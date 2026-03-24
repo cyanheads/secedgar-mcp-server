@@ -1,30 +1,30 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "secedgar-mcp-server",
-  "description": "",
+  "name": "io.github.cyanheads/secedgar-mcp-server",
+  "description": "MCP server for SEC EDGAR — company lookups, filing search/retrieval, XBRL financial data, and cross-company comparison.",
   "repository": {
-    "url": "",
+    "url": "https://github.com/cyanheads/secedgar-mcp-server",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.1.1",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "secedgar-mcp-server",
-      "runtimeHint": "node",
-      "version": "0.1.0",
+      "runtimeHint": "bun",
+      "version": "0.1.1",
       "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:stdio"
-        }
+        { "type": "positional", "value": "run" },
+        { "type": "positional", "value": "start:stdio" }
       ],
       "environmentVariables": [
+        {
+          "name": "EDGAR_USER_AGENT",
+          "description": "User-Agent header for SEC compliance. Format: \"AppName contact@email.com\".",
+          "format": "string",
+          "isRequired": true
+        },
         {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
@@ -41,19 +41,19 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "secedgar-mcp-server",
-      "runtimeHint": "node",
-      "version": "0.1.0",
+      "runtimeHint": "bun",
+      "version": "0.1.1",
       "packageArguments": [
-        {
-          "type": "positional",
-          "value": "run"
-        },
-        {
-          "type": "positional",
-          "value": "start:http"
-        }
+        { "type": "positional", "value": "run" },
+        { "type": "positional", "value": "start:http" }
       ],
       "environmentVariables": [
+        {
+          "name": "EDGAR_USER_AGENT",
+          "description": "User-Agent header for SEC compliance. Format: \"AppName contact@email.com\".",
+          "format": "string",
+          "isRequired": true
+        },
         {
           "name": "MCP_HTTP_HOST",
           "description": "The hostname for the HTTP server.",
