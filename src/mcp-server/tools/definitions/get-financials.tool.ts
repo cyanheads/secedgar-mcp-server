@@ -87,7 +87,9 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     const mapping = resolveConcept(input.concept);
     const tags = mapping ? mapping.tags : [input.concept];
     const taxonomy = mapping
-      ? input.taxonomy !== 'us-gaap' ? input.taxonomy : mapping.taxonomy
+      ? input.taxonomy !== 'us-gaap'
+        ? input.taxonomy
+        : mapping.taxonomy
       : input.taxonomy;
     const label = mapping?.label ?? input.concept;
 

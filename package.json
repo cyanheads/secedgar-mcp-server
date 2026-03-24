@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/secedgar-mcp-server",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "MCP server for SEC EDGAR — company lookups, filing search/retrieval, XBRL financial data, and cross-company comparison.",
   "mcpName": "io.github.cyanheads/secedgar-mcp-server",
   "type": "module",
@@ -9,7 +9,10 @@
   "bin": {
     "secedgar-mcp-server": "dist/index.js"
   },
-  "files": ["dist/", "README.md", "LICENSE", "CLAUDE.md", "Dockerfile", "server.json"],
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": ["dist/", "README.md", "LICENSE", "Dockerfile", "server.json"],
   "scripts": {
     "build": "bun scripts/build.ts",
     "rebuild": "bun scripts/clean.ts && bun scripts/build.ts",
