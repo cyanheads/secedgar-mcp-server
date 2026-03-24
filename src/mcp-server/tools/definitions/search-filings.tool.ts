@@ -6,19 +6,64 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
+/**
+ * Extract entity targeting (cik: or ticker:) from a query string,
+ * resolve to a CIK, and return the cleaned query + resolved CIK.
+ */
+async function resolveEntityTargeting(
+  query: string,
+): Promise<{ query: string; entityCik?: string }> {
+  const tickerMatch = query.match(/\bticker:(\S+)/i);
+  const cikMatch = query.match(/\bcik:(\S+)/i);
+
+  const api = getEdgarApiService();
+
+  if (tickerMatch?.[1]) {
+    const token = tickerMatch[0];
+    const ticker = tickerMatch[1];
+    const resolved = await api.resolveCik(ticker);
+    const match = Array.isArray(resolved) ? resolved[0] : resolved;
+    if (match?.name) {
+      return {
+        query: query.replace(token, `"${match.name}"`).trim(),
+        entityCik: match.cik,
+      };
+    }
+    return { query: query.replace(token, '').trim() };
+  }
+
+  if (cikMatch?.[1]) {
+    const token = cikMatch[0];
+    const rawCik = cikMatch[1];
+    const padded = rawCik.padStart(10, '0');
+    const resolved = await api.resolveCik(rawCik);
+    const match = Array.isArray(resolved) ? resolved[0] : resolved;
+    if (match?.name) {
+      return {
+        query: query.replace(token, `"${match.name}"`).trim(),
+        entityCik: padded,
+      };
+    }
+    return { query: query.replace(token, '').trim(), entityCik: padded };
+  }
+
+  return { query };
+}
+
 export const searchFilingsTool = tool('secedgar_search_filings', {
   description:
     'Full-text search across all EDGAR filing documents since 1993. ' +
-    'Supports exact phrases, boolean operators, wildcards, and entity targeting (cik: or ticker: in query).',
+    'Supports exact phrases, boolean operators, wildcards, and entity targeting (ticker:AAPL or cik:320193 in query).',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   input: z.object({
     query: z
       .string()
+      .min(1)
       .describe(
         'Full-text search query. Supports: exact phrases ("material weakness"), ' +
           'boolean operators (revenue OR income), exclusion (-preliminary), ' +
-          'wildcard suffix (account*), entity targeting (cik:320193 or ticker:AAPL within the query string). ' +
+          'wildcard suffix (account*), entity targeting (ticker:AAPL or cik:320193 in the query). ' +
           "Terms are AND'd by default.",
       ),
     forms: z
@@ -83,23 +128,37 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
   }),
 
   async handler(input, ctx) {
-    const api = getEdgarApiService();
+    // Resolve ticker:/cik: entity targeting → company name in query + CIK for filtering
+    const { query, entityCik } = await resolveEntityTargeting(input.query);
 
+    // When entity-filtering, over-fetch from EFTS since we'll post-filter by CIK
+    const fetchSize = entityCik ? 100 : input.limit;
+
+    const api = getEdgarApiService();
     const response = await api.searchFilings({
-      query: input.query,
+      query,
       forms: input.forms,
       startDate: input.start_date,
       endDate: input.end_date,
       from: input.offset,
-      size: input.limit,
+      size: fetchSize,
     });
 
-    const total = response.hits.total.value;
-    const totalIsExact = response.hits.total.relation === 'eq';
+    let total = response.hits.total.value;
+    let totalIsExact = response.hits.total.relation === 'eq';
 
     // search-index endpoint ignores size/from params (always returns up to 100),
     // so apply client-side slicing to respect the requested limit
-    const sliced = response.hits.hits.slice(0, input.limit);
+    let hits = response.hits.hits;
+
+    // Post-filter by entity CIK when entity targeting was used
+    if (entityCik) {
+      hits = hits.filter((h) => h._source.ciks?.includes(entityCik));
+      total = hits.length;
+      totalIsExact = true;
+    }
+
+    const sliced = hits.slice(0, input.limit);
 
     const results = sliced.map((hit) => {
       const accessionNumber = hit._source.adsh || hit._id.split(':')[0] || hit._id;

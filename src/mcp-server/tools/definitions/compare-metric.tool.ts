@@ -86,11 +86,14 @@ export const compareMetricTool = tool('secedgar_compare_metric', {
     } catch (err) {
       const is404 = err instanceof Error && /404|not found/i.test(err.message);
       if (!is404) throw err;
-      throw notFound(
-        `No data for ${input.concept}/${unit}/${input.period}. Check: ` +
+      // Distinguish unknown concept (no mapping + 404) from valid concept with no data
+      const hint = !mapping
+        ? `Unknown concept '${input.concept}'. Use a friendly name (e.g., "revenue", "assets") ` +
+          'or a valid XBRL tag. See secedgar://concepts for available names.'
+        : `No data for ${label}/${unit}/${input.period}. Check: ` +
           'duration vs. instant period (add "I" for balance sheet items), ' +
-          'correct unit (USD-per-shares for EPS), and period exists (data starts ~CY2009).',
-      );
+          'correct unit (USD-per-shares for EPS), and period exists (data starts ~CY2009).';
+      throw notFound(hint);
     }
 
     // Sort by value

@@ -134,6 +134,15 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     // Deduplicate: keep only entries with frame field (one per standard calendar period)
     const deduped = allUnits.filter((u): u is CompanyConceptUnit & { frame: string } => !!u.frame);
 
+    // If deduplication removed everything, the concept exists but has no frame-aligned entries
+    if (deduped.length === 0) {
+      throw notFound(
+        `'${conceptResponse.tag}' exists for this company but has no standard-period data. ` +
+          'This typically means the company reports this item in a non-standard period or ' +
+          'the data lacks frame alignment. Try a related concept or check secedgar://concepts.',
+      );
+    }
+
     // Remove duplicates by frame value (keep latest filed)
     const byFrame = new Map<string, CompanyConceptUnit & { frame: string }>();
     for (const unit of deduped) {
@@ -149,6 +158,18 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       filtered = filtered.filter((u) => /^CY\d{4}$/.test(u.frame));
     } else if (input.period_type === 'quarterly') {
       filtered = filtered.filter((u) => /^CY\d{4}Q\d/.test(u.frame));
+    }
+
+    // If period_type filter removed everything, suggest the right period type
+    if (filtered.length === 0 && byFrame.size > 0) {
+      const sample = byFrame.values().next().value;
+      const hasInstant = sample && /I$/.test(sample.frame);
+      const hint = hasInstant
+        ? 'This is a balance sheet (instant) item — try period_type: "quarterly" or "all".'
+        : input.period_type === 'annual'
+          ? 'No annual data found — try period_type: "quarterly" or "all".'
+          : 'No quarterly data found — try period_type: "annual" or "all".';
+      throw notFound(`No ${input.period_type} data for '${conceptResponse.tag}'. ${hint}`);
     }
 
     // Sort newest first

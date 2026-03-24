@@ -6,9 +6,7 @@
 import { prompt, z } from '@cyanheads/mcp-ts-core';
 
 export const companyAnalysisPrompt = prompt('secedgar_company_analysis', {
-  description:
-    "Guides a structured analysis of a public company's SEC filings: " +
-    'identify recent filings, extract financial trends, surface risk factors, and note material events.',
+  description: `Guides a structured analysis of a public company's SEC filings: identify recent filings, extract financial trends, surface risk factors, and note material events.`,
 
   args: z.object({
     company: z.string().describe('Company name, ticker symbol, or CIK number to analyze.'),
