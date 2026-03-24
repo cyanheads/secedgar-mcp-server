@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.7] — 2026-03-24
+
+Packaging, documentation, and code formatting cleanup.
+
+### Changed
+
+- Removed static Version badge from README — npm badge already provides this
+- Removed Docker MCP client configuration example from README (Docker section under Running still exists)
+- Added build step to README installation instructions
+- Changed default `MCP_LOG_LEVEL` documentation from `debug` to `info`
+- Added `exports` field to `package.json` for proper ESM resolution
+- Removed `CLAUDE.md` from npm `files` array
+- Removed unnecessary `packageArguments` from `server.json` npm package entries
+- Bumped `server.json` top-level version to match package version
+- Formatting cleanup in `get-financials.tool.ts`, `search-filings.tool.ts`, and `edgar-api-service.ts`
+
+---
+
 ## [0.1.6] — 2026-03-24
 
 Fixes for taxonomy resolution, date validation, HTTP retry resilience, and Bun version bump.
