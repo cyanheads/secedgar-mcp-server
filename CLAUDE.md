@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.1.5
+**Version:** 0.1.6
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 MCP server for SEC EDGAR — company lookups, filing search/retrieval, XBRL financial data, and cross-company comparison. Read-only, no API keys required. Full design: `docs/sec-edgar-mcp-design.md`.

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.6] — 2026-03-24
+
+Fixes for taxonomy resolution, date validation, HTTP retry resilience, and Bun version bump.
+
+### Fixed
+
+- `get-financials` respects user-provided taxonomy when it differs from the `us-gaap` default — previously the resolved mapping always overwrote the input
+- `get-financials` shows a targeted error hint when using `ifrs-full` taxonomy vs the default
+- `search-filings` validates that both `start_date` and `end_date` are provided together — rejects partial date ranges at input
+- `edgar-api-service` retries on 500, 502, and 504 responses in addition to existing 429 and 503
+
+### Changed
+
+- Bun minimum engine version bumped to `>=1.3.0`, packageManager to `bun@1.3.11`
+- README default log level updated to `debug`, prerequisite Bun version corrected to v1.3.0, npm badge updated to scoped package name
+
+---
+
 ## [0.1.5] — 2026-03-24
 
 Improved entity-targeted search, better error diagnostics, and documentation overhaul.

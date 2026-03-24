@@ -13,7 +13,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/secedgar-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "packageArguments": [
         { "type": "positional", "value": "run" },
         { "type": "positional", "value": "start:stdio" }
@@ -42,7 +42,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/secedgar-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.5",
+      "version": "0.1.6",
       "packageArguments": [
         { "type": "positional", "value": "run" },
         { "type": "positional", "value": "start:http" }
