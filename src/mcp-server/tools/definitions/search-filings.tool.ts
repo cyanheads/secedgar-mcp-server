@@ -138,7 +138,9 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
   format: (result) => {
     const lines = [`Found ${result.total}${result.total_is_exact ? '' : '+'} filings`];
     for (const r of result.results) {
-      lines.push(`- ${r.form ?? 'N/A'} ${r.filing_date} — ${r.company_name} [${r.accession_number}]`);
+      lines.push(
+        `- ${r.form ?? 'N/A'} ${r.filing_date} — ${r.company_name} [${r.accession_number}]`,
+      );
     }
     if (result.form_distribution) {
       const dist = Object.entries(result.form_distribution)

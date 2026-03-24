@@ -46,7 +46,7 @@ describe('filingToText', () => {
   });
 
   it('truncates at word boundary when over limit', () => {
-    const html = '<p>' + 'word '.repeat(1000) + '</p>';
+    const html = `<p>${'word '.repeat(1000)}</p>`;
     const { text, truncated, totalLength } = filingToText(html, 50);
     expect(truncated).toBe(true);
     expect(text.length).toBeLessThanOrEqual(50);
@@ -57,20 +57,20 @@ describe('filingToText', () => {
 
   it('handles truncation when no word boundary is found', () => {
     // A single very long "word" with no spaces
-    const html = '<p>' + 'a'.repeat(200) + '</p>';
+    const html = `<p>${'a'.repeat(200)}</p>`;
     const { text, truncated } = filingToText(html, 50);
     expect(truncated).toBe(true);
     expect(text.length).toBe(50);
   });
 
   it('does not truncate when limit is undefined', () => {
-    const html = '<p>' + 'content '.repeat(500) + '</p>';
+    const html = `<p>${'content '.repeat(500)}</p>`;
     const { truncated } = filingToText(html);
     expect(truncated).toBe(false);
   });
 
   it('reports correct totalLength regardless of truncation', () => {
-    const html = '<p>' + 'test '.repeat(100) + '</p>';
+    const html = `<p>${'test '.repeat(100)}</p>`;
     const full = filingToText(html);
     const truncatedResult = filingToText(html, 20);
     expect(truncatedResult.totalLength).toBe(full.totalLength);
