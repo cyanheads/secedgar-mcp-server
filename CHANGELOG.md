@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.8] — 2026-03-24
+
+Tool annotation improvements and agent protocol updates.
+
+### Changed
+
+- Added `idempotentHint: true` annotation to all five tools — signals to MCP clients that repeated calls with the same inputs are safe
+- Added `openWorldHint: true` annotation to `get-filing` and `get-financials` tools — previously only set on search/compare tools
+- Added publishing instructions section to `CLAUDE.md` (npm + Docker GHCR commands)
+
+---
+
 ## [0.1.7] — 2026-03-24
 
 Packaging, documentation, and code formatting cleanup.

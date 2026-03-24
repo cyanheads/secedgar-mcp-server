@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.1.7
+**Version:** 0.1.8
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 MCP server for SEC EDGAR — company lookups, filing search/retrieval, XBRL financial data, and cross-company comparison. Read-only, no API keys required. Full design: `docs/sec-edgar-mcp-design.md`.
@@ -210,6 +210,23 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run dev:http` | Dev mode (HTTP) |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |
+
+---
+
+## Publishing
+
+After a version bump and final commit, publish to both npm and GHCR:
+
+```bash
+bun publish --access public
+
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t ghcr.io/cyanheads/secedgar-mcp-server:<version> \
+  -t ghcr.io/cyanheads/secedgar-mcp-server:latest \
+  --push .
+```
+
+Remind the user to run these after completing a release flow.
 
 ---
 
