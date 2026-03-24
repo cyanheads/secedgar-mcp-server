@@ -13,6 +13,12 @@
 
 </div>
 
+<div align="center">
+
+**Public Hosted Server:** [https://secedgar.caseyjhand.com/mcp](https://secedgar.caseyjhand.com/mcp)
+
+</div>
+
 ---
 
 ## Tools
@@ -114,14 +120,29 @@ SEC EDGAR–specific:
 
 ## Getting started
 
-### MCP client configuration
+### Public Hosted Instance
+
+A public instance is available at `https://secedgar.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "secedgar-mcp-server": {
+      "type": "streamable-http",
+      "url": "https://secedgar.caseyjhand.com/mcp"
+    }
+  }
+}
+```
+
+### Self-Hosted / Local
 
 Add the following to your MCP client configuration file.
 
 ```json
 {
   "mcpServers": {
-    "secedgar": {
+    "secedgar-mcp-server": {
       "type": "stdio",
       "command": "bunx",
       "args": ["@cyanheads/secedgar-mcp-server@latest"],
@@ -139,7 +160,7 @@ Or with npx (no Bun required):
 ```json
 {
   "mcpServers": {
-    "secedgar": {
+    "secedgar-mcp-server": {
       "type": "stdio",
       "command": "npx",
       "args": ["-y", "@cyanheads/secedgar-mcp-server@latest"],
