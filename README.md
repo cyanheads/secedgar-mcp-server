@@ -1,6 +1,6 @@
 <div align="center">
   <h1>@cyanheads/secedgar-mcp-server</h1>
-  <p><b>MCP server for SEC EDGAR — company lookups, filing search/retrieval, XBRL financial data, and cross-company comparison. Read-only, no API keys required. STDIO & Streamable HTTP</b>
+  <p><b>Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.</b>
   <div>5 Tools • 2 Resources • 1 Prompt</div>
   </p>
 </div>

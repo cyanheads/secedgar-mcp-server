@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.1.9] — 2026-03-24
+
+Description and metadata updates.
+
+### Changed
+
+- Unified project description across `package.json`, `server.json`, `Dockerfile`, and `README.md` to a shorter tagline
+- Updated `CLAUDE.md` agent protocol description to match
+- Added `typescript` keyword to `package.json`
+
+---
+
 ## [0.1.8] — 2026-03-24
 
 Tool annotation improvements and agent protocol updates.

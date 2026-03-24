@@ -38,7 +38,7 @@ ENV NODE_ENV=production
 
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 LABEL org.opencontainers.image.title="@cyanheads/secedgar-mcp-server"
-LABEL org.opencontainers.image.description="MCP server for SEC EDGAR — company lookups, filing search/retrieval, XBRL financial data, and cross-company comparison."
+LABEL org.opencontainers.image.description="Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP."
 LABEL org.opencontainers.image.source="https://github.com/cyanheads/secedgar-mcp-server"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
