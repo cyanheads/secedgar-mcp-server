@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.1.3] — 2026-03-24
+
+Data quality and resilience fixes for filing text conversion, XBRL financials, and EFTS search results.
+
+### Fixed
+
+- Inline XBRL markup (`<ix:header>`, `<ix:nonFraction>`, etc.) stripped before HTML→text conversion — eliminates noise in modern filing output
+- `get-filing` tool returns proper `notFound()` error for 404 responses instead of an unclassified exception
+- `get-financials` period type filtering uses frame pattern (`CY2024`, `CY2024Q1`) instead of `fp` field — `fp` reflects the filing period, not the data point period
+- `get-financials` output schema allows nullable `fiscal_year` and `fiscal_period` — some XBRL data points lack these fields
+- `search-filings` output schema and type allow optional `form` field — some EFTS results omit it
+
+### Changed
+
+- `company-search` query input now requires `.min(1)` — rejects empty strings at validation
+
+---
+
 ## [0.1.2] — 2026-03-24
 
 Bug fixes for EFTS full-text search, improved error handling, and full test coverage.
