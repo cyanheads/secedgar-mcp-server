@@ -55,7 +55,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
   description:
     'Full-text search across all EDGAR filing documents since 1993. ' +
     'Supports exact phrases, boolean operators, wildcards, and entity targeting (ticker:AAPL or cik:320193 in query).',
-  annotations: { readOnlyHint: true, openWorldHint: true },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
     query: z

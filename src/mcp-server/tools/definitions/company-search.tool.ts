@@ -12,7 +12,7 @@ export const companySearchTool = tool('secedgar_company_search', {
   description:
     'Find companies and retrieve entity info with optional recent filings. ' +
     'Entry point for most EDGAR workflows — resolve tickers, names, or CIKs to entity details.',
-  annotations: { readOnlyHint: true, openWorldHint: true },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
     query: z

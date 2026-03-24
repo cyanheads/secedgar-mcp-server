@@ -13,7 +13,7 @@ export const compareMetricTool = tool('secedgar_compare_metric', {
   description:
     'Compare a financial metric across all reporting companies for a specific period. ' +
     'Uses the same friendly concept names as secedgar_get_financials (e.g., "revenue", "assets").',
-  annotations: { readOnlyHint: true, openWorldHint: true },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
     concept: z

@@ -15,7 +15,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     'Get historical XBRL financial data for a company. Accepts friendly concept names ' +
     '(e.g., "revenue", "net_income", "assets") or raw XBRL tags. Automatically handles ' +
     'historical tag changes and deduplicates data. See secedgar://concepts for available names.',
-  annotations: { readOnlyHint: true },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
     company: z

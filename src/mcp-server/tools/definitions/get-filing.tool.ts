@@ -12,7 +12,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
   description:
     "Fetch a specific filing's metadata and document content by accession number. " +
     'Returns the primary document as readable text, with option to fetch specific exhibits.',
-  annotations: { readOnlyHint: true },
+  annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
     accession_number: z
