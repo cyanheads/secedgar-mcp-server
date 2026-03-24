@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.1.5] — 2026-03-24
+
+Improved entity-targeted search, better error diagnostics, and documentation overhaul.
+
+### Changed
+
+- `search-filings` resolves `ticker:` and `cik:` targeting in queries — looks up the company name and substitutes it into the EFTS query, then post-filters results by CIK for accurate entity-scoped search
+- `compare-metric` distinguishes unknown concepts (no mapping + 404) from valid concepts with no data — error message now suggests checking `secedgar://concepts` for unknown names
+- `get-financials` reports actionable errors when deduplication removes all entries (no frame-aligned data) or when the period type filter yields no results (suggests the correct period type)
+- Prompt description uses template literal instead of string concatenation
+
+### Docs
+
+- README overhaul: added npm and Bun badges, Docker and npx configuration examples, sentence-case headings, cleaned up table formatting, added auth mention, updated prerequisites to Bun v1.3.2, added tests directory to project structure
+
+---
+
 ## [0.1.4] — 2026-03-24
 
 Dependency updates and code style fixes.
