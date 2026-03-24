@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.1.2] — 2026-03-24
+
+Bug fixes for EFTS full-text search, improved error handling, and full test coverage.
+
+### Fixed
+
+- EFTS response field mapping — `form_type` → `form`, `period_of_report` → `period_ending`, `entity_name` → `display_names[]`, `file_num` → `ciks[]`, added `adsh` for reliable accession numbers
+- Error handling in `compare-metric` and `get-financials` tools — only swallow 404s (tag not reported), re-throw real errors instead of silently catching all exceptions
+- Client-side limit slicing in `search-filings` — EFTS search-index endpoint ignores `size`/`from` params, so apply requested limit after fetch
+
+### Changed
+
+- `edgar-api-service` — 403 error messages now include hostname and User-Agent format hint for faster debugging
+- `EftsHit` type — updated to match actual EDGAR EFTS response structure (`adsh`, `ciks`, `form`, `items`, `root_forms`, `sequence`, `xsl`)
+- `CLAUDE.md` — added `migrate-mcp-ts-template` skill to skills table
+
+### Added
+
+- Test suite with 7 test files covering all tools, resources, and services
+  - Tools: `company-search`, `search-filings`, `get-filing`, `get-financials`, `compare-metric`
+  - Resources: `concepts`, `filing-types`
+  - Services: `concept-map`, `filing-to-text`
+- Updated `docs/tree.md` with test directory structure
+
+---
+
 ## [0.1.1] — 2026-03-24
 
 Metadata, documentation, and packaging polish — no functional changes.

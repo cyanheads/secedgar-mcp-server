@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-03-24 09:08:54
+Generated on: 2026-03-24 09:50:37
 
 ```text
 secedgar-mcp-server/
@@ -97,9 +97,22 @@ secedgar-mcp-server/
 │   │       └── types.ts
 │   └── index.ts
 ├── tests/
-│   ├── prompts/
-│   ├── resources/
-│   └── tools/
+│   ├── mcp-server/
+│   │   ├── resources/
+│   │   │   └── definitions/
+│   │   │       ├── concepts.resource.test.ts
+│   │   │       └── filing-types.resource.test.ts
+│   │   └── tools/
+│   │       └── definitions/
+│   │           ├── company-search.tool.test.ts
+│   │           ├── compare-metric.tool.test.ts
+│   │           ├── get-filing.tool.test.ts
+│   │           ├── get-financials.tool.test.ts
+│   │           └── search-filings.tool.test.ts
+│   └── services/
+│       └── edgar/
+│           ├── concept-map.test.ts
+│           └── filing-to-text.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
