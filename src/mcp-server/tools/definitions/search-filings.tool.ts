@@ -4,6 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { validationError } from '@cyanheads/mcp-ts-core/errors';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
 /**
@@ -128,6 +129,13 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
   }),
 
   async handler(input, ctx) {
+    // Validate date range: both or neither
+    if ((input.start_date && !input.end_date) || (!input.start_date && input.end_date)) {
+      throw validationError(
+        'Both start_date and end_date are required when filtering by date.',
+      );
+    }
+
     // Resolve ticker:/cik: entity targeting → company name in query + CIK for filtering
     const { query, entityCik } = await resolveEntityTargeting(input.query);
 

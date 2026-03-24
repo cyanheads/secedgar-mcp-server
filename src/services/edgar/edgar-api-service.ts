@@ -51,7 +51,9 @@ class EdgarApiService {
 
       if (response.ok) return response;
 
-      if ((response.status === 429 || response.status === 503) && attempt < MAX_RETRIES - 1) {
+      const retryable = response.status === 429 || response.status === 500 ||
+        response.status === 502 || response.status === 503 || response.status === 504;
+      if (retryable && attempt < MAX_RETRIES - 1) {
         const delay = BASE_BACKOFF_MS * 2 ** attempt;
         await sleep(delay);
         continue;

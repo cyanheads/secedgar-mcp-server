@@ -86,7 +86,9 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     // Resolve concept to XBRL tag(s)
     const mapping = resolveConcept(input.concept);
     const tags = mapping ? mapping.tags : [input.concept];
-    const taxonomy = mapping ? mapping.taxonomy : input.taxonomy;
+    const taxonomy = mapping
+      ? input.taxonomy !== 'us-gaap' ? input.taxonomy : mapping.taxonomy
+      : input.taxonomy;
     const label = mapping?.label ?? input.concept;
 
     // Try each tag until we get data
@@ -125,9 +127,12 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     }
 
     if (!conceptResponse || allUnits.length === 0) {
+      const hint =
+        taxonomy === 'ifrs-full'
+          ? 'Try a raw XBRL tag instead of a friendly name, or check the company uses IFRS.'
+          : "This company may use a different tag or taxonomy. Try 'ifrs-full' for foreign filers.";
       throw notFound(
-        `No XBRL data for '${input.concept}' under ${taxonomy} for this company. ` +
-          "This company may use a different tag or taxonomy. Try 'ifrs-full' for foreign filers.",
+        `No XBRL data for '${input.concept}' under ${taxonomy} for this company. ${hint}`,
       );
     }
 
