@@ -124,7 +124,7 @@ Add the following to your MCP client configuration file.
     "secedgar": {
       "type": "stdio",
       "command": "bunx",
-      "args": ["secedgar-mcp-server@latest"],
+      "args": ["@cyanheads/secedgar-mcp-server@latest"],
       "env": {
         "EDGAR_USER_AGENT": "YourAppName your-email@example.com",
         "MCP_TRANSPORT_TYPE": "stdio"
@@ -142,7 +142,7 @@ Or with npx (no Bun required):
     "secedgar": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "secedgar-mcp-server@latest"],
+      "args": ["-y", "@cyanheads/secedgar-mcp-server@latest"],
       "env": {
         "EDGAR_USER_AGENT": "YourAppName your-email@example.com",
         "MCP_TRANSPORT_TYPE": "stdio"
