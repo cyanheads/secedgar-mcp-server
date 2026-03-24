@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.4] — 2026-03-24
+
+Dependency updates and code style fixes.
+
+### Changed
+
+- Updated dev dependencies: `typescript` `^5.9.3→^6.0.2`, `@biomejs/biome` `^2.4.7→^2.4.8`, `vitest` `^4.1.0→^4.1.1`
+- Formatting and style fixes applied by updated Biome (line wrapping, template literals)
+
+---
+
 ## [0.1.3] — 2026-03-24
 
 Data quality and resilience fixes for filing text conversion, XBRL financials, and EFTS search results.
