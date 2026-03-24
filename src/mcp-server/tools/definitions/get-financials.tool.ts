@@ -55,8 +55,8 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
           value: z.number().describe('Reported value.'),
           start: z.string().optional().describe('Period start date (duration items only).'),
           end: z.string().describe('Period end date.'),
-          fiscal_year: z.number().describe('Fiscal year.'),
-          fiscal_period: z.string().describe('Fiscal period (FY, Q1, Q2, Q3, Q4).'),
+          fiscal_year: z.number().nullable().describe('Fiscal year.'),
+          fiscal_period: z.string().nullable().describe('Fiscal period (FY, Q1, Q2, Q3, Q4).'),
           form: z.string().describe('Source filing type (10-K, 10-Q, etc.).'),
           filed: z.string().describe('Date the source filing was submitted.'),
           accession_number: z
@@ -143,12 +143,12 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       }
     }
 
-    // Filter by period type
+    // Filter by period type using frame pattern (fp reflects the filing, not the data point)
     let filtered = Array.from(byFrame.values());
     if (input.period_type === 'annual') {
-      filtered = filtered.filter((u) => u.fp === 'FY');
+      filtered = filtered.filter((u) => /^CY\d{4}$/.test(u.frame));
     } else if (input.period_type === 'quarterly') {
-      filtered = filtered.filter((u) => u.fp.startsWith('Q'));
+      filtered = filtered.filter((u) => /^CY\d{4}Q\d/.test(u.frame));
     }
 
     // Sort newest first

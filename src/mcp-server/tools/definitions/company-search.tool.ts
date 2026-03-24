@@ -17,6 +17,7 @@ export const companySearchTool = tool('secedgar_company_search', {
   input: z.object({
     query: z
       .string()
+      .min(1)
       .describe(
         'Company ticker symbol (e.g., "AAPL"), name (e.g., "Apple"), or CIK number (e.g., "320193"). Ticker is the fastest lookup. Name search does fuzzy matching.',
       ),

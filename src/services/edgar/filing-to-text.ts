@@ -15,12 +15,21 @@ const CONVERT_OPTIONS: HtmlToTextOptions = {
   ],
 };
 
+/** Strip Inline XBRL markup that produces noise in text conversion. */
+function stripInlineXbrl(html: string): string {
+  // Remove <ix:header>...</ix:header> block (hidden XBRL metadata, context, references)
+  let cleaned = html.replace(/<ix:header\b[\s\S]*?<\/ix:header>/gi, '');
+  // Unwrap remaining ix:* tags (nonFraction, nonNumeric, continuation) — keep their text content
+  cleaned = cleaned.replace(/<\/?ix:[^>]*>/gi, '');
+  return cleaned;
+}
+
 /** Convert filing HTML to plain text, optionally truncating to a character limit. */
 export function filingToText(
   html: string,
   limit?: number,
 ): { text: string; truncated: boolean; totalLength: number } {
-  const full = convert(html, CONVERT_OPTIONS);
+  const full = convert(stripInlineXbrl(html), CONVERT_OPTIONS);
   const totalLength = full.length;
 
   if (!limit || totalLength <= limit) {

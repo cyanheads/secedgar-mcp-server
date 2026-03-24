@@ -68,7 +68,7 @@ export interface EftsHit {
     file_num?: string[];
     file_type?: string;
     film_num?: string[];
-    form: string;
+    form?: string;
     biz_locations?: string[];
     inc_states?: string[];
     items?: string[];

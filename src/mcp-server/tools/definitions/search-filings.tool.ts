@@ -65,7 +65,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
           accession_number: z
             .string()
             .describe('Use with secedgar_get_filing to retrieve content.'),
-          form: z.string().describe('Form type.'),
+          form: z.string().optional().describe('Form type.'),
           filing_date: z.string().describe('Date filed.'),
           period_ending: z.string().optional().describe('Period of report.'),
           company_name: z.string().describe('Filing entity name.'),
@@ -106,7 +106,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
 
       return {
         accession_number: accessionNumber,
-        form: hit._source.form,
+        form: hit._source.form ?? undefined,
         filing_date: hit._source.file_date,
         period_ending: hit._source.period_ending ?? undefined,
         company_name: hit._source.display_names?.[0] || '',
@@ -138,7 +138,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
   format: (result) => {
     const lines = [`Found ${result.total}${result.total_is_exact ? '' : '+'} filings`];
     for (const r of result.results) {
-      lines.push(`- ${r.form} ${r.filing_date} — ${r.company_name} [${r.accession_number}]`);
+      lines.push(`- ${r.form ?? 'N/A'} ${r.filing_date} — ${r.company_name} [${r.accession_number}]`);
     }
     if (result.form_distribution) {
       const dist = Object.entries(result.form_distribution)

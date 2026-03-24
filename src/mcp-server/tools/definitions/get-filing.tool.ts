@@ -82,7 +82,18 @@ export const getFilingTool = tool('secedgar_get_filing', {
     const paddedCik = cik.padStart(10, '0');
 
     // Fetch filing index
-    const index = await api.getFilingIndex(paddedCik, accn);
+    let index: Awaited<ReturnType<typeof api.getFilingIndex>>;
+    try {
+      index = await api.getFilingIndex(paddedCik, accn);
+    } catch (err) {
+      const is404 = err instanceof Error && /404|not found/i.test(err.message);
+      if (is404) {
+        throw notFound(
+          `Filing '${accn}' not found (CIK ${paddedCik}). Verify the accession number and CIK are correct.`,
+        );
+      }
+      throw err;
+    }
 
     const items = index.directory.item;
     const documents = items.map((item) => ({
