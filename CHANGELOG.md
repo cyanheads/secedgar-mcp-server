@@ -1,0 +1,30 @@
+# Changelog
+
+## [0.1.0] — 2026-03-24
+
+Initial release. MCP server for SEC EDGAR — company lookups, filing search/retrieval, XBRL financial data, and cross-company comparison.
+
+### Added
+
+- **Tools**
+  - `secedgar_company_search` — find companies and retrieve entity info with optional recent filings
+  - `secedgar_search_filings` — full-text search across all EDGAR filing documents since 1993
+  - `secedgar_get_filing` — fetch a specific filing's metadata and document content
+  - `secedgar_get_financials` — get historical XBRL financial data for a company (friendly concept names supported)
+  - `secedgar_compare_metric` — compare a financial metric across all reporting companies for a period
+- **Resources**
+  - `secedgar://concepts` — XBRL financial concepts grouped by statement, mapping friendly names to tags
+  - `secedgar://filing-types` — common SEC filing types with descriptions, cadence, and use cases
+- **Prompts**
+  - `secedgar_company_analysis` — guided structured analysis of a company's SEC filings
+- **Services**
+  - `EdgarApiService` — rate-limited HTTP client with CIK resolution and ticker caching
+  - `concept-map` — static friendly name → XBRL tag mapping (handles ASC 606 historical tag changes)
+  - `filing-to-text` — HTML → readable plain text conversion via `html-to-text`
+- **Infrastructure**
+  - Dockerfile and `.dockerignore` for containerized deployment
+  - Biome for linting and formatting
+  - Vitest test scaffolding
+  - Build scripts (build, clean, rebuild, devcheck, tree, lint-mcp)
+  - Stdio and HTTP transport support
+  - Design document (`docs/sec-edgar-mcp-design.md`)
