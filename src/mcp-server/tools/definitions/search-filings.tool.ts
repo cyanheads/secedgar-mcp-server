@@ -97,18 +97,20 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     const total = response.hits.total.value;
     const totalIsExact = response.hits.total.relation === 'eq';
 
-    const results = response.hits.hits.map((hit) => {
-      // Extract CIK from the hit _id (format: accession number)
-      const accnParts = hit._id.split(':');
-      const accessionNumber = accnParts[0] || hit._id;
+    // search-index endpoint ignores size/from params (always returns up to 100),
+    // so apply client-side slicing to respect the requested limit
+    const sliced = response.hits.hits.slice(0, input.limit);
+
+    const results = sliced.map((hit) => {
+      const accessionNumber = hit._source.adsh || hit._id.split(':')[0] || hit._id;
 
       return {
         accession_number: accessionNumber,
-        form: hit._source.form_type,
+        form: hit._source.form,
         filing_date: hit._source.file_date,
-        period_ending: hit._source.period_of_report ?? undefined,
-        company_name: hit._source.entity_name || hit._source.display_names?.[0] || '',
-        cik: hit._source.file_num?.[0] || '',
+        period_ending: hit._source.period_ending ?? undefined,
+        company_name: hit._source.display_names?.[0] || '',
+        cik: hit._source.ciks?.[0] || '',
         file_description: hit._source.file_description ?? undefined,
         sic: hit._source.sics?.[0] ?? undefined,
         location: hit._source.biz_locations?.[0] ?? undefined,

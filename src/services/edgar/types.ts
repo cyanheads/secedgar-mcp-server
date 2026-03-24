@@ -60,17 +60,23 @@ export interface EftsResponse {
 export interface EftsHit {
   _id: string;
   _source: {
-    file_date: string;
-    period_of_report?: string;
+    adsh: string;
+    ciks?: string[];
     display_names?: string[];
-    entity_name?: string;
+    file_date: string;
+    file_description?: string;
     file_num?: string[];
+    file_type?: string;
     film_num?: string[];
+    form: string;
     biz_locations?: string[];
     inc_states?: string[];
+    items?: string[];
+    period_ending?: string | null;
+    root_forms?: string[];
+    sequence?: number;
     sics?: string[];
-    form_type: string;
-    file_description?: string;
+    xsl?: string | null;
   };
 }
 

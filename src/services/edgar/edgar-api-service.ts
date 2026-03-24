@@ -59,8 +59,13 @@ class EdgarApiService {
 
       if (response.status === 404) return response;
 
+      const host = new URL(url).hostname;
+      const hint =
+        response.status === 403
+          ? `. This may indicate ${host} is blocking requests — check EDGAR_USER_AGENT format ("AppName contact@email.com") or retry later.`
+          : '';
       throw serviceUnavailable(
-        `SEC EDGAR API returned ${response.status}: ${response.statusText}`,
+        `SEC EDGAR API returned ${response.status}: ${response.statusText} (${host})${hint}`,
         { url, status: response.status },
       );
     }

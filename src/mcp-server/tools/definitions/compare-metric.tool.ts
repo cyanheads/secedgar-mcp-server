@@ -83,7 +83,9 @@ export const compareMetricTool = tool('secedgar_compare_metric', {
     let framesResponse: FramesResponse;
     try {
       framesResponse = await api.getFrames(taxonomy, tag, unit, input.period);
-    } catch {
+    } catch (err) {
+      const is404 = err instanceof Error && /404|not found/i.test(err.message);
+      if (!is404) throw err;
       throw notFound(
         `No data for ${input.concept}/${unit}/${input.period}. Check: ` +
           'duration vs. instant period (add "I" for balance sheet items), ' +

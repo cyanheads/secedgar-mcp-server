@@ -117,7 +117,11 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
         for (const units of Object.values(resp.units)) {
           allUnits.push(...units);
         }
-      } catch {}
+      } catch (err) {
+        // Only swallow 404s (tag not reported by this company); re-throw real errors
+        const is404 = err instanceof Error && /404|not found/i.test(err.message);
+        if (!is404) throw err;
+      }
     }
 
     if (!conceptResponse || allUnits.length === 0) {
