@@ -6,14 +6,20 @@
     "url": "https://github.com/cyanheads/secedgar-mcp-server",
     "source": "github"
   },
-  "version": "0.1.9",
+  "version": "0.1.10",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://secedgar.caseyjhand.com/mcp"
+    }
+  ],
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/secedgar-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.9",
+      "version": "0.1.10",
       "environmentVariables": [
         {
           "name": "EDGAR_USER_AGENT",
@@ -38,7 +44,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/secedgar-mcp-server",
       "runtimeHint": "bun",
-      "version": "0.1.9",
+      "version": "0.1.10",
       "environmentVariables": [
         {
           "name": "EDGAR_USER_AGENT",
