@@ -203,8 +203,10 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
   format: (result) => {
     const lines = [`Found ${result.total}${result.total_is_exact ? '' : '+'} filings`];
     for (const r of result.results) {
+      const period = r.period_ending ? ` (period: ${r.period_ending})` : '';
+      const desc = r.file_description ? ` — ${r.file_description}` : '';
       lines.push(
-        `- ${r.form ?? 'N/A'} ${r.filing_date} — ${r.company_name} [${r.accession_number}]`,
+        `- ${r.form ?? 'N/A'} ${r.filing_date}${period} — ${r.company_name} (CIK ${r.cik})${desc} [${r.accession_number}]`,
       );
     }
     if (result.form_distribution) {

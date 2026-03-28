@@ -216,7 +216,13 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
   },
 
   format: (result) => {
-    const lines = [`**${result.label}** — ${result.company} (${result.unit})`];
+    const lines = [`**${result.label}** — ${result.company} (CIK ${result.cik}, ${result.unit})`];
+    lines.push(`XBRL tag: ${result.concept}`);
+    if (result.description) lines.push(result.description);
+    if (result.tags_tried && result.tags_tried.length > 1) {
+      lines.push(`Tags tried: ${result.tags_tried.join(', ')}`);
+    }
+    lines.push('');
     for (const d of result.data) {
       const formatted =
         result.unit === 'USD'
@@ -224,7 +230,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
           : result.unit === 'USD/shares'
             ? `$${d.value.toFixed(2)}`
             : d.value.toLocaleString();
-      lines.push(`${d.period}: ${formatted} (${d.form} filed ${d.filed})`);
+      lines.push(`${d.period}: ${formatted} (${d.form} filed ${d.filed}) [${d.accession_number}]`);
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

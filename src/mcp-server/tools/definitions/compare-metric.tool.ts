@@ -138,7 +138,9 @@ export const compareMetricTool = tool('secedgar_compare_metric', {
   },
 
   format: (result) => {
-    const lines = [`**${result.label}** — ${result.period} (${result.total_companies} companies)`];
+    const lines = [
+      `**${result.label}** — ${result.period} (${result.unit}, ${result.total_companies} companies)`,
+    ];
     for (const d of result.data) {
       const ticker = d.ticker ? ` (${d.ticker})` : '';
       const formatted =
@@ -147,7 +149,9 @@ export const compareMetricTool = tool('secedgar_compare_metric', {
           : result.unit === 'USD-per-shares'
             ? `$${d.value.toFixed(2)}`
             : d.value.toLocaleString();
-      lines.push(`${d.rank}. ${d.company_name}${ticker}: ${formatted}`);
+      lines.push(
+        `${d.rank}. ${d.company_name}${ticker} — CIK ${d.cik}: ${formatted} [${d.accession_number}]`,
+      );
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

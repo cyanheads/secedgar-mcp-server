@@ -160,11 +160,18 @@ export const companySearchTool = tool('secedgar_company_search', {
 
   format: (result) => {
     const lines = [`**${result.name}** (${result.tickers.join(', ') || 'no ticker'})`];
-    lines.push(`CIK: ${result.cik} | SIC: ${result.sic} (${result.sic_description})`);
+    const exchange = result.exchanges.length ? ` | Exchange: ${result.exchanges.join(', ')}` : '';
+    lines.push(`CIK: ${result.cik} | SIC: ${result.sic} (${result.sic_description})${exchange}`);
+    lines.push(`Fiscal year end: ${result.fiscal_year_end}`);
+    if (result.state_of_incorporation) {
+      lines.push(`State of incorporation: ${result.state_of_incorporation}`);
+    }
     if (result.filings?.length) {
       lines.push(`\nRecent filings (${result.filings.length} of ${result.total_filings}):`);
       for (const f of result.filings) {
-        lines.push(`- ${f.form} ${f.filing_date} [${f.accession_number}]`);
+        const reportDate = f.report_date ? ` (period: ${f.report_date})` : '';
+        const desc = f.description ? ` — ${f.description}` : '';
+        lines.push(`- ${f.form} ${f.filing_date}${reportDate}${desc} [${f.accession_number}]`);
       }
     }
     return [{ type: 'text', text: lines.join('\n') }];

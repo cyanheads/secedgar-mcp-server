@@ -162,9 +162,17 @@ export const getFilingTool = tool('secedgar_get_filing', {
   },
 
   format: (result) => {
-    const header = `**${result.form}** — ${result.company_name} (${result.filing_date})`;
+    const header = `**${result.form}** — ${result.company_name} (CIK ${result.cik})`;
+    const dateLine = `Filed: ${result.filing_date}${result.period_ending ? ` | Period: ${result.period_ending}` : ''}`;
     const meta = `Accession: ${result.accession_number} | ${result.content_total_length.toLocaleString()} chars${result.content_truncated ? ' (truncated)' : ''}`;
-    return [{ type: 'text', text: `${header}\n${meta}\n\n${result.content}` }];
+    const docs =
+      result.documents.length > 1
+        ? `\nDocuments: ${result.documents.map((d) => `${d.name} (${d.type})`).join(', ')}`
+        : '';
+    const url = `\nURL: ${result.filing_url}`;
+    return [
+      { type: 'text', text: `${header}\n${dateLine}\n${meta}${docs}${url}\n\n${result.content}` },
+    ];
   },
 });
 
