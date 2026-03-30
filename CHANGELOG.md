@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.11] — 2026-03-30
+
+Dependency updates and package metadata improvements.
+
+### Changed
+
+- Updated `@cyanheads/mcp-ts-core` from `^0.2.8` to `^0.2.10`
+- Updated `@biomejs/biome` from `^2.4.9` to `^2.4.10`
+- Enriched `author` field in `package.json` with email and homepage URL
+- Added `funding` array to `package.json` (GitHub Sponsors, Buy Me a Coffee)
+
+---
+
 ## [0.1.10] — 2026-03-28
 
 Framework upgrade, enhanced skills, and MCP linter improvements.
