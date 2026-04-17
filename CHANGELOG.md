@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.12] — 2026-04-17
+## [0.2.0] — 2026-04-17
 
 Concept discovery, filing lookup resilience, and framework sync.
 
