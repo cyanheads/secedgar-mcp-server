@@ -59,16 +59,18 @@ const mockSubmissions: SubmissionsResponse = {
 };
 
 const mockApi = {
-  getFilingIndex: vi.fn(),
-  getFilingDocument: vi.fn(),
+  findFilingCiks: vi.fn(),
+  tryGetFilingIndex: vi.fn(),
+  tryGetFilingDocument: vi.fn(),
   getSubmissions: vi.fn(),
 };
 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(getEdgarApiService).mockReturnValue(mockApi as any);
-  mockApi.getFilingIndex.mockResolvedValue(mockIndex);
-  mockApi.getFilingDocument.mockResolvedValue('<html><body><p>Filing content</p></body></html>');
+  mockApi.findFilingCiks.mockResolvedValue(['0000320193']);
+  mockApi.tryGetFilingIndex.mockResolvedValue(mockIndex);
+  mockApi.tryGetFilingDocument.mockResolvedValue('<html><body><p>Filing content</p></body></html>');
   mockApi.getSubmissions.mockResolvedValue(mockSubmissions);
   vi.mocked(filingToText).mockReturnValue({
     text: 'Filing content',
@@ -111,7 +113,20 @@ describe('getFilingTool', () => {
     });
     await getFilingTool.handler(input, ctx);
 
-    expect(mockApi.getFilingIndex).toHaveBeenCalledWith('0000320193', '0000320193-23-000106');
+    expect(mockApi.findFilingCiks).toHaveBeenCalledWith('0000320193-23-000106');
+    expect(mockApi.tryGetFilingIndex).toHaveBeenCalledWith('0000320193', '0000320193-23-000106');
+  });
+
+  it('uses SEC search metadata to resolve accession-only lookups', async () => {
+    mockApi.findFilingCiks.mockResolvedValue(['0000320193']);
+    const ctx = createMockContext();
+    const input = getFilingTool.input.parse({
+      accession_number: '0001193125-14-383437',
+    });
+    const result = await getFilingTool.handler(input, ctx);
+
+    expect(result.cik).toBe('0000320193');
+    expect(mockApi.tryGetFilingIndex).toHaveBeenCalledWith('0000320193', '0001193125-14-383437');
   });
 
   it('fetches a specific document when specified', async () => {
@@ -124,7 +139,7 @@ describe('getFilingTool', () => {
     const result = await getFilingTool.handler(input, ctx);
 
     expect(result.primary_document).toBe('ex-21.htm');
-    expect(mockApi.getFilingDocument).toHaveBeenCalledWith(
+    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledWith(
       '0000320193',
       '0000320193-23-000106',
       'ex-21.htm',
@@ -141,6 +156,98 @@ describe('getFilingTool', () => {
 
     // aapl-20230930.htm (500000) is largest, R1.htm is filtered out (starts with R)
     expect(result.primary_document).toBe('aapl-20230930.htm');
+  });
+
+  it('selects the primary XML document when only SEC index HTML files exist', async () => {
+    mockApi.tryGetFilingIndex.mockResolvedValue({
+      directory: {
+        name: '000114036126013192',
+        item: [
+          {
+            name: '0001140361-26-013192-index-headers.html',
+            type: 'text/html',
+            size: '',
+            'last-modified': '2026-04-03',
+          },
+          {
+            name: '0001140361-26-013192-index.html',
+            type: 'text/html',
+            size: '',
+            'last-modified': '2026-04-03',
+          },
+          {
+            name: '0001140361-26-013192.txt',
+            type: 'text/plain',
+            size: '',
+            'last-modified': '2026-04-03',
+          },
+          {
+            name: 'form4.xml',
+            type: 'text/xml',
+            size: '15823',
+            'last-modified': '2026-04-03',
+          },
+        ],
+      },
+    });
+    const ctx = createMockContext();
+    const input = getFilingTool.input.parse({
+      accession_number: '0001140361-26-013192',
+      cik: '320193',
+    });
+    const result = await getFilingTool.handler(input, ctx);
+
+    expect(result.primary_document).toBe('form4.xml');
+    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledWith(
+      '0000320193',
+      '0001140361-26-013192',
+      'form4.xml',
+    );
+  });
+
+  it('tries another resolved CIK when the first archive path is missing the document', async () => {
+    mockApi.findFilingCiks.mockResolvedValue(['0001140361', '0000320193']);
+    mockApi.tryGetFilingIndex.mockResolvedValue({
+      directory: {
+        name: '000114036126013192',
+        item: [
+          {
+            name: '0001140361-26-013192-index-headers.html',
+            type: 'text/html',
+            size: '',
+            'last-modified': '2026-04-03',
+          },
+          {
+            name: 'form4.xml',
+            type: 'text/xml',
+            size: '15823',
+            'last-modified': '2026-04-03',
+          },
+        ],
+      },
+    });
+    mockApi.tryGetFilingDocument
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce('<xml><ownershipDocument /></xml>');
+    const ctx = createMockContext();
+    const input = getFilingTool.input.parse({
+      accession_number: '0001140361-26-013192',
+    });
+    const result = await getFilingTool.handler(input, ctx);
+
+    expect(result.cik).toBe('0000320193');
+    expect(mockApi.tryGetFilingDocument).toHaveBeenNthCalledWith(
+      1,
+      '0001140361',
+      '0001140361-26-013192',
+      'form4.xml',
+    );
+    expect(mockApi.tryGetFilingDocument).toHaveBeenNthCalledWith(
+      2,
+      '0000320193',
+      '0001140361-26-013192',
+      'form4.xml',
+    );
   });
 
   it('throws notFound when requested document does not exist', async () => {
@@ -190,6 +297,28 @@ describe('getFilingTool', () => {
     await getFilingTool.handler(input, ctx);
 
     expect(filingToText).toHaveBeenCalledWith(expect.any(String), 10000);
+  });
+
+  it('omits recent-window metadata for older filings', async () => {
+    mockApi.getSubmissions.mockResolvedValue({
+      ...mockSubmissions,
+      filings: {
+        ...mockSubmissions.filings,
+        recent: {
+          ...mockSubmissions.filings.recent,
+          accessionNumber: ['0000320193-23-000106'],
+        },
+      },
+    });
+    const ctx = createMockContext();
+    const input = getFilingTool.input.parse({
+      accession_number: '0001193125-14-383437',
+      cik: '320193',
+    });
+    const result = await getFilingTool.handler(input, ctx);
+
+    expect(result.form).toBeUndefined();
+    expect(result.filing_date).toBeUndefined();
   });
 
   it('uses default content_limit of 50000', () => {

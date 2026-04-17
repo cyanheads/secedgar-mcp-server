@@ -7,8 +7,8 @@
 export interface CikMatch {
   cik: string;
   exchange?: string;
-  name: string;
-  ticker: string;
+  name?: string;
+  ticker?: string;
 }
 
 /** Raw entry from SEC's company_tickers.json. */
@@ -132,10 +132,22 @@ export interface FrameEntry {
   val: number;
 }
 
+/** Financial statement grouping for XBRL concepts. */
+export type ConceptGroup =
+  | 'income_statement'
+  | 'balance_sheet'
+  | 'cash_flow'
+  | 'per_share'
+  | 'entity_info';
+
+/** XBRL taxonomy a concept belongs to. */
+export type ConceptTaxonomy = 'us-gaap' | 'ifrs-full' | 'dei';
+
 /** Friendly concept name mapping. */
 export interface ConceptMapping {
+  group: ConceptGroup;
   label: string;
   tags: string[];
-  taxonomy: string;
+  taxonomy: ConceptTaxonomy;
   unit: string;
 }

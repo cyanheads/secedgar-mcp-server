@@ -51,14 +51,14 @@ const mockFramesResponse: FramesResponse = {
 };
 
 const mockApi = {
-  getFrames: vi.fn(),
+  tryGetFrames: vi.fn(),
   cikToTicker: vi.fn(),
 };
 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(getEdgarApiService).mockReturnValue(mockApi as any);
-  mockApi.getFrames.mockResolvedValue(mockFramesResponse);
+  mockApi.tryGetFrames.mockResolvedValue(mockFramesResponse);
   mockApi.cikToTicker.mockImplementation(async (cik: string) => {
     const map: Record<string, string> = {
       '0000320193': 'AAPL',
@@ -86,7 +86,7 @@ describe('compareMetricTool', () => {
     const input = compareMetricTool.input.parse({ concept: 'revenue', period: 'CY2023' });
     await compareMetricTool.handler(input, ctx);
 
-    expect(mockApi.getFrames).toHaveBeenCalledWith(
+    expect(mockApi.tryGetFrames).toHaveBeenCalledWith(
       'us-gaap',
       'RevenueFromContractWithCustomerExcludingAssessedTax',
       'USD',
@@ -103,7 +103,7 @@ describe('compareMetricTool', () => {
     });
     await compareMetricTool.handler(input, ctx);
 
-    expect(mockApi.getFrames).toHaveBeenCalledWith(
+    expect(mockApi.tryGetFrames).toHaveBeenCalledWith(
       'us-gaap',
       'AccountsPayableCurrent',
       'USD',
@@ -165,7 +165,7 @@ describe('compareMetricTool', () => {
   });
 
   it('throws notFound on 404 from frames API', async () => {
-    mockApi.getFrames.mockRejectedValue(new Error('404 Not Found'));
+    mockApi.tryGetFrames.mockResolvedValue(null);
     const ctx = createMockContext();
     const input = compareMetricTool.input.parse({ concept: 'revenue', period: 'CY2023' });
 
@@ -173,7 +173,7 @@ describe('compareMetricTool', () => {
   });
 
   it('re-throws non-404 errors', async () => {
-    mockApi.getFrames.mockRejectedValue(new Error('500 Internal Server Error'));
+    mockApi.tryGetFrames.mockRejectedValue(new Error('500 Internal Server Error'));
     const ctx = createMockContext();
     const input = compareMetricTool.input.parse({ concept: 'revenue', period: 'CY2023' });
 

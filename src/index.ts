@@ -12,6 +12,7 @@ import { companySearchTool } from '@/mcp-server/tools/definitions/company-search
 import { compareMetricTool } from '@/mcp-server/tools/definitions/compare-metric.tool.js';
 import { getFilingTool } from '@/mcp-server/tools/definitions/get-filing.tool.js';
 import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials.tool.js';
+import { searchConceptsTool } from '@/mcp-server/tools/definitions/search-concepts.tool.js';
 import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
 import { initEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
@@ -22,6 +23,7 @@ await createApp({
     getFilingTool,
     getFinancialsTool,
     compareMetricTool,
+    searchConceptsTool,
   ],
   resources: [conceptsResource, filingTypesResource],
   prompts: [companyAnalysisPrompt],

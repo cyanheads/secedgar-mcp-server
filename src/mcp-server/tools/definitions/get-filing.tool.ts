@@ -7,11 +7,14 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { notFound } from '@cyanheads/mcp-ts-core/errors';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { filingToText } from '@/services/edgar/filing-to-text.js';
+import type { FilingIndex } from '@/services/edgar/types.js';
+
+const MAX_DOCUMENTS_IN_FORMAT = 10;
+type FilingIndexItem = FilingIndex['directory']['item'][number];
 
 export const getFilingTool = tool('secedgar_get_filing', {
   description:
-    "Fetch a specific filing's metadata and document content by accession number. " +
-    'Returns the primary document as readable text, with option to fetch specific exhibits.',
+    "Fetch a specific filing's metadata and document content by accession number. Returns the primary document as readable text, with option to fetch specific exhibits.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -24,7 +27,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .string()
       .optional()
       .describe(
-        'Company CIK. Optional but recommended — speeds up URL construction. If omitted, derived from the accession number prefix.',
+        'Company CIK. Optional but recommended — speeds up archive lookup. If omitted, the server resolves likely filing CIKs from SEC search metadata and archive paths.',
       ),
     content_limit: z
       .number()
@@ -33,9 +36,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .max(200000)
       .default(50000)
       .describe(
-        'Maximum characters of document text to return. 10-K filings can exceed 500,000 characters. ' +
-          'Default 50,000 captures ~12,000 words (typically business overview, risk factors, and MD&A). ' +
-          'Increase to 200,000 for full financial statements, or decrease for quick summaries.',
+        'Maximum characters of document text to return. 10-K filings can exceed 500,000 characters. Default 50,000 captures ~12,000 words (typically business overview, risk factors, and MD&A). Increase to 200,000 for full financial statements, or decrease for quick summaries.',
       ),
     document: z
       .string()
@@ -47,9 +48,18 @@ export const getFilingTool = tool('secedgar_get_filing', {
 
   output: z.object({
     accession_number: z.string().describe('Filing accession number.'),
-    form: z.string().describe('Form type.'),
-    filing_date: z.string().describe('Date filed.'),
-    company_name: z.string().describe('Filing entity name.'),
+    form: z
+      .string()
+      .optional()
+      .describe('Form type. Omitted when the filing predates the recent-submissions window.'),
+    filing_date: z
+      .string()
+      .optional()
+      .describe('Date filed. Omitted when the filing predates the recent-submissions window.'),
+    company_name: z
+      .string()
+      .optional()
+      .describe('Filing entity name, if the CIK resolved to a known entity.'),
     cik: z.string().describe('Company CIK.'),
     period_ending: z.string().optional().describe('Period of report.'),
     primary_document: z.string().describe('Primary document filename.'),
@@ -73,28 +83,14 @@ export const getFilingTool = tool('secedgar_get_filing', {
   async handler(input, ctx) {
     const api = getEdgarApiService();
 
-    // Normalize accession number to dash format
     const accn = normalizeAccessionNumber(input.accession_number);
+    const { cik, index, html, targetName } = await resolveFilingArchive(
+      api,
+      accn,
+      input.cik,
+      input.document,
+    );
     const accnNoDashes = accn.replace(/-/g, '');
-
-    // Derive CIK from accession number prefix if not provided
-    const cik = input.cik ?? accn.split('-')[0] ?? accn.slice(0, 10);
-    const paddedCik = cik.padStart(10, '0');
-
-    // Fetch filing index
-    let index: Awaited<ReturnType<typeof api.getFilingIndex>>;
-    try {
-      index = await api.getFilingIndex(paddedCik, accn);
-    } catch (err) {
-      const is404 = err instanceof Error && /404|not found/i.test(err.message);
-      if (is404) {
-        throw notFound(
-          `Filing '${accn}' not found (CIK ${paddedCik}). Verify the accession number and CIK are correct.`,
-        );
-      }
-      throw err;
-    }
-
     const items = index.directory.item;
     const documents = items.map((item) => ({
       name: item.name,
@@ -102,73 +98,61 @@ export const getFilingTool = tool('secedgar_get_filing', {
       size: item.size ? Number.parseInt(item.size, 10) : undefined,
     }));
 
-    // Find the target document
-    const targetName = input.document || findPrimaryDocument(items);
-    if (!targetName) {
-      throw notFound(
-        `No document found in filing ${accn}. Available documents: ${items.map((i) => i.name).join(', ')}`,
-      );
-    }
-
-    const docExists = items.some((i) => i.name === targetName);
-    if (!docExists) {
-      throw notFound(
-        `Document '${targetName}' not found in this filing. Available documents: ${items.map((i) => i.name).join(', ')}. Use one of these names.`,
-      );
-    }
-
-    // Fetch and convert document
-    const html = await api.getFilingDocument(paddedCik, accn, targetName);
     const { text, truncated, totalLength } = filingToText(html, input.content_limit);
 
-    // Get filing metadata from submissions
-    let form = '';
-    let filingDate = '';
-    let companyName = '';
-    let periodEnding: string | undefined;
-
-    // Try to get metadata from the index page or a quick submissions lookup
-    const submissions = await api.getSubmissions(paddedCik);
-    companyName = submissions.name;
-
+    // Enrich with metadata from the recent-submissions window — not every accession lands here
+    // (older filings live in paginated archive files), so these fields remain optional.
+    const submissions = await api.getSubmissions(cik);
     const recentAccns = submissions.filings.recent.accessionNumber;
     const idx = recentAccns.indexOf(accn);
-    if (idx >= 0) {
-      form = submissions.filings.recent.form[idx] ?? '';
-      filingDate = submissions.filings.recent.filingDate[idx] ?? '';
-      periodEnding = submissions.filings.recent.reportDate[idx] || undefined;
-    }
+
+    const form = idx >= 0 ? submissions.filings.recent.form[idx] : undefined;
+    const filingDate = idx >= 0 ? submissions.filings.recent.filingDate[idx] : undefined;
+    const periodEnding =
+      idx >= 0 ? submissions.filings.recent.reportDate[idx] || undefined : undefined;
 
     ctx.log.info('Filing retrieved', {
       accessionNumber: accn,
-      cik: paddedCik,
+      cik,
       contentLength: totalLength,
+      inRecentWindow: idx >= 0,
     });
 
     return {
       accession_number: accn,
-      form,
-      filing_date: filingDate,
-      company_name: companyName,
-      cik: paddedCik,
+      form: form || undefined,
+      filing_date: filingDate || undefined,
+      company_name: submissions.name || undefined,
+      cik,
       period_ending: periodEnding,
       primary_document: targetName,
       documents,
       content: text,
       content_truncated: truncated,
       content_total_length: totalLength,
-      filing_url: `https://www.sec.gov/Archives/edgar/data/${paddedCik}/${accnNoDashes}/${targetName}`,
+      filing_url: `https://www.sec.gov/Archives/edgar/data/${cik}/${accnNoDashes}/${targetName}`,
     };
   },
 
   format: (result) => {
-    const header = `**${result.form}** — ${result.company_name} (CIK ${result.cik})`;
-    const dateLine = `Filed: ${result.filing_date}${result.period_ending ? ` | Period: ${result.period_ending}` : ''}`;
+    const formLabel = result.form ?? 'Filing';
+    const entity = result.company_name ?? 'Unknown entity';
+    const header = `**${formLabel}** — ${entity} (CIK ${result.cik})`;
+
+    const filedPart = result.filing_date ? `Filed: ${result.filing_date}` : 'Filed: Unknown';
+    const periodPart = result.period_ending ? ` | Period: ${result.period_ending}` : '';
+    const dateLine = `${filedPart}${periodPart}`;
+
     const meta = `Accession: ${result.accession_number} | ${result.content_total_length.toLocaleString()} chars${result.content_truncated ? ' (truncated)' : ''}`;
-    const docs =
-      result.documents.length > 1
-        ? `\nDocuments: ${result.documents.map((d) => `${d.name} (${d.type})`).join(', ')}`
-        : '';
+
+    let docs = '';
+    if (result.documents.length > 1) {
+      const shown = result.documents.slice(0, MAX_DOCUMENTS_IN_FORMAT);
+      const extra = result.documents.length - shown.length;
+      const list = shown.map((d) => `${d.name} (${d.type})`).join(', ');
+      docs = `\nDocuments (${result.documents.length}): ${list}${extra > 0 ? `, +${extra} more` : ''}`;
+    }
+
     const url = `\nURL: ${result.filing_url}`;
     return [
       { type: 'text', text: `${header}\n${dateLine}\n${meta}${docs}${url}\n\n${result.content}` },
@@ -187,23 +171,103 @@ function normalizeAccessionNumber(input: string): string {
   return cleaned;
 }
 
-/** Find the primary document in a filing index (typically the largest .htm file). */
-function findPrimaryDocument(
-  items: Array<{ name: string; type: string; size: string }>,
-): string | undefined {
-  // Prefer .htm/.html files, skip index files
+async function resolveFilingArchive(
+  api: ReturnType<typeof getEdgarApiService>,
+  accessionNumber: string,
+  providedCik: string | undefined,
+  requestedDocument: string | undefined,
+): Promise<{ cik: string; html: string; index: FilingIndex; targetName: string }> {
+  const candidateCiks = await resolveCandidateCiks(api, accessionNumber, providedCik);
+  let lastIndexedItems: FilingIndexItem[] = [];
+
+  for (const cik of candidateCiks) {
+    const index = await api.tryGetFilingIndex(cik, accessionNumber);
+    if (!index) continue;
+
+    const items = index.directory.item;
+    lastIndexedItems = items;
+
+    const targetName = requestedDocument ?? findPrimaryDocument(items);
+    if (!targetName) continue;
+    if (!items.some((item) => item.name === targetName)) continue;
+
+    const html = await api.tryGetFilingDocument(cik, accessionNumber, targetName);
+    if (!html) continue;
+
+    return { cik, html, index, targetName };
+  }
+
+  if (requestedDocument && lastIndexedItems.length > 0) {
+    throw notFound(
+      `Document '${requestedDocument}' not found in this filing. Available documents: ${lastIndexedItems.map((item) => item.name).join(', ')}. Use one of these names.`,
+    );
+  }
+
+  if (lastIndexedItems.length > 0) {
+    throw notFound(
+      `No document found in filing ${accessionNumber}. Available documents: ${lastIndexedItems.map((item) => item.name).join(', ')}`,
+    );
+  }
+
+  if (providedCik) {
+    throw notFound(
+      `Filing '${accessionNumber}' not found (CIK ${providedCik.padStart(10, '0')}). Verify the accession number and CIK are correct.`,
+    );
+  }
+
+  throw notFound(
+    `Filing '${accessionNumber}' not found. Verify the accession number or provide the company CIK explicitly.`,
+  );
+}
+
+async function resolveCandidateCiks(
+  api: ReturnType<typeof getEdgarApiService>,
+  accessionNumber: string,
+  providedCik: string | undefined,
+): Promise<string[]> {
+  if (providedCik) return [providedCik.padStart(10, '0')];
+
+  const ciks = await api.findFilingCiks(accessionNumber);
+  const prefixCik = (accessionNumber.split('-')[0] ?? accessionNumber.slice(0, 10)).padStart(
+    10,
+    '0',
+  );
+
+  return [...new Set([...ciks, prefixCik])];
+}
+
+/** Find the primary document in a filing index (prefer real filing docs over SEC index pages). */
+function findPrimaryDocument(items: FilingIndexItem[]): string | undefined {
   const htmlDocs = items.filter(
-    (i) =>
-      (i.name.endsWith('.htm') || i.name.endsWith('.html')) &&
-      !i.name.includes('index') &&
-      !i.name.startsWith('R'),
+    (item) =>
+      isNonIndexFile(item.name) &&
+      (item.name.endsWith('.htm') || item.name.endsWith('.html')) &&
+      !item.name.startsWith('R'),
   );
+  if (htmlDocs.length > 0) return getLargestDocument(htmlDocs)?.name;
 
-  if (htmlDocs.length === 0) return items[0]?.name;
+  const xmlDocs = items.filter(
+    (item) =>
+      isNonIndexFile(item.name) && item.name.endsWith('.xml') && !isXbrlSupportFile(item.name),
+  );
+  if (xmlDocs.length > 0) return getLargestDocument(xmlDocs)?.name;
 
-  // Return the largest HTML file (likely the primary document)
-  const sorted = htmlDocs.sort(
+  const textDocs = items.filter((item) => isNonIndexFile(item.name) && item.name.endsWith('.txt'));
+  if (textDocs.length > 0) return getLargestDocument(textDocs)?.name;
+
+  return items.find((item) => isNonIndexFile(item.name))?.name ?? items[0]?.name;
+}
+
+function getLargestDocument(items: FilingIndexItem[]): FilingIndexItem | undefined {
+  return [...items].sort(
     (a, b) => (Number.parseInt(b.size, 10) || 0) - (Number.parseInt(a.size, 10) || 0),
-  );
-  return sorted[0]?.name;
+  )[0];
+}
+
+function isNonIndexFile(name: string): boolean {
+  return !name.toLowerCase().includes('index');
+}
+
+function isXbrlSupportFile(name: string): boolean {
+  return /(?:_cal|_def|_lab|_pre|_sch)\.xml$/i.test(name);
 }

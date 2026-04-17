@@ -53,8 +53,7 @@ async function resolveEntityTargeting(
 
 export const searchFilingsTool = tool('secedgar_search_filings', {
   description:
-    'Full-text search across all EDGAR filing documents since 1993. ' +
-    'Supports exact phrases, boolean operators, wildcards, and entity targeting (ticker:AAPL or cik:320193 in query).',
+    'Full-text search across all EDGAR filing documents since 1993. Supports exact phrases, boolean operators, wildcards, and entity targeting (ticker:AAPL or cik:320193 in query).',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -62,10 +61,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .string()
       .min(1)
       .describe(
-        'Full-text search query. Supports: exact phrases ("material weakness"), ' +
-          'boolean operators (revenue OR income), exclusion (-preliminary), ' +
-          'wildcard suffix (account*), entity targeting (ticker:AAPL or cik:320193 in the query). ' +
-          "Terms are AND'd by default.",
+        'Full-text search query. Supports: exact phrases ("material weakness"), boolean operators (revenue OR income), exclusion (-preliminary), wildcard suffix (account*), entity targeting (ticker:AAPL or cik:320193 in the query). Terms are AND\'d by default.',
       ),
     forms: z
       .array(z.string())
@@ -96,9 +92,10 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .number()
       .int()
       .min(0)
+      .max(9999)
       .default(0)
       .describe(
-        'Pagination offset. Increment by limit for next page. Hard cap at 10,000 total results.',
+        'Pagination offset. Increment by limit for the next page. EDGAR caps total accessible results at 10,000 — offsets past this return nothing.',
       ),
   }),
 

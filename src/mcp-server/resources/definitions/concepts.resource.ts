@@ -5,7 +5,17 @@
  */
 
 import { resource } from '@cyanheads/mcp-ts-core';
-import { getAllConcepts } from '@/services/edgar/concept-map.js';
+import type { ConceptEntry } from '@/services/edgar/concept-map.js';
+import { listConcepts } from '@/services/edgar/concept-map.js';
+import type { ConceptGroup } from '@/services/edgar/types.js';
+
+const GROUP_LABELS: Record<ConceptGroup, string> = {
+  income_statement: 'Income Statement',
+  balance_sheet: 'Balance Sheet',
+  cash_flow: 'Cash Flow',
+  per_share: 'Per Share',
+  entity_info: 'Entity Info',
+};
 
 export const conceptsResource = resource('secedgar://concepts', {
   name: 'XBRL Financial Concepts',
@@ -15,46 +25,11 @@ export const conceptsResource = resource('secedgar://concepts', {
   mimeType: 'text/markdown',
 
   handler(_params, _ctx) {
-    const concepts = getAllConcepts();
-
-    const groups: Record<
-      string,
-      Array<{ name: string; label: string; tags: string[]; taxonomy: string; unit: string }>
-    > = {
-      'Income Statement': [],
-      'Balance Sheet': [],
-      'Cash Flow': [],
-      'Per Share': [],
-      'Entity Info': [],
-    };
-
-    const groupMap: Record<string, string> = {
-      revenue: 'Income Statement',
-      net_income: 'Income Statement',
-      operating_income: 'Income Statement',
-      gross_profit: 'Income Statement',
-      assets: 'Balance Sheet',
-      liabilities: 'Balance Sheet',
-      equity: 'Balance Sheet',
-      cash: 'Balance Sheet',
-      debt: 'Balance Sheet',
-      eps_basic: 'Per Share',
-      eps_diluted: 'Per Share',
-      operating_cash_flow: 'Cash Flow',
-      capex: 'Cash Flow',
-      shares_outstanding: 'Entity Info',
-    };
-
-    for (const [name, mapping] of Object.entries(concepts)) {
-      const group = groupMap[name] ?? 'Other';
-      if (!groups[group]) groups[group] = [];
-      groups[group].push({
-        name,
-        label: mapping.label,
-        tags: mapping.tags,
-        taxonomy: mapping.taxonomy,
-        unit: mapping.unit,
-      });
+    const groups = new Map<ConceptGroup, ConceptEntry[]>();
+    for (const entry of listConcepts()) {
+      const list = groups.get(entry.group) ?? [];
+      list.push(entry);
+      groups.set(entry.group, list);
     }
 
     const lines: string[] = ['# XBRL Financial Concepts', ''];
@@ -67,9 +42,9 @@ export const conceptsResource = resource('secedgar://concepts', {
       '',
     );
 
-    for (const [group, items] of Object.entries(groups)) {
+    for (const [group, items] of groups) {
       if (items.length === 0) continue;
-      lines.push(`## ${group}`, '');
+      lines.push(`## ${GROUP_LABELS[group]}`, '');
       lines.push('| Friendly Name | Label | XBRL Tags | Taxonomy | Unit |');
       lines.push('|:------|:------|:----------|:---------|:-----|');
       for (const item of items) {

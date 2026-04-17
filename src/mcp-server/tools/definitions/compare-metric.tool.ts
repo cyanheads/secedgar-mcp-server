@@ -7,30 +7,22 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { notFound } from '@cyanheads/mcp-ts-core/errors';
 import { resolveConcept } from '@/services/edgar/concept-map.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import type { FramesResponse } from '@/services/edgar/types.js';
 
 export const compareMetricTool = tool('secedgar_compare_metric', {
   description:
-    'Compare a financial metric across all reporting companies for a specific period. ' +
-    'Uses the same friendly concept names as secedgar_get_financials (e.g., "revenue", "assets").',
+    'Compare a financial metric across all reporting companies for a specific period. Uses the same friendly concept names as secedgar_get_financials (e.g., "revenue", "assets").',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
     concept: z
       .string()
       .describe(
-        'Financial concept — same friendly names as secedgar_get_financials ' +
-          '(e.g., "revenue", "assets", "eps_basic") or raw XBRL tag.',
+        'Financial concept — same friendly names as secedgar_get_financials (e.g., "revenue", "assets", "eps_basic") or raw XBRL tag.',
       ),
     period: z
       .string()
       .describe(
-        'Calendar period. Formats:\n' +
-          '  "CY2023" — full year 2023 (duration, for income statement items)\n' +
-          '  "CY2024Q2" — Q2 2024 (duration, for quarterly income items)\n' +
-          '  "CY2023Q4I" — Q4 2023 instant (balance sheet items like assets, cash)\n' +
-          'Use duration periods (no I suffix) for income/cash flow items. ' +
-          'Use instant periods (I suffix) for balance sheet items.',
+        'Calendar period. Formats:\n  "CY2023" — full year 2023 (duration, for income statement items)\n  "CY2024Q2" — Q2 2024 (duration, for quarterly income items)\n  "CY2023Q4I" — Q4 2023 instant (balance sheet items like assets, cash)\nUse duration periods (no I suffix) for income/cash flow items. Use instant periods (I suffix) for balance sheet items.',
       ),
     unit: z
       .enum(['USD', 'USD-per-shares', 'shares', 'pure'])
@@ -79,20 +71,13 @@ export const compareMetricTool = tool('secedgar_compare_metric', {
     const label = mapping?.label ?? input.concept;
     const unit = mapping ? mapping.unit.replace('/', '-per-') : input.unit;
 
-    // Fetch frames data
-    let framesResponse: FramesResponse;
-    try {
-      framesResponse = await api.getFrames(taxonomy, tag, unit, input.period);
-    } catch (err) {
-      const is404 = err instanceof Error && /404|not found/i.test(err.message);
-      if (!is404) throw err;
+    // `tryGetFrames` returns null when no companies report this combination for this period.
+    const framesResponse = await api.tryGetFrames(taxonomy, tag, unit, input.period);
+    if (!framesResponse) {
       // Distinguish unknown concept (no mapping + 404) from valid concept with no data
       const hint = !mapping
-        ? `Unknown concept '${input.concept}'. Use a friendly name (e.g., "revenue", "assets") ` +
-          'or a valid XBRL tag. See secedgar://concepts for available names.'
-        : `No data for ${label}/${unit}/${input.period}. Check: ` +
-          'duration vs. instant period (add "I" for balance sheet items), ' +
-          'correct unit (USD-per-shares for EPS), and period exists (data starts ~CY2009).';
+        ? `Unknown concept '${input.concept}'. Use a friendly name (e.g., "revenue", "assets") or a valid XBRL tag.`
+        : `No data for ${label}/${unit}/${input.period}. Check: duration vs. instant period (add "I" for balance sheet items), correct unit (USD-per-shares for EPS), and period exists (data starts ~CY2009).`;
       throw notFound(hint);
     }
 

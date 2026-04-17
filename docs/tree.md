@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-03-24 09:50:37
+Generated on: 2026-04-17 11:59:39
 
 ```text
 secedgar-mcp-server/
@@ -18,6 +18,8 @@ secedgar-mcp-server/
 │   ├── lint-mcp.ts
 │   └── tree.ts
 ├── skills/
+│   ├── add-app-tool/
+│   │   └── SKILL.md
 │   ├── add-prompt/
 │   │   └── SKILL.md
 │   ├── add-resource/
@@ -69,6 +71,10 @@ secedgar-mcp-server/
 │   │   │   ├── readme.md
 │   │   │   └── server-json.md
 │   │   └── SKILL.md
+│   ├── report-issue-framework/
+│   │   └── SKILL.md
+│   ├── report-issue-local/
+│   │   └── SKILL.md
 │   └── setup/
 │       └── SKILL.md
 ├── src/
@@ -88,6 +94,7 @@ secedgar-mcp-server/
 │   │           ├── compare-metric.tool.ts
 │   │           ├── get-filing.tool.ts
 │   │           ├── get-financials.tool.ts
+│   │           ├── search-concepts.tool.ts
 │   │           └── search-filings.tool.ts
 │   ├── services/
 │   │   └── edgar/

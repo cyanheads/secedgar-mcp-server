@@ -70,14 +70,14 @@ const mockConceptResponse: CompanyConceptResponse = {
 
 const mockApi = {
   resolveCik: vi.fn(),
-  getCompanyConcept: vi.fn(),
+  tryGetCompanyConcept: vi.fn(),
 };
 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(getEdgarApiService).mockReturnValue(mockApi as any);
   mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
-  mockApi.getCompanyConcept.mockResolvedValue(mockConceptResponse);
+  mockApi.tryGetCompanyConcept.mockResolvedValue(mockConceptResponse);
 });
 
 describe('getFinancialsTool', () => {
@@ -98,7 +98,7 @@ describe('getFinancialsTool', () => {
     await getFinancialsTool.handler(input, ctx);
 
     // Should try the first tag from revenue mapping
-    expect(mockApi.getCompanyConcept).toHaveBeenCalledWith(
+    expect(mockApi.tryGetCompanyConcept).toHaveBeenCalledWith(
       '0000320193',
       'us-gaap',
       'RevenueFromContractWithCustomerExcludingAssessedTax',
@@ -113,7 +113,7 @@ describe('getFinancialsTool', () => {
     });
     await getFinancialsTool.handler(input, ctx);
 
-    expect(mockApi.getCompanyConcept).toHaveBeenCalledWith(
+    expect(mockApi.tryGetCompanyConcept).toHaveBeenCalledWith(
       '0000320193',
       'us-gaap',
       'AccountsPayableCurrent',
@@ -195,7 +195,7 @@ describe('getFinancialsTool', () => {
   });
 
   it('throws notFound when no XBRL data exists', async () => {
-    mockApi.getCompanyConcept.mockRejectedValue(new Error('404 Not Found'));
+    mockApi.tryGetCompanyConcept.mockResolvedValue(null);
     const ctx = createMockContext();
     const input = getFinancialsTool.input.parse({ company: 'AAPL', concept: 'revenue' });
 
@@ -203,9 +203,9 @@ describe('getFinancialsTool', () => {
   });
 
   it('tries multiple tags for friendly names and merges results', async () => {
-    // First tag 404s, second succeeds
-    mockApi.getCompanyConcept
-      .mockRejectedValueOnce(new Error('404 Not Found'))
+    // First tag 404s (returned as null), second succeeds
+    mockApi.tryGetCompanyConcept
+      .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(mockConceptResponse);
 
     const ctx = createMockContext();
@@ -218,7 +218,7 @@ describe('getFinancialsTool', () => {
   });
 
   it('re-throws non-404 errors', async () => {
-    mockApi.getCompanyConcept.mockRejectedValue(new Error('500 Internal Server Error'));
+    mockApi.tryGetCompanyConcept.mockRejectedValue(new Error('500 Internal Server Error'));
     const ctx = createMockContext();
     const input = getFinancialsTool.input.parse({ company: 'AAPL', concept: 'revenue' });
 

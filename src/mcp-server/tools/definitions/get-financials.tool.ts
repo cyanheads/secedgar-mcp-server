@@ -12,9 +12,7 @@ import type { CompanyConceptUnit } from '@/services/edgar/types.js';
 
 export const getFinancialsTool = tool('secedgar_get_financials', {
   description:
-    'Get historical XBRL financial data for a company. Accepts friendly concept names ' +
-    '(e.g., "revenue", "net_income", "assets") or raw XBRL tags. Automatically handles ' +
-    'historical tag changes and deduplicates data. See secedgar://concepts for available names.',
+    'Get historical XBRL financial data for a company. Accepts friendly concept names (e.g., "revenue", "net_income", "assets") or raw XBRL tags. Automatically handles historical tag changes and deduplicates data.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -24,10 +22,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     concept: z
       .string()
       .describe(
-        'Financial concept — friendly name (e.g., "revenue", "net_income", "assets", "eps_diluted") ' +
-          'or raw XBRL tag (e.g., "AccountsPayableCurrent"). ' +
-          'Friendly names auto-resolve to the correct XBRL tags and handle historical tag changes. ' +
-          'See secedgar://concepts for the full list of supported names and mappings.',
+        'Financial concept — friendly name (e.g., "revenue", "net_income", "assets", "eps_diluted") or raw XBRL tag (e.g., "AccountsPayableCurrent"). Friendly names auto-resolve to the correct XBRL tags and handle historical tag changes.',
       ),
     taxonomy: z
       .enum(['us-gaap', 'ifrs-full', 'dei'])
@@ -86,14 +81,17 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     // Resolve concept to XBRL tag(s)
     const mapping = resolveConcept(input.concept);
     const tags = mapping ? mapping.tags : [input.concept];
-    const taxonomy = mapping
-      ? input.taxonomy !== 'us-gaap'
-        ? input.taxonomy
-        : mapping.taxonomy
-      : input.taxonomy;
     const label = mapping?.label ?? input.concept;
 
-    // Try each tag until we get data
+    // When the user overrides the default taxonomy, honor their choice;
+    // otherwise fall back to the mapping's preferred taxonomy (e.g. `dei` for shares_outstanding).
+    let taxonomy = input.taxonomy;
+    if (mapping && input.taxonomy === 'us-gaap') {
+      taxonomy = mapping.taxonomy as typeof input.taxonomy;
+    }
+
+    // Try each tag until we get data. `tryGetCompanyConcept` returns null for 404
+    // (tag not reported by this company); other errors propagate.
     let conceptResponse:
       | {
           units: Record<string, CompanyConceptUnit[]>;
@@ -107,24 +105,18 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
 
     for (const tag of tags) {
       tagsTried.push(tag);
-      try {
-        const resp = await api.getCompanyConcept(match.cik, taxonomy, tag);
-        if (!conceptResponse) {
-          conceptResponse = {
-            units: resp.units,
-            label: resp.label,
-            description: resp.description ?? undefined,
-            tag: resp.tag,
-          };
-        }
-        // Merge units from all matching tags
-        for (const units of Object.values(resp.units)) {
-          allUnits.push(...units);
-        }
-      } catch (err) {
-        // Only swallow 404s (tag not reported by this company); re-throw real errors
-        const is404 = err instanceof Error && /404|not found/i.test(err.message);
-        if (!is404) throw err;
+      const resp = await api.tryGetCompanyConcept(match.cik, taxonomy, tag);
+      if (!resp) continue;
+      if (!conceptResponse) {
+        conceptResponse = {
+          units: resp.units,
+          label: resp.label,
+          description: resp.description ?? undefined,
+          tag: resp.tag,
+        };
+      }
+      for (const units of Object.values(resp.units)) {
+        allUnits.push(...units);
       }
     }
 
@@ -144,9 +136,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     // If deduplication removed everything, the concept exists but has no frame-aligned entries
     if (deduped.length === 0) {
       throw notFound(
-        `'${conceptResponse.tag}' exists for this company but has no standard-period data. ` +
-          'This typically means the company reports this item in a non-standard period or ' +
-          'the data lacks frame alignment. Try a related concept or check secedgar://concepts.',
+        `'${conceptResponse.tag}' exists for this company but has no standard-period data. This typically means the company reports this item in a non-standard period or the data lacks frame alignment. Try a related concept.`,
       );
     }
 

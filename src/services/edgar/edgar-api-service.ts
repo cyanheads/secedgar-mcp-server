@@ -32,6 +32,7 @@ class EdgarApiService {
   private lastRequestAt = 0;
   private minIntervalMs: number;
   private tickerCache: TickerCache | undefined;
+  private throttleQueue: Promise<void> = Promise.resolve();
 
   constructor() {
     const config = getServerConfig();
@@ -91,6 +92,19 @@ class EdgarApiService {
     return response.json() as Promise<T>;
   }
 
+  /** Fetch JSON, returning `null` on 404 and throwing on other non-OK responses. */
+  async tryFetchJson<T>(url: string): Promise<T | null> {
+    const response = await this.fetch(url);
+    if (response.status === 404) return null;
+    if (!response.ok) {
+      throw serviceUnavailable(`SEC EDGAR API returned ${response.status} for ${url}`, {
+        url,
+        status: response.status,
+      });
+    }
+    return response.json() as Promise<T>;
+  }
+
   /** Fetch raw text content (HTML filing documents). */
   async fetchText(url: string): Promise<string> {
     await this.throttle();
@@ -100,6 +114,25 @@ class EdgarApiService {
       headers: { 'User-Agent': config.userAgent },
     });
 
+    if (!response.ok) {
+      throw serviceUnavailable(`SEC EDGAR returned ${response.status} for ${url}`, {
+        url,
+        status: response.status,
+      });
+    }
+    return response.text();
+  }
+
+  /** Fetch raw text content, returning `null` on 404 and throwing on other failures. */
+  async tryFetchText(url: string): Promise<string | null> {
+    await this.throttle();
+
+    const config = getServerConfig();
+    const response = await globalThis.fetch(url, {
+      headers: { 'User-Agent': config.userAgent },
+    });
+
+    if (response.status === 404) return null;
     if (!response.ok) {
       throw serviceUnavailable(`SEC EDGAR returned ${response.status} for ${url}`, {
         url,
@@ -126,8 +159,9 @@ class EdgarApiService {
       const padded = trimmed.padStart(10, '0');
       const match = cache.byCik.get(padded);
       if (match) return match;
-      // Return a synthetic match — CIK may be valid even if not in tickers file
-      return { cik: padded, name: '', ticker: '' };
+      // CIK may be valid even if absent from the tickers file (e.g. individual filers) —
+      // return a CIK-only match and let the caller resolve identity from submissions.
+      return { cik: padded };
     }
 
     // Short alphabetic → ticker
@@ -144,6 +178,7 @@ class EdgarApiService {
     const substring: CikMatch[] = [];
 
     for (const entry of cache.allEntries) {
+      if (!entry.name) continue;
       const name = entry.name.toLowerCase();
       if (name === lower) {
         exact.push(entry);
@@ -201,10 +236,35 @@ class EdgarApiService {
     return this.fetchJson<EftsResponse>(url.toString());
   }
 
-  getFilingIndex(cik: string, accessionNumber: string): Promise<FilingIndex> {
+  /**
+   * Resolve likely company CIKs for a filing accession number using SEC search metadata.
+   * Returns zero or more padded 10-digit CIKs in SEC-provided order.
+   */
+  async findFilingCiks(accessionNumber: string): Promise<string[]> {
+    const response = await this.searchFilings({ query: accessionNumber, size: 10 });
+    const normalizedAccession = accessionNumber.replace(/[^0-9]/g, '');
+    const ciks = new Set<string>();
+
+    for (const hit of response.hits.hits) {
+      const hitAccession = (hit._source.adsh || hit._id.split(':')[0] || hit._id).replace(
+        /[^0-9]/g,
+        '',
+      );
+      if (hitAccession !== normalizedAccession) continue;
+
+      for (const cik of hit._source.ciks ?? []) {
+        ciks.add(cik.padStart(10, '0'));
+      }
+    }
+
+    return [...ciks];
+  }
+
+  /** Fetch a filing's document index. Returns `null` if the filing does not exist. */
+  tryGetFilingIndex(cik: string, accessionNumber: string): Promise<FilingIndex | null> {
     const padded = cik.padStart(10, '0');
     const noDashes = accessionNumber.replace(/-/g, '');
-    return this.fetchJson<FilingIndex>(
+    return this.tryFetchJson<FilingIndex>(
       `https://www.sec.gov/Archives/edgar/data/${padded}/${noDashes}/index.json`,
     );
   }
@@ -217,28 +277,63 @@ class EdgarApiService {
     );
   }
 
-  getCompanyConcept(cik: string, taxonomy: string, tag: string): Promise<CompanyConceptResponse> {
+  /**
+   * Fetch a filing document, returning `null` when the archive path exists but this document does not.
+   */
+  tryGetFilingDocument(
+    cik: string,
+    accessionNumber: string,
+    document: string,
+  ): Promise<string | null> {
     const padded = cik.padStart(10, '0');
-    return this.fetchJson<CompanyConceptResponse>(
+    const noDashes = accessionNumber.replace(/-/g, '');
+    return this.tryFetchText(
+      `https://www.sec.gov/Archives/edgar/data/${padded}/${noDashes}/${document}`,
+    );
+  }
+
+  /** Fetch XBRL data for a concept. Returns `null` if the company does not report this tag. */
+  tryGetCompanyConcept(
+    cik: string,
+    taxonomy: string,
+    tag: string,
+  ): Promise<CompanyConceptResponse | null> {
+    const padded = cik.padStart(10, '0');
+    return this.tryFetchJson<CompanyConceptResponse>(
       `https://data.sec.gov/api/xbrl/companyconcept/CIK${padded}/${taxonomy}/${tag}.json`,
     );
   }
 
-  getFrames(taxonomy: string, tag: string, unit: string, period: string): Promise<FramesResponse> {
-    return this.fetchJson<FramesResponse>(
+  /** Fetch cross-company frame data. Returns `null` if no companies report this combination. */
+  tryGetFrames(
+    taxonomy: string,
+    tag: string,
+    unit: string,
+    period: string,
+  ): Promise<FramesResponse | null> {
+    return this.tryFetchJson<FramesResponse>(
       `https://data.sec.gov/api/xbrl/frames/${taxonomy}/${tag}/${unit}/${period}.json`,
     );
   }
 
   // --- Internals ---
 
-  private async throttle(): Promise<void> {
-    const now = Date.now();
-    const elapsed = now - this.lastRequestAt;
-    if (elapsed < this.minIntervalMs) {
-      await sleep(this.minIntervalMs - elapsed);
-    }
-    this.lastRequestAt = Date.now();
+  /**
+   * Serialize throttle checks through a promise chain so concurrent callers
+   * can't observe a stale `lastRequestAt` and fire in parallel within one window.
+   */
+  private throttle(): Promise<void> {
+    const next = this.throttleQueue.then(async () => {
+      const elapsed = Date.now() - this.lastRequestAt;
+      if (elapsed < this.minIntervalMs) {
+        await sleep(this.minIntervalMs - elapsed);
+      }
+      this.lastRequestAt = Date.now();
+    });
+    this.throttleQueue = next.catch(() => {
+      /* swallow: errors propagate to the caller's awaited chain, not the queue */
+    });
+    return next;
   }
 
   private async getTickerCache(): Promise<TickerCache> {

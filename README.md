@@ -1,7 +1,7 @@
 <div align="center">
   <h1>@cyanheads/secedgar-mcp-server</h1>
   <p><b>Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.</b>
-  <div>5 Tools • 2 Resources • 1 Prompt</div>
+  <div>6 Tools • 2 Resources • 1 Prompt</div>
   </p>
 </div>
 
@@ -9,7 +9,7 @@
 
 [![npm](https://img.shields.io/npm/v/@cyanheads/secedgar-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/secedgar-mcp-server) [![Framework](https://img.shields.io/badge/Built%20on-@cyanheads/mcp--ts--core-259?style=flat-square)](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.27.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/)
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.11-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -23,7 +23,7 @@
 
 ## Tools
 
-Five tools for querying SEC EDGAR data:
+Six tools for querying SEC EDGAR data:
 
 | Tool | Description |
 |:---|:---|
@@ -32,6 +32,7 @@ Five tools for querying SEC EDGAR data:
 | `secedgar_get_filing` | Fetch a specific filing's metadata and document content |
 | `secedgar_get_financials` | Get historical XBRL financial data for a company |
 | `secedgar_compare_metric` | Compare a financial metric across all reporting companies |
+| `secedgar_search_concepts` | Discover supported XBRL concept names or reverse-lookup a raw tag |
 
 ### `secedgar_company_search`
 
@@ -86,6 +87,17 @@ Compare a financial metric across all reporting companies for a specific period.
 - Sorted ranking with configurable limit and direction
 - Enriches results with ticker symbols where available
 
+---
+
+### `secedgar_search_concepts`
+
+Discover supported XBRL concept names before querying financials or cross-company comparisons.
+
+- Search by friendly name, label, or raw XBRL tag
+- Filter by statement group (`income_statement`, `balance_sheet`, `cash_flow`, `per_share`, `entity_info`) or taxonomy
+- Reverse-lookup raw tags like `NetIncomeLoss` to the supported friendly names
+- Returns the same catalog used by `secedgar_get_financials`, `secedgar_compare_metric`, and `secedgar://concepts`
+
 ## Resources
 
 | URI | Description |
@@ -115,6 +127,7 @@ SEC EDGAR–specific:
 - Rate-limited HTTP client respecting SEC's 10 req/s limit with automatic inter-request delay
 - CIK resolution from tickers, company names, or raw CIK numbers with local caching
 - Friendly XBRL concept name mapping with historical tag change handling
+- Searchable concept catalog with statement-group metadata and reverse XBRL tag lookup
 - HTML-to-text conversion for filing documents via `html-to-text`
 - No API keys required — SEC EDGAR is a free, public API
 
@@ -253,7 +266,7 @@ docker run -e EDGAR_USER_AGENT="MyApp my@email.com" -p 3010:3010 secedgar-mcp-se
 
 | Directory | Purpose |
 |:---|:---|
-| `src/mcp-server/tools/definitions/` | Tool definitions (`*.tool.ts`). Five SEC EDGAR tools. |
+| `src/mcp-server/tools/definitions/` | Tool definitions (`*.tool.ts`). Six SEC EDGAR tools. |
 | `src/mcp-server/resources/definitions/` | Resource definitions. XBRL concepts and filing types. |
 | `src/mcp-server/prompts/definitions/` | Prompt definitions. Company analysis prompt. |
 | `src/services/edgar/` | SEC EDGAR API client, XBRL concept mapping, HTML-to-text conversion. |
@@ -262,7 +275,7 @@ docker run -e EDGAR_USER_AGENT="MyApp my@email.com" -p 3010:3010 secedgar-mcp-se
 
 ## Development guide
 
-See [`CLAUDE.md`](./CLAUDE.md) for development guidelines and architectural rules. The short version:
+See [`CLAUDE.md`](./CLAUDE.md) and [`AGENTS.md`](./AGENTS.md) for development guidelines and architectural rules. The short version:
 
 - Handlers throw, framework catches — no `try/catch` in tool logic
 - Use `ctx.log` for logging, `ctx.state` for storage

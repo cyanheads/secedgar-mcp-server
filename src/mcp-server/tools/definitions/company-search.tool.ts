@@ -8,10 +8,18 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { notFound } from '@cyanheads/mcp-ts-core/errors';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
+interface FilingEntry {
+  accession_number: string;
+  description?: string | undefined;
+  filing_date: string;
+  form: string;
+  primary_document: string;
+  report_date?: string | undefined;
+}
+
 export const companySearchTool = tool('secedgar_company_search', {
   description:
-    'Find companies and retrieve entity info with optional recent filings. ' +
-    'Entry point for most EDGAR workflows — resolve tickers, names, or CIKs to entity details.',
+    'Find companies and retrieve entity info with optional recent filings. Entry point for most EDGAR workflows — resolve tickers, names, or CIKs to entity details.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   input: z.object({
@@ -81,7 +89,9 @@ export const companySearchTool = tool('secedgar_company_search', {
         );
       }
       if (resolved.length > 1) {
-        const matches = resolved.map((m) => `${m.ticker} (${m.name})`).join(', ');
+        const matches = resolved
+          .map((m) => `${m.ticker ?? m.cik} (${m.name ?? 'Unknown'})`)
+          .join(', ');
         throw notFound(
           `Multiple matches for '${input.query}': ${matches}. Specify a ticker for an exact match.`,
         );
@@ -97,16 +107,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       name: submissions.name,
     });
 
-    let filings:
-      | Array<{
-          accession_number: string;
-          form: string;
-          filing_date: string;
-          report_date?: string | undefined;
-          primary_document: string;
-          description?: string | undefined;
-        }>
-      | undefined;
+    let filings: FilingEntry[] | undefined;
     let totalFilings: number | undefined;
 
     if (input.include_filings) {
@@ -114,14 +115,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       const count = recent.accessionNumber.length;
 
       // Zip parallel arrays into objects
-      const all: Array<{
-        accession_number: string;
-        form: string;
-        filing_date: string;
-        report_date?: string | undefined;
-        primary_document: string;
-        description?: string | undefined;
-      }> = [];
+      const all: FilingEntry[] = [];
       for (let i = 0; i < count; i++) {
         all.push({
           accession_number: recent.accessionNumber[i] ?? '',
@@ -133,7 +127,6 @@ export const companySearchTool = tool('secedgar_company_search', {
         });
       }
 
-      // Filter by form types
       const filtered = input.form_types
         ? all.filter((f) =>
             input.form_types?.some((ft) => f.form.toUpperCase() === ft.toUpperCase()),
