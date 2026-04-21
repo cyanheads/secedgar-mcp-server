@@ -8,6 +8,19 @@ import { validationError } from '@cyanheads/mcp-ts-core/errors';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
 /**
+ * EDGAR's `display_names[0]` embeds the ticker(s) and CIK in trailing parentheticals
+ * (e.g., "Apple Inc.  (AAPL)  (CIK 0000320193)"). Strip them so consumers see a clean
+ * company name — ticker and CIK are already surfaced as their own fields.
+ */
+function cleanCompanyName(displayName: string): string {
+  return displayName
+    .replace(/\s*\(CIK\s*\d+\)/gi, '')
+    .replace(/\s*\([A-Z0-9,\s.]+\)\s*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * Extract entity targeting (cik: or ticker:) from a query string,
  * resolve to a CIK, and return the cleaned query + resolved CIK.
  */
@@ -171,7 +184,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         form: hit._source.form ?? undefined,
         filing_date: hit._source.file_date,
         period_ending: hit._source.period_ending ?? undefined,
-        company_name: hit._source.display_names?.[0] || '',
+        company_name: cleanCompanyName(hit._source.display_names?.[0] || ''),
         cik: hit._source.ciks?.[0] || '',
         file_description: hit._source.file_description ?? undefined,
         sic: hit._source.sics?.[0] ?? undefined,
@@ -198,12 +211,15 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
   },
 
   format: (result) => {
-    const lines = [`Found ${result.total}${result.total_is_exact ? '' : '+'} filings`];
+    const exactness = result.total_is_exact ? 'exact' : 'capped at 10,000';
+    const lines = [`Found ${result.total} filings (${exactness})`];
     for (const r of result.results) {
       const period = r.period_ending ? ` (period: ${r.period_ending})` : '';
       const desc = r.file_description ? ` — ${r.file_description}` : '';
+      const sic = r.sic ? ` | SIC ${r.sic}` : '';
+      const loc = r.location ? ` | ${r.location}` : '';
       lines.push(
-        `- ${r.form ?? 'N/A'} ${r.filing_date}${period} — ${r.company_name} (CIK ${r.cik})${desc} [${r.accession_number}]`,
+        `- ${r.form ?? 'N/A'} ${r.filing_date}${period} — ${r.company_name} (CIK ${r.cik})${sic}${loc}${desc} [${r.accession_number}]`,
       );
     }
     if (result.form_distribution) {

@@ -211,13 +211,13 @@ describe('searchFilingsTool', () => {
     expect(blocks[0].text).toContain('Form distribution');
   });
 
-  it('formats non-exact total with + suffix', () => {
+  it('formats non-exact total with capped note', () => {
     const output = {
       total: 10000,
       total_is_exact: false,
       results: [],
     };
     const blocks = searchFilingsTool.format!(output);
-    expect(blocks[0].text).toContain('10000+');
+    expect(blocks[0].text).toContain('capped at 10,000');
   });
 });

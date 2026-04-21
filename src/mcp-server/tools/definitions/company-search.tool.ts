@@ -164,7 +164,9 @@ export const companySearchTool = tool('secedgar_company_search', {
       for (const f of result.filings) {
         const reportDate = f.report_date ? ` (period: ${f.report_date})` : '';
         const desc = f.description ? ` — ${f.description}` : '';
-        lines.push(`- ${f.form} ${f.filing_date}${reportDate}${desc} [${f.accession_number}]`);
+        lines.push(
+          `- ${f.form} ${f.filing_date}${reportDate}${desc} — ${f.primary_document} [${f.accession_number}]`,
+        );
       }
     }
     return [{ type: 'text', text: lines.join('\n') }];

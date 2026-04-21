@@ -143,13 +143,15 @@ export const getFilingTool = tool('secedgar_get_filing', {
     const periodPart = result.period_ending ? ` | Period: ${result.period_ending}` : '';
     const dateLine = `${filedPart}${periodPart}`;
 
-    const meta = `Accession: ${result.accession_number} | ${result.content_total_length.toLocaleString()} chars${result.content_truncated ? ' (truncated)' : ''}`;
+    const meta = `Accession: ${result.accession_number} | Primary: ${result.primary_document} | ${result.content_total_length} chars${result.content_truncated ? ' (truncated)' : ''}`;
 
     let docs = '';
-    if (result.documents.length > 1) {
+    if (result.documents.length) {
       const shown = result.documents.slice(0, MAX_DOCUMENTS_IN_FORMAT);
       const extra = result.documents.length - shown.length;
-      const list = shown.map((d) => `${d.name} (${d.type})`).join(', ');
+      const list = shown
+        .map((d) => `${d.name} (${d.type}${d.size !== undefined ? `, ${d.size}B` : ''})`)
+        .join(', ');
       docs = `\nDocuments (${result.documents.length}): ${list}${extra > 0 ? `, +${extra} more` : ''}`;
     }
 

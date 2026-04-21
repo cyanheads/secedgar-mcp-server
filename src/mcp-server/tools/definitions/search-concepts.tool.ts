@@ -123,7 +123,7 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
     for (const c of result.concepts) {
       if (c.group !== currentGroup) {
         if (currentGroup) lines.push('');
-        lines.push(`## ${formatGroup(c.group)}`);
+        lines.push(`## ${formatGroup(c.group)} (\`${c.group}\`)`);
         currentGroup = c.group;
       }
       const tagList = c.tags.map((t) => `\`${t}\``).join(', ');

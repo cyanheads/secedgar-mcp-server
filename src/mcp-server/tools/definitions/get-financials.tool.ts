@@ -209,7 +209,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     const lines = [`**${result.label}** — ${result.company} (CIK ${result.cik}, ${result.unit})`];
     lines.push(`XBRL tag: ${result.concept}`);
     if (result.description) lines.push(result.description);
-    if (result.tags_tried && result.tags_tried.length > 1) {
+    if (result.tags_tried?.length) {
       lines.push(`Tags tried: ${result.tags_tried.join(', ')}`);
     }
     lines.push('');
@@ -220,7 +220,12 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
           : result.unit === 'USD/shares'
             ? `$${d.value.toFixed(2)}`
             : d.value.toLocaleString();
-      lines.push(`${d.period}: ${formatted} (${d.form} filed ${d.filed}) [${d.accession_number}]`);
+      const fy = d.fiscal_year ?? '—';
+      const fp = d.fiscal_period ?? '—';
+      const range = d.start ? `${d.start} → ${d.end}` : d.end;
+      lines.push(
+        `${d.period} [FY${fy} ${fp}]: ${formatted} (raw ${d.value}) | ${range} | ${d.form} filed ${d.filed} [${d.accession_number}]`,
+      );
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },
