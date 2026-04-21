@@ -1,9 +1,10 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-04-17 11:59:39
+Generated on: 2026-04-18 12:50:05
 
 ```text
 secedgar-mcp-server/
+├── .agents/
 ├── .claude/
 ├── .vscode/
 │   ├── extensions.json
@@ -123,6 +124,7 @@ secedgar-mcp-server/
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
+├── AGENTS.md
 ├── biome.json
 ├── bun.lock
 ├── bunfig.toml
