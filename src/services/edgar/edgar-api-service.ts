@@ -19,6 +19,7 @@ import type {
 
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 1000;
+const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 
 /** Indexed ticker data for O(1) lookups. */
 interface TickerCache {
@@ -39,107 +40,34 @@ class EdgarApiService {
     this.minIntervalMs = Math.ceil(1000 / config.rateLimitRps);
   }
 
-  /** Rate-limited, retried fetch with User-Agent header. */
-  async fetch(url: string): Promise<Response> {
-    const config = getServerConfig();
-
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      await this.throttle();
-
-      const response = await globalThis.fetch(url, {
-        headers: { 'User-Agent': config.userAgent, Accept: 'application/json' },
-      });
-
-      if (response.ok) return response;
-
-      const retryable =
-        response.status === 429 ||
-        response.status === 500 ||
-        response.status === 502 ||
-        response.status === 503 ||
-        response.status === 504;
-      if (retryable && attempt < MAX_RETRIES - 1) {
-        const delay = BASE_BACKOFF_MS * 2 ** attempt;
-        await sleep(delay);
-        continue;
-      }
-
-      if (response.status === 404) return response;
-
-      const host = new URL(url).hostname;
-      const hint =
-        response.status === 403
-          ? `. This may indicate ${host} is blocking requests — check EDGAR_USER_AGENT format ("AppName contact@email.com") or retry later.`
-          : '';
-      throw serviceUnavailable(
-        `SEC EDGAR API returned ${response.status}: ${response.statusText} (${host})${hint}`,
-        { url, status: response.status },
-      );
-    }
-
-    throw serviceUnavailable('SEC EDGAR API request failed after retries', { url });
-  }
-
   /** Fetch and parse JSON, throwing on non-OK responses. */
   async fetchJson<T>(url: string): Promise<T> {
-    const response = await this.fetch(url);
-    if (!response.ok) {
-      throw serviceUnavailable(`SEC EDGAR API returned ${response.status} for ${url}`, {
-        url,
-        status: response.status,
-      });
+    const response = await this.rawFetch(url, true);
+    if (response.status === 404) {
+      throw serviceUnavailable(`SEC EDGAR API returned 404 for ${url}`, { url, status: 404 });
     }
     return response.json() as Promise<T>;
   }
 
   /** Fetch JSON, returning `null` on 404 and throwing on other non-OK responses. */
   async tryFetchJson<T>(url: string): Promise<T | null> {
-    const response = await this.fetch(url);
-    if (response.status === 404) return null;
-    if (!response.ok) {
-      throw serviceUnavailable(`SEC EDGAR API returned ${response.status} for ${url}`, {
-        url,
-        status: response.status,
-      });
-    }
-    return response.json() as Promise<T>;
+    const response = await this.rawFetch(url, true);
+    return response.status === 404 ? null : (response.json() as Promise<T>);
   }
 
   /** Fetch raw text content (HTML filing documents). */
   async fetchText(url: string): Promise<string> {
-    await this.throttle();
-
-    const config = getServerConfig();
-    const response = await globalThis.fetch(url, {
-      headers: { 'User-Agent': config.userAgent },
-    });
-
-    if (!response.ok) {
-      throw serviceUnavailable(`SEC EDGAR returned ${response.status} for ${url}`, {
-        url,
-        status: response.status,
-      });
+    const response = await this.rawFetch(url, false);
+    if (response.status === 404) {
+      throw serviceUnavailable(`SEC EDGAR returned 404 for ${url}`, { url, status: 404 });
     }
     return response.text();
   }
 
   /** Fetch raw text content, returning `null` on 404 and throwing on other failures. */
   async tryFetchText(url: string): Promise<string | null> {
-    await this.throttle();
-
-    const config = getServerConfig();
-    const response = await globalThis.fetch(url, {
-      headers: { 'User-Agent': config.userAgent },
-    });
-
-    if (response.status === 404) return null;
-    if (!response.ok) {
-      throw serviceUnavailable(`SEC EDGAR returned ${response.status} for ${url}`, {
-        url,
-        status: response.status,
-      });
-    }
-    return response.text();
+    const response = await this.rawFetch(url, false);
+    return response.status === 404 ? null : response.text();
   }
 
   // --- CIK Resolution ---
@@ -317,6 +245,39 @@ class EdgarApiService {
   }
 
   // --- Internals ---
+
+  /**
+   * Rate-limited fetch with retry/backoff. Returns the response on 2xx or 404;
+   * throws `serviceUnavailable` on other non-OK statuses after retries are exhausted.
+   */
+  private async rawFetch(url: string, acceptJson: boolean): Promise<Response> {
+    const headers: Record<string, string> = { 'User-Agent': getServerConfig().userAgent };
+    if (acceptJson) headers.Accept = 'application/json';
+
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      await this.throttle();
+      const response = await globalThis.fetch(url, { headers });
+
+      if (response.ok || response.status === 404) return response;
+
+      if (RETRYABLE_STATUSES.has(response.status) && attempt < MAX_RETRIES - 1) {
+        await sleep(BASE_BACKOFF_MS * 2 ** attempt);
+        continue;
+      }
+
+      const host = new URL(url).hostname;
+      const hint =
+        response.status === 403
+          ? `. This may indicate ${host} is blocking requests — check EDGAR_USER_AGENT format ("AppName contact@email.com") or retry later.`
+          : '';
+      throw serviceUnavailable(
+        `SEC EDGAR API returned ${response.status}: ${response.statusText} (${host})${hint}`,
+        { url, status: response.status },
+      );
+    }
+
+    throw serviceUnavailable('SEC EDGAR API request failed after retries', { url });
+  }
 
   /**
    * Serialize throttle checks through a promise chain so concurrent callers
