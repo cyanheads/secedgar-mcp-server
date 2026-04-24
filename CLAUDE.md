@@ -165,7 +165,7 @@ src/
 
 Skills are modular instructions in `skills/` at the project root. Read them directly when a task matches — e.g., `skills/add-tool/SKILL.md` when adding a tool.
 
-**Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). This makes skills available as context without needing to reference `skills/` paths manually. After framework updates, re-copy to pick up changes.
+**Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). This makes skills available as context without needing to reference `skills/` paths manually. After framework updates, run the `maintenance` skill — it re-syncs the agent directory automatically (Phase B).
 
 Available skills:
 
@@ -180,16 +180,19 @@ Available skills:
 | `add-service` | Scaffold a new service integration |
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
+| `security-pass` | Audit server for MCP-flavored security gaps: output injection, scope blast radius, input sinks, tenant isolation |
 | `devcheck` | Lint, format, typecheck, audit |
 | `polish-docs-meta` | Finalize docs, README, metadata, and agent protocol for shipping |
+| `release-and-publish` | Post-wrapup ship workflow: verification gate, push, publish to npm / MCP Registry / GHCR |
 | `migrate-mcp-ts-template` | Migrate a template fork to use `@cyanheads/mcp-ts-core` as a package dependency |
 | `report-issue-local` | File a bug or feature request against this server's repo |
 | `report-issue-framework` | File a bug or feature request against `@cyanheads/mcp-ts-core` |
-| `maintenance` | Sync skills and dependencies after updates |
+| `maintenance` | Investigate changelogs, adopt upstream changes, sync skills to agent dirs |
 | `api-auth` | Auth modes, scopes, JWT/OAuth |
 | `api-config` | AppConfig, parseConfig, env vars |
 | `api-context` | Context interface, logger, state, progress |
 | `api-errors` | McpError, JsonRpcErrorCode, error patterns |
+| `api-linter` | MCP definition lint rules reference (`format-parity`, `describe-on-fields`, `server-json-*`, …) |
 | `api-services` | LLM, Speech, Graph services |
 | `api-testing` | createMockContext, test patterns |
 | `api-utils` | Formatting, parsing, security, pagination, scheduling |

@@ -74,6 +74,12 @@
           "default": "/mcp"
         },
         {
+          "name": "MCP_PUBLIC_URL",
+          "description": "Public-facing origin override for TLS-terminating proxies (e.g., https://mcp.example.com). Leave unset for direct deployments.",
+          "format": "string",
+          "isRequired": false
+        },
+        {
           "name": "MCP_AUTH_MODE",
           "description": "Authentication mode to use: 'none', 'jwt', or 'oauth'.",
           "format": "string",
