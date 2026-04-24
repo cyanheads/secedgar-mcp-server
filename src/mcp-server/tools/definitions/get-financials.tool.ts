@@ -45,19 +45,21 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     unit: z.string().describe('Unit of measure (e.g., "USD", "shares", "USD/shares").'),
     data: z
       .array(
-        z.object({
-          period: z.string().describe('Calendar period label (e.g., "CY2023", "CY2023Q3").'),
-          value: z.number().describe('Reported value.'),
-          start: z.string().optional().describe('Period start date (duration items only).'),
-          end: z.string().describe('Period end date.'),
-          fiscal_year: z.number().nullable().describe('Fiscal year.'),
-          fiscal_period: z.string().nullable().describe('Fiscal period (FY, Q1, Q2, Q3, Q4).'),
-          form: z.string().describe('Source filing type (10-K, 10-Q, etc.).'),
-          filed: z.string().describe('Date the source filing was submitted.'),
-          accession_number: z
-            .string()
-            .describe('Source filing accession number for secedgar_get_filing.'),
-        }),
+        z
+          .object({
+            period: z.string().describe('Calendar period label (e.g., "CY2023", "CY2023Q3").'),
+            value: z.number().describe('Reported value.'),
+            start: z.string().optional().describe('Period start date (duration items only).'),
+            end: z.string().describe('Period end date.'),
+            fiscal_year: z.number().nullable().describe('Fiscal year.'),
+            fiscal_period: z.string().nullable().describe('Fiscal period (FY, Q1, Q2, Q3, Q4).'),
+            form: z.string().describe('Source filing type (10-K, 10-Q, etc.).'),
+            filed: z.string().describe('Date the source filing was submitted.'),
+            accession_number: z
+              .string()
+              .describe('Source filing accession number for secedgar_get_filing.'),
+          })
+          .describe('One reported value with its period, fiscal context, and source filing.'),
       )
       .describe('Deduplicated time series, newest first.'),
     tags_tried: z

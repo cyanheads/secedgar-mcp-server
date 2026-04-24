@@ -53,26 +53,28 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
     total: z.number().describe('Number of concepts matching the filters.'),
     concepts: z
       .array(
-        z.object({
-          name: z
-            .string()
-            .describe(
-              'Friendly name to pass as the concept argument to secedgar_get_financials or secedgar_compare_metric.',
-            ),
-          label: z.string().describe('Human-readable concept label.'),
-          tags: z
-            .array(z.string())
-            .describe(
-              'XBRL tags this friendly name resolves to, tried in order. Multiple tags cover historical naming changes (e.g., pre- vs post-ASC 606 revenue).',
-            ),
-          taxonomy: z.enum(TAXONOMY_VALUES).describe('XBRL taxonomy.'),
-          unit: z
-            .string()
-            .describe(
-              'Unit of measure (USD, USD/shares, shares, pure). Note: secedgar_compare_metric expects the dashed form USD-per-shares.',
-            ),
-          group: z.enum(GROUP_VALUES).describe('Financial statement group.'),
-        }),
+        z
+          .object({
+            name: z
+              .string()
+              .describe(
+                'Friendly name to pass as the concept argument to secedgar_get_financials or secedgar_compare_metric.',
+              ),
+            label: z.string().describe('Human-readable concept label.'),
+            tags: z
+              .array(z.string())
+              .describe(
+                'XBRL tags this friendly name resolves to, tried in order. Multiple tags cover historical naming changes (e.g., pre- vs post-ASC 606 revenue).',
+              ),
+            taxonomy: z.enum(TAXONOMY_VALUES).describe('XBRL taxonomy.'),
+            unit: z
+              .string()
+              .describe(
+                'Unit of measure (USD, USD/shares, shares, pure). Note: secedgar_compare_metric expects the dashed form USD-per-shares.',
+              ),
+            group: z.enum(GROUP_VALUES).describe('Financial statement group.'),
+          })
+          .describe('One XBRL concept mapping with its friendly name, tags, and grouping.'),
       )
       .describe('Matching concepts, ordered by group then alphabetical by name.'),
   }),

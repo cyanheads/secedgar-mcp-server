@@ -61,14 +61,16 @@ export const companySearchTool = tool('secedgar_company_search', {
     fiscal_year_end: z.string().describe('Fiscal year end (MMDD format).'),
     filings: z
       .array(
-        z.object({
-          accession_number: z.string().describe('Filing accession number.'),
-          form: z.string().describe('Form type (e.g., 10-K).'),
-          filing_date: z.string().describe('Date filed.'),
-          report_date: z.string().optional().describe('Period of report.'),
-          primary_document: z.string().describe('Primary document filename.'),
-          description: z.string().optional().describe('Filing description.'),
-        }),
+        z
+          .object({
+            accession_number: z.string().describe('Filing accession number.'),
+            form: z.string().describe('Form type (e.g., 10-K).'),
+            filing_date: z.string().describe('Date filed.'),
+            report_date: z.string().optional().describe('Period of report.'),
+            primary_document: z.string().describe('Primary document filename.'),
+            description: z.string().optional().describe('Filing description.'),
+          })
+          .describe('One filing record with form type, dates, and primary document.'),
       )
       .optional()
       .describe('Recent filings, filtered by form_types if specified.'),

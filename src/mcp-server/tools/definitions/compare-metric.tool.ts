@@ -47,16 +47,18 @@ export const compareMetricTool = tool('secedgar_compare_metric', {
     total_companies: z.number().describe('Total companies reporting this metric for this period.'),
     data: z
       .array(
-        z.object({
-          rank: z.number().describe('Rank in sorted order.'),
-          company_name: z.string().describe('Entity name.'),
-          cik: z.string().describe('Company CIK.'),
-          ticker: z.string().optional().describe('Ticker symbol (if available).'),
-          value: z.number().describe('Reported value.'),
-          location: z.string().optional().describe('Business location.'),
-          period_end: z.string().describe('Period end date.'),
-          accession_number: z.string().describe('Source filing for secedgar_get_filing.'),
-        }),
+        z
+          .object({
+            rank: z.number().describe('Rank in sorted order.'),
+            company_name: z.string().describe('Entity name.'),
+            cik: z.string().describe('Company CIK.'),
+            ticker: z.string().optional().describe('Ticker symbol (if available).'),
+            value: z.number().describe('Reported value.'),
+            location: z.string().optional().describe('Business location.'),
+            period_end: z.string().describe('Period end date.'),
+            accession_number: z.string().describe('Source filing for secedgar_get_filing.'),
+          })
+          .describe("One company's reported value for this metric and period."),
       )
       .describe('Ranked companies for this metric.'),
   }),

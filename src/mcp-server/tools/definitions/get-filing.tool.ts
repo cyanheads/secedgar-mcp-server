@@ -65,11 +65,13 @@ export const getFilingTool = tool('secedgar_get_filing', {
     primary_document: z.string().describe('Primary document filename.'),
     documents: z
       .array(
-        z.object({
-          name: z.string().describe('Document filename.'),
-          type: z.string().describe('Document type.'),
-          size: z.number().optional().describe('File size in bytes.'),
-        }),
+        z
+          .object({
+            name: z.string().describe('Document filename.'),
+            type: z.string().describe('Document type.'),
+            size: z.number().optional().describe('File size in bytes.'),
+          })
+          .describe('One document entry from the filing archive index.'),
       )
       .describe(
         'All documents in this filing. Use the name field with the document input param to fetch exhibits.',

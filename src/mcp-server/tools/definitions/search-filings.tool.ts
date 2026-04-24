@@ -117,19 +117,21 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     total_is_exact: z.boolean().describe('False when total hits the 10,000 cap.'),
     results: z
       .array(
-        z.object({
-          accession_number: z
-            .string()
-            .describe('Use with secedgar_get_filing to retrieve content.'),
-          form: z.string().optional().describe('Form type.'),
-          filing_date: z.string().describe('Date filed.'),
-          period_ending: z.string().optional().describe('Period of report.'),
-          company_name: z.string().describe('Filing entity name.'),
-          cik: z.string().describe('Company CIK.'),
-          file_description: z.string().optional().describe('Document description.'),
-          sic: z.string().optional().describe('SIC code.'),
-          location: z.string().optional().describe('Business location.'),
-        }),
+        z
+          .object({
+            accession_number: z
+              .string()
+              .describe('Use with secedgar_get_filing to retrieve content.'),
+            form: z.string().optional().describe('Form type.'),
+            filing_date: z.string().describe('Date filed.'),
+            period_ending: z.string().optional().describe('Period of report.'),
+            company_name: z.string().describe('Filing entity name.'),
+            cik: z.string().describe('Company CIK.'),
+            file_description: z.string().optional().describe('Document description.'),
+            sic: z.string().optional().describe('SIC code.'),
+            location: z.string().optional().describe('Business location.'),
+          })
+          .describe('One matching filing hit from the full-text search index.'),
       )
       .describe('Matching filings.'),
     form_distribution: z
