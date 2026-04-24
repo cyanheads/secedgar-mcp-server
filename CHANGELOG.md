@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.4.0] — 2026-04-24
+
+Framework upgrade to `@cyanheads/mcp-ts-core` 0.7.0, shared SEC fetch path with retry on filing document downloads, and the lint-warning cleanup that framework 0.6.16 surfaced.
+
+### Changed
+
+- Updated `@cyanheads/mcp-ts-core` from `^0.5.3` to `^0.7.0` (covers 0.5.4 through 0.7.0 — directory-based changelog system, landing page + SEP-1649 Server Card at `/.well-known/mcp.json`, `MCP_PUBLIC_URL` override for TLS-terminating proxies, flattened ZodError messages with structured `issues`, locale-aware format-parity, new `describe-on-fields` recursion, HTTP transport hardening, and more)
+- Updated dev tooling: `@biomejs/biome` `^2.4.12→^2.4.13`, `vitest` `^4.1.4→^4.1.5`
+- Refactored `EdgarApiService` to share a single `rawFetch` across JSON and text fetches. Filing document downloads (`fetchText` / `tryFetchText`) now retry on 429 / 500 / 502 / 503 / 504 with exponential backoff — previously they bypassed the retry loop and failed immediately on transient upstream errors. Retryable status codes hoisted to a `RETRYABLE_STATUSES` Set
+- Added `.describe()` on the array-element `z.object({...})` in every tool's output schema (`company-search` filings, `compare-metric` data, `get-filing` documents, `get-financials` data, `search-concepts` concepts, `search-filings` results) — satisfies the new recursive `describe-on-fields` linter
+- Refreshed all project skills from the package; most external skills bumped (`add-tool` 1.6→1.8, `design-mcp-server` 2.4→2.7, `field-test` 1.2→2.0, `maintenance` 1.3→1.5, `polish-docs-meta` 1.4→1.7, `setup` 1.3→1.5, `report-issue-local` / `report-issue-framework` 1.1→1.3, and others). Skills also re-synced to `.claude/skills/` and `.agents/skills/`
+- Synced framework `scripts/` additions: `build-changelog.ts`, `check-docs-sync.ts`, `check-skills-sync.ts`. The latter two back new devcheck steps that verify `CLAUDE.md` ↔ `AGENTS.md` and `skills/` ↔ agent-dir mirrors stay aligned
+- CLAUDE.md / AGENTS.md skills table updated with `api-linter`, `release-and-publish`, and `security-pass`; agent-skill-directory guidance now references the `maintenance` skill's automatic Phase-B sync. AGENTS.md realigned byte-identical to CLAUDE.md for the new `Docs Sync` devcheck step
+
+### Added
+
+- Three new skills adopted from the framework: `api-linter` (v1.1) — definition-lint rule reference; `release-and-publish` (v2.1) — post-wrapup ship workflow across npm / MCP Registry / GHCR with transient-failure retries; `security-pass` (v1.1) — eight-axis MCP-flavored security audit
+- Documented `MCP_PUBLIC_URL` in `.env.example` and surfaced it in `server.json` — public-facing origin override for deployments behind TLS-terminating reverse proxies (Cloudflare Tunnel, Caddy, nginx)
+- Tracked `.github/ISSUE_TEMPLATE/` (bug_report, feature_request, config) that were previously on disk but untracked
+
+---
+
 ## [0.3.0] — 2026-04-20
 
 Framework upgrade, content parity across tools, and cleaner entity names.
