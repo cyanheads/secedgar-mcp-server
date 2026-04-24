@@ -105,9 +105,9 @@ function discoverFiles(): string[] {
 /** Try to read and parse a JSON file. Returns undefined on failure. */
 function tryReadJson(path: string): unknown {
   try {
+    if (!existsSync(path)) return;
     return JSON.parse(readFileSync(path, 'utf-8'));
   } catch (err) {
-    if (err instanceof Error && 'code' in err && err.code === 'ENOENT') return;
     console.warn(`Warning: Failed to parse ${path}: ${err instanceof Error ? err.message : err}`);
     return;
   }

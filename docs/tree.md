@@ -1,11 +1,16 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-04-18 12:50:05
+Generated on: 2026-04-24 20:27:14
 
 ```text
 secedgar-mcp-server/
 ├── .agents/
 ├── .claude/
+├── .github/
+│   └── ISSUE_TEMPLATE/
+│       ├── bug_report.yml
+│       ├── config.yml
+│       └── feature_request.yml
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
@@ -13,7 +18,10 @@ secedgar-mcp-server/
 ├── docs/
 │   └── sec-edgar-mcp-design.md
 ├── scripts/
+│   ├── build-changelog.ts
 │   ├── build.ts
+│   ├── check-docs-sync.ts
+│   ├── check-skills-sync.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts
@@ -38,6 +46,8 @@ secedgar-mcp-server/
 │   ├── api-context/
 │   │   └── SKILL.md
 │   ├── api-errors/
+│   │   └── SKILL.md
+│   ├── api-linter/
 │   │   └── SKILL.md
 │   ├── api-services/
 │   │   ├── references/
@@ -72,9 +82,13 @@ secedgar-mcp-server/
 │   │   │   ├── readme.md
 │   │   │   └── server-json.md
 │   │   └── SKILL.md
+│   ├── release-and-publish/
+│   │   └── SKILL.md
 │   ├── report-issue-framework/
 │   │   └── SKILL.md
 │   ├── report-issue-local/
+│   │   └── SKILL.md
+│   ├── security-pass/
 │   │   └── SKILL.md
 │   └── setup/
 │       └── SKILL.md
