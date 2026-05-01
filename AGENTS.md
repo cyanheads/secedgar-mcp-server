@@ -225,10 +225,25 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run tree` | Generate directory structure doc |
 | `bun run format` | Auto-fix formatting |
 | `bun run lint:mcp` | Validate MCP tool/resource definitions |
+| `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
+| `bun run changelog:check` | Verify `CHANGELOG.md` is in sync with `changelog/` (used by devcheck) |
 | `bun run test` | Run tests |
 | `bun run start` | Production mode (`.env`-respecting transport) |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |
+
+---
+
+## Changelog
+
+Directory-based. Source of truth is `changelog/<major.minor>.x/<version>.md` — one file per released version. `CHANGELOG.md` is a generated index; never hand-edit it.
+
+**To add a release entry:**
+
+1. Author `changelog/<major.minor>.x/<version>.md` using `changelog/template.md` as a reference.
+2. Add YAML frontmatter: `summary` (≤250 chars, no markdown) and `breaking: false` (or `true`).
+3. Set the H1 heading to `# <version> — YYYY-MM-DD`.
+4. Run `bun run changelog:build` to regenerate `CHANGELOG.md`.
 
 ---
 
