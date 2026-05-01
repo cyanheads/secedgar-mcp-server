@@ -5,7 +5,8 @@
  * @module services/edgar/edgar-api-service
  */
 
-import { serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { httpErrorFromResponse } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type {
   CikMatch,
@@ -44,7 +45,7 @@ class EdgarApiService {
   async fetchJson<T>(url: string): Promise<T> {
     const response = await this.rawFetch(url, true);
     if (response.status === 404) {
-      throw serviceUnavailable(`SEC EDGAR API returned 404 for ${url}`, { url, status: 404 });
+      throw notFound(`SEC EDGAR API returned 404 for ${url}`, { url, status: 404 });
     }
     return response.json() as Promise<T>;
   }
@@ -59,7 +60,7 @@ class EdgarApiService {
   async fetchText(url: string): Promise<string> {
     const response = await this.rawFetch(url, false);
     if (response.status === 404) {
-      throw serviceUnavailable(`SEC EDGAR returned 404 for ${url}`, { url, status: 404 });
+      throw notFound(`SEC EDGAR returned 404 for ${url}`, { url, status: 404 });
     }
     return response.text();
   }
@@ -248,7 +249,7 @@ class EdgarApiService {
 
   /**
    * Rate-limited fetch with retry/backoff. Returns the response on 2xx or 404;
-   * throws `serviceUnavailable` on other non-OK statuses after retries are exhausted.
+   * throws a status-classified `McpError` on other non-OK statuses after retries are exhausted.
    */
   private async rawFetch(url: string, acceptJson: boolean): Promise<Response> {
     const headers: Record<string, string> = { 'User-Agent': getServerConfig().userAgent };
@@ -265,15 +266,14 @@ class EdgarApiService {
         continue;
       }
 
-      const host = new URL(url).hostname;
-      const hint =
-        response.status === 403
-          ? `. This may indicate ${host} is blocking requests — check EDGAR_USER_AGENT format ("AppName contact@email.com") or retry later.`
-          : '';
-      throw serviceUnavailable(
-        `SEC EDGAR API returned ${response.status}: ${response.statusText} (${host})${hint}`,
-        { url, status: response.status },
-      );
+      const data: Record<string, unknown> = { url };
+      if (response.status === 403) {
+        const host = new URL(url).hostname;
+        data.recovery = {
+          hint: `${host} may be blocking requests. Check EDGAR_USER_AGENT format ("AppName contact@email.com") or retry later.`,
+        };
+      }
+      throw await httpErrorFromResponse(response, { service: 'SEC EDGAR', data });
     }
 
     throw serviceUnavailable('SEC EDGAR API request failed after retries', { url });

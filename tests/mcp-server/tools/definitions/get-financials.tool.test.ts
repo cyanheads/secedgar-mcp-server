@@ -82,7 +82,7 @@ beforeEach(() => {
 
 describe('getFinancialsTool', () => {
   it('returns financial data for a valid company and concept', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({ company: 'AAPL', concept: 'revenue' });
     const result = await getFinancialsTool.handler(input, ctx);
 
@@ -93,7 +93,7 @@ describe('getFinancialsTool', () => {
   });
 
   it('resolves friendly concept names to XBRL tags', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({ company: 'AAPL', concept: 'revenue' });
     await getFinancialsTool.handler(input, ctx);
 
@@ -106,7 +106,7 @@ describe('getFinancialsTool', () => {
   });
 
   it('passes raw XBRL tags directly when not a friendly name', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({
       company: 'AAPL',
       concept: 'AccountsPayableCurrent',
@@ -121,7 +121,7 @@ describe('getFinancialsTool', () => {
   });
 
   it('deduplicates by frame field', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({
       company: 'AAPL',
       concept: 'revenue',
@@ -135,7 +135,7 @@ describe('getFinancialsTool', () => {
   });
 
   it('filters to annual data by default', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({ company: 'AAPL', concept: 'revenue' });
     const result = await getFinancialsTool.handler(input, ctx);
 
@@ -145,7 +145,7 @@ describe('getFinancialsTool', () => {
   });
 
   it('filters to quarterly data', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({
       company: 'AAPL',
       concept: 'revenue',
@@ -159,7 +159,7 @@ describe('getFinancialsTool', () => {
   });
 
   it('returns all periods when period_type is all', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({
       company: 'AAPL',
       concept: 'revenue',
@@ -173,7 +173,7 @@ describe('getFinancialsTool', () => {
   });
 
   it('sorts data newest first', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({
       company: 'AAPL',
       concept: 'revenue',
@@ -186,9 +186,94 @@ describe('getFinancialsTool', () => {
     }
   });
 
+  it('defaults balance-sheet concepts to period_type "all" so bare calls return data (issue #1)', async () => {
+    // Balance-sheet items emit instant frames (CYxxxxQxI). Pre-fix, the default 'annual' filter
+    // (/^CY\d{4}$/) excluded all of them and the call threw `no_period_data`.
+    const balanceSheetResponse: CompanyConceptResponse = {
+      cik: 320193,
+      entityName: 'Apple Inc.',
+      label: 'Total Assets',
+      tag: 'Assets',
+      taxonomy: 'us-gaap',
+      units: {
+        USD: [
+          {
+            accn: '0000320193-23-000106',
+            end: '2023-09-30',
+            filed: '2023-11-03',
+            form: '10-K',
+            fp: 'FY',
+            frame: 'CY2023Q3I',
+            fy: 2023,
+            val: 352755000000,
+          },
+          {
+            accn: '0000320193-22-000108',
+            end: '2022-09-24',
+            filed: '2022-10-28',
+            form: '10-K',
+            fp: 'FY',
+            frame: 'CY2022Q3I',
+            fy: 2022,
+            val: 352755000000,
+          },
+        ],
+      },
+    };
+    mockApi.tryGetCompanyConcept.mockResolvedValue(balanceSheetResponse);
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({ company: 'AAPL', concept: 'assets' });
+    const result = await getFinancialsTool.handler(input, ctx);
+
+    expect(result.data.length).toBeGreaterThan(0);
+    expect(result.data[0].period).toMatch(/I$/);
+  });
+
+  it('respects explicit period_type override on balance-sheet concepts', async () => {
+    // Caller passes period_type: 'annual' explicitly on a balance-sheet item — the no_period_data
+    // hint should still fire (now from the effective period_type, not the schema default).
+    const balanceSheetResponse: CompanyConceptResponse = {
+      cik: 320193,
+      entityName: 'Apple Inc.',
+      label: 'Total Assets',
+      tag: 'Assets',
+      taxonomy: 'us-gaap',
+      units: {
+        USD: [
+          {
+            accn: '0000320193-23-000106',
+            end: '2023-09-30',
+            filed: '2023-11-03',
+            form: '10-K',
+            fp: 'FY',
+            frame: 'CY2023Q3I',
+            fy: 2023,
+            val: 352755000000,
+          },
+        ],
+      },
+    };
+    mockApi.tryGetCompanyConcept.mockResolvedValue(balanceSheetResponse);
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({
+      company: 'AAPL',
+      concept: 'assets',
+      period_type: 'annual',
+    });
+
+    await expect(getFinancialsTool.handler(input, ctx)).rejects.toMatchObject({
+      message: /No annual data for 'Assets'/,
+      data: {
+        reason: 'no_period_data',
+        period_type: 'annual',
+        recovery: { hint: expect.stringMatching(/balance sheet \(instant\) item/) },
+      },
+    });
+  });
+
   it('throws notFound when company not found', async () => {
     mockApi.resolveCik.mockResolvedValue([]);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({ company: 'XYZNOTREAL', concept: 'revenue' });
 
     await expect(getFinancialsTool.handler(input, ctx)).rejects.toThrow(/not found/);
@@ -196,7 +281,7 @@ describe('getFinancialsTool', () => {
 
   it('throws notFound when no XBRL data exists', async () => {
     mockApi.tryGetCompanyConcept.mockResolvedValue(null);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({ company: 'AAPL', concept: 'revenue' });
 
     await expect(getFinancialsTool.handler(input, ctx)).rejects.toThrow(/No XBRL data/);
@@ -208,7 +293,7 @@ describe('getFinancialsTool', () => {
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(mockConceptResponse);
 
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({ company: 'AAPL', concept: 'revenue' });
     const result = await getFinancialsTool.handler(input, ctx);
 
@@ -219,7 +304,7 @@ describe('getFinancialsTool', () => {
 
   it('re-throws non-404 errors', async () => {
     mockApi.tryGetCompanyConcept.mockRejectedValue(new Error('500 Internal Server Error'));
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({ company: 'AAPL', concept: 'revenue' });
 
     await expect(getFinancialsTool.handler(input, ctx)).rejects.toThrow(/500/);
@@ -227,7 +312,7 @@ describe('getFinancialsTool', () => {
 
   it('omits tags_tried when only one tag was needed', async () => {
     // Raw XBRL tag → single tag tried
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({
       company: 'AAPL',
       concept: 'AccountsPayableCurrent',

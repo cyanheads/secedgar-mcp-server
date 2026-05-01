@@ -5,7 +5,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { resolveConcept } from '@/services/edgar/concept-map.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import type { CompanyConceptUnit } from '@/services/edgar/types.js';
@@ -14,6 +14,33 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
   description:
     'Get historical XBRL financial data for a company. Accepts friendly concept names (e.g., "revenue", "net_income", "assets") or raw XBRL tags. Automatically handles historical tag changes and deduplicates data.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+
+  errors: [
+    {
+      reason: 'company_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The company input does not resolve to a CIK',
+      recovery: 'Use a ticker symbol or 10-digit CIK number for an exact match.',
+    },
+    {
+      reason: 'no_concept_data',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The company does not report any XBRL data for the resolved concept and taxonomy',
+      recovery: 'Try a raw XBRL tag, switch taxonomy to ifrs-full, or use a related concept.',
+    },
+    {
+      reason: 'no_frame_data',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Concept exists but has no frame-aligned (standard calendar period) entries',
+      recovery: 'Try a related concept that reports against standard calendar periods.',
+    },
+    {
+      reason: 'no_period_data',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Concept has data but the period_type filter excluded all of it',
+      recovery: 'Switch period_type to "quarterly" or "all" for balance sheet items.',
+    },
+  ],
 
   input: z.object({
     company: z
@@ -32,8 +59,10 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       ),
     period_type: z
       .enum(['annual', 'quarterly', 'all'])
-      .default('annual')
-      .describe('Filter to annual (FY) or quarterly (Q1-Q4) data. "all" returns both.'),
+      .optional()
+      .describe(
+        'Filter to annual (FY) or quarterly (Q1-Q4) data. "all" returns both. Defaults: "annual" for income/cash-flow concepts, "all" for balance-sheet (instant) items so a bare friendly-name call returns data without a follow-up retry.',
+      ),
   }),
 
   output: z.object({
@@ -77,7 +106,9 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     const resolved = await api.resolveCik(input.company);
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
     if (!match || (Array.isArray(resolved) && resolved.length === 0)) {
-      throw notFound(`Company '${input.company}' not found. Try a ticker symbol or CIK number.`);
+      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`, {
+        ...ctx.recoveryFor('company_not_found'),
+      });
     }
 
     // Resolve concept to XBRL tag(s)
@@ -91,6 +122,11 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     if (mapping && input.taxonomy === 'us-gaap') {
       taxonomy = mapping.taxonomy as typeof input.taxonomy;
     }
+
+    // Balance-sheet items emit instant frames (CYxxxxQxI), which the "annual" filter
+    // (/^CY\d{4}$/) excludes. Default to "all" for them so a bare friendly-name call returns data.
+    const effectivePeriodType =
+      input.period_type ?? (mapping?.group === 'balance_sheet' ? 'all' : 'annual');
 
     // Try each tag until we get data. `tryGetCompanyConcept` returns null for 404
     // (tag not reported by this company); other errors propagate.
@@ -127,8 +163,15 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
         taxonomy === 'ifrs-full'
           ? 'Try a raw XBRL tag instead of a friendly name, or check the company uses IFRS.'
           : "This company may use a different tag or taxonomy. Try 'ifrs-full' for foreign filers.";
-      throw notFound(
-        `No XBRL data for '${input.concept}' under ${taxonomy} for this company. ${hint}`,
+      throw ctx.fail(
+        'no_concept_data',
+        `No XBRL data for '${input.concept}' under ${taxonomy} for this company.`,
+        {
+          recovery: { hint },
+          concept: input.concept,
+          taxonomy,
+          tags_tried: tagsTried,
+        },
       );
     }
 
@@ -137,8 +180,13 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
 
     // If deduplication removed everything, the concept exists but has no frame-aligned entries
     if (deduped.length === 0) {
-      throw notFound(
-        `'${conceptResponse.tag}' exists for this company but has no standard-period data. This typically means the company reports this item in a non-standard period or the data lacks frame alignment. Try a related concept.`,
+      throw ctx.fail(
+        'no_frame_data',
+        `'${conceptResponse.tag}' exists for this company but has no standard-period data.`,
+        {
+          ...ctx.recoveryFor('no_frame_data'),
+          tag: conceptResponse.tag,
+        },
       );
     }
 
@@ -153,9 +201,9 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
 
     // Filter by period type using frame pattern (fp reflects the filing, not the data point)
     let filtered = Array.from(byFrame.values());
-    if (input.period_type === 'annual') {
+    if (effectivePeriodType === 'annual') {
       filtered = filtered.filter((u) => /^CY\d{4}$/.test(u.frame));
-    } else if (input.period_type === 'quarterly') {
+    } else if (effectivePeriodType === 'quarterly') {
       filtered = filtered.filter((u) => /^CY\d{4}Q\d/.test(u.frame));
     }
 
@@ -165,10 +213,18 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       const hasInstant = sample && /I$/.test(sample.frame);
       const hint = hasInstant
         ? 'This is a balance sheet (instant) item — try period_type: "quarterly" or "all".'
-        : input.period_type === 'annual'
+        : effectivePeriodType === 'annual'
           ? 'No annual data found — try period_type: "quarterly" or "all".'
           : 'No quarterly data found — try period_type: "annual" or "all".';
-      throw notFound(`No ${input.period_type} data for '${conceptResponse.tag}'. ${hint}`);
+      throw ctx.fail(
+        'no_period_data',
+        `No ${effectivePeriodType} data for '${conceptResponse.tag}'.`,
+        {
+          recovery: { hint },
+          tag: conceptResponse.tag,
+          period_type: effectivePeriodType,
+        },
+      );
     }
 
     // Sort newest first

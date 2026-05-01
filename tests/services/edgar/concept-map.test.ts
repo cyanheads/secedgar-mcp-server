@@ -55,6 +55,24 @@ describe('resolveConcept', () => {
     expect(mapping).toBeDefined();
     expect(mapping!.unit).toBe('USD/shares');
   });
+
+  it('resolves depreciation_amortization with cross-company tag fallbacks', () => {
+    const mapping = resolveConcept('depreciation_amortization');
+    expect(mapping).toBeDefined();
+    expect(mapping!.group).toBe('cash_flow');
+    expect(mapping!.tags).toEqual([
+      'DepreciationDepletionAndAmortization',
+      'DepreciationAndAmortization',
+      'Depreciation',
+    ]);
+  });
+
+  it('resolves notes_payable with notes-specific then debt-fallback tags', () => {
+    const mapping = resolveConcept('notes_payable');
+    expect(mapping).toBeDefined();
+    expect(mapping!.group).toBe('balance_sheet');
+    expect(mapping!.tags).toEqual(['LongTermNotesPayable', 'NotesPayable', 'LongTermDebt']);
+  });
 });
 
 describe('getAllConcepts', () => {

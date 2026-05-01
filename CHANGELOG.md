@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.4.1] — 2026-04-30
+
+Framework upgrade to `@cyanheads/mcp-ts-core` 0.8.7 with full typed-error-contract adoption, two domain bug fixes against issues [#1](https://github.com/cyanheads/secedgar-mcp-server/issues/1) and [#2](https://github.com/cyanheads/secedgar-mcp-server/issues/2), and skill / script syncs.
+
+### Fixed
+
+- **`secedgar_get_financials` no longer throws on default invocation for balance-sheet concepts** ([#1](https://github.com/cyanheads/secedgar-mcp-server/issues/1)) — `period_type` is now optional. The handler computes the effective default from the resolved concept's mapping group: balance-sheet items default to `'all'` (so instant frames `CYxxxxQxI` aren't filtered out), every other group keeps the previous `'annual'` default. Bare calls for `assets`, `liabilities`, `equity`, `cash`, `debt` now return data instead of a recovery hint. Income-statement defaults are unchanged.
+- **`EdgarApiService` HTTP errors now classify by status** — `rawFetch` uses `httpErrorFromResponse` from `@cyanheads/mcp-ts-core/utils`, mapping 401/403/408/422/429/5xx to the correct `JsonRpcErrorCode` and capturing body + `Retry-After` into `error.data`. The `EDGAR_USER_AGENT` hint for 403 is preserved as a structured `data.recovery.hint`. 404 paths in `fetchJson` / `fetchText` now throw `notFound` instead of `serviceUnavailable` — semantically correct.
+
+### Added
+
+- **Typed error contracts on five tools** — `company_search`, `search_filings`, `get_filing`, `get_financials`, `compare_metric` declare `errors[]` arrays per the framework's 0.8.0 contract pattern. Twelve declared reasons total (`no_match`, `multiple_matches`, `invalid_date_range`, `document_not_found`, `no_documents`, `filing_not_found`, `company_not_found`, `no_concept_data`, `no_frame_data`, `no_period_data`, `unknown_concept`, `no_data`), each with a ≥5-word `recovery` string. Handlers throw via `ctx.fail(reason, msg, { ...ctx.recoveryFor(reason) })`; the `get_filing` archive helper carries reasons via `data: { reason }` per the 0.8.1 service-layer pattern. Error responses now mirror `data.recovery.hint` into `content[]` text per 0.8.3's parity invariant — clients see the same recovery guidance whether they read `structuredContent` or `content[]`.
+- **Two new friendly XBRL concept names** ([#2](https://github.com/cyanheads/secedgar-mcp-server/issues/2)) — `depreciation_amortization` (tags: `DepreciationDepletionAndAmortization`, `DepreciationAndAmortization`, `Depreciation`) and `notes_payable` (tags: `LongTermNotesPayable`, `NotesPayable`, `LongTermDebt`). The multi-tag fallback chain handles cross-filer variation observed in production traffic for D&A across LMT / NOC / GD.
+- **`bun run start` script** — bare `.env`-respecting transport script for hosted MCP runners (template change adopted from framework 0.7.6).
+
+### Changed
+
+- **`@cyanheads/mcp-ts-core` `^0.7.0` → `^0.8.7`** (1 minor + 8 patches: typed error contracts, `ctx.fail` / `ctx.recoveryFor` helpers, `httpErrorFromResponse` utility, error-path parity, framework-antipatterns devcheck step, security hardening for HTTP origin guard / landing auth / log scrubbing, vitest config `.mjs` fix, and skill drift fixes).
+- **`html-to-text` `^9.0.5` → `^10.0.0`** — maintenance major release; minimum Node bumped to 20.19+ (project already requires ≥22), no API breaks.
+- **Dropped `dev:stdio` / `dev:http` watch scripts** from `package.json` (template cleanup adopted from framework 0.8.6 — smoke tests now run via `bun run rebuild && bun run start:stdio`).
+- **Errors section in `CLAUDE.md` / `AGENTS.md`** rewritten to lead with the typed-contract pattern; checklist updated to require `recovery` strings (≥5 words) and `createMockContext({ errors: tool.errors })` for tests with declared contracts.
+- **Refreshed all project skills from the package** (12 updated: `add-service` 1.3→1.5, `add-tool` 1.8→2.4, `api-context` 1.1→1.2, `api-errors` 1.0→1.4, `api-linter` 1.1→1.2, `design-mcp-server` 2.7→2.8, `field-test` 2.0→2.3, `maintenance` 1.5→2.0, `release-and-publish` 2.1→2.2, `report-issue-framework` 1.3→1.4, `security-pass` 1.1→1.2, `setup` 1.5→1.6). Re-synced into `.claude/skills/` and `.agents/skills/`.
+- **Synced framework `scripts/` additions** — `check-framework-antipatterns.ts` (new devcheck step) and `split-changelog.ts`.
+
+### Tests
+
+- All five tool test files thread `createMockContext({ errors: tool.errors })` so `ctx.fail` is wired against the contract's reasons.
+- Two new regression tests for issue [#1](https://github.com/cyanheads/secedgar-mcp-server/issues/1) — bare `concept: 'assets'` returns data; explicit `period_type: 'annual'` against a balance-sheet item still surfaces the structured `no_period_data` recovery hint.
+- Two new tests in `concept-map.test.ts` lock the tag ordering for `depreciation_amortization` and `notes_payable`.
+
+---
+
 ## [0.4.0] — 2026-04-24
 
 Framework upgrade to `@cyanheads/mcp-ts-core` 0.7.0, shared SEC fetch path with retry on filing document downloads, and the lint-warning cleanup that framework 0.6.16 surfaced.

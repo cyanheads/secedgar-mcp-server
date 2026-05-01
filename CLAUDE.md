@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.4.0
+**Version:** 0.4.1
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-only, no API keys required. Full design: `docs/sec-edgar-mcp-design.md`.
@@ -99,24 +99,36 @@ Handlers receive a unified `ctx` object. Key properties:
 
 ## Errors
 
-Handlers throw — the framework catches, classifies, and formats. Three escalation levels:
+Handlers throw — the framework catches, classifies, and formats.
+
+**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable? }]` on `tool()`. The handler then receives `ctx.fail(reason, msg?, data?)` typed against the reason union, and `data.reason` is auto-populated for observability. The `recovery` field is required (≥5 words, lint-validated). Use `ctx.recoveryFor('reason')` to spread the contract recovery onto the wire; pass an explicit `{ recovery: { hint } }` when runtime context matters. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`) bubble freely without declaration. **All EDGAR tools that have known failure modes use this pattern.**
 
 ```ts
-// 1. Plain Error — framework auto-classifies from message patterns
-throw new Error('Item not found');           // → NotFound
-throw new Error('Invalid query format');     // → ValidationError
-
-// 2. Error factories — explicit code, concise
-import { notFound, validationError, forbidden, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-throw notFound('Item not found', { itemId });
-throw serviceUnavailable('API unavailable', { url }, { cause: err });
-
-// 3. McpError — full control over code and data
-import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-throw new McpError(JsonRpcErrorCode.DatabaseError, 'Connection failed', { pool: 'primary' });
+errors: [
+  { reason: 'company_not_found', code: JsonRpcErrorCode.NotFound,
+    when: 'The company input does not resolve to a CIK',
+    recovery: 'Use a ticker symbol or 10-digit CIK number for an exact match.' },
+],
+async handler(input, ctx) {
+  if (!match) throw ctx.fail('company_not_found', `Company '${input.company}' not found.`, {
+    ...ctx.recoveryFor('company_not_found'),
+  });
+}
 ```
 
-Plain `Error` is fine for most cases. Use factories when the error code matters. See framework CLAUDE.md for the full auto-classification table and all available factories.
+**Service-layer pattern (no `ctx`).** Throw an `McpError` with `data: { reason, recovery: { hint } }`. The auto-classifier preserves `data` on the wire so clients see the same `error.data.reason` they'd see from `ctx.fail`.
+
+**Fallback for ad-hoc throws** (no contract entry fits, prototype code): use error factories or plain `Error`.
+
+```ts
+import { notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
+throw notFound('Item not found', { itemId });            // explicit code
+throw new Error('Item not found');                       // auto-classified → NotFound
+```
+
+**HTTP responses.** `httpErrorFromResponse(response, { service, data })` from `/utils` maps the full status table (401/403/408/422/429/5xx) and captures body + `Retry-After`. Used in `EdgarApiService`.
+
+See framework CLAUDE.md and the `api-errors` skill for the full reference.
 
 ---
 
@@ -214,8 +226,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run format` | Auto-fix formatting |
 | `bun run lint:mcp` | Validate MCP tool/resource definitions |
 | `bun run test` | Run tests |
-| `bun run dev:stdio` | Dev mode (stdio) |
-| `bun run dev:http` | Dev mode (HTTP) |
+| `bun run start` | Production mode (`.env`-respecting transport) |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |
 
@@ -256,7 +267,8 @@ import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 - [ ] Zod schemas: all fields have `.describe()`, only JSON-Schema-serializable types (no `z.custom()`, `z.date()`, `z.transform()`, etc.)
 - [ ] JSDoc `@fileoverview` + `@module` on every file
 - [ ] `ctx.log` for logging, `ctx.state` for storage
-- [ ] Handlers throw on failure — error factories or plain `Error`, no try/catch
+- [ ] Handlers throw on failure — typed `errors[]` contract + `ctx.fail(reason, …, ctx.recoveryFor(reason))` when failure modes are known; factories or plain `Error` for ad-hoc throws. No try/catch.
+- [ ] Tool error contracts include `recovery` strings (≥5 words)
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
-- [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
+- [ ] Tests use `createMockContext({ errors: tool.errors })` from `@cyanheads/mcp-ts-core/testing` for tools with declared contracts
 - [ ] `bun run devcheck` passes

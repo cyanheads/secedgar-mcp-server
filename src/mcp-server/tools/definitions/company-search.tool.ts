@@ -5,7 +5,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
 interface FilingEntry {
@@ -21,6 +21,21 @@ export const companySearchTool = tool('secedgar_company_search', {
   description:
     'Find companies and retrieve entity info with optional recent filings. Entry point for most EDGAR workflows — resolve tickers, names, or CIKs to entity details.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+
+  errors: [
+    {
+      reason: 'no_match',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No company matches the query',
+      recovery: 'Try a ticker symbol, full company name, or 10-digit CIK.',
+    },
+    {
+      reason: 'multiple_matches',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Query is ambiguous and matches several companies',
+      recovery: 'Specify a ticker symbol for an exact match instead of a name fragment.',
+    },
+  ],
 
   input: z.object({
     query: z
@@ -86,22 +101,28 @@ export const companySearchTool = tool('secedgar_company_search', {
 
     if (Array.isArray(resolved)) {
       if (resolved.length === 0) {
-        throw notFound(
-          `No company found for '${input.query}'. Try a ticker symbol (e.g., 'AAPL'), full company name, or 10-digit CIK.`,
-        );
+        throw ctx.fail('no_match', `No company found for '${input.query}'.`, {
+          ...ctx.recoveryFor('no_match'),
+        });
       }
       if (resolved.length > 1) {
         const matches = resolved
           .map((m) => `${m.ticker ?? m.cik} (${m.name ?? 'Unknown'})`)
           .join(', ');
-        throw notFound(
-          `Multiple matches for '${input.query}': ${matches}. Specify a ticker for an exact match.`,
-        );
+        throw ctx.fail('multiple_matches', `Multiple matches for '${input.query}': ${matches}.`, {
+          ...ctx.recoveryFor('multiple_matches'),
+          query: input.query,
+          matches: resolved.map((m) => ({ cik: m.cik, name: m.name, ticker: m.ticker })),
+        });
       }
     }
 
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
-    if (!match) throw notFound(`No company found for '${input.query}'.`);
+    if (!match) {
+      throw ctx.fail('no_match', `No company found for '${input.query}'.`, {
+        ...ctx.recoveryFor('no_match'),
+      });
+    }
     const submissions = await api.getSubmissions(match.cik);
     ctx.log.info('Company resolved', {
       query: input.query,

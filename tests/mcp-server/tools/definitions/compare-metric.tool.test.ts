@@ -71,7 +71,7 @@ beforeEach(() => {
 
 describe('compareMetricTool', () => {
   it('returns ranked companies for a metric', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: compareMetricTool.errors });
     const input = compareMetricTool.input.parse({ concept: 'revenue', period: 'CY2023' });
     const result = await compareMetricTool.handler(input, ctx);
 
@@ -82,7 +82,7 @@ describe('compareMetricTool', () => {
   });
 
   it('resolves friendly concept names', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: compareMetricTool.errors });
     const input = compareMetricTool.input.parse({ concept: 'revenue', period: 'CY2023' });
     await compareMetricTool.handler(input, ctx);
 
@@ -95,7 +95,7 @@ describe('compareMetricTool', () => {
   });
 
   it('passes raw XBRL tags directly', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: compareMetricTool.errors });
     const input = compareMetricTool.input.parse({
       concept: 'AccountsPayableCurrent',
       period: 'CY2023Q4I',
@@ -112,7 +112,7 @@ describe('compareMetricTool', () => {
   });
 
   it('sorts ascending when requested', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: compareMetricTool.errors });
     const input = compareMetricTool.input.parse({
       concept: 'revenue',
       period: 'CY2023',
@@ -124,7 +124,7 @@ describe('compareMetricTool', () => {
   });
 
   it('applies limit', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: compareMetricTool.errors });
     const input = compareMetricTool.input.parse({
       concept: 'revenue',
       period: 'CY2023',
@@ -136,7 +136,7 @@ describe('compareMetricTool', () => {
   });
 
   it('enriches results with ticker symbols', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: compareMetricTool.errors });
     const input = compareMetricTool.input.parse({ concept: 'revenue', period: 'CY2023' });
     const result = await compareMetricTool.handler(input, ctx);
 
@@ -146,7 +146,7 @@ describe('compareMetricTool', () => {
   });
 
   it('assigns correct rank numbers', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: compareMetricTool.errors });
     const input = compareMetricTool.input.parse({ concept: 'revenue', period: 'CY2023' });
     const result = await compareMetricTool.handler(input, ctx);
 
@@ -154,7 +154,7 @@ describe('compareMetricTool', () => {
   });
 
   it('zero-pads CIK to 10 digits', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: compareMetricTool.errors });
     const input = compareMetricTool.input.parse({ concept: 'revenue', period: 'CY2023' });
     const result = await compareMetricTool.handler(input, ctx);
 
@@ -166,7 +166,7 @@ describe('compareMetricTool', () => {
 
   it('throws notFound on 404 from frames API', async () => {
     mockApi.tryGetFrames.mockResolvedValue(null);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: compareMetricTool.errors });
     const input = compareMetricTool.input.parse({ concept: 'revenue', period: 'CY2023' });
 
     await expect(compareMetricTool.handler(input, ctx)).rejects.toThrow(/No data for/);
@@ -174,7 +174,7 @@ describe('compareMetricTool', () => {
 
   it('re-throws non-404 errors', async () => {
     mockApi.tryGetFrames.mockRejectedValue(new Error('500 Internal Server Error'));
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: compareMetricTool.errors });
     const input = compareMetricTool.input.parse({ concept: 'revenue', period: 'CY2023' });
 
     await expect(compareMetricTool.handler(input, ctx)).rejects.toThrow(/500/);
@@ -182,7 +182,7 @@ describe('compareMetricTool', () => {
 
   it('handles ticker lookup returning undefined', async () => {
     mockApi.cikToTicker.mockResolvedValue(undefined);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: compareMetricTool.errors });
     const input = compareMetricTool.input.parse({ concept: 'revenue', period: 'CY2023' });
     const result = await compareMetricTool.handler(input, ctx);
 

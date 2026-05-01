@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { validationError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
 /**
@@ -68,6 +68,15 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
   description:
     'Full-text search across all EDGAR filing documents since 1993. Supports exact phrases, boolean operators, wildcards, and entity targeting (ticker:AAPL or cik:320193 in query).',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+
+  errors: [
+    {
+      reason: 'invalid_date_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Only one of start_date or end_date was provided',
+      recovery: 'Provide both start_date and end_date, or omit both to search all dates.',
+    },
+  ],
 
   input: z.object({
     query: z
@@ -143,7 +152,11 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
   async handler(input, ctx) {
     // Validate date range: both or neither
     if ((input.start_date && !input.end_date) || (!input.start_date && input.end_date)) {
-      throw validationError('Both start_date and end_date are required when filtering by date.');
+      throw ctx.fail(
+        'invalid_date_range',
+        'Both start_date and end_date are required when filtering by date.',
+        { ...ctx.recoveryFor('invalid_date_range') },
+      );
     }
 
     // Resolve ticker:/cik: entity targeting → company name in query + CIK for filtering

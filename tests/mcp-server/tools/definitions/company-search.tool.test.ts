@@ -52,7 +52,7 @@ beforeEach(() => {
 describe('companySearchTool', () => {
   it('returns company info for a single match', async () => {
     mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: companySearchTool.errors });
     const input = companySearchTool.input.parse({ query: 'AAPL' });
     const result = await companySearchTool.handler(input, ctx);
 
@@ -65,7 +65,7 @@ describe('companySearchTool', () => {
 
   it('includes filings by default', async () => {
     mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: companySearchTool.errors });
     const input = companySearchTool.input.parse({ query: 'AAPL' });
     const result = await companySearchTool.handler(input, ctx);
 
@@ -77,7 +77,7 @@ describe('companySearchTool', () => {
 
   it('excludes filings when include_filings is false', async () => {
     mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: companySearchTool.errors });
     const input = companySearchTool.input.parse({ query: 'AAPL', include_filings: false });
     const result = await companySearchTool.handler(input, ctx);
 
@@ -87,7 +87,7 @@ describe('companySearchTool', () => {
 
   it('filters filings by form_types', async () => {
     mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: companySearchTool.errors });
     const input = companySearchTool.input.parse({ query: 'AAPL', form_types: ['10-K'] });
     const result = await companySearchTool.handler(input, ctx);
 
@@ -98,7 +98,7 @@ describe('companySearchTool', () => {
 
   it('applies filing_limit', async () => {
     mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: companySearchTool.errors });
     const input = companySearchTool.input.parse({ query: 'AAPL', filing_limit: 1 });
     const result = await companySearchTool.handler(input, ctx);
 
@@ -108,7 +108,7 @@ describe('companySearchTool', () => {
 
   it('throws notFound when no matches', async () => {
     mockApi.resolveCik.mockResolvedValue([]);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: companySearchTool.errors });
     const input = companySearchTool.input.parse({ query: 'XYZNOTREAL' });
 
     await expect(companySearchTool.handler(input, ctx)).rejects.toThrow(/No company found/);
@@ -119,7 +119,7 @@ describe('companySearchTool', () => {
       { cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' },
       { cik: '0000001234', name: 'Apple Corp.', ticker: 'APCO' },
     ]);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: companySearchTool.errors });
     const input = companySearchTool.input.parse({ query: 'Apple' });
 
     await expect(companySearchTool.handler(input, ctx)).rejects.toThrow(/Multiple matches/);
@@ -129,7 +129,7 @@ describe('companySearchTool', () => {
     mockApi.resolveCik.mockResolvedValue([
       { cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' },
     ]);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: companySearchTool.errors });
     const input = companySearchTool.input.parse({ query: 'AAPL' });
     const result = await companySearchTool.handler(input, ctx);
 

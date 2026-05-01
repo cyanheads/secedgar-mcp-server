@@ -110,6 +110,23 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     unit: 'USD',
     label: 'Capital Expenditures',
   },
+  depreciation_amortization: {
+    group: 'cash_flow',
+    tags: ['DepreciationDepletionAndAmortization', 'DepreciationAndAmortization', 'Depreciation'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Depreciation & Amortization',
+  },
+  // Distinct from `debt` (which targets long-term debt directly). `notes_payable` prefers
+  // the notes-specific tags and only falls back to LongTermDebt for filers that report it
+  // there exclusively.
+  notes_payable: {
+    group: 'balance_sheet',
+    tags: ['LongTermNotesPayable', 'NotesPayable', 'LongTermDebt'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Notes Payable',
+  },
 };
 
 /**

@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { filingToText } from '@/services/edgar/filing-to-text.js';
 import type { FilingIndex } from '@/services/edgar/types.js';
@@ -16,6 +16,27 @@ export const getFilingTool = tool('secedgar_get_filing', {
   description:
     "Fetch a specific filing's metadata and document content by accession number. Returns the primary document as readable text, with option to fetch specific exhibits.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+
+  errors: [
+    {
+      reason: 'document_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'A specific document was requested but not present in the filing archive',
+      recovery: 'Pick a name from the available_documents list returned in error data.',
+    },
+    {
+      reason: 'no_documents',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Filing index lists items but no fetchable primary document was found',
+      recovery: 'Specify a document name from available_documents in error data.',
+    },
+    {
+      reason: 'filing_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No filing matches the accession number under any candidate CIK',
+      recovery: 'Verify the accession number and pass the company CIK explicitly.',
+    },
+  ],
 
   input: z.object({
     accession_number: z
@@ -201,26 +222,51 @@ async function resolveFilingArchive(
     return { cik, html, index, targetName };
   }
 
-  if (requestedDocument && lastIndexedItems.length > 0) {
-    throw notFound(
-      `Document '${requestedDocument}' not found in this filing. Available documents: ${lastIndexedItems.map((item) => item.name).join(', ')}. Use one of these names.`,
+  const availableDocuments = lastIndexedItems.map((item) => item.name);
+
+  if (requestedDocument && availableDocuments.length > 0) {
+    throw new McpError(
+      JsonRpcErrorCode.NotFound,
+      `Document '${requestedDocument}' not found in this filing.`,
+      {
+        reason: 'document_not_found',
+        requested_document: requestedDocument,
+        available_documents: availableDocuments,
+        recovery: {
+          hint: `Pick one of: ${availableDocuments.join(', ')}.`,
+        },
+      },
     );
   }
 
-  if (lastIndexedItems.length > 0) {
-    throw notFound(
-      `No document found in filing ${accessionNumber}. Available documents: ${lastIndexedItems.map((item) => item.name).join(', ')}`,
+  if (availableDocuments.length > 0) {
+    throw new McpError(
+      JsonRpcErrorCode.NotFound,
+      `No primary document found in filing ${accessionNumber}.`,
+      {
+        reason: 'no_documents',
+        accession_number: accessionNumber,
+        available_documents: availableDocuments,
+        recovery: {
+          hint: `Specify the document input from: ${availableDocuments.join(', ')}.`,
+        },
+      },
     );
   }
 
-  if (providedCik) {
-    throw notFound(
-      `Filing '${accessionNumber}' not found (CIK ${providedCik.padStart(10, '0')}). Verify the accession number and CIK are correct.`,
-    );
-  }
-
-  throw notFound(
-    `Filing '${accessionNumber}' not found. Verify the accession number or provide the company CIK explicitly.`,
+  const cikSuffix = providedCik ? ` (CIK ${providedCik.padStart(10, '0')})` : '';
+  const recoveryHint = providedCik
+    ? 'Verify the accession number and CIK are correct.'
+    : 'Verify the accession number and pass the company CIK explicitly.';
+  throw new McpError(
+    JsonRpcErrorCode.NotFound,
+    `Filing '${accessionNumber}' not found${cikSuffix}.`,
+    {
+      reason: 'filing_not_found',
+      accession_number: accessionNumber,
+      cik: providedCik,
+      recovery: { hint: recoveryHint },
+    },
   );
 }
 

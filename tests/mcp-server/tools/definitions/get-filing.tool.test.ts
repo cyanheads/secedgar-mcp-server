@@ -81,7 +81,7 @@ beforeEach(() => {
 
 describe('getFilingTool', () => {
   it('returns filing content for a valid accession number', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({
       accession_number: '0000320193-23-000106',
       cik: '320193',
@@ -97,7 +97,7 @@ describe('getFilingTool', () => {
   });
 
   it('normalizes accession number without dashes', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({
       accession_number: '000032019323000106',
     });
@@ -107,7 +107,7 @@ describe('getFilingTool', () => {
   });
 
   it('derives CIK from accession number when not provided', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({
       accession_number: '0000320193-23-000106',
     });
@@ -119,7 +119,7 @@ describe('getFilingTool', () => {
 
   it('uses SEC search metadata to resolve accession-only lookups', async () => {
     mockApi.findFilingCiks.mockResolvedValue(['0000320193']);
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({
       accession_number: '0001193125-14-383437',
     });
@@ -130,7 +130,7 @@ describe('getFilingTool', () => {
   });
 
   it('fetches a specific document when specified', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({
       accession_number: '0000320193-23-000106',
       cik: '320193',
@@ -147,7 +147,7 @@ describe('getFilingTool', () => {
   });
 
   it('selects the largest HTML as primary document', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({
       accession_number: '0000320193-23-000106',
       cik: '320193',
@@ -190,7 +190,7 @@ describe('getFilingTool', () => {
         ],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({
       accession_number: '0001140361-26-013192',
       cik: '320193',
@@ -229,7 +229,7 @@ describe('getFilingTool', () => {
     mockApi.tryGetFilingDocument
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce('<xml><ownershipDocument /></xml>');
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({
       accession_number: '0001140361-26-013192',
     });
@@ -251,7 +251,7 @@ describe('getFilingTool', () => {
   });
 
   it('throws notFound when requested document does not exist', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({
       accession_number: '0000320193-23-000106',
       cik: '320193',
@@ -262,7 +262,7 @@ describe('getFilingTool', () => {
   });
 
   it('includes all documents in response', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({
       accession_number: '0000320193-23-000106',
       cik: '320193',
@@ -275,7 +275,7 @@ describe('getFilingTool', () => {
   });
 
   it('constructs correct filing URL', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({
       accession_number: '0000320193-23-000106',
       cik: '320193',
@@ -288,7 +288,7 @@ describe('getFilingTool', () => {
   });
 
   it('passes content_limit to filingToText', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({
       accession_number: '0000320193-23-000106',
       cik: '320193',
@@ -310,7 +310,7 @@ describe('getFilingTool', () => {
         },
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({
       accession_number: '0001193125-14-383437',
       cik: '320193',

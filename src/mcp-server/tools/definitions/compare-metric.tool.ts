@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { resolveConcept } from '@/services/edgar/concept-map.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
@@ -12,6 +12,21 @@ export const compareMetricTool = tool('secedgar_compare_metric', {
   description:
     'Compare a financial metric across all reporting companies for a specific period. Uses the same friendly concept names as secedgar_get_financials (e.g., "revenue", "assets").',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
+
+  errors: [
+    {
+      reason: 'unknown_concept',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The concept input does not match a friendly name and SEC frames returned no data',
+      recovery: 'Use a friendly name from secedgar_search_concepts or a valid raw XBRL tag.',
+    },
+    {
+      reason: 'no_data',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Concept resolves but no companies report this metric for the requested period and unit',
+      recovery: 'Check duration vs instant period, unit, and that the period exists post-CY2009.',
+    },
+  ],
 
   input: z.object({
     concept: z
@@ -77,10 +92,20 @@ export const compareMetricTool = tool('secedgar_compare_metric', {
     const framesResponse = await api.tryGetFrames(taxonomy, tag, unit, input.period);
     if (!framesResponse) {
       // Distinguish unknown concept (no mapping + 404) from valid concept with no data
-      const hint = !mapping
-        ? `Unknown concept '${input.concept}'. Use a friendly name (e.g., "revenue", "assets") or a valid XBRL tag.`
-        : `No data for ${label}/${unit}/${input.period}. Check: duration vs. instant period (add "I" for balance sheet items), correct unit (USD-per-shares for EPS), and period exists (data starts ~CY2009).`;
-      throw notFound(hint);
+      if (!mapping) {
+        throw ctx.fail('unknown_concept', `Unknown concept '${input.concept}'.`, {
+          ...ctx.recoveryFor('unknown_concept'),
+          concept: input.concept,
+        });
+      }
+      throw ctx.fail('no_data', `No data for ${label}/${unit}/${input.period}.`, {
+        recovery: {
+          hint: 'Check duration vs. instant period (add "I" for balance sheet items), correct unit (USD-per-shares for EPS), and period exists (data starts ~CY2009).',
+        },
+        concept: tag,
+        period: input.period,
+        unit,
+      });
     }
 
     // Sort by value

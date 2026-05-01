@@ -69,7 +69,7 @@ beforeEach(() => {
 
 describe('searchFilingsTool', () => {
   it('returns search results with correct structure', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({ query: 'material weakness' });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -82,7 +82,7 @@ describe('searchFilingsTool', () => {
   });
 
   it('passes search params to API', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({
       query: 'revenue growth',
       forms: ['10-K', '10-Q'],
@@ -104,7 +104,7 @@ describe('searchFilingsTool', () => {
   });
 
   it('applies client-side limit slicing', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({ query: 'test', limit: 1 });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -112,7 +112,7 @@ describe('searchFilingsTool', () => {
   });
 
   it('extracts form distribution from aggregations', async () => {
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({ query: 'test' });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -124,7 +124,7 @@ describe('searchFilingsTool', () => {
       ...mockEftsResponse,
       aggregations: undefined,
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({ query: 'test' });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -136,7 +136,7 @@ describe('searchFilingsTool', () => {
       ...mockEftsResponse,
       hits: { ...mockEftsResponse.hits, total: { value: 10000, relation: 'gte' } },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({ query: 'test' });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -148,7 +148,7 @@ describe('searchFilingsTool', () => {
       ...mockEftsResponse,
       hits: { total: { value: 0, relation: 'eq' }, hits: [] },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({ query: 'nonexistent' });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -175,7 +175,7 @@ describe('searchFilingsTool', () => {
         ],
       },
     });
-    const ctx = createMockContext();
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({ query: 'test' });
     const result = await searchFilingsTool.handler(input, ctx);
 
