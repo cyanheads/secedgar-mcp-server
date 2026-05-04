@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.2](changelog/0.4.x/0.4.2.md) — 2026-05-04
+
+Framework bump to @cyanheads/mcp-ts-core 0.8.13; secedgar_get_filing now routes its three contract reasons through ctx.fail in the archive-resolution helper for full lint conformance.
+
 ## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-04-30
 
 Framework upgrade to @cyanheads/mcp-ts-core 0.8.7 with full typed-error-contract adoption, two domain bug fixes against issues #1 and #2, and skill / script syncs.

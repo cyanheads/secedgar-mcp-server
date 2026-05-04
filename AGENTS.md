@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.4.1
+**Version:** 0.4.2
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 
 Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-only, no API keys required. Full design: `docs/sec-edgar-mcp-design.md`.
@@ -202,6 +202,7 @@ Available skills:
 | `maintenance` | Investigate changelogs, adopt upstream changes, sync skills to agent dirs |
 | `api-auth` | Auth modes, scopes, JWT/OAuth |
 | `api-config` | AppConfig, parseConfig, env vars |
+| `api-canvas` | DataCanvas primitive: register tabular data, run SQL, export results (Tier 3, DuckDB) |
 | `api-context` | Context interface, logger, state, progress |
 | `api-errors` | McpError, JsonRpcErrorCode, error patterns |
 | `api-linter` | MCP definition lint rules reference (`format-parity`, `describe-on-fields`, `server-json-*`, …) |
@@ -280,10 +281,13 @@ import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 ## Checklist
 
 - [ ] Zod schemas: all fields have `.describe()`, only JSON-Schema-serializable types (no `z.custom()`, `z.date()`, `z.transform()`, etc.)
+- [ ] Optional nested objects: handler guards for empty inner values from form-based clients (`if (input.obj?.field && ...)`, not just `if (input.obj)`)
 - [ ] JSDoc `@fileoverview` + `@module` on every file
 - [ ] `ctx.log` for logging, `ctx.state` for storage
 - [ ] Handlers throw on failure — typed `errors[]` contract + `ctx.fail(reason, …, ctx.recoveryFor(reason))` when failure modes are known; factories or plain `Error` for ad-hoc throws. No try/catch.
 - [ ] Tool error contracts include `recovery` strings (≥5 words)
+- [ ] `format()` renders all data the LLM needs — Claude Code reads `structuredContent`, Claude Desktop reads `content[]`; both must carry the same data
+- [ ] EDGAR upstream sparsity: schemas reflect real nullability; `format()` preserves uncertainty (don't fabricate facts from missing XBRL fields); tests cover at least one sparse payload
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
 - [ ] Tests use `createMockContext({ errors: tool.errors })` from `@cyanheads/mcp-ts-core/testing` for tools with declared contracts
 - [ ] `bun run devcheck` passes
