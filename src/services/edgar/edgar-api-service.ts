@@ -8,6 +8,7 @@
 import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { httpErrorFromResponse } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
+import { type FilingDocumentHeader, parseFilingHeaders } from './filing-headers.js';
 import type {
   CikMatch,
   CompanyConceptResponse,
@@ -196,6 +197,24 @@ class EdgarApiService {
     return this.tryFetchJson<FilingIndex>(
       `https://www.sec.gov/Archives/edgar/data/${padded}/${noDashes}/index.json`,
     );
+  }
+
+  /**
+   * Fetch the SEC submission header (`<accession>-index-headers.html`) and parse
+   * it into a `filename → metadata` map. Returns `null` if the file is absent.
+   * The header page exposes canonical SEC document TYPE values (e.g. "EX-21.1")
+   * that the directory listing JSON does not.
+   */
+  async tryGetFilingHeaders(
+    cik: string,
+    accessionNumber: string,
+  ): Promise<Map<string, FilingDocumentHeader> | null> {
+    const padded = cik.padStart(10, '0');
+    const noDashes = accessionNumber.replace(/-/g, '');
+    const text = await this.tryFetchText(
+      `https://www.sec.gov/Archives/edgar/data/${padded}/${noDashes}/${accessionNumber}-index-headers.html`,
+    );
+    return text ? parseFilingHeaders(text) : null;
   }
 
   getFilingDocument(cik: string, accessionNumber: string, document: string): Promise<string> {

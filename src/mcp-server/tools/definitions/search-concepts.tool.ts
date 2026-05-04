@@ -66,13 +66,21 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
               .describe(
                 'XBRL tags this friendly name resolves to, tried in order. Multiple tags cover historical naming changes (e.g., pre- vs post-ASC 606 revenue).',
               ),
-            taxonomy: z.enum(TAXONOMY_VALUES).describe('XBRL taxonomy.'),
+            taxonomy: z
+              .enum(TAXONOMY_VALUES)
+              .describe(
+                'XBRL taxonomy this concept lives in: us-gaap (US filers), ifrs-full (foreign filers), or dei (entity info).',
+              ),
             unit: z
               .string()
               .describe(
-                'Unit of measure (USD, USD/shares, shares, pure). Note: secedgar_compare_metric expects the dashed form USD-per-shares.',
+                'Unit of measure (USD, USD/shares, shares, pure). secedgar_compare_metric accepts both slash and dashed forms.',
               ),
-            group: z.enum(GROUP_VALUES).describe('Financial statement group.'),
+            group: z
+              .enum(GROUP_VALUES)
+              .describe(
+                'Statement section this concept belongs to: income_statement, balance_sheet, cash_flow, per_share, or entity_info.',
+              ),
           })
           .describe('One XBRL concept mapping with its friendly name, tags, and grouping.'),
       )

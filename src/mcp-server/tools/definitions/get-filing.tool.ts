@@ -6,11 +6,26 @@
 import { type HandlerContext, type ReasonOf, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+import type { FilingDocumentHeader } from '@/services/edgar/filing-headers.js';
 import { filingToText } from '@/services/edgar/filing-to-text.js';
 import type { FilingIndex } from '@/services/edgar/types.js';
 
 const MAX_DOCUMENTS_IN_FORMAT = 10;
 type FilingIndexItem = FilingIndex['directory']['item'][number];
+
+interface DocumentEntry {
+  description?: string | undefined;
+  name: string;
+  size?: number | undefined;
+  type: string;
+}
+
+interface CategorizedDocuments {
+  auxiliary: DocumentEntry[];
+  exhibits: DocumentEntry[];
+  primary: DocumentEntry[];
+  xbrl?: DocumentEntry[] | undefined;
+}
 
 const FILING_ERRORS = [
   {
@@ -35,6 +50,24 @@ const FILING_ERRORS = [
 
 type FilingHandlerCtx = HandlerContext<ReasonOf<typeof FILING_ERRORS>>;
 
+const documentEntrySchema = z
+  .object({
+    name: z.string().describe('Document filename within the filing archive.'),
+    type: z
+      .string()
+      .describe(
+        'SEC document type from the submission header (e.g., "10-K", "EX-21.1", "GRAPHIC", "XML"). When the header file is unavailable, falls back to a name-pattern synthetic label for known XBRL artifacts ("XBRL-LINKBASE", "XBRL-INSTANCE", etc.) and "unknown" for everything else.',
+      ),
+    description: z
+      .string()
+      .optional()
+      .describe(
+        'Human-readable description (e.g., "Annual Report", "Subsidiaries of the Registrant"). Absent when SEC published none for this entry.',
+      ),
+    size: z.number().optional().describe('File size in bytes.'),
+  })
+  .describe('One document entry from the filing.');
+
 export const getFilingTool = tool('secedgar_get_filing', {
   description:
     "Fetch a specific filing's metadata and document content by accession number. Returns the primary document as readable text, with option to fetch specific exhibits.",
@@ -52,7 +85,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .string()
       .optional()
       .describe(
-        'Company CIK. Optional but recommended — speeds up archive lookup. If omitted, the server resolves likely filing CIKs from SEC search metadata and archive paths.',
+        'Company CIK (resolve via secedgar_company_search if you have a ticker or name). Optional but recommended — speeds up archive lookup. If omitted, likely filing CIKs are inferred from SEC search metadata and archive paths.',
       ),
     content_limit: z
       .number()
@@ -69,37 +102,68 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .describe(
         'Specific document filename within the filing (e.g., "ex-21.htm" for subsidiaries list). Default: the primary document. Available documents listed in the response metadata.',
       ),
+    include_xbrl: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Include XBRL viewer artifacts and machine-readable taxonomy files (R*.htm fragments, *_cal/_def/_lab/_pre.xml linkbases, *_htm.xml inline instance, *.xsd schemas, MetaLinks.json, FilingSummary.xml, Show.js, report.css, *-xbrl.zip, Financial_Report.xlsx, EX-101.* technical exhibits) under documents.xbrl. Off by default — these dominate filing indexes (~100 entries on a typical 10-K) and are rarely relevant when reading filing content.',
+      ),
   }),
 
   output: z.object({
-    accession_number: z.string().describe('Filing accession number.'),
+    accession_number: z.string().describe('Filing accession number, normalized to dash format.'),
     form: z
       .string()
       .optional()
-      .describe('Form type. Omitted when the filing predates the recent-submissions window.'),
+      .describe(
+        'Form type (e.g., "10-K", "10-Q"). Absent for filings older than the last ~1,000 the company has filed (SEC does not surface metadata for those without a separate fetch).',
+      ),
     filing_date: z
       .string()
       .optional()
-      .describe('Date filed. Omitted when the filing predates the recent-submissions window.'),
+      .describe(
+        'Date the filing was submitted (YYYY-MM-DD). Absent under the same conditions as form.',
+      ),
     company_name: z
       .string()
       .optional()
-      .describe('Filing entity name, if the CIK resolved to a known entity.'),
-    cik: z.string().describe('Company CIK.'),
-    period_ending: z.string().optional().describe('Period of report.'),
-    primary_document: z.string().describe('Primary document filename.'),
-    documents: z
-      .array(
-        z
-          .object({
-            name: z.string().describe('Document filename.'),
-            type: z.string().describe('Document type.'),
-            size: z.number().optional().describe('File size in bytes.'),
-          })
-          .describe('One document entry from the filing archive index.'),
-      )
+      .describe('Filing entity name. Absent if the CIK did not resolve to a known entity.'),
+    cik: z.string().describe('Filing entity CIK, zero-padded to 10 digits.'),
+    period_ending: z
+      .string()
+      .optional()
       .describe(
-        'All documents in this filing. Use the name field with the document input param to fetch exhibits.',
+        'Period the filing reports on (YYYY-MM-DD). Absent under the same conditions as form.',
+      ),
+    primary_document: z
+      .string()
+      .describe('Filename of the document whose text was returned in content.'),
+    documents: z
+      .object({
+        primary: z
+          .array(documentEntrySchema)
+          .describe(
+            'Primary filing document(s). Typically a single entry whose type matches the form (e.g., "10-K").',
+          ),
+        exhibits: z
+          .array(documentEntrySchema)
+          .describe(
+            'Filed exhibits (EX-21 subsidiaries, EX-31/32 certifications, EX-99 press releases, etc.). Excludes XBRL technical exhibits (EX-101.*). Identified by the EX- prefix on the header TYPE — when the submission header is unavailable, exhibits whose filename does not match a known pattern fall through to auxiliary instead.',
+          ),
+        auxiliary: z
+          .array(documentEntrySchema)
+          .describe(
+            "Other supporting documents that aren't the primary, exhibits, or XBRL artifacts (cover pages, audit consent letters, embedded graphics).",
+          ),
+        xbrl: z
+          .array(documentEntrySchema)
+          .optional()
+          .describe(
+            'XBRL viewer artifacts and machine-readable taxonomy files. Only present when include_xbrl=true.',
+          ),
+      })
+      .describe(
+        'Filing documents grouped by category. Pass a name from any list as the document input param to fetch that file. XBRL viewer artifacts are suppressed by default — set include_xbrl=true to surface them under the xbrl bucket.',
       ),
     content: z.string().describe('Document text content, truncated to content_limit.'),
     content_truncated: z.boolean().describe('True if content was truncated.'),
@@ -119,18 +183,26 @@ export const getFilingTool = tool('secedgar_get_filing', {
       input.document,
     );
     const accnNoDashes = accn.replace(/-/g, '');
-    const items = index.directory.item;
-    const documents = items.map((item) => ({
-      name: item.name,
-      type: item.type,
-      size: item.size ? Number.parseInt(item.size, 10) : undefined,
-    }));
 
     const { text, truncated, totalLength } = filingToText(html, input.content_limit);
 
+    // Parallelize: submissions metadata (recent-window enrichment) and submission
+    // headers (canonical document types). Headers are best-effort — categorization
+    // falls back to name-pattern inference when absent.
+    const [submissions, headers] = await Promise.all([
+      api.getSubmissions(cik),
+      api.tryGetFilingHeaders(cik, accn),
+    ]);
+
+    const documents = categorizeDocuments(
+      index.directory.item,
+      targetName,
+      headers,
+      input.include_xbrl,
+    );
+
     // Enrich with metadata from the recent-submissions window — not every accession lands here
     // (older filings live in paginated archive files), so these fields remain optional.
-    const submissions = await api.getSubmissions(cik);
     const recentAccns = submissions.filings.recent.accessionNumber;
     const idx = recentAccns.indexOf(accn);
 
@@ -144,6 +216,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       cik,
       contentLength: totalLength,
       inRecentWindow: idx >= 0,
+      headersResolved: headers !== null,
     });
 
     return {
@@ -173,15 +246,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
 
     const meta = `Accession: ${result.accession_number} | Primary: ${result.primary_document} | ${result.content_total_length} chars${result.content_truncated ? ' (truncated)' : ''}`;
 
-    let docs = '';
-    if (result.documents.length) {
-      const shown = result.documents.slice(0, MAX_DOCUMENTS_IN_FORMAT);
-      const extra = result.documents.length - shown.length;
-      const list = shown
-        .map((d) => `${d.name} (${d.type}${d.size !== undefined ? `, ${d.size}B` : ''})`)
-        .join(', ');
-      docs = `\nDocuments (${result.documents.length}): ${list}${extra > 0 ? `, +${extra} more` : ''}`;
-    }
+    const docs = formatDocumentSection(result.documents);
 
     const url = `\nURL: ${result.filing_url}`;
     return [
@@ -311,4 +376,112 @@ function isNonIndexFile(name: string): boolean {
 
 function isXbrlSupportFile(name: string): boolean {
   return /(?:_cal|_def|_lab|_pre|_sch)\.xml$/i.test(name);
+}
+
+/**
+ * Categorize filing documents into primary / exhibits / auxiliary / xbrl buckets.
+ * Uses canonical SEC TYPE values from the submission header when present, falling
+ * back to filename-pattern inference. XBRL viewer artifacts and taxonomy files
+ * are suppressed unless `includeXbrl` is true.
+ */
+function categorizeDocuments(
+  items: FilingIndexItem[],
+  primaryName: string,
+  headers: Map<string, FilingDocumentHeader> | null,
+  includeXbrl: boolean,
+): CategorizedDocuments {
+  const primary: DocumentEntry[] = [];
+  const exhibits: DocumentEntry[] = [];
+  const auxiliary: DocumentEntry[] = [];
+  const xbrl: DocumentEntry[] = [];
+
+  for (const item of items) {
+    const header = headers?.get(item.name);
+    const type = header?.type ?? inferTypeFromName(item.name);
+    const entry: DocumentEntry = {
+      name: item.name,
+      type,
+      description: header?.description,
+      size: item.size ? Number.parseInt(item.size, 10) || undefined : undefined,
+    };
+
+    if (item.name === primaryName) {
+      primary.push(entry);
+    } else if (isXbrlArtifact(item.name, type)) {
+      xbrl.push(entry);
+    } else if (/^EX-/i.test(type)) {
+      exhibits.push(entry);
+    } else {
+      auxiliary.push(entry);
+    }
+  }
+
+  return includeXbrl ? { primary, exhibits, auxiliary, xbrl } : { primary, exhibits, auxiliary };
+}
+
+const XBRL_VIEWER_ASSETS = new Set([
+  'MetaLinks.json',
+  'Show.js',
+  'report.css',
+  'Financial_Report.xlsx',
+  'FilingSummary.xml',
+]);
+
+function isXbrlArtifact(name: string, type: string): boolean {
+  if (/^R\d+\.htm$/i.test(name)) return true; // viewer fragments
+  if (/_(?:cal|def|lab|pre|sch)\.xml$/i.test(name)) return true; // linkbases
+  if (/_htm\.xml$/i.test(name)) return true; // inline XBRL instance
+  if (/\.xsd$/i.test(name)) return true; // taxonomy schema
+  if (/-xbrl\.zip$/i.test(name)) return true; // packaged XBRL bundle
+  if (XBRL_VIEWER_ASSETS.has(name)) return true;
+  return /^EX-101/i.test(type); // EX-101.INS / .CAL / .DEF / .LAB / .PRE / .SCH
+}
+
+/** Fallback type label when the submission header is unavailable. */
+function inferTypeFromName(name: string): string {
+  if (/^R\d+\.htm$/i.test(name)) return 'XBRL-VIEWER';
+  if (/_(?:cal|def|lab|pre|sch)\.xml$/i.test(name)) return 'XBRL-LINKBASE';
+  if (/_htm\.xml$/i.test(name)) return 'XBRL-INSTANCE';
+  if (/\.xsd$/i.test(name)) return 'XBRL-SCHEMA';
+  if (/-xbrl\.zip$/i.test(name)) return 'XBRL-BUNDLE';
+  if (name === 'MetaLinks.json') return 'XBRL-METADATA';
+  if (name === 'FilingSummary.xml') return 'FILING-SUMMARY';
+  if (name === 'Show.js' || name === 'report.css') return 'XBRL-VIEWER-ASSET';
+  if (name === 'Financial_Report.xlsx') return 'FINANCIAL-REPORT';
+  return 'unknown';
+}
+
+function formatDocumentSection(docs: CategorizedDocuments): string {
+  const sections: string[] = [];
+  if (docs.primary.length) {
+    sections.push(`Primary (${docs.primary.length}): ${formatDocList(docs.primary)}`);
+  }
+  if (docs.exhibits.length) {
+    sections.push(`Exhibits (${docs.exhibits.length}): ${formatDocList(docs.exhibits)}`);
+  }
+  if (docs.auxiliary.length) {
+    sections.push(`Auxiliary (${docs.auxiliary.length}): ${formatDocList(docs.auxiliary)}`);
+  }
+  if (docs.xbrl?.length) {
+    sections.push(`XBRL (${docs.xbrl.length}): ${formatDocList(docs.xbrl)}`);
+  }
+  return sections.length ? `\n${sections.join('\n')}` : '';
+}
+
+function formatDocList(entries: DocumentEntry[]): string {
+  const shown = entries.slice(0, MAX_DOCUMENTS_IN_FORMAT);
+  const extra = entries.length - shown.length;
+  const list = shown
+    .map((d) => {
+      const tail = [
+        d.type,
+        d.size !== undefined ? `${d.size}B` : null,
+        d.description ? `"${d.description}"` : null,
+      ]
+        .filter(Boolean)
+        .join(', ');
+      return `${d.name} [${tail}]`;
+    })
+    .join(', ');
+  return `${list}${extra > 0 ? `, +${extra} more` : ''}`;
 }

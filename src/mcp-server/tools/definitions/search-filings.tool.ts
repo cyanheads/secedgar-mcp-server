@@ -117,28 +117,71 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .max(9999)
       .default(0)
       .describe(
-        'Pagination offset. Increment by limit for the next page. EDGAR caps total accessible results at 10,000 — offsets past this return nothing.',
+        'Pagination offset. Increment by limit for the next page. EDGAR caps total accessible results at 10,000 — offsets past this return nothing. Under date sort, pagination is bounded to the first 100 hits.',
+      ),
+    sort: z
+      .enum(['filing_date_desc', 'filing_date_asc', 'relevance'])
+      .default('filing_date_desc')
+      .describe(
+        'Result ordering. "filing_date_desc" (default) returns most recent first. "filing_date_asc" returns oldest first. "relevance" returns SEC\'s native search-score order, which weights term match strength over recency. Date sorts re-order the top 100 EFTS relevance hits — for broad queries with more than 100 matches and no entity targeting, date-newest filings may sit outside that window. Add ticker:/cik: targeting or tighten the query to keep matches under 100 if absolute recency matters.',
       ),
   }),
 
   output: z.object({
-    total: z.number().describe('Total matching filings (capped at 10,000).'),
-    total_is_exact: z.boolean().describe('False when total hits the 10,000 cap.'),
+    total: z
+      .number()
+      .describe(
+        'Total matching filings (capped at 10,000). Under entity targeting (ticker:/cik:), this becomes the count of entity-matching hits within the EFTS sample window — a lower bound when more EFTS matches exist beyond the window.',
+      ),
+    total_is_exact: z
+      .boolean()
+      .describe(
+        'False when total hits the 10,000 cap, or when entity targeting filtered a sample that did not cover the full EFTS match set.',
+      ),
     results: z
       .array(
         z
           .object({
             accession_number: z
               .string()
-              .describe('Use with secedgar_get_filing to retrieve content.'),
-            form: z.string().optional().describe('Form type.'),
-            filing_date: z.string().describe('Date filed.'),
-            period_ending: z.string().optional().describe('Period of report.'),
-            company_name: z.string().describe('Filing entity name.'),
-            cik: z.string().describe('Company CIK.'),
-            file_description: z.string().optional().describe('Document description.'),
-            sic: z.string().optional().describe('SIC code.'),
-            location: z.string().optional().describe('Business location.'),
+              .describe(
+                'Filing accession number. Pass to secedgar_get_filing to retrieve the document text.',
+              ),
+            form: z
+              .string()
+              .optional()
+              .describe(
+                'Form type (e.g. "10-K"). Absent for hits where the index lacks a form tag.',
+              ),
+            filing_date: z.string().describe('Date the filing was submitted (YYYY-MM-DD).'),
+            period_ending: z
+              .string()
+              .optional()
+              .describe(
+                'Period the filing reports on (YYYY-MM-DD). Absent for filings without a reporting period (e.g., proxy statements, ownership reports).',
+              ),
+            company_name: z
+              .string()
+              .describe('Filing entity, with ticker/CIK parentheticals stripped.'),
+            cik: z.string().describe('Filing entity CIK, zero-padded to 10 digits.'),
+            file_description: z
+              .string()
+              .optional()
+              .describe(
+                'SEC-provided description of the matching document (e.g., "EX-99.1"). Absent when SEC published none.',
+              ),
+            sic: z
+              .string()
+              .optional()
+              .describe(
+                'SIC industry code for the filer. Absent for filers without a classification.',
+              ),
+            location: z
+              .string()
+              .optional()
+              .describe(
+                'Business location (state or country code). Absent when SEC has no location for this filer.',
+              ),
           })
           .describe('One matching filing hit from the full-text search index.'),
       )
@@ -162,8 +205,13 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     // Resolve ticker:/cik: entity targeting → company name in query + CIK for filtering
     const { query, entityCik } = await resolveEntityTargeting(input.query);
 
-    // When entity-filtering, over-fetch from EFTS since we'll post-filter by CIK
-    const fetchSize = entityCik ? 100 : input.limit;
+    // EFTS scores by relevance and exposes no sort param. When the caller wants
+    // a date sort (the default) or entity filtering, we over-fetch the EFTS
+    // window and reorder/slice client-side. Pure relevance mode keeps the
+    // existing pass-through behavior so callers paying for relevance get it.
+    const wideFetch = entityCik !== undefined || input.sort !== 'relevance';
+    const fetchFrom = wideFetch ? 0 : input.offset;
+    const fetchSize = wideFetch ? 100 : input.limit;
 
     const api = getEdgarApiService();
     const response = await api.searchFilings({
@@ -171,25 +219,34 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       forms: input.forms,
       startDate: input.start_date,
       endDate: input.end_date,
-      from: input.offset,
+      from: fetchFrom,
       size: fetchSize,
     });
 
     let total = response.hits.total.value;
     let totalIsExact = response.hits.total.relation === 'eq';
 
-    // search-index endpoint ignores size/from params (always returns up to 100),
-    // so apply client-side slicing to respect the requested limit
     let hits = response.hits.hits;
 
-    // Post-filter by entity CIK when entity targeting was used
+    // Post-filter by entity CIK when entity targeting was used. We can only claim
+    // an exact total when the EFTS sample window already contained the full match
+    // set; if EFTS reported more matches than fit in our sample, additional
+    // entity hits may exist beyond the window and `total` is a lower bound.
     if (entityCik) {
+      const sampleCoversAll = total <= hits.length;
       hits = hits.filter((h) => h._source.ciks?.includes(entityCik));
       total = hits.length;
-      totalIsExact = true;
+      totalIsExact = sampleCoversAll;
     }
 
-    const sliced = hits.slice(0, input.limit);
+    if (input.sort === 'filing_date_desc') {
+      hits = [...hits].sort((a, b) => b._source.file_date.localeCompare(a._source.file_date));
+    } else if (input.sort === 'filing_date_asc') {
+      hits = [...hits].sort((a, b) => a._source.file_date.localeCompare(b._source.file_date));
+    }
+
+    const startIdx = wideFetch ? input.offset : 0;
+    const sliced = hits.slice(startIdx, startIdx + input.limit);
 
     const results = sliced.map((hit) => {
       const accessionNumber = hit._source.adsh || hit._id.split(':')[0] || hit._id;

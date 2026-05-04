@@ -62,6 +62,7 @@ const mockApi = {
   findFilingCiks: vi.fn(),
   tryGetFilingIndex: vi.fn(),
   tryGetFilingDocument: vi.fn(),
+  tryGetFilingHeaders: vi.fn(),
   getSubmissions: vi.fn(),
 };
 
@@ -71,6 +72,13 @@ beforeEach(() => {
   mockApi.findFilingCiks.mockResolvedValue(['0000320193']);
   mockApi.tryGetFilingIndex.mockResolvedValue(mockIndex);
   mockApi.tryGetFilingDocument.mockResolvedValue('<html><body><p>Filing content</p></body></html>');
+  mockApi.tryGetFilingHeaders.mockResolvedValue(
+    new Map([
+      ['aapl-20230930.htm', { type: '10-K', sequence: '1', description: '10-K' }],
+      ['ex-21.htm', { type: 'EX-21', sequence: '2', description: 'EX-21' }],
+      ['R1.htm', { type: 'XML', sequence: '99' }],
+    ]),
+  );
   mockApi.getSubmissions.mockResolvedValue(mockSubmissions);
   vi.mocked(filingToText).mockReturnValue({
     text: 'Filing content',
@@ -261,7 +269,7 @@ describe('getFilingTool', () => {
     await expect(getFilingTool.handler(input, ctx)).rejects.toThrow(/not found in this filing/);
   });
 
-  it('includes all documents in response', async () => {
+  it('categorizes documents into primary, exhibits, and auxiliary; suppresses XBRL by default', async () => {
     const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({
       accession_number: '0000320193-23-000106',
@@ -269,9 +277,51 @@ describe('getFilingTool', () => {
     });
     const result = await getFilingTool.handler(input, ctx);
 
-    expect(result.documents).toHaveLength(3);
-    expect(result.documents[0].name).toBe('aapl-20230930.htm');
-    expect(result.documents[0].size).toBe(500000);
+    expect(result.documents.primary).toHaveLength(1);
+    expect(result.documents.primary[0]).toMatchObject({
+      name: 'aapl-20230930.htm',
+      type: '10-K',
+      size: 500000,
+    });
+    expect(result.documents.exhibits).toHaveLength(1);
+    expect(result.documents.exhibits[0]).toMatchObject({ name: 'ex-21.htm', type: 'EX-21' });
+    expect(result.documents.auxiliary).toEqual([]);
+    // R1.htm is an XBRL viewer fragment — suppressed when include_xbrl=false (default)
+    expect(result.documents.xbrl).toBeUndefined();
+  });
+
+  it('surfaces XBRL artifacts under documents.xbrl when include_xbrl=true', async () => {
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: '0000320193-23-000106',
+      cik: '320193',
+      include_xbrl: true,
+    });
+    const result = await getFilingTool.handler(input, ctx);
+
+    expect(result.documents.xbrl).toHaveLength(1);
+    expect(result.documents.xbrl?.[0]).toMatchObject({ name: 'R1.htm' });
+  });
+
+  it('falls back to name-pattern type inference when filing headers are unavailable', async () => {
+    mockApi.tryGetFilingHeaders.mockResolvedValue(null);
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: '0000320193-23-000106',
+      cik: '320193',
+      include_xbrl: true,
+    });
+    const result = await getFilingTool.handler(input, ctx);
+
+    // Without headers, primary still resolved by largest non-R .htm; ex-21.htm
+    // lacks an "EX-" name pattern so falls into auxiliary; R1.htm is detected
+    // as XBRL purely from its filename.
+    expect(result.documents.primary[0]?.name).toBe('aapl-20230930.htm');
+    expect(result.documents.primary[0]?.type).toBe('unknown');
+    expect(result.documents.exhibits).toEqual([]);
+    expect(result.documents.auxiliary[0]?.name).toBe('ex-21.htm');
+    expect(result.documents.xbrl).toHaveLength(1);
+    expect(result.documents.xbrl?.[0]).toMatchObject({ name: 'R1.htm', type: 'XBRL-VIEWER' });
   });
 
   it('constructs correct filing URL', async () => {
@@ -334,7 +384,11 @@ describe('getFilingTool', () => {
       company_name: 'Apple Inc.',
       cik: '0000320193',
       primary_document: 'aapl-20230930.htm',
-      documents: [],
+      documents: {
+        primary: [{ name: 'aapl-20230930.htm', type: '10-K' }],
+        exhibits: [{ name: 'ex-21.htm', type: 'EX-21' }],
+        auxiliary: [],
+      },
       content: 'Sample filing text',
       content_truncated: true,
       content_total_length: 500000,
@@ -346,5 +400,7 @@ describe('getFilingTool', () => {
     expect(blocks[0].text).toContain('10-K');
     expect(blocks[0].text).toContain('Apple Inc.');
     expect(blocks[0].text).toContain('truncated');
+    expect(blocks[0].text).toContain('Exhibits (1)');
+    expect(blocks[0].text).toContain('ex-21.htm [EX-21]');
   });
 });

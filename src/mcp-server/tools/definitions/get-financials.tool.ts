@@ -12,7 +12,7 @@ import type { CompanyConceptUnit } from '@/services/edgar/types.js';
 
 export const getFinancialsTool = tool('secedgar_get_financials', {
   description:
-    'Get historical XBRL financial data for a company. Accepts friendly concept names (e.g., "revenue", "net_income", "assets") or raw XBRL tags. Automatically handles historical tag changes and deduplicates data.',
+    'Get historical XBRL financial data for a company. Accepts friendly concept names (e.g., "revenue", "net_income", "assets") or raw XBRL tags. Discover available friendly names with secedgar_search_concepts. Handles historical tag changes and deduplicates data automatically.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -61,16 +61,21 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       .enum(['annual', 'quarterly', 'all'])
       .optional()
       .describe(
-        'Filter to annual (FY) or quarterly (Q1-Q4) data. "all" returns both. Defaults: "annual" for income/cash-flow concepts, "all" for balance-sheet (instant) items so a bare friendly-name call returns data without a follow-up retry.',
+        'Filter to annual (FY) or quarterly (Q1-Q4) data. "all" returns both. When omitted, defaults to "annual" for income/cash-flow concepts and "all" for balance-sheet (instant) items so balance-sheet calls return data on the first attempt.',
       ),
   }),
 
   output: z.object({
-    company: z.string().describe('Company name.'),
-    cik: z.string().describe('Company CIK.'),
+    company: z.string().describe('Resolved entity name (SEC-conformed).'),
+    cik: z.string().describe('Resolved CIK, zero-padded to 10 digits.'),
     concept: z.string().describe('XBRL tag name used.'),
     label: z.string().describe('Human-readable label for the concept.'),
-    description: z.string().optional().describe('XBRL taxonomy description.'),
+    description: z
+      .string()
+      .optional()
+      .describe(
+        'XBRL taxonomy description for this concept. Often absent for company-extension tags or older concepts.',
+      ),
     unit: z.string().describe('Unit of measure (e.g., "USD", "shares", "USD/shares").'),
     data: z
       .array(
@@ -80,8 +85,18 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
             value: z.number().describe('Reported value.'),
             start: z.string().optional().describe('Period start date (duration items only).'),
             end: z.string().describe('Period end date.'),
-            fiscal_year: z.number().nullable().describe('Fiscal year.'),
-            fiscal_period: z.string().nullable().describe('Fiscal period (FY, Q1, Q2, Q3, Q4).'),
+            fiscal_year: z
+              .number()
+              .nullable()
+              .describe(
+                'Fiscal year of the source filing. Null when the source filing did not encode a fiscal year.',
+              ),
+            fiscal_period: z
+              .string()
+              .nullable()
+              .describe(
+                'Fiscal period of the source filing (FY, Q1, Q2, Q3, Q4). Null when the source filing did not encode a fiscal period.',
+              ),
             form: z.string().describe('Source filing type (10-K, 10-Q, etc.).'),
             filed: z.string().describe('Date the source filing was submitted.'),
             accession_number: z

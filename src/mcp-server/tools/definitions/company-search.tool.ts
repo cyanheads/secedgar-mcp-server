@@ -19,7 +19,7 @@ interface FilingEntry {
 
 export const companySearchTool = tool('secedgar_company_search', {
   description:
-    'Find companies and retrieve entity info with optional recent filings. Entry point for most EDGAR workflows — resolve tickers, names, or CIKs to entity details.',
+    'Find companies and retrieve entity info with optional recent filings. Entry point for most EDGAR workflows — resolve tickers, names, or CIKs to entity details, then pass an accession number to secedgar_get_filing for the underlying document.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -72,7 +72,12 @@ export const companySearchTool = tool('secedgar_company_search', {
     exchanges: z.array(z.string()).describe('Exchanges where listed.'),
     sic: z.string().describe('SIC industry code.'),
     sic_description: z.string().describe('Human-readable SIC description.'),
-    state_of_incorporation: z.string().optional().describe('State of incorporation.'),
+    state_of_incorporation: z
+      .string()
+      .optional()
+      .describe(
+        'State of incorporation (US two-letter code, e.g. "DE"). Omitted for some entities, including many foreign filers and individuals.',
+      ),
     fiscal_year_end: z.string().describe('Fiscal year end (MMDD format).'),
     filings: z
       .array(

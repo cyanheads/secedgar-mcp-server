@@ -81,7 +81,7 @@ describe('searchFilingsTool', () => {
     expect(result.results[0].company_name).toBe('Apple Inc.');
   });
 
-  it('passes search params to API', async () => {
+  it('passes through caller offset/limit when sort=relevance', async () => {
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({
       query: 'revenue growth',
@@ -90,6 +90,7 @@ describe('searchFilingsTool', () => {
       end_date: '2023-12-31',
       limit: 10,
       offset: 20,
+      sort: 'relevance',
     });
     await searchFilingsTool.handler(input, ctx);
 
@@ -103,12 +104,153 @@ describe('searchFilingsTool', () => {
     });
   });
 
+  it('over-fetches and applies offset client-side under date sort', async () => {
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      query: 'revenue growth',
+      forms: ['10-K'],
+      limit: 10,
+      offset: 20,
+    });
+    await searchFilingsTool.handler(input, ctx);
+
+    // Default sort is filing_date_desc → fetch the EFTS window (size=100, from=0)
+    // so we have enough hits to sort and paginate over.
+    expect(mockApi.searchFilings).toHaveBeenCalledWith({
+      query: 'revenue growth',
+      forms: ['10-K'],
+      startDate: undefined,
+      endDate: undefined,
+      from: 0,
+      size: 100,
+    });
+  });
+
   it('applies client-side limit slicing', async () => {
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({ query: 'test', limit: 1 });
     const result = await searchFilingsTool.handler(input, ctx);
 
     expect(result.results).toHaveLength(1);
+  });
+
+  it('sorts results by filing_date desc by default', async () => {
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: {
+        total: { value: 3, relation: 'eq' },
+        hits: [
+          // Deliberately out of date order — mimics EFTS relevance scoring
+          {
+            _id: 'a',
+            _source: {
+              adsh: 'A',
+              form: '10-K',
+              file_date: '2012-03-01',
+              display_names: ['NVIDIA Corp'],
+              ciks: ['0001045810'],
+            },
+          },
+          {
+            _id: 'b',
+            _source: {
+              adsh: 'B',
+              form: '10-K',
+              file_date: '2025-02-26',
+              display_names: ['NVIDIA Corp'],
+              ciks: ['0001045810'],
+            },
+          },
+          {
+            _id: 'c',
+            _source: {
+              adsh: 'C',
+              form: '10-K',
+              file_date: '2018-05-15',
+              display_names: ['NVIDIA Corp'],
+              ciks: ['0001045810'],
+            },
+          },
+        ],
+      },
+    });
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({ query: 'export controls', limit: 3 });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    expect(result.results.map((r) => r.filing_date)).toEqual([
+      '2025-02-26',
+      '2018-05-15',
+      '2012-03-01',
+    ]);
+  });
+
+  it('sorts results by filing_date asc when sort=filing_date_asc', async () => {
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: {
+        total: { value: 2, relation: 'eq' },
+        hits: [
+          {
+            _id: 'a',
+            _source: {
+              adsh: 'A',
+              file_date: '2025-01-01',
+              display_names: ['X'],
+              ciks: ['1'],
+            },
+          },
+          {
+            _id: 'b',
+            _source: {
+              adsh: 'B',
+              file_date: '2010-01-01',
+              display_names: ['X'],
+              ciks: ['1'],
+            },
+          },
+        ],
+      },
+    });
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({ query: 'foo', sort: 'filing_date_asc' });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    expect(result.results.map((r) => r.filing_date)).toEqual(['2010-01-01', '2025-01-01']);
+  });
+
+  it('preserves EFTS order when sort=relevance', async () => {
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: {
+        total: { value: 2, relation: 'eq' },
+        hits: [
+          {
+            _id: 'a',
+            _source: {
+              adsh: 'A',
+              file_date: '2010-01-01',
+              display_names: ['X'],
+              ciks: ['1'],
+            },
+          },
+          {
+            _id: 'b',
+            _source: {
+              adsh: 'B',
+              file_date: '2025-01-01',
+              display_names: ['X'],
+              ciks: ['1'],
+            },
+          },
+        ],
+      },
+    });
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({ query: 'foo', sort: 'relevance' });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    expect(result.results.map((r) => r.filing_date)).toEqual(['2010-01-01', '2025-01-01']);
   });
 
   it('extracts form distribution from aggregations', async () => {
@@ -182,10 +324,11 @@ describe('searchFilingsTool', () => {
     expect(result.results[0].accession_number).toBe('0000320193-23-000106');
   });
 
-  it('uses default limit and offset', () => {
+  it('uses default limit, offset, and sort', () => {
     const input = searchFilingsTool.input.parse({ query: 'test' });
     expect(input.limit).toBe(20);
     expect(input.offset).toBe(0);
+    expect(input.sort).toBe('filing_date_desc');
   });
 
   it('formats output correctly', () => {

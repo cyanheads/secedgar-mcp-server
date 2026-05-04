@@ -6,7 +6,7 @@
 import { prompt, z } from '@cyanheads/mcp-ts-core';
 
 export const companyAnalysisPrompt = prompt('secedgar_company_analysis', {
-  description: `Guides a structured analysis of a public company's SEC filings: identify recent filings, extract financial trends, surface risk factors, and note material events.`,
+  description: `Guide a structured analysis of a public company's SEC filings: identify recent filings, extract financial trends, surface risk factors, and note material events.`,
 
   args: z.object({
     company: z.string().describe('Company name, ticker symbol, or CIK number to analyze.'),
@@ -31,7 +31,7 @@ export const companyAnalysisPrompt = prompt('secedgar_company_analysis', {
           '1. **Company Identification** — Use `secedgar_company_search` to resolve the company and review recent filings.',
           '2. **Financial Trends** — Use `secedgar_get_financials` to pull key metrics (revenue, net_income, eps_diluted, assets, debt, operating_cash_flow) and identify trends over the last 3-5 years.',
           '3. **Recent Filings Review** — Use `secedgar_get_filing` to read the most recent 10-K or 10-Q for qualitative insights (risk factors, MD&A, business overview).',
-          '4. **Material Events** — Search for recent 8-K filings to identify material events (M&A, leadership changes, earnings surprises).',
+          '4. **Material Events** — Use `secedgar_search_filings` (or call `secedgar_company_search` with `form_types: ["8-K"]`) to surface recent material events (M&A, leadership changes, earnings surprises).',
           '5. **Industry Context** — Use `secedgar_compare_metric` to compare key metrics against peers.',
           '',
           'Present findings as:',

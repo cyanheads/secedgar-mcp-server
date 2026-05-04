@@ -10,7 +10,7 @@ import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
 export const compareMetricTool = tool('secedgar_compare_metric', {
   description:
-    'Compare a financial metric across all reporting companies for a specific period. Uses the same friendly concept names as secedgar_get_financials (e.g., "revenue", "assets").',
+    'Compare a financial metric across all reporting companies for a specific period. Accepts the same friendly concept names as secedgar_get_financials (e.g., "revenue", "assets") — discover available names with secedgar_search_concepts.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -37,13 +37,13 @@ export const compareMetricTool = tool('secedgar_compare_metric', {
     period: z
       .string()
       .describe(
-        'Calendar period. Formats:\n  "CY2023" — full year 2023 (duration, for income statement items)\n  "CY2024Q2" — Q2 2024 (duration, for quarterly income items)\n  "CY2023Q4I" — Q4 2023 instant (balance sheet items like assets, cash)\nUse duration periods (no I suffix) for income/cash flow items. Use instant periods (I suffix) for balance sheet items.',
+        'Calendar period. Use duration periods (no I suffix) for income/cash-flow items: "CY2023" (full year), "CY2024Q2" (single quarter). Use instant periods (I suffix) for balance-sheet items: "CY2023Q4I" (snapshot at Q4 close).',
       ),
     unit: z
-      .enum(['USD', 'USD-per-shares', 'shares', 'pure'])
+      .enum(['USD', 'USD-per-shares', 'USD/shares', 'shares', 'pure'])
       .default('USD')
       .describe(
-        'Unit of measure. Use "USD-per-shares" for EPS, "shares" for share counts, "pure" for ratios.',
+        'Unit of measure. Use "USD-per-shares" (or equivalently "USD/shares") for EPS, "shares" for share counts, "pure" for ratios. Ignored when concept resolves to a friendly name with a known unit.',
       ),
     limit: z.number().int().min(1).max(100).default(25).describe('Number of companies to return.'),
     sort: z
@@ -55,9 +55,17 @@ export const compareMetricTool = tool('secedgar_compare_metric', {
   }),
 
   output: z.object({
-    concept: z.string().describe('XBRL tag used.'),
-    period: z.string().describe('Calendar period.'),
-    unit: z.string().describe('Unit of measure.'),
+    concept: z
+      .string()
+      .describe(
+        'XBRL tag the data was actually fetched against (after resolving any friendly name).',
+      ),
+    period: z.string().describe('Calendar period the data was fetched for, echoed from input.'),
+    unit: z
+      .string()
+      .describe(
+        'Unit of measure used for the lookup (always normalized to dashed form, e.g. "USD-per-shares").',
+      ),
     label: z.string().describe('Human-readable concept label.'),
     total_companies: z.number().describe('Total companies reporting this metric for this period.'),
     data: z
@@ -69,7 +77,12 @@ export const compareMetricTool = tool('secedgar_compare_metric', {
             cik: z.string().describe('Company CIK.'),
             ticker: z.string().optional().describe('Ticker symbol (if available).'),
             value: z.number().describe('Reported value.'),
-            location: z.string().optional().describe('Business location.'),
+            location: z
+              .string()
+              .optional()
+              .describe(
+                'Business location (state or country). Absent when SEC has no location for this filer.',
+              ),
             period_end: z.string().describe('Period end date.'),
             accession_number: z.string().describe('Source filing for secedgar_get_filing.'),
           })
@@ -86,7 +99,8 @@ export const compareMetricTool = tool('secedgar_compare_metric', {
     const tag = mapping?.tags[0] ?? input.concept;
     const taxonomy = mapping?.taxonomy ?? 'us-gaap';
     const label = mapping?.label ?? input.concept;
-    const unit = mapping ? mapping.unit.replace('/', '-per-') : input.unit;
+    // SEC's frames API path uses dashed form (USD-per-shares); accept either form on input.
+    const unit = (mapping?.unit ?? input.unit).replace('/', '-per-');
 
     // `tryGetFrames` returns null when no companies report this combination for this period.
     const framesResponse = await api.tryGetFrames(taxonomy, tag, unit, input.period);
