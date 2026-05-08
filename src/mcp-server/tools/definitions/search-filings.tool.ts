@@ -66,7 +66,7 @@ async function resolveEntityTargeting(
 
 export const searchFilingsTool = tool('secedgar_search_filings', {
   description:
-    'Full-text search across all EDGAR filing documents since 1993. Supports exact phrases, boolean operators, wildcards, and entity targeting (ticker:AAPL or cik:320193 in query).',
+    'Search the full-text index of EDGAR filings since 1993. Supports exact phrases, boolean operators, wildcards, and entity targeting (ticker:AAPL or cik:320193 in query).',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -103,13 +103,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .describe(
         'End of date range (YYYY-MM-DD). Both start_date and end_date must be provided for date filtering.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(100)
-      .default(20)
-      .describe('Results per page. Max 100. Default 20 to keep responses concise.'),
+    limit: z.number().int().min(1).max(100).default(20).describe('Results per page. Max 100.'),
     offset: z
       .number()
       .int()
@@ -123,7 +117,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .enum(['filing_date_desc', 'filing_date_asc', 'relevance'])
       .default('filing_date_desc')
       .describe(
-        'Result ordering. "filing_date_desc" (default) returns most recent first. "filing_date_asc" returns oldest first. "relevance" returns SEC\'s native search-score order, which weights term match strength over recency. Date sorts re-order the top 100 EFTS relevance hits — for broad queries with more than 100 matches and no entity targeting, date-newest filings may sit outside that window. Add ticker:/cik: targeting or tighten the query to keep matches under 100 if absolute recency matters.',
+        'Result ordering. "filing_date_desc" (default) returns most recent first. "filing_date_asc" returns oldest first. "relevance" returns SEC\'s native search-score order, which weights term match strength over recency. Date sorts re-order the top 100 hits returned by the search index — for broad queries with more than 100 matches and no entity targeting, date-newest filings may sit outside that window. Entity targeting (ticker:/cik:) or a narrower query keeps matches inside the window when absolute recency matters.',
       ),
   }),
 
@@ -131,12 +125,12 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     total: z
       .number()
       .describe(
-        'Total matching filings (capped at 10,000). Under entity targeting (ticker:/cik:), this becomes the count of entity-matching hits within the EFTS sample window — a lower bound when more EFTS matches exist beyond the window.',
+        'Total matching filings (capped at 10,000). Under entity targeting (ticker:/cik:), this becomes the count of entity-matching hits within the sampled window of search results — a lower bound when more matches exist beyond the window.',
       ),
     total_is_exact: z
       .boolean()
       .describe(
-        'False when total hits the 10,000 cap, or when entity targeting filtered a sample that did not cover the full EFTS match set.',
+        'False when total hits the 10,000 cap, or when entity targeting filtered a sample that did not cover the full match set.',
       ),
     results: z
       .array(
@@ -264,9 +258,18 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       };
     });
 
-    // Extract form distribution from aggregations
+    // Form distribution must reflect the same set as `total`. When entity
+    // targeting filtered the EFTS sample client-side, recompute from `hits`;
+    // EFTS's aggregation reflects the pre-filter sample and would disagree.
     let formDistribution: Record<string, number> | undefined;
-    if (response.aggregations?.form_filter?.buckets) {
+    if (entityCik) {
+      const dist: Record<string, number> = {};
+      for (const hit of hits) {
+        const form = hit._source.form;
+        if (form) dist[form] = (dist[form] ?? 0) + 1;
+      }
+      if (Object.keys(dist).length > 0) formDistribution = dist;
+    } else if (response.aggregations?.form_filter?.buckets) {
       formDistribution = {};
       for (const bucket of response.aggregations.form_filter.buckets) {
         formDistribution[bucket.key] = bucket.doc_count;

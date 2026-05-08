@@ -273,6 +273,57 @@ describe('searchFilingsTool', () => {
     expect(result.form_distribution).toBeUndefined();
   });
 
+  it('rebuilds form_distribution from filtered hits when entity targeting is used', async () => {
+    (mockApi as any).resolveCik = vi
+      .fn()
+      .mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.' });
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: {
+        total: { value: 3, relation: 'eq' },
+        hits: [
+          {
+            _id: 'a',
+            _source: {
+              adsh: 'A',
+              form: '10-K',
+              file_date: '2024-01-01',
+              display_names: ['Apple Inc.'],
+              ciks: ['0000320193'],
+            },
+          },
+          {
+            _id: 'b',
+            _source: {
+              adsh: 'B',
+              form: '10-Q',
+              file_date: '2024-04-01',
+              display_names: ['Apple Inc.'],
+              ciks: ['0000320193'],
+            },
+          },
+          {
+            _id: 'c',
+            _source: {
+              adsh: 'C',
+              form: '10-K',
+              file_date: '2024-02-01',
+              display_names: ['Other Co.'],
+              ciks: ['9999999999'],
+            },
+          },
+        ],
+      },
+      aggregations: { form_filter: { buckets: [{ key: '10-K', doc_count: 2 }] } },
+    });
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({ query: 'foo ticker:AAPL' });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    expect(result.total).toBe(2);
+    expect(result.form_distribution).toEqual({ '10-K': 1, '10-Q': 1 });
+  });
+
   it('reports non-exact totals', async () => {
     mockApi.searchFilings.mockResolvedValue({
       ...mockEftsResponse,
