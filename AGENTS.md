@@ -1,8 +1,9 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.4.3
+**Version:** 0.4.4
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
+**Engines:** Bun ≥1.3.0, Node ≥24.0.0
 
 Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-only, no API keys required. Full design: `docs/sec-edgar-mcp-design.md`.
 
@@ -202,13 +203,14 @@ Available skills:
 | `maintenance` | Investigate changelogs, adopt upstream changes, sync skills to agent dirs |
 | `api-auth` | Auth modes, scopes, JWT/OAuth |
 | `api-config` | AppConfig, parseConfig, env vars |
-| `api-canvas` | DataCanvas primitive: register tabular data, run SQL, export results (Tier 3, DuckDB) |
+| `api-canvas` | DataCanvas: register tabular data, run SQL, export, plus the `spillover()` helper for big result sets — Tier 3, DuckDB |
 | `api-context` | Context interface, logger, state, progress |
 | `api-errors` | McpError, JsonRpcErrorCode, error patterns |
 | `api-linter` | MCP definition lint rules reference (`format-parity`, `describe-on-fields`, `server-json-*`, …) |
 | `api-services` | LLM, Speech, Graph services |
+| `api-telemetry` | OTel catalog: spans, metrics, completion logs, env config, cardinality rules |
 | `api-testing` | createMockContext, test patterns |
-| `api-utils` | Formatting, parsing, security, pagination, scheduling |
+| `api-utils` | Formatting, parsing, security, pagination, scheduling, telemetry helpers |
 | `api-workers` | Cloudflare Workers runtime |
 
 When you complete a skill's checklist, check the boxes and add a completion timestamp at the end (e.g., `Completed: 2026-03-11`).
@@ -242,7 +244,7 @@ Directory-based. Source of truth is `changelog/<major.minor>.x/<version>.md` —
 **To add a release entry:**
 
 1. Author `changelog/<major.minor>.x/<version>.md` using `changelog/template.md` as a reference.
-2. Add YAML frontmatter: `summary` (≤250 chars, no markdown) and `breaking: false` (or `true`).
+2. Add YAML frontmatter: `summary` (≤250 chars, no markdown), optional `breaking: true` flags breaking changes (`· ⚠️ Breaking` badge), optional `security: true` flags security fixes (`· 🛡️ Security` badge, pairs with a `## Security` body section).
 3. Set the H1 heading to `# <version> — YYYY-MM-DD`.
 4. Run `bun run changelog:build` to regenerate `CHANGELOG.md`.
 

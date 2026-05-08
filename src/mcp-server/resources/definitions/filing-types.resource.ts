@@ -74,8 +74,7 @@ const FILING_TYPES = [
 export const filingTypesResource = resource('secedgar://filing-types', {
   name: 'SEC Filing Types',
   description:
-    'Reference list of common SEC filing types with descriptions, cadence, and typical use cases. ' +
-    'Helps choose the forms parameter for secedgar_search_filings or the form_types filter for secedgar_company_search.',
+    'Reference list of common SEC filing types with descriptions, cadence, and typical use cases. Helps choose the forms parameter for secedgar_search_filings or the form_types filter for secedgar_company_search.',
   mimeType: 'text/markdown',
 
   handler(_params, _ctx) {

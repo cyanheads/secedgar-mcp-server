@@ -39,7 +39,7 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
       .enum(GROUP_VALUES)
       .optional()
       .describe(
-        'Filter to a single financial statement group. income_statement covers P&L items; balance_sheet covers position items (use instant periods in compare_metric); cash_flow covers CF statement items; per_share covers EPS; entity_info covers DEI items like shares outstanding.',
+        'Filter to a single financial statement group. income_statement covers P&L items; balance_sheet covers position items (use instant periods in secedgar_compare_metric); cash_flow covers CF statement items; per_share covers EPS; entity_info covers DEI items like shares outstanding.',
       ),
     taxonomy: z
       .enum(TAXONOMY_VALUES)

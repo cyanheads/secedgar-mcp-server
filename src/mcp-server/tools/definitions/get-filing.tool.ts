@@ -3,7 +3,7 @@
  * @module mcp-server/tools/definitions/get-filing
  */
 
-import { type HandlerContext, type ReasonOf, tool, z } from '@cyanheads/mcp-ts-core';
+import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import type { FilingDocumentHeader } from '@/services/edgar/filing-headers.js';
@@ -27,28 +27,16 @@ interface CategorizedDocuments {
   xbrl?: DocumentEntry[] | undefined;
 }
 
-const FILING_ERRORS = [
-  {
-    reason: 'document_not_found',
-    code: JsonRpcErrorCode.NotFound,
-    when: 'A specific document was requested but not present in the filing archive',
-    recovery: 'Pick a name from the available_documents list returned in error data.',
-  },
-  {
-    reason: 'no_documents',
-    code: JsonRpcErrorCode.NotFound,
-    when: 'Filing index lists items but no fetchable primary document was found',
-    recovery: 'Specify a document name from available_documents in error data.',
-  },
-  {
-    reason: 'filing_not_found',
-    code: JsonRpcErrorCode.NotFound,
-    when: 'No filing matches the accession number under any candidate CIK',
-    recovery: 'Verify the accession number and pass the company CIK explicitly.',
-  },
-] as const;
-
-type FilingHandlerCtx = HandlerContext<ReasonOf<typeof FILING_ERRORS>>;
+type ResolveOutcome =
+  | { ok: true; cik: string; html: string; index: FilingIndex; targetName: string }
+  | {
+      ok: false;
+      kind: 'document_not_found';
+      requestedDocument: string;
+      availableDocuments: string[];
+    }
+  | { ok: false; kind: 'no_documents'; availableDocuments: string[] }
+  | { ok: false; kind: 'filing_not_found'; providedCik: string | undefined };
 
 const documentEntrySchema = z
   .object({
@@ -56,7 +44,7 @@ const documentEntrySchema = z
     type: z
       .string()
       .describe(
-        'SEC document type from the submission header (e.g., "10-K", "EX-21.1", "GRAPHIC", "XML"). When the header file is unavailable, falls back to a name-pattern synthetic label for known XBRL artifacts ("XBRL-LINKBASE", "XBRL-INSTANCE", etc.) and "unknown" for everything else.',
+        'SEC document type from the submission header (e.g., "10-K", "EX-21.1", "GRAPHIC", "XML"). When the submission header is unavailable, falls back to a label inferred from the filename for known XBRL artifacts ("XBRL-LINKBASE", "XBRL-INSTANCE", etc.) and "unknown" for everything else.',
       ),
     description: z
       .string()
@@ -73,7 +61,26 @@ export const getFilingTool = tool('secedgar_get_filing', {
     "Fetch a specific filing's metadata and document content by accession number. Returns the primary document as readable text, with option to fetch specific exhibits.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
-  errors: FILING_ERRORS,
+  errors: [
+    {
+      reason: 'document_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'A specific document was requested but not present in the filing archive',
+      recovery: 'Pick a name from the available_documents list returned in error data.',
+    },
+    {
+      reason: 'no_documents',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Filing index lists items but no fetchable primary document was found',
+      recovery: 'Specify a document name from available_documents in error data.',
+    },
+    {
+      reason: 'filing_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No filing matches the accession number under any candidate CIK',
+      recovery: 'Verify the accession number and pass the company CIK explicitly.',
+    },
+  ],
 
   input: z.object({
     accession_number: z
@@ -148,7 +155,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
         exhibits: z
           .array(documentEntrySchema)
           .describe(
-            'Filed exhibits (EX-21 subsidiaries, EX-31/32 certifications, EX-99 press releases, etc.). Excludes XBRL technical exhibits (EX-101.*). Identified by the EX- prefix on the header TYPE — when the submission header is unavailable, exhibits whose filename does not match a known pattern fall through to auxiliary instead.',
+            'Filed exhibits (EX-21 subsidiaries, EX-31/32 certifications, EX-99 press releases, etc.). Excludes XBRL technical exhibits (EX-101.*). Identified by the EX- prefix on the document type. Some exhibits may appear under auxiliary when the submission header is unavailable and the filename has no recognizable pattern.',
           ),
         auxiliary: z
           .array(documentEntrySchema)
@@ -163,7 +170,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
           ),
       })
       .describe(
-        'Filing documents grouped by category. Pass a name from any list as the document input param to fetch that file. XBRL viewer artifacts are suppressed by default — set include_xbrl=true to surface them under the xbrl bucket.',
+        'Filing documents grouped by category. Names from any list are valid values for the document input. XBRL viewer artifacts are suppressed by default; setting include_xbrl=true surfaces them under the xbrl bucket.',
       ),
     content: z.string().describe('Document text content, truncated to content_limit.'),
     content_truncated: z.boolean().describe('True if content was truncated.'),
@@ -175,13 +182,41 @@ export const getFilingTool = tool('secedgar_get_filing', {
     const api = getEdgarApiService();
 
     const accn = normalizeAccessionNumber(input.accession_number);
-    const { cik, index, html, targetName } = await resolveFilingArchive(
-      api,
-      ctx,
-      accn,
-      input.cik,
-      input.document,
-    );
+    const resolved = await resolveFilingArchive(api, accn, input.cik, input.document);
+    if (!resolved.ok) {
+      if (resolved.kind === 'document_not_found') {
+        throw ctx.fail(
+          'document_not_found',
+          `Document '${resolved.requestedDocument}' not found in this filing.`,
+          {
+            requested_document: resolved.requestedDocument,
+            available_documents: resolved.availableDocuments,
+            recovery: { hint: `Pick one of: ${resolved.availableDocuments.join(', ')}.` },
+          },
+        );
+      }
+      if (resolved.kind === 'no_documents') {
+        throw ctx.fail('no_documents', `No primary document found in filing ${accn}.`, {
+          accession_number: accn,
+          available_documents: resolved.availableDocuments,
+          recovery: {
+            hint: `Specify the document input from: ${resolved.availableDocuments.join(', ')}.`,
+          },
+        });
+      }
+      const cikSuffix = resolved.providedCik
+        ? ` (CIK ${resolved.providedCik.padStart(10, '0')})`
+        : '';
+      const recoveryHint = resolved.providedCik
+        ? 'Verify the accession number and CIK are correct.'
+        : 'Verify the accession number and pass the company CIK explicitly.';
+      throw ctx.fail('filing_not_found', `Filing '${accn}' not found${cikSuffix}.`, {
+        accession_number: accn,
+        cik: resolved.providedCik,
+        recovery: { hint: recoveryHint },
+      });
+    }
+    const { cik, index, html, targetName } = resolved;
     const accnNoDashes = accn.replace(/-/g, '');
 
     const { text, truncated, totalLength } = filingToText(html, input.content_limit);
@@ -268,11 +303,10 @@ function normalizeAccessionNumber(input: string): string {
 
 async function resolveFilingArchive(
   api: ReturnType<typeof getEdgarApiService>,
-  ctx: FilingHandlerCtx,
   accessionNumber: string,
   providedCik: string | undefined,
   requestedDocument: string | undefined,
-): Promise<{ cik: string; html: string; index: FilingIndex; targetName: string }> {
+): Promise<ResolveOutcome> {
   const candidateCiks = await resolveCandidateCiks(api, accessionNumber, providedCik);
   let lastIndexedItems: FilingIndexItem[] = [];
 
@@ -290,40 +324,18 @@ async function resolveFilingArchive(
     const html = await api.tryGetFilingDocument(cik, accessionNumber, targetName);
     if (!html) continue;
 
-    return { cik, html, index, targetName };
+    return { ok: true, cik, html, index, targetName };
   }
 
   const availableDocuments = lastIndexedItems.map((item) => item.name);
 
   if (requestedDocument && availableDocuments.length > 0) {
-    throw ctx.fail(
-      'document_not_found',
-      `Document '${requestedDocument}' not found in this filing.`,
-      {
-        requested_document: requestedDocument,
-        available_documents: availableDocuments,
-        recovery: { hint: `Pick one of: ${availableDocuments.join(', ')}.` },
-      },
-    );
+    return { ok: false, kind: 'document_not_found', requestedDocument, availableDocuments };
   }
-
   if (availableDocuments.length > 0) {
-    throw ctx.fail('no_documents', `No primary document found in filing ${accessionNumber}.`, {
-      accession_number: accessionNumber,
-      available_documents: availableDocuments,
-      recovery: { hint: `Specify the document input from: ${availableDocuments.join(', ')}.` },
-    });
+    return { ok: false, kind: 'no_documents', availableDocuments };
   }
-
-  const cikSuffix = providedCik ? ` (CIK ${providedCik.padStart(10, '0')})` : '';
-  const recoveryHint = providedCik
-    ? 'Verify the accession number and CIK are correct.'
-    : 'Verify the accession number and pass the company CIK explicitly.';
-  throw ctx.fail('filing_not_found', `Filing '${accessionNumber}' not found${cikSuffix}.`, {
-    accession_number: accessionNumber,
-    cik: providedCik,
-    recovery: { hint: recoveryHint },
-  });
+  return { ok: false, kind: 'filing_not_found', providedCik };
 }
 
 async function resolveCandidateCiks(

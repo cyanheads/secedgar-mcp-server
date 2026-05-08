@@ -74,7 +74,7 @@ export const compareMetricTool = tool('secedgar_compare_metric', {
           .object({
             rank: z.number().describe('Rank in sorted order.'),
             company_name: z.string().describe('Entity name.'),
-            cik: z.string().describe('Company CIK.'),
+            cik: z.string().describe('Company CIK, zero-padded to 10 digits.'),
             ticker: z.string().optional().describe('Ticker symbol (if available).'),
             value: z.number().describe('Reported value.'),
             location: z
@@ -83,7 +83,7 @@ export const compareMetricTool = tool('secedgar_compare_metric', {
               .describe(
                 'Business location (state or country). Absent when SEC has no location for this filer.',
               ),
-            period_end: z.string().describe('Period end date.'),
+            period_end: z.string().describe('Period end date (YYYY-MM-DD).'),
             accession_number: z.string().describe('Source filing for secedgar_get_filing.'),
           })
           .describe("One company's reported value for this metric and period."),

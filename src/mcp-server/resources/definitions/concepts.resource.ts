@@ -20,8 +20,7 @@ const GROUP_LABELS: Record<ConceptGroup, string> = {
 export const conceptsResource = resource('secedgar://concepts', {
   name: 'XBRL Financial Concepts',
   description:
-    'Reference list of common XBRL financial concepts grouped by financial statement, ' +
-    'mapping friendly names to XBRL tags. Read this before calling secedgar_get_financials or secedgar_compare_metric to see available concept names.',
+    'Reference list of common XBRL financial concepts grouped by financial statement, mapping friendly names accepted by secedgar_get_financials and secedgar_compare_metric to their XBRL tags.',
   mimeType: 'text/markdown',
 
   handler(_params, _ctx) {

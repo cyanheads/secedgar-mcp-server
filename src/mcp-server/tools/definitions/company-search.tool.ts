@@ -19,7 +19,7 @@ interface FilingEntry {
 
 export const companySearchTool = tool('secedgar_company_search', {
   description:
-    'Find companies and retrieve entity info with optional recent filings. Entry point for most EDGAR workflows — resolve tickers, names, or CIKs to entity details, then pass an accession number to secedgar_get_filing for the underlying document.',
+    'Find companies and retrieve entity info with optional recent filings. Entry point for most EDGAR workflows — resolves tickers, names, or CIKs to entity details, with accession numbers in the result feeding secedgar_get_filing for document content.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -83,12 +83,24 @@ export const companySearchTool = tool('secedgar_company_search', {
       .array(
         z
           .object({
-            accession_number: z.string().describe('Filing accession number.'),
+            accession_number: z
+              .string()
+              .describe(
+                'Filing accession number, dash format (e.g., 0000320193-23-000106). Pass to secedgar_get_filing.',
+              ),
             form: z.string().describe('Form type (e.g., 10-K).'),
-            filing_date: z.string().describe('Date filed.'),
-            report_date: z.string().optional().describe('Period of report.'),
+            filing_date: z.string().describe('Date the filing was submitted (YYYY-MM-DD).'),
+            report_date: z
+              .string()
+              .optional()
+              .describe(
+                'Period of report (YYYY-MM-DD). Absent for filings without a reporting period (proxy statements, ownership reports).',
+              ),
             primary_document: z.string().describe('Primary document filename.'),
-            description: z.string().optional().describe('Filing description.'),
+            description: z
+              .string()
+              .optional()
+              .describe('SEC-provided filing description. Absent when SEC published none.'),
           })
           .describe('One filing record with form type, dates, and primary document.'),
       )

@@ -83,8 +83,11 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
           .object({
             period: z.string().describe('Calendar period label (e.g., "CY2023", "CY2023Q3").'),
             value: z.number().describe('Reported value.'),
-            start: z.string().optional().describe('Period start date (duration items only).'),
-            end: z.string().describe('Period end date.'),
+            start: z
+              .string()
+              .optional()
+              .describe('Period start date (YYYY-MM-DD). Duration items only.'),
+            end: z.string().describe('Period end date (YYYY-MM-DD).'),
             fiscal_year: z
               .number()
               .nullable()
@@ -98,7 +101,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
                 'Fiscal period of the source filing (FY, Q1, Q2, Q3, Q4). Null when the source filing did not encode a fiscal period.',
               ),
             form: z.string().describe('Source filing type (10-K, 10-Q, etc.).'),
-            filed: z.string().describe('Date the source filing was submitted.'),
+            filed: z.string().describe('Date the source filing was submitted (YYYY-MM-DD).'),
             accession_number: z
               .string()
               .describe('Source filing accession number for secedgar_get_filing.'),

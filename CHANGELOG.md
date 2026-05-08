@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.4](changelog/0.4.x/0.4.4.md) — 2026-05-08
+
+secedgar_search_filings reports form_distribution consistent with total under entity targeting; framework ^0.8.13 → ^0.8.19, Node engine ≥24, schema descriptions tightened across all tools and resources.
+
 ## [0.4.3](changelog/0.4.x/0.4.3.md) — 2026-05-04
 
 secedgar_search_filings adds sort (filing_date_desc default); secedgar_get_filing categorizes documents into primary/exhibits/auxiliary/xbrl from SEC headers and gates XBRL artifacts behind include_xbrl. Closes #3, #5.
