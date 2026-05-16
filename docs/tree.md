@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-05-01 02:55:08
+Generated on: 2026-05-16 19:22:40
 
 ```text
 secedgar-mcp-server/
@@ -14,6 +14,12 @@ secedgar-mcp-server/
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
+├── changelog/
+│   ├── 0.1.x/
+│   ├── 0.2.x/
+│   ├── 0.3.x/
+│   ├── 0.4.x/
+│   └── template.md
 ├── claude-plans/
 ├── docs/
 │   └── sec-edgar-mcp-design.md
@@ -43,6 +49,8 @@ secedgar-mcp-server/
 │   │   └── SKILL.md
 │   ├── api-auth/
 │   │   └── SKILL.md
+│   ├── api-canvas/
+│   │   └── SKILL.md
 │   ├── api-config/
 │   │   └── SKILL.md
 │   ├── api-context/
@@ -56,6 +64,8 @@ secedgar-mcp-server/
 │   │   │   ├── graph.md
 │   │   │   ├── llm.md
 │   │   │   └── speech.md
+│   │   └── SKILL.md
+│   ├── api-telemetry/
 │   │   └── SKILL.md
 │   ├── api-testing/
 │   │   └── SKILL.md
@@ -92,7 +102,9 @@ secedgar-mcp-server/
 │   │   └── SKILL.md
 │   ├── security-pass/
 │   │   └── SKILL.md
-│   └── setup/
+│   ├── setup/
+│   │   └── SKILL.md
+│   └── tool-defs-analysis/
 │       └── SKILL.md
 ├── src/
 │   ├── config/
@@ -117,6 +129,7 @@ secedgar-mcp-server/
 │   │   └── edgar/
 │   │       ├── concept-map.ts
 │   │       ├── edgar-api-service.ts
+│   │       ├── filing-headers.ts
 │   │       ├── filing-to-text.ts
 │   │       └── types.ts
 │   └── index.ts
@@ -145,6 +158,7 @@ secedgar-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
