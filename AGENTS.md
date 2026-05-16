@@ -244,7 +244,7 @@ Directory-based. Source of truth is `changelog/<major.minor>.x/<version>.md` —
 **To add a release entry:**
 
 1. Author `changelog/<major.minor>.x/<version>.md` using `changelog/template.md` as a reference.
-2. Add YAML frontmatter: `summary` (≤250 chars, no markdown), optional `breaking: true` flags breaking changes (`· ⚠️ Breaking` badge), optional `security: true` flags security fixes (`· 🛡️ Security` badge, pairs with a `## Security` body section).
+2. Add YAML frontmatter: `summary` (≤350 chars, no markdown), optional `breaking: true` flags breaking changes (`· ⚠️ Breaking` badge), optional `security: true` flags security fixes (`· 🛡️ Security` badge, pairs with a `## Security` body section).
 3. Set the H1 heading to `# <version> — YYYY-MM-DD`.
 4. Run `bun run changelog:build` to regenerate `CHANGELOG.md`.
 
@@ -282,8 +282,8 @@ import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
 ## Checklist
 
-- [ ] Zod schemas: all fields have `.describe()`, only JSON-Schema-serializable types (no `z.custom()`, `z.date()`, `z.transform()`, etc.)
-- [ ] Optional nested objects: handler guards for empty inner values from form-based clients (`if (input.obj?.field && ...)`, not just `if (input.obj)`)
+- [ ] Zod schemas: all fields have `.describe()`, only JSON-Schema-serializable types (no `z.custom()`, `z.date()`, `z.transform()`, `z.bigint()`, `z.symbol()`, `z.void()`, `z.map()`, `z.set()`, `z.function()`, `z.nan()`). Avoid `z.url()` / `z.cuid()` / `z.base64()` / `z.jwt()` — the `schema-format-portability` lint rejects format values outside OpenAI's allowlist. Drop the format method and move the constraint into describe text.
+- [ ] Optional nested objects: handler guards for empty inner values from form-based clients (`if (input.obj?.field && ...)`, not just `if (input.obj)`). When regex/length constraints matter, use `z.union([z.literal(''), z.string().regex(...).describe(...)])` — literal variants are exempt from `describe-on-fields`.
 - [ ] JSDoc `@fileoverview` + `@module` on every file
 - [ ] `ctx.log` for logging, `ctx.state` for storage
 - [ ] Handlers throw on failure — typed `errors[]` contract + `ctx.fail(reason, …, ctx.recoveryFor(reason))` when failure modes are known; factories or plain `Error` for ad-hoc throws. No try/catch.
