@@ -27,6 +27,8 @@ await createApp({
   ],
   resources: [conceptsResource, filingTypesResource],
   prompts: [companyAnalysisPrompt],
+  instructions:
+    'Use the secedgar_* tools to query SEC EDGAR — US public-company filings since 1993 plus historical XBRL financials. Resolve companies with secedgar_company_search (accepts ticker, name, or CIK), fetch document text with secedgar_get_filing by accession number, and run full-text search across all filings with secedgar_search_filings (supports boolean operators and inline ticker:AAPL / cik:320193 targeting). For financials, secedgar_get_financials and secedgar_compare_metric accept friendly names like "revenue" or "eps_diluted" (discover them with secedgar_search_concepts) or raw XBRL tags.',
   setup() {
     initEdgarApiService();
   },
