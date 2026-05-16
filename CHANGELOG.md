@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.5](changelog/0.4.x/0.4.5.md) — 2026-05-16
+
+Adopt framework ^0.9.1 — server now publishes a top-level `instructions` orientation string on every MCP `initialize` response. Definition linting moves to build-time only (lint:mcp / devcheck), no longer gates startup. Devcheck `bun outdated` parser fix and the 350-char changelog summary cap come along for the ride.
+
 ## [0.4.4](changelog/0.4.x/0.4.4.md) — 2026-05-08
 
 secedgar_search_filings reports form_distribution consistent with total under entity targeting; framework ^0.8.13 → ^0.8.19, Node engine ≥24, schema descriptions tightened across all tools and resources.
