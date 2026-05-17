@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-05-17 · ⚠️ Breaking
+
+In-conversation SQL analytics over SEC EDGAR. `secedgar_search_filings`, `secedgar_get_financials`, and the new `secedgar_fetch_frames` (renamed from `secedgar_compare_metric`) now materialize their full upstream response as a DuckDB-backed `df_<id>` dataframe, queryable via three new `secedgar_dataframe_*` tools.
+
 ## [0.4.5](changelog/0.4.x/0.4.5.md) — 2026-05-16
 
 Adopt framework ^0.9.1 — server now publishes a top-level `instructions` orientation string on every MCP `initialize` response. Definition linting moves to build-time only (lint:mcp / devcheck), no longer gates startup. Devcheck `bun outdated` parser fix and the 350-char changelog summary cap come along for the ride.
