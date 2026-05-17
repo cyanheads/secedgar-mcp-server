@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-05-17 21:46:43
+Generated on: 2026-05-17 22:21:31
 
 ```text
 secedgar-mcp-server/
@@ -19,6 +19,7 @@ secedgar-mcp-server/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
+│   ├── 0.5.x/
 │   └── template.md
 ├── claude-plans/
 ├── docs/
@@ -158,6 +159,7 @@ secedgar-mcp-server/
 │       │   └── sql-gate-extras.test.ts
 │       └── edgar/
 │           ├── concept-map.test.ts
+│           ├── edgar-api-service.test.ts
 │           └── filing-to-text.test.ts
 ├── .dockerignore
 ├── .env.example

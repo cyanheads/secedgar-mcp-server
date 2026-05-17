@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.1](changelog/0.5.x/0.5.1.md) — 2026-05-17
+
+`secedgar_fetch_frames` flags fiscal-Q4 silent dropout on `CY####Q[1-4]` periods via a new `caveats` field. Ticker enrichment now resolves multi-class CIKs to common stock (JPM, BAC, C) instead of preferred-share variants (JPM-PA, BAC-PS, C-PR).
+
 ## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-05-17 · ⚠️ Breaking
 
 In-conversation SQL analytics over SEC EDGAR. `secedgar_search_filings`, `secedgar_get_financials`, and the new `secedgar_fetch_frames` (renamed from `secedgar_compare_metric`) now materialize their full upstream response as a DuckDB-backed `df_<id>` dataframe, queryable via three new `secedgar_dataframe_*` tools.
