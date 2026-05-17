@@ -5,7 +5,25 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+import type { EftsHit } from '@/services/edgar/types.js';
+
+function eftsHitToRow(hit: EftsHit) {
+  const displayName = hit._source.display_names?.[0] || '';
+  return {
+    accession_number: hit._source.adsh || hit._id.split(':')[0] || hit._id,
+    form: hit._source.form ?? null,
+    filing_date: hit._source.file_date,
+    period_ending: hit._source.period_ending ?? null,
+    company_name: cleanCompanyName(displayName),
+    cik: hit._source.ciks?.[0] ?? null,
+    ticker: extractTicker(displayName),
+    file_description: hit._source.file_description ?? null,
+    sic: hit._source.sics?.[0] ?? null,
+    location: hit._source.biz_locations?.[0] ?? null,
+  };
+}
 
 /**
  * EDGAR's `display_names[0]` embeds the ticker(s) and CIK in trailing parentheticals
@@ -15,9 +33,25 @@ import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 function cleanCompanyName(displayName: string): string {
   return displayName
     .replace(/\s*\(CIK\s*\d+\)/gi, '')
-    .replace(/\s*\([A-Z0-9,\s.]+\)\s*$/, '')
+    .replace(/\s*\([A-Z0-9,\s.-]+\)\s*$/, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * Pull the primary ticker out of `display_names[0]`. Strips the CIK parenthetical
+ * first, then captures the trailing parens iff they look like ticker symbols
+ * (uppercase letters, digits, dots, hyphens — optionally a comma-separated list
+ * for multi-class issuers like BRK-A/BRK-B). Returns null when no ticker
+ * parenthetical is present (private filers, foreign filers, filings with no
+ * exchange listing).
+ */
+function extractTicker(displayName: string): string | null {
+  const withoutCik = displayName.replace(/\s*\(CIK\s*\d+\)/gi, '');
+  const match = withoutCik.match(/\(([A-Z][A-Z0-9.-]*(?:,\s*[A-Z][A-Z0-9.-]*)*)\)\s*$/);
+  if (!match?.[1]) return null;
+  const first = match[1].split(',')[0]?.trim();
+  return first ? first : null;
 }
 
 /**
@@ -158,6 +192,12 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
               .string()
               .describe('Filing entity, with ticker/CIK parentheticals stripped.'),
             cik: z.string().describe('Filing entity CIK, zero-padded to 10 digits.'),
+            ticker: z
+              .string()
+              .optional()
+              .describe(
+                'Primary ticker symbol parsed from the EFTS display name. Absent for private filers, foreign filers without a US listing, and filings whose display name omits the ticker parenthetical. For multi-class issuers (e.g., BRK-A / BRK-B), this is the first class listed.',
+              ),
             file_description: z
               .string()
               .optional()
@@ -184,6 +224,23 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .record(z.string(), z.number())
       .optional()
       .describe('Count of results by form type. Helps narrow follow-up searches.'),
+    dataset: z
+      .object({
+        name: z
+          .string()
+          .describe('Dataframe handle (df_XXXXX_XXXXX) — pass to secedgar_dataframe_query.'),
+        row_count: z.number().describe('Rows materialized in the dataframe.'),
+        expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
+        truncated: z
+          .boolean()
+          .describe(
+            'True when EFTS reported more text matches than the window we already fetched — additional rows exist beyond the dataframe. Page further with `offset` for the inline view; the canvas dataframe is bounded by the single response window.',
+          ),
+      })
+      .optional()
+      .describe(
+        'Canvas dataframe holding the hits already fetched for the inline response. Absent when total ≤ inline limit, canvas is unavailable, or materialization failed. The dataframe contains the raw EFTS results (entity-filtered when ticker:/cik: was used) — query with secedgar_dataframe_query SQL.',
+      ),
   }),
 
   async handler(input, ctx) {
@@ -244,14 +301,17 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
 
     const results = sliced.map((hit) => {
       const accessionNumber = hit._source.adsh || hit._id.split(':')[0] || hit._id;
+      const displayName = hit._source.display_names?.[0] || '';
+      const ticker = extractTicker(displayName);
 
       return {
         accession_number: accessionNumber,
         form: hit._source.form ?? undefined,
         filing_date: hit._source.file_date,
         period_ending: hit._source.period_ending ?? undefined,
-        company_name: cleanCompanyName(hit._source.display_names?.[0] || ''),
+        company_name: cleanCompanyName(displayName),
         cik: hit._source.ciks?.[0] || '',
+        ...(ticker !== null && { ticker }),
         file_description: hit._source.file_description ?? undefined,
         sic: hit._source.sics?.[0] ?? undefined,
         location: hit._source.biz_locations?.[0] ?? undefined,
@@ -276,13 +336,49 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       }
     }
 
+    let dataset:
+      | { name: string; row_count: number; expires_at: string; truncated: boolean }
+      | undefined;
+    const bridge = getCanvasBridge();
+    const eftsTotal = response.hits.total.value;
+    // Materialize the hits we already fetched — no additional EFTS calls.
+    // `hits` is already entity-filtered (and sorted, where applicable) above.
+    // Skip when the response fits inline or when there's no canvas.
+    if (bridge && hits.length > input.limit) {
+      // Truncated when EFTS reported more text matches than the window we
+      // fetched. Under entity targeting, additional entity hits may exist
+      // beyond the window we sampled; under no targeting, more text matches
+      // exist past the window. Either way, the dataframe is a sample.
+      const truncated = eftsTotal > response.hits.hits.length;
+      const registered = await bridge.registerDataframe(ctx, {
+        rows: hits.map(eftsHitToRow),
+        sourceTool: 'secedgar_search_filings',
+        queryParams: {
+          query,
+          forms: input.forms,
+          start_date: input.start_date,
+          end_date: input.end_date,
+          entity_cik: entityCik,
+        },
+        truncated,
+      });
+      if (registered) dataset = { ...toDatasetField(registered), truncated };
+    }
+
     ctx.log.info('Filing search completed', {
       query: input.query,
       total,
       resultCount: results.length,
+      datasetName: dataset?.name,
     });
 
-    return { total, total_is_exact: totalIsExact, results, form_distribution: formDistribution };
+    return {
+      total,
+      total_is_exact: totalIsExact,
+      results,
+      form_distribution: formDistribution,
+      dataset,
+    };
   },
 
   format: (result) => {
@@ -293,8 +389,9 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       const desc = r.file_description ? ` — ${r.file_description}` : '';
       const sic = r.sic ? ` | SIC ${r.sic}` : '';
       const loc = r.location ? ` | ${r.location}` : '';
+      const ident = r.ticker ? `${r.ticker}, CIK ${r.cik}` : `CIK ${r.cik}`;
       lines.push(
-        `- ${r.form ?? 'N/A'} ${r.filing_date}${period} — ${r.company_name} (CIK ${r.cik})${sic}${loc}${desc} [${r.accession_number}]`,
+        `- ${r.form ?? 'N/A'} ${r.filing_date}${period} — ${r.company_name} (${ident})${sic}${loc}${desc} [${r.accession_number}]`,
       );
     }
     if (result.form_distribution) {
@@ -302,6 +399,14 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         .map(([k, v]) => `${k}: ${v}`)
         .join(', ');
       lines.push(`\nForm distribution: ${dist}`);
+    }
+    if (result.dataset) {
+      const truncatedNote = result.dataset.truncated
+        ? ' (truncated — more matches exist beyond the EFTS window)'
+        : '';
+      lines.push(
+        `\nDataset: ${result.dataset.name} (${result.dataset.row_count} rows, expires ${result.dataset.expires_at})${truncatedNote} — query with secedgar_dataframe_query.`,
+      );
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

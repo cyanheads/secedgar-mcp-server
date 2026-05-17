@@ -71,6 +71,7 @@
   },
   "dependencies": {
     "@cyanheads/mcp-ts-core": "^0.9.1",
+    "@duckdb/node-api": "^1.5.2-r.1",
     "html-to-text": "^10.0.0",
     "pino-pretty": "^13.1.3"
   },

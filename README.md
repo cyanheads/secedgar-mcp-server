@@ -1,7 +1,7 @@
 <div align="center">
   <h1>@cyanheads/secedgar-mcp-server</h1>
   <p><b>Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.</b>
-  <div>6 Tools • 2 Resources • 1 Prompt</div>
+  <div>8 Tools (+1 opt-in) • 2 Resources • 1 Prompt</div>
   </p>
 </div>
 
@@ -23,7 +23,7 @@
 
 ## Tools
 
-Six tools for querying SEC EDGAR data:
+Six tools for querying SEC EDGAR data, plus three for SQL analytics over the DuckDB-backed canvas dataframes those tools materialize:
 
 | Tool | Description |
 |:---|:---|
@@ -31,8 +31,11 @@ Six tools for querying SEC EDGAR data:
 | `secedgar_search_filings` | Full-text search across all EDGAR filing documents since 1993 |
 | `secedgar_get_filing` | Fetch a specific filing's metadata and document content |
 | `secedgar_get_financials` | Get historical XBRL financial data for a company |
-| `secedgar_compare_metric` | Compare a financial metric across all reporting companies |
+| `secedgar_fetch_frames` | Fetch SEC XBRL frames for one concept × one period across all reporting companies |
 | `secedgar_search_concepts` | Discover supported XBRL concept names or reverse-lookup a raw tag |
+| `secedgar_dataframe_describe` | List canvas dataframes with provenance, TTL, and schema |
+| `secedgar_dataframe_query` | Run a single-statement SELECT across dataframes |
+| `secedgar_dataframe_drop` | Drop a canvas dataframe by name. Opt-in via `EDGAR_DATAFRAME_DROP_ENABLED=true` — off by default since TTL already handles cleanup |
 
 ### `secedgar_company_search`
 
@@ -52,6 +55,7 @@ Full-text search across all EDGAR filing documents since 1993.
 - Entity targeting within query string (`cik:320193` or `ticker:AAPL`)
 - Date range filtering, form type filtering, pagination up to 10,000 results
 - Returns form distribution for narrowing follow-up searches
+- When post-filter hits exceed the inline limit, the already-fetched EFTS window (entity-filtered when `ticker:`/`cik:` is used) is materialized as a `df_<id>` dataframe — query it with `secedgar_dataframe_query`
 
 ---
 
@@ -78,14 +82,14 @@ Get historical XBRL financial data for a company with friendly concept name reso
 
 ---
 
-### `secedgar_compare_metric`
+### `secedgar_fetch_frames`
 
-Compare a financial metric across all reporting companies for a specific period.
+Fetch SEC XBRL frames for one concept × one period across all reporting companies.
 
 - Same friendly concept names as `secedgar_get_financials`
 - Supports annual (`CY2023`), quarterly (`CY2024Q2`), and instant (`CY2023Q4I`) periods
-- Sorted ranking with configurable limit and direction
-- Enriches results with ticker symbols where available
+- Inline response returns the top N ranked companies (sort + limit), with ticker enrichment
+- The full frames response (all reporters, typically 2k–10k rows) is materialized as a `df_<id>` dataframe — query it with `secedgar_dataframe_query`
 
 ---
 
@@ -96,7 +100,17 @@ Discover supported XBRL concept names before querying financials or cross-compan
 - Search by friendly name, label, or raw XBRL tag
 - Filter by statement group (`income_statement`, `balance_sheet`, `cash_flow`, `per_share`, `entity_info`) or taxonomy
 - Reverse-lookup raw tags like `NetIncomeLoss` to the supported friendly names
-- Returns the same catalog used by `secedgar_get_financials`, `secedgar_compare_metric`, and `secedgar://concepts`
+- Returns the same catalog used by `secedgar_get_financials`, `secedgar_fetch_frames`, and `secedgar://concepts`
+
+---
+
+### `secedgar_dataframe_describe` / `secedgar_dataframe_query` / `secedgar_dataframe_drop`
+
+In-conversation SQL analytics over the dataframes that `secedgar_fetch_frames`, `secedgar_search_filings`, and `secedgar_get_financials` materialize on a shared DuckDB-backed canvas. Each data-returning call adds a `dataset` field with a `df_XXXXX_XXXXX` handle; pass that handle to `secedgar_dataframe_query` for joins, aggregates, window functions, percentiles — standard DuckDB SQL.
+
+- **Read-only by default.** Writes, DDL, DROP, COPY, PRAGMA, ATTACH, and external-file table functions are rejected by the framework SQL gate. System catalogs (`information_schema`, `pg_catalog`, `sqlite_master`, `duckdb_*`) are denied at the bridge layer so callers can't enumerate dataframes they don't already hold a handle for. `secedgar_dataframe_drop` is the only destructive tool and is opt-in (`EDGAR_DATAFRAME_DROP_ENABLED=true`); TTL handles cleanup otherwise.
+- **Per-table TTL.** Each dataframe ages on its own clock (default 24h, override with `EDGAR_DATASET_TTL_SECONDS`). The canvas itself uses the framework's sliding TTL.
+- **`register_as` chaining.** `secedgar_dataframe_query` can persist its result as a new dataframe (`df_XXXXX_XXXXX`) with a fresh TTL — pipe analyses without re-running the source query.
 
 ## Resources
 
@@ -129,6 +143,7 @@ SEC EDGAR–specific:
 - Friendly XBRL concept name mapping with historical tag change handling
 - Searchable concept catalog with statement-group metadata and reverse XBRL tag lookup
 - HTML-to-text conversion for filing documents via `html-to-text`
+- In-conversation SQL analytics: `secedgar_fetch_frames`, `secedgar_search_filings`, and `secedgar_get_financials` materialize their full upstream response as a DuckDB-backed canvas dataframe queryable via `secedgar_dataframe_query`
 - No API keys required — SEC EDGAR is a free, public API
 
 ## Getting started
@@ -232,6 +247,9 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `EDGAR_USER_AGENT` | **Required.** User-Agent header for SEC compliance. Format: `"AppName contact@email.com"`. SEC blocks IPs without a valid User-Agent. | — |
 | `EDGAR_RATE_LIMIT_RPS` | Max requests/second to SEC APIs. Do not exceed 10. | `10` |
 | `EDGAR_TICKER_CACHE_TTL` | Seconds to cache the company tickers lookup file. | `3600` |
+| `EDGAR_DATASET_TTL_SECONDS` | Per-table TTL for canvas-registered dataframes. Sliding window touched on every dataframe op. | `86400` |
+| `EDGAR_DATAFRAME_DROP_ENABLED` | Set to `true` to expose `secedgar_dataframe_drop` — the only destructive tool on this server. Off by default; TTL handles cleanup. | `false` |
+| `CANVAS_PROVIDER_TYPE` | Canvas engine. Defaults to `duckdb`; set to `none` to disable the canvas (e.g. when running on Cloudflare Workers, where DuckDB has no V8-isolate build). | `duckdb` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http` | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port | `3010` |
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth` | `none` |
@@ -266,10 +284,11 @@ docker run -e EDGAR_USER_AGENT="MyApp my@email.com" -p 3010:3010 secedgar-mcp-se
 
 | Directory | Purpose |
 |:---|:---|
-| `src/mcp-server/tools/definitions/` | Tool definitions (`*.tool.ts`). Six SEC EDGAR tools. |
+| `src/mcp-server/tools/definitions/` | Tool definitions (`*.tool.ts`). Six SEC EDGAR tools plus three `dataframe_*` tools for SQL analytics. |
 | `src/mcp-server/resources/definitions/` | Resource definitions. XBRL concepts and filing types. |
 | `src/mcp-server/prompts/definitions/` | Prompt definitions. Company analysis prompt. |
 | `src/services/edgar/` | SEC EDGAR API client, XBRL concept mapping, HTML-to-text conversion. |
+| `src/services/canvas-bridge/` | Adapter over the framework `DataCanvas`: `df_<id>` minting, all-nullable schema derivation, per-table TTL bookkeeping, bridge-layer system-catalog SQL deny. |
 | `src/config/` | Server-specific environment variable parsing and validation with Zod. |
 | `tests/` | Unit and integration tests, mirroring the `src/` structure. |
 

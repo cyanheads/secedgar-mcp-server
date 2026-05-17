@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.4.4
+**Version:** 0.5.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 
@@ -31,8 +31,11 @@ Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-onl
 | `secedgar_search_filings` | Full-text search across all EDGAR filing documents since 1993 | `query`, `forms?`, `start_date?`, `end_date?`, `limit?` |
 | `secedgar_get_filing` | Fetch a specific filing's metadata and document content | `accession_number`, `cik?`, `content_limit?`, `document?` |
 | `secedgar_get_financials` | Get historical XBRL financial data for a company | `company`, `concept`, `taxonomy?`, `period_type?` |
-| `secedgar_compare_metric` | Compare a financial metric across all reporting companies | `concept`, `period`, `unit?`, `limit?`, `sort?` |
+| `secedgar_fetch_frames` | Fetch SEC XBRL frames for one concept × one period across all reporting companies | `concept`, `period`, `unit?`, `limit?`, `sort?` |
 | `secedgar_search_concepts` | Discover supported XBRL concept names or reverse-lookup a raw tag | `search?`, `group?`, `taxonomy?` |
+| `secedgar_dataframe_describe` | List canvas dataframes with provenance, TTL, and schema | `name?` |
+| `secedgar_dataframe_query` | Run a single-statement SELECT across dataframes (DuckDB SQL) | `sql`, `preview?`, `register_as?` |
+| `secedgar_dataframe_drop` | Drop a canvas dataframe by name. Opt-in via `EDGAR_DATAFRAME_DROP_ENABLED=true` | `name` |
 
 ### Resources
 
@@ -58,6 +61,7 @@ Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-onl
 - **XBRL deduplication:** Filter to entries with `frame` field to get one value per standard calendar period
 - **EFTS quirks:** `dateRange=custom` must be set when using date params; `entity` param is ignored (use `cik:` in query string)
 - **Filing content:** HTML → text via `html-to-text` library; pre-2005 filings produce noisier output
+- **Dataframes:** `secedgar_search_filings`, `secedgar_get_financials`, and `secedgar_fetch_frames` materialize their full upstream response as `df_<id>` on a shared DuckDB-backed canvas (one per tenant). Each row set carries an all-nullable schema (sparse SEC columns must not trip DuckDB's NOT NULL appender rollback). Per-table TTL is bridge-side bookkeeping in `ctx.state` until [cyanheads/mcp-ts-core#140](https://github.com/cyanheads/mcp-ts-core/issues/140) lands. `secedgar_dataframe_query` runs framework's SQL gate plus a bridge-layer deny on `information_schema`, `pg_catalog`, `sqlite_master`, and `duckdb_*` catalogs.
 
 ---
 
@@ -68,6 +72,9 @@ Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-onl
 | `EDGAR_USER_AGENT` | **Yes** | — | User-Agent for SEC compliance. Format: `"AppName contact@email.com"` |
 | `EDGAR_RATE_LIMIT_RPS` | No | `10` | Max requests/second to SEC APIs. Do not exceed 10. |
 | `EDGAR_TICKER_CACHE_TTL` | No | `3600` | Seconds to cache company_tickers.json |
+| `EDGAR_DATASET_TTL_SECONDS` | No | `86400` | Per-table TTL for canvas-registered dataframes. Sliding window touched on every dataframe op. |
+| `EDGAR_DATAFRAME_DROP_ENABLED` | No | `false` | Set to `true` to expose `secedgar_dataframe_drop`. TTL handles cleanup otherwise. |
+| `CANVAS_PROVIDER_TYPE` | No | `duckdb` | Canvas engine. Set to `none` to disable the canvas (e.g. on Cloudflare Workers). |
 
 ---
 
@@ -78,6 +85,8 @@ Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-onl
 | `EdgarApiService` | `src/services/edgar/edgar-api-service.ts` | Rate-limited HTTP client, CIK resolution, all SEC API calls |
 | `concept-map` | `src/services/edgar/concept-map.ts` | Static friendly name → XBRL tag mapping |
 | `filing-to-text` | `src/services/edgar/filing-to-text.ts` | HTML → readable plain text conversion |
+| `CanvasBridge` | `src/services/canvas-bridge/canvas-bridge.ts` | Adapter over framework `DataCanvas`: `df_<id>` minting, all-nullable schema derivation, per-table TTL, shared-canvas acquire |
+| `sql-gate-extras` | `src/services/canvas-bridge/sql-gate-extras.ts` | System-catalog SQL deny on top of the framework's read-only gate |
 
 ---
 
@@ -146,14 +155,20 @@ src/
       concept-map.ts                    # Friendly name → XBRL tag mapping
       filing-to-text.ts                 # HTML → plain text
       types.ts                          # Domain types
+    canvas-bridge/
+      canvas-bridge.ts                  # Framework DataCanvas adapter, df_<id> minting, per-table TTL
+      sql-gate-extras.ts                # Bridge-layer system-catalog deny on top of framework SQL gate
   mcp-server/
     tools/definitions/
       company-search.tool.ts
       search-filings.tool.ts
       get-filing.tool.ts
       get-financials.tool.ts
-      compare-metric.tool.ts
+      fetch-frames.tool.ts
       search-concepts.tool.ts
+      dataframe-describe.tool.ts
+      dataframe-query.tool.ts
+      dataframe-drop.tool.ts            # Opt-in via EDGAR_DATAFRAME_DROP_ENABLED
     resources/definitions/
       concepts.resource.ts
       filing-types.resource.ts

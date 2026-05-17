@@ -129,6 +129,8 @@ export interface FrameEntry {
   end: string;
   entityName: string;
   loc: string;
+  /** Period start date — present for duration frames, absent for instant frames. */
+  start?: string;
   val: number;
 }
 

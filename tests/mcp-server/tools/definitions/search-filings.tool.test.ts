@@ -13,6 +13,16 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
   initEdgarApiService: vi.fn(),
 }));
 
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+  getCanvasBridge: vi.fn(),
+  toDatasetField: (r: { tableName: string; rowCount: number; expiresAt: string }) => ({
+    name: r.tableName,
+    row_count: r.rowCount,
+    expires_at: r.expiresAt,
+  }),
+}));
+
+import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
 const mockEftsResponse: EftsResponse = {
@@ -64,6 +74,7 @@ const mockApi = { searchFilings: vi.fn() };
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(getEdgarApiService).mockReturnValue(mockApi as any);
+  vi.mocked(getCanvasBridge).mockReturnValue(undefined);
   mockApi.searchFilings.mockResolvedValue(mockEftsResponse);
 });
 
@@ -373,6 +384,162 @@ describe('searchFilingsTool', () => {
     const result = await searchFilingsTool.handler(input, ctx);
 
     expect(result.results[0].accession_number).toBe('0000320193-23-000106');
+  });
+
+  it('extracts ticker from display_names parenthetical', async () => {
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: {
+        total: { value: 2, relation: 'eq' },
+        hits: [
+          {
+            _id: 'a',
+            _source: {
+              adsh: 'A',
+              form: '10-K',
+              file_date: '2024-01-01',
+              display_names: ['Apple Inc.  (AAPL)  (CIK 0000320193)'],
+              ciks: ['0000320193'],
+            },
+          },
+          {
+            _id: 'b',
+            _source: {
+              adsh: 'B',
+              form: '10-K',
+              file_date: '2024-01-02',
+              display_names: ['BERKSHIRE HATHAWAY INC  (BRK-A, BRK-B)  (CIK 0001067983)'],
+              ciks: ['0001067983'],
+            },
+          },
+        ],
+      },
+    });
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({ query: 'test', sort: 'relevance' });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    expect(result.results[0].ticker).toBe('AAPL');
+    expect(result.results[0].company_name).toBe('Apple Inc.');
+    expect(result.results[1].ticker).toBe('BRK-A');
+    expect(result.results[1].company_name).toBe('BERKSHIRE HATHAWAY INC');
+  });
+
+  it('omits ticker when display_names has no ticker parenthetical', async () => {
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: {
+        total: { value: 1, relation: 'eq' },
+        hits: [
+          {
+            _id: 'a',
+            _source: {
+              adsh: 'A',
+              form: '10-K',
+              file_date: '2024-01-01',
+              display_names: ['Some Private Co.  (CIK 0001234567)'],
+              ciks: ['0001234567'],
+            },
+          },
+        ],
+      },
+    });
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({ query: 'test' });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    expect(result.results[0].ticker).toBeUndefined();
+    expect(result.results[0].company_name).toBe('Some Private Co.');
+  });
+
+  it('materializes entity-filtered hits from the single EFTS window — no additional calls', async () => {
+    (mockApi as any).resolveCik = vi
+      .fn()
+      .mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.' });
+    const registerDataframe = vi.fn().mockResolvedValue({
+      tableName: 'df_TEST1_TEST2',
+      rowCount: 20,
+      expiresAt: '2026-05-18T00:00:00.000Z',
+      columnSchema: [],
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+
+    const aaplHit = (n: number) => ({
+      _id: `aapl-${n}`,
+      _source: {
+        adsh: `A${n}`,
+        form: '10-K',
+        file_date: `2024-01-${String(n).padStart(2, '0')}`,
+        display_names: ['Apple Inc.  (AAPL)  (CIK 0000320193)'],
+        ciks: ['0000320193'],
+      },
+    });
+    const otherHit = (n: number) => ({
+      _id: `other-${n}`,
+      _source: {
+        adsh: `O${n}`,
+        form: '10-K',
+        file_date: `2024-02-${String(n).padStart(2, '0')}`,
+        display_names: [`Other Co ${n}  (CIK 999000000${n})`],
+        ciks: [`999000000${n}`],
+      },
+    });
+
+    // Inline window: 20 AAPL + 80 unrelated. limit=5 → 5 inline, 20 in df.
+    // EFTS total 200 > window 100 → truncated=true.
+    const windowHits = [
+      ...Array.from({ length: 20 }, (_, i) => aaplHit(i + 1)),
+      ...Array.from({ length: 80 }, (_, i) => otherHit(i)),
+    ];
+    mockApi.searchFilings.mockResolvedValueOnce({
+      ...mockEftsResponse,
+      hits: { total: { value: 200, relation: 'eq' }, hits: windowHits },
+    });
+
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({ query: 'ticker:AAPL revenue', limit: 5 });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    expect(mockApi.searchFilings).toHaveBeenCalledOnce();
+    expect(registerDataframe).toHaveBeenCalledOnce();
+    const call = registerDataframe.mock.calls[0]![1];
+    expect(call.rows).toHaveLength(20);
+    expect(call.rows.every((r: any) => r.cik === '0000320193')).toBe(true);
+    expect(call.queryParams.entity_cik).toBe('0000320193');
+    expect(call.truncated).toBe(true);
+    expect(result.dataset?.name).toBe('df_TEST1_TEST2');
+  });
+
+  it('skips dataset registration when entity-filtered hits fit inline', async () => {
+    (mockApi as any).resolveCik = vi
+      .fn()
+      .mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.' });
+    const registerDataframe = vi.fn();
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+
+    const noiseHit = (n: number) => ({
+      _id: `noise-${n}`,
+      _source: {
+        adsh: `N${n}`,
+        form: '10-K',
+        file_date: '2024-01-01',
+        display_names: [`Mentions Apple Inc.  (NOPE)  (CIK 999000000${n})`],
+        ciks: [`999000000${n}`],
+      },
+    });
+    const inlineHits = Array.from({ length: 100 }, (_, i) => noiseHit(i));
+    mockApi.searchFilings.mockResolvedValueOnce({
+      ...mockEftsResponse,
+      hits: { total: { value: 100, relation: 'eq' }, hits: inlineHits },
+    });
+
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({ query: 'ticker:AAPL', limit: 5 });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    expect(registerDataframe).not.toHaveBeenCalled();
+    expect(result.dataset).toBeUndefined();
+    expect(result.total).toBe(0);
   });
 
   it('uses default limit, offset, and sort', () => {

@@ -6,6 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { resolveConcept } from '@/services/edgar/concept-map.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import type { CompanyConceptUnit } from '@/services/edgar/types.js';
@@ -114,6 +115,18 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       .optional()
       .describe(
         'XBRL tags that were attempted (shown when using friendly names that map to multiple tags).',
+      ),
+    dataset: z
+      .object({
+        name: z
+          .string()
+          .describe('Dataframe handle (df_XXXXX_XXXXX) — pass to secedgar_dataframe_query.'),
+        row_count: z.number().describe('Rows materialized in the dataframe.'),
+        expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
+      })
+      .optional()
+      .describe(
+        'Canvas dataframe handle holding the same time series. Use for cross-company JOINs via secedgar_dataframe_query. Absent when canvas is unavailable.',
       ),
   }),
 
@@ -263,10 +276,44 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       accession_number: u.accn,
     }));
 
+    let dataset: { name: string; row_count: number; expires_at: string } | undefined;
+    const bridge = getCanvasBridge();
+    if (bridge && data.length > 0) {
+      const rows = data.map((d) => ({
+        cik: match.cik,
+        entity_name: match.name ?? null,
+        concept: conceptResponse.tag,
+        taxonomy,
+        unit: unitKey,
+        period: d.period,
+        value: d.value,
+        period_start: d.start ?? null,
+        period_end: d.end,
+        fiscal_year: d.fiscal_year,
+        fiscal_period: d.fiscal_period,
+        form: d.form,
+        filed: d.filed,
+        accession_number: d.accession_number,
+      }));
+      const registered = await bridge.registerDataframe(ctx, {
+        rows,
+        sourceTool: 'secedgar_get_financials',
+        queryParams: {
+          company: input.company,
+          cik: match.cik,
+          concept: conceptResponse.tag,
+          taxonomy,
+          period_type: effectivePeriodType,
+        },
+      });
+      if (registered) dataset = toDatasetField(registered);
+    }
+
     ctx.log.info('Financials retrieved', {
       company: match.cik,
       concept: conceptResponse.tag,
       dataPoints: data.length,
+      datasetName: dataset?.name,
     });
 
     return {
@@ -278,6 +325,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       unit: unitKey,
       data,
       tags_tried: tagsTried.length > 1 ? tagsTried : undefined,
+      dataset,
     };
   },
 
@@ -301,6 +349,11 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       const range = d.start ? `${d.start} → ${d.end}` : d.end;
       lines.push(
         `${d.period} [FY${fy} ${fp}]: ${formatted} (raw ${d.value}) | ${range} | ${d.form} filed ${d.filed} [${d.accession_number}]`,
+      );
+    }
+    if (result.dataset) {
+      lines.push(
+        `\nDataset: ${result.dataset.name} (${result.dataset.row_count} rows, expires ${result.dataset.expires_at}) — query with secedgar_dataframe_query.`,
       );
     }
     return [{ type: 'text', text: lines.join('\n') }];

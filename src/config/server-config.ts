@@ -22,6 +22,21 @@ const ServerConfigSchema = z.object({
     .min(60)
     .default(3600)
     .describe('Seconds to cache company_tickers.json'),
+  datasetTtlSeconds: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .default(86400)
+    .describe(
+      'Per-table TTL for canvas-registered dataframes, in seconds. Bridge-side bookkeeping in ctx.state (backstop for cyanheads/mcp-ts-core#140 until the framework exposes RegisterTableOptions.ttlMs).',
+    ),
+  dataframeDropEnabled: z
+    .string()
+    .optional()
+    .transform((v) => v === 'true' || v === '1')
+    .describe(
+      'Set to "true" to expose secedgar_dataframe_drop. Off by default — the canvas already drops tables on the per-table TTL, and a write surface against the shared canvas is the only destructive tool on this server.',
+    ),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -33,6 +48,8 @@ export function getServerConfig(): ServerConfig {
     userAgent: process.env.EDGAR_USER_AGENT,
     rateLimitRps: process.env.EDGAR_RATE_LIMIT_RPS,
     tickerCacheTtl: process.env.EDGAR_TICKER_CACHE_TTL,
+    datasetTtlSeconds: process.env.EDGAR_DATASET_TTL_SECONDS,
+    dataframeDropEnabled: process.env.EDGAR_DATAFRAME_DROP_ENABLED,
   });
   return _config;
 }

@@ -35,6 +35,7 @@ class EdgarApiService {
   private lastRequestAt = 0;
   private minIntervalMs: number;
   private tickerCache: TickerCache | undefined;
+  private tickerCacheLoad: Promise<TickerCache> | undefined;
   private throttleQueue: Promise<void> = Promise.resolve();
 
   constructor() {
@@ -324,6 +325,16 @@ class EdgarApiService {
       return this.tickerCache;
     }
 
+    // Singleflight: concurrent first-time callers (e.g. fetch-frames enriching
+    // ~5k reporters in parallel) share one in-flight load instead of each
+    // queuing their own SEC fetch through the 10 req/s throttle.
+    this.tickerCacheLoad ??= this.loadTickerCache().finally(() => {
+      this.tickerCacheLoad = undefined;
+    });
+    return this.tickerCacheLoad;
+  }
+
+  private async loadTickerCache(): Promise<TickerCache> {
     const raw = await this.fetchJson<Record<string, TickerEntry>>(
       'https://www.sec.gov/files/company_tickers.json',
     );
@@ -343,7 +354,7 @@ class EdgarApiService {
       allEntries.push(match);
     }
 
-    this.tickerCache = { byTicker, byCik, allEntries, loadedAt: now };
+    this.tickerCache = { byTicker, byCik, allEntries, loadedAt: Date.now() };
     return this.tickerCache;
   }
 }

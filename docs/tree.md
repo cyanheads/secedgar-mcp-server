@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-05-16 19:22:40
+Generated on: 2026-05-17 21:46:43
 
 ```text
 secedgar-mcp-server/
@@ -120,12 +120,18 @@ secedgar-mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── company-search.tool.ts
-│   │           ├── compare-metric.tool.ts
+│   │           ├── dataframe-describe.tool.ts
+│   │           ├── dataframe-drop.tool.ts
+│   │           ├── dataframe-query.tool.ts
+│   │           ├── fetch-frames.tool.ts
 │   │           ├── get-filing.tool.ts
 │   │           ├── get-financials.tool.ts
 │   │           ├── search-concepts.tool.ts
 │   │           └── search-filings.tool.ts
 │   ├── services/
+│   │   ├── canvas-bridge/
+│   │   │   ├── canvas-bridge.ts
+│   │   │   └── sql-gate-extras.ts
 │   │   └── edgar/
 │   │       ├── concept-map.ts
 │   │       ├── edgar-api-service.ts
@@ -142,11 +148,14 @@ secedgar-mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── company-search.tool.test.ts
-│   │           ├── compare-metric.tool.test.ts
+│   │           ├── fetch-frames.tool.test.ts
 │   │           ├── get-filing.tool.test.ts
 │   │           ├── get-financials.tool.test.ts
 │   │           └── search-filings.tool.test.ts
 │   └── services/
+│       ├── canvas-bridge/
+│       │   ├── canvas-bridge.test.ts
+│       │   └── sql-gate-extras.test.ts
 │       └── edgar/
 │           ├── concept-map.test.ts
 │           └── filing-to-text.test.ts
