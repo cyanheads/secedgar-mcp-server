@@ -321,6 +321,7 @@ describe('fetchFramesTool', () => {
       unqueried_tags: [],
       value_distribution: { median: 0, p95: 0, max: 0, max_to_p95_ratio: 0 },
       period_end_range: { min: '', max: '' },
+      caveats: [],
     };
     const blocks = fetchFramesTool.format!(output);
     expect(blocks).toHaveLength(1);
@@ -350,6 +351,7 @@ describe('fetchFramesTool', () => {
       unqueried_tags: [],
       value_distribution: { median: 0, p95: 0, max: 0, max_to_p95_ratio: 0 },
       period_end_range: { min: '', max: '' },
+      caveats: [],
     };
     const blocks = fetchFramesTool.format!(output);
     expect(blocks[0].text).toContain('$15.42');
@@ -371,6 +373,7 @@ describe('fetchFramesTool', () => {
       unqueried_tags: [],
       value_distribution: { median: 0, p95: 0, max: 0, max_to_p95_ratio: 0 },
       period_end_range: { min: '', max: '' },
+      caveats: [],
     };
     const blocks = fetchFramesTool.format!(output);
     expect(blocks[0].text).toContain('df_ABCDE_FGHIJ');
@@ -394,11 +397,74 @@ describe('fetchFramesTool', () => {
         max_to_p95_ratio: 15,
       },
       period_end_range: { min: '2023-01-31', max: '2024-12-31' },
+      caveats: [],
     };
     const blocks = fetchFramesTool.format!(output);
     expect(blocks[0].text).toContain('Coverage: 1 of 3 XBRL tags queried');
     expect(blocks[0].text).toContain('Revenues, SalesRevenueNet');
     expect(blocks[0].text).toContain('max/p95 15×');
     expect(blocks[0].text).toContain('2023-01-31 → 2024-12-31');
+  });
+
+  it('emits fiscal-Q4 caveat for duration CY*Q[1-4] periods', async () => {
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2024Q3' });
+    const result = await fetchFramesTool.handler(input, ctx);
+
+    expect(result.caveats).toHaveLength(1);
+    expect(result.caveats[0]).toMatch(/fiscal Q4 closes in calendar Q3/);
+    expect(result.caveats[0]).toContain('AAPL Sep-end');
+  });
+
+  it.each([
+    ['CY2024Q1', 'calendar Q1', 'WMT Jan-end'],
+    ['CY2024Q2', 'calendar Q2', 'MSFT Jun-end'],
+    ['CY2024Q3', 'calendar Q3', 'AAPL Sep-end'],
+    ['CY2024Q4', 'calendar Q4', 'most US filers'],
+  ])('caveat for %s names the right calendar quarter and examples', async (period, label, example) => {
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({ concept: 'revenue', period });
+    const result = await fetchFramesTool.handler(input, ctx);
+
+    expect(result.caveats[0]).toContain(label);
+    expect(result.caveats[0]).toContain(example);
+  });
+
+  it('emits no caveats for annual CY#### periods', async () => {
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2023' });
+    const result = await fetchFramesTool.handler(input, ctx);
+
+    expect(result.caveats).toEqual([]);
+  });
+
+  it('emits no caveats for instant CY####Q#I periods', async () => {
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({
+      concept: 'AccountsPayableCurrent',
+      period: 'CY2023Q4I',
+      unit: 'USD',
+    });
+    const result = await fetchFramesTool.handler(input, ctx);
+
+    expect(result.caveats).toEqual([]);
+  });
+
+  it('surfaces caveats in format text', () => {
+    const output = {
+      concept: 'Revenues',
+      period: 'CY2024Q3',
+      unit: 'USD',
+      label: 'Revenue',
+      total_companies: 3000,
+      data: [],
+      unqueried_tags: [],
+      value_distribution: { median: 0, p95: 0, max: 0, max_to_p95_ratio: 0 },
+      period_end_range: { min: '', max: '' },
+      caveats: ['Filers whose fiscal Q4 closes in calendar Q3 are absent — AAPL Sep-end.'],
+    };
+    const blocks = fetchFramesTool.format!(output);
+    expect(blocks[0].text).toContain('Caveat:');
+    expect(blocks[0].text).toContain('AAPL Sep-end');
   });
 });

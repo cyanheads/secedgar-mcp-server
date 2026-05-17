@@ -14,6 +14,30 @@ import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas
 import { resolveConcept } from '@/services/edgar/concept-map.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
+/**
+ * SEC XBRL reports fiscal Q4 as the 10-K residual, never as a discrete
+ * quarterly fact, so any company whose fiscal year ends inside the queried
+ * calendar quarter is silently absent from a `CY####Q[1-4]` frame. The
+ * omission is invisible without domain knowledge — flag it so the caller knows
+ * to cross-reference `secedgar_get_financials` with `period_type='annual'` for
+ * those filers. Annual (`CY####`) and instant (`CY####Q#I`) periods are
+ * unaffected.
+ */
+function fiscalQ4Caveats(period: string): string[] {
+  const match = period.match(/^CY\d{4}Q([1-4])$/);
+  if (!match) return [];
+  const examples: Record<string, string> = {
+    '1': 'WMT Jan-end, HD/TGT Feb-end',
+    '2': 'MSFT Jun-end, ORCL May-end',
+    '3': 'AAPL Sep-end, ACN Aug-end, CSCO Jul-end, COST early Sep',
+    '4': 'most US filers (calendar fiscal year)',
+  };
+  const q = match[1] as keyof typeof examples;
+  return [
+    `Filers whose fiscal Q4 closes in calendar Q${q} are absent from this frame — SEC XBRL reports their fiscal Q4 as the 10-K residual rather than a discrete quarterly fact (e.g. ${examples[q]}). Use secedgar_get_financials with period_type='annual' for those filers.`,
+  ];
+}
+
 export const fetchFramesTool = tool('secedgar_fetch_frames', {
   description:
     'Fetch SEC XBRL frames for one concept × one period across all reporting companies. Inline response returns the top N ranked companies; the full frames response (all reporters) is materialized as df_<id> when a canvas is available, queryable via secedgar_dataframe_query. Accepts friendly names like "revenue" or "assets" (discover via secedgar_search_concepts) or raw XBRL tags. One call hits one XBRL tag — when a friendly name maps to multiple tags, the response\'s `unqueried_tags` lists the others; call again per tag and UNION/COALESCE in SQL with an analysis-specific priority (e.g. SalesRevenueGoodsNet is goods-only). Response includes `value_distribution` and `period_end_range` to flag XBRL scale-factor anomalies and fiscal-year mixing.',
@@ -134,6 +158,11 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       .describe(
         'Range of period_end dates across the frame. SEC normalizes to calendar periods but filers report against their own fiscal year-ends, so a "CY2023" duration frame can contain period_ends from 2023-01-31 (January-FY filers like Walmart) to 2024-12-31 (calendar-FY filers reported late). Wide ranges mean cross-comparison mixes fiscal periods.',
       ),
+    caveats: z
+      .array(z.string())
+      .describe(
+        "Data-completeness warnings specific to this query. Currently populated for duration periods 'CY####Q[1-4]', where SEC XBRL omits filers' fiscal Q4 (reported only as the 10-K residual) — affected filers are silently absent from the frame. Empty for annual ('CY####') and instant ('CY####Q#I') periods, where the underlying facts exist and the frame is complete.",
+      ),
   }),
 
   async handler(input, ctx) {
@@ -232,6 +261,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     };
 
     const unqueriedTags = mapping ? mapping.tags.slice(1) : [];
+    const caveats = fiscalQ4Caveats(input.period);
 
     ctx.log.info('Frames fetched', {
       concept: tag,
@@ -253,6 +283,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       unqueried_tags: unqueriedTags,
       value_distribution: valueDistribution,
       period_end_range: periodEndRange,
+      caveats,
     };
   },
 
@@ -287,6 +318,9 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       `Value dispersion: median ${result.value_distribution.median.toLocaleString()}, p95 ${result.value_distribution.p95.toLocaleString()}, max ${result.value_distribution.max.toLocaleString()}, max/p95 ${result.value_distribution.max_to_p95_ratio}×`,
     );
     lines.push(`Period ends: ${result.period_end_range.min} → ${result.period_end_range.max}`);
+    for (const c of result.caveats) {
+      lines.push(`\nCaveat: ${c}`);
+    }
 
     return [{ type: 'text', text: lines.join('\n') }];
   },
