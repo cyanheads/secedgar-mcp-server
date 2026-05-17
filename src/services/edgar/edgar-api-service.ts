@@ -350,13 +350,42 @@ class EdgarApiService {
         ticker: entry.ticker,
       };
       byTicker.set(entry.ticker.toUpperCase(), match);
-      byCik.set(match.cik, match);
+      const existing = byCik.get(match.cik);
+      byCik.set(match.cik, existing ? pickPreferredTicker(existing, match) : match);
       allEntries.push(match);
     }
 
     this.tickerCache = { byTicker, byCik, allEntries, loadedAt: Date.now() };
     return this.tickerCache;
   }
+}
+
+/**
+ * Pick the better of two ticker entries sharing a CIK. SEC's
+ * `company_tickers.json` lists every class, preferred-share, and debt-security
+ * ticker against the same CIK (e.g. JPM + JPM-PA/JPM-PB/…, PRU + PFH/PRH/PRS).
+ * Rules, in order:
+ *
+ * 1. **Tickers without a hyphen win over hyphenated.** Common stock has no
+ *    class suffix (`JPM`, `BAC`, `C`); preferred shares carry hyphenated
+ *    suffixes (`JPM-PA`, `BAC-PS`, `C-PR`).
+ * 2. **Otherwise, the incumbent (first-seen) wins.** SEC lists common stock as
+ *    the primary entry per CIK, with debt/note securities and additional share
+ *    classes appended later (Prudential's PRU precedes PFH/PRH/PRS; Berkshire's
+ *    BRK-A precedes BRK-B). The `byCik` build iterates `Object.values()` in
+ *    insertion order, so the earliest match — typically the common stock —
+ *    stays in the index unless rule 1 displaces it.
+ *
+ * Missing tickers (defensive — `CikMatch.ticker` is optional in the type but
+ * always set by `loadTickerCache`) lose to defined ones.
+ */
+export function pickPreferredTicker(a: CikMatch, b: CikMatch): CikMatch {
+  if (!a.ticker) return b;
+  if (!b.ticker) return a;
+  const aHyphen = a.ticker.includes('-');
+  const bHyphen = b.ticker.includes('-');
+  if (aHyphen !== bHyphen) return aHyphen ? b : a;
+  return a;
 }
 
 function sleep(ms: number): Promise<void> {
