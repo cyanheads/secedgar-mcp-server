@@ -1,0 +1,42 @@
+{
+  "manifest_version": "0.3",
+  "name": "secedgar-mcp-server",
+  "version": "0.5.2",
+  "description": "Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.",
+  "author": { "name": "cyanheads" },
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "MCP_AUTH_MODE": "none",
+        "NODE_ENV": "production",
+        "EDGAR_USER_AGENT": "${EDGAR_USER_AGENT}",
+        "MCP_LOG_LEVEL": "${MCP_LOG_LEVEL}"
+      }
+    }
+  },
+  "compatibility": {
+    "runtimes": { "node": ">=24.0.0" }
+  },
+  "tools_generated": true,
+  "prompts_generated": true,
+  "user_config": {
+    "EDGAR_USER_AGENT": {
+      "title": "User-Agent (required)",
+      "description": "User-Agent header for SEC compliance. Format: \"AppName contact@email.com\".",
+      "type": "string",
+      "required": true
+    },
+    "MCP_LOG_LEVEL": {
+      "title": "Log Level",
+      "description": "Minimum log level for output (debug, info, warn, error).",
+      "type": "string",
+      "required": false,
+      "default": "info"
+    }
+  }
+}

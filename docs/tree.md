@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-05-17 22:21:31
+Generated on: 2026-05-23 12:23:02
 
 ```text
 secedgar-mcp-server/
@@ -33,6 +33,8 @@ secedgar-mcp-server/
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── lint-mcp.ts
+│   ├── lint-packaging.ts
+│   ├── list-skills.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
 ├── skills/
@@ -164,6 +166,7 @@ secedgar-mcp-server/
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
+├── .mcpbignore
 ├── AGENTS.md
 ├── biome.json
 ├── bun.lock
@@ -174,6 +177,7 @@ secedgar-mcp-server/
 ├── devcheck.config.json
 ├── Dockerfile
 ├── LICENSE
+├── manifest.json
 ├── package.json
 ├── README.md
 ├── server.json

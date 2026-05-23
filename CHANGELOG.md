@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.2](changelog/0.5.x/0.5.2.md) — 2026-05-23
+
+`@cyanheads/mcp-ts-core ^0.9.1 → ^0.9.6`. `RequestContextLike` canvas cast removed. `zod` added as explicit dependency. `manifest.json` + `.mcpbignore` scaffolded for MCPB bundle support. Install badges added to README.
+
 ## [0.5.1](changelog/0.5.x/0.5.1.md) — 2026-05-17
 
 `secedgar_fetch_frames` flags fiscal-Q4 silent dropout on `CY####Q[1-4]` periods via a new `caveats` field. Ticker enrichment now resolves multi-class CIKs to common stock (JPM, BAC, C) instead of preferred-share variants (JPM-PA, BAC-PS, C-PR).
