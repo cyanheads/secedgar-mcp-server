@@ -241,6 +241,19 @@ class EdgarApiService {
     );
   }
 
+  /**
+   * Fetch all XBRL facts for a company. Returns `null` on 404.
+   * Used on the no-data error path to surface which namespaces and tags a filer actually uses.
+   */
+  tryGetCompanyFacts(
+    cik: string,
+  ): Promise<{ facts: Record<string, Record<string, unknown>> } | null> {
+    const padded = cik.padStart(10, '0');
+    return this.tryFetchJson<{ facts: Record<string, Record<string, unknown>> }>(
+      `https://data.sec.gov/api/xbrl/companyfacts/CIK${padded}.json`,
+    );
+  }
+
   /** Fetch XBRL data for a concept. Returns `null` if the company does not report this tag. */
   tryGetCompanyConcept(
     cik: string,

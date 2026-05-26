@@ -190,10 +190,34 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     }
 
     if (!conceptResponse || allUnits.length === 0) {
-      const hint =
-        taxonomy === 'ifrs-full'
-          ? 'Try a raw XBRL tag instead of a friendly name, or check the company uses IFRS.'
-          : "This company may use a different tag or taxonomy. Try 'ifrs-full' for foreign filers.";
+      // Probe companyfacts to discover what namespaces and tags this filer actually reports.
+      // Only on the error path — one extra request, never on the happy path.
+      const facts = await api.tryGetCompanyFacts(match.cik);
+      const availableNamespaces = facts ? Object.keys(facts.facts) : [];
+
+      let hint: string;
+      if (facts && availableNamespaces.length > 0) {
+        const namespaceSummary = availableNamespaces
+          .map((ns) => {
+            const nsTags = Object.keys(facts.facts[ns] ?? {});
+            const searchTerm = tagsTried[0]?.toLowerCase().replace(/_/g, '') ?? '';
+            // Surface a few matching tags when the requested concept overlaps with this namespace
+            const matchingTags = searchTerm
+              ? nsTags.filter((t) => t.toLowerCase().includes(searchTerm)).slice(0, 3)
+              : [];
+            return matchingTags.length > 0
+              ? `${ns} (${nsTags.length} tags, e.g. ${matchingTags.join(', ')})`
+              : `${ns} (${nsTags.length} tags)`;
+          })
+          .join('; ');
+        hint = `This filer reports under: ${namespaceSummary}. Try a raw XBRL tag from one of these namespaces, or switch taxonomy to match.`;
+      } else {
+        hint =
+          taxonomy === 'ifrs-full'
+            ? 'Try a raw XBRL tag instead of a friendly name, or check the company uses IFRS.'
+            : "This company may use a different tag or taxonomy. Try 'ifrs-full' for foreign filers.";
+      }
+
       throw ctx.fail(
         'no_concept_data',
         `No XBRL data for '${input.concept}' under ${taxonomy} for this company.`,
@@ -202,6 +226,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
           concept: input.concept,
           taxonomy,
           tags_tried: tagsTried,
+          available_namespaces: availableNamespaces.length > 0 ? availableNamespaces : undefined,
         },
       );
     }
@@ -344,12 +369,14 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
           : result.unit === 'USD/shares'
             ? `$${d.value.toFixed(2)}`
             : d.value.toLocaleString();
-      const fy = d.fiscal_year ?? '—';
-      const fp = d.fiscal_period ?? '—';
+      const fy = d.fiscal_year != null ? `FY${d.fiscal_year}` : null;
+      const fp = d.fiscal_period ?? null;
+      const fiscalCtx = [fy, fp].filter(Boolean).join(' ');
       const range = d.start ? `${d.start} → ${d.end}` : d.end;
-      lines.push(
-        `${d.period} [FY${fy} ${fp}]: ${formatted} (raw ${d.value}) | ${range} | ${d.form} filed ${d.filed} [${d.accession_number}]`,
-      );
+      const filingCtx = fiscalCtx
+        ? `${d.form} (${fiscalCtx}) filed ${d.filed} [${d.accession_number}]`
+        : `${d.form} filed ${d.filed} [${d.accession_number}]`;
+      lines.push(`${d.period}: ${formatted} (raw ${d.value}) | ${range} | ${filingCtx}`);
     }
     if (result.dataset) {
       lines.push(

@@ -71,6 +71,7 @@ const mockConceptResponse: CompanyConceptResponse = {
 const mockApi = {
   resolveCik: vi.fn(),
   tryGetCompanyConcept: vi.fn(),
+  tryGetCompanyFacts: vi.fn(),
 };
 
 beforeEach(() => {
@@ -78,6 +79,7 @@ beforeEach(() => {
   vi.mocked(getEdgarApiService).mockReturnValue(mockApi as any);
   mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
   mockApi.tryGetCompanyConcept.mockResolvedValue(mockConceptResponse);
+  mockApi.tryGetCompanyFacts.mockResolvedValue(null);
 });
 
 describe('getFinancialsTool', () => {
