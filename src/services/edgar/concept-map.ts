@@ -127,6 +127,139 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     unit: 'USD',
     label: 'Notes Payable',
   },
+
+  // Income statement
+  cogs: {
+    group: 'income_statement',
+    tags: ['CostOfGoodsAndServicesSold', 'CostOfRevenue', 'CostOfGoodsSold'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Cost of Goods Sold',
+  },
+  rd_expense: {
+    group: 'income_statement',
+    tags: ['ResearchAndDevelopmentExpense'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Research & Development Expense',
+  },
+  sga_expense: {
+    group: 'income_statement',
+    tags: ['SellingGeneralAndAdministrativeExpense'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Selling, General & Administrative Expense',
+  },
+  interest_expense: {
+    group: 'income_statement',
+    tags: ['InterestExpense', 'InterestExpenseDebt'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Interest Expense',
+  },
+  tax_expense: {
+    group: 'income_statement',
+    tags: ['IncomeTaxExpenseBenefit'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Income Tax Expense (Benefit)',
+  },
+  stock_based_compensation: {
+    group: 'income_statement',
+    tags: ['ShareBasedCompensation', 'AllocatedShareBasedCompensationExpense'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Stock-Based Compensation',
+  },
+
+  // Balance sheet
+  current_assets: {
+    group: 'balance_sheet',
+    tags: ['AssetsCurrent'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Current Assets',
+  },
+  current_liabilities: {
+    group: 'balance_sheet',
+    tags: ['LiabilitiesCurrent'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Current Liabilities',
+  },
+  inventory: {
+    group: 'balance_sheet',
+    tags: ['InventoryNet', 'InventoryGross'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Inventory',
+  },
+  accounts_receivable: {
+    group: 'balance_sheet',
+    tags: [
+      'AccountsReceivableNetCurrent',
+      'ReceivablesNetCurrent',
+      'AccountsReceivableGrossCurrent',
+    ],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Accounts Receivable (Net)',
+  },
+  accounts_payable: {
+    group: 'balance_sheet',
+    tags: ['AccountsPayableCurrent'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Accounts Payable',
+  },
+  goodwill: {
+    group: 'balance_sheet',
+    tags: ['Goodwill'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Goodwill',
+  },
+  intangible_assets: {
+    group: 'balance_sheet',
+    tags: ['FiniteLivedIntangibleAssetsNet', 'IntangibleAssetsNetExcludingGoodwill'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Intangible Assets (Net)',
+  },
+
+  // Cash flow
+  dividends_paid: {
+    group: 'cash_flow',
+    tags: ['PaymentsOfDividends', 'PaymentsOfDividendsCommonStock'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Dividends Paid',
+  },
+  share_repurchases: {
+    group: 'cash_flow',
+    tags: [
+      'PaymentsForRepurchaseOfCommonStock',
+      'PaymentsForRepurchaseOfEquity',
+      'StockRepurchasedAndRetiredDuringPeriodValue',
+    ],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Share Repurchases',
+  },
+  investing_cash_flow: {
+    group: 'cash_flow',
+    tags: ['NetCashProvidedByUsedInInvestingActivities'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Investing Cash Flow',
+  },
+  financing_cash_flow: {
+    group: 'cash_flow',
+    tags: ['NetCashProvidedByUsedInFinancingActivities'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Financing Cash Flow',
+  },
 };
 
 /**
