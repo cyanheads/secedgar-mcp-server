@@ -123,7 +123,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .array(z.string())
       .optional()
       .describe(
-        'Filter to specific form types (e.g., ["10-K", "10-Q", "8-K"]). Without this, searches all form types.',
+        'Filter to specific form types (e.g., ["10-K", "10-Q", "8-K"]). Without this, searches all form types. Note: "10-K" also matches amendments filed as 10-K/A.',
       ),
     start_date: z
       .string()
@@ -318,11 +318,12 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       };
     });
 
-    // Form distribution must reflect the same set as `total`. When entity
-    // targeting filtered the EFTS sample client-side, recompute from `hits`;
-    // EFTS's aggregation reflects the pre-filter sample and would disagree.
+    // Form distribution must reflect the same set as `total`.
+    // When entity targeting or a forms filter is applied, the EFTS aggregation
+    // reflects the pre-filter sample and would disagree with `total`. In either
+    // case, recompute from the post-filter `hits` to keep the counts consistent.
     let formDistribution: Record<string, number> | undefined;
-    if (entityCik) {
+    if (entityCik || input.forms?.length) {
       const dist: Record<string, number> = {};
       for (const hit of hits) {
         const form = hit._source.form;
