@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.6.0
+**Version:** 0.6.1
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 
@@ -18,6 +18,7 @@ Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-onl
 - **Use `ctx.state`** for tenant-scoped storage. Never access persistence directly.
 - **Check `ctx.elicit` / `ctx.sample`** for presence before calling.
 - **Secrets in env vars only** — never hardcoded.
+- **Close the loop on issues.** When implementing work tracked by a GitHub issue, comment on the issue with what landed before moving on. The comment is for future readers — state the concrete changes, not the conversation that produced them.
 
 ---
 
@@ -211,6 +212,7 @@ Available skills:
 | `security-pass` | Audit server for MCP-flavored security gaps: output injection, scope blast radius, input sinks, tenant isolation |
 | `devcheck` | Lint, format, typecheck, audit |
 | `polish-docs-meta` | Finalize docs, README, metadata, and agent protocol for shipping |
+| `git-wrapup` | Version bump, changelog, commit, and tag for a release |
 | `release-and-publish` | Post-wrapup ship workflow: verification gate, push, publish to npm / MCP Registry / GHCR |
 | `migrate-mcp-ts-template` | Migrate a template fork to use `@cyanheads/mcp-ts-core` as a package dependency |
 | `report-issue-local` | File a bug or feature request against this server's repo |
@@ -274,6 +276,8 @@ Directory-based. Source of truth is `changelog/<major.minor>.x/<version>.md` —
 2. Add YAML frontmatter: `summary` (≤350 chars, no markdown), optional `breaking: true` flags breaking changes (`· ⚠️ Breaking` badge), optional `security: true` flags security fixes (`· 🛡️ Security` badge, pairs with a `## Security` body section).
 3. Set the H1 heading to `# <version> — YYYY-MM-DD`.
 4. Run `bun run changelog:build` to regenerate `CHANGELOG.md`.
+
+**Tag annotations** render as GitHub Release bodies via `--notes-from-tag`. They must be structured markdown — never a flat comma-separated string. Subject omits the version number (GitHub prepends it). See `changelog/template.md` for the full format reference.
 
 ---
 

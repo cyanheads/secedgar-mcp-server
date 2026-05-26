@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.1](changelog/0.6.x/0.6.1.md) — 2026-05-25
+
+mcp-ts-core ^0.9.6 → ^0.9.9: git-wrapup skill, ctx.elicit/ctx.fail/ctx.notifyPromptListChanged/ctx.notifyToolListChanged docs, release artifact verification, structured tag annotation format; @duckdb/node-api ^1.5.3-r.1 → ^1.5.3-r.2; stdio/streamable-http npm keywords added.
+
 ## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-05-25
 
 Concept catalog 16 → 33; get_financials companyfacts probe on no_concept_data; FY bracket label dropped; get_filing primary_document preserved on exhibit fetches; search_filings form_distribution fixed for forms filter; fiscal_year_end formatted MM-DD.
