@@ -146,7 +146,10 @@ describe('getFilingTool', () => {
     });
     const result = await getFilingTool.handler(input, ctx);
 
-    expect(result.primary_document).toBe('ex-21.htm');
+    // primary_document is the filing's actual primary (largest HTML), not the requested exhibit
+    expect(result.primary_document).toBe('aapl-20230930.htm');
+    // requested_document reflects the exhibit that was actually fetched
+    expect(result.requested_document).toBe('ex-21.htm');
     expect(mockApi.tryGetFilingDocument).toHaveBeenCalledWith(
       '0000320193',
       '0000320193-23-000106',

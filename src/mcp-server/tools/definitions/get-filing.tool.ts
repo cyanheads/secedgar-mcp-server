@@ -28,7 +28,16 @@ interface CategorizedDocuments {
 }
 
 type ResolveOutcome =
-  | { ok: true; cik: string; html: string; index: FilingIndex; targetName: string }
+  | {
+      ok: true;
+      cik: string;
+      html: string;
+      index: FilingIndex;
+      /** The document actually fetched (may be an exhibit if `document` param was specified). */
+      targetName: string;
+      /** The filing's actual primary document (independent of the `document` param). */
+      filingPrimaryName: string;
+    }
   | {
       ok: false;
       kind: 'document_not_found';
@@ -144,7 +153,13 @@ export const getFilingTool = tool('secedgar_get_filing', {
       ),
     primary_document: z
       .string()
-      .describe('Filename of the document whose text was returned in content.'),
+      .describe("Filename of the filing's actual primary document (e.g., the 10-K HTML file)."),
+    requested_document: z
+      .string()
+      .optional()
+      .describe(
+        'Filename of the specific document requested via the document param. Only present when document differs from primary_document.',
+      ),
     documents: z
       .object({
         primary: z
@@ -216,7 +231,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
         recovery: { hint: recoveryHint },
       });
     }
-    const { cik, index, html, targetName } = resolved;
+    const { cik, index, html, targetName, filingPrimaryName } = resolved;
     const accnNoDashes = accn.replace(/-/g, '');
 
     const { text, truncated, totalLength } = filingToText(html, input.content_limit);
@@ -231,7 +246,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
 
     const documents = categorizeDocuments(
       index.directory.item,
-      targetName,
+      filingPrimaryName,
       headers,
       input.include_xbrl,
     );
@@ -254,6 +269,9 @@ export const getFilingTool = tool('secedgar_get_filing', {
       headersResolved: headers !== null,
     });
 
+    const requestedDocument =
+      input.document && input.document !== filingPrimaryName ? input.document : undefined;
+
     return {
       accession_number: accn,
       form: form || undefined,
@@ -261,7 +279,8 @@ export const getFilingTool = tool('secedgar_get_filing', {
       company_name: submissions.name || undefined,
       cik,
       period_ending: periodEnding,
-      primary_document: targetName,
+      primary_document: filingPrimaryName,
+      requested_document: requestedDocument,
       documents,
       content: text,
       content_truncated: truncated,
@@ -279,7 +298,10 @@ export const getFilingTool = tool('secedgar_get_filing', {
     const periodPart = result.period_ending ? ` | Period: ${result.period_ending}` : '';
     const dateLine = `${filedPart}${periodPart}`;
 
-    const meta = `Accession: ${result.accession_number} | Primary: ${result.primary_document} | ${result.content_total_length} chars${result.content_truncated ? ' (truncated)' : ''}`;
+    const docLabel = result.requested_document
+      ? `Primary: ${result.primary_document} | Requested: ${result.requested_document}`
+      : `Primary: ${result.primary_document}`;
+    const meta = `Accession: ${result.accession_number} | ${docLabel} | ${result.content_total_length} chars${result.content_truncated ? ' (truncated)' : ''}`;
 
     const docs = formatDocumentSection(result.documents);
 
@@ -317,14 +339,17 @@ async function resolveFilingArchive(
     const items = index.directory.item;
     lastIndexedItems = items;
 
-    const targetName = requestedDocument ?? findPrimaryDocument(items);
-    if (!targetName) continue;
+    // Always resolve the filing's actual primary document independently of what the caller requested.
+    const filingPrimaryName = findPrimaryDocument(items);
+    if (!filingPrimaryName) continue;
+
+    const targetName = requestedDocument ?? filingPrimaryName;
     if (!items.some((item) => item.name === targetName)) continue;
 
     const html = await api.tryGetFilingDocument(cik, accessionNumber, targetName);
     if (!html) continue;
 
-    return { ok: true, cik, html, index, targetName };
+    return { ok: true, cik, html, index, targetName, filingPrimaryName };
   }
 
   const availableDocuments = lastIndexedItems.map((item) => item.name);
