@@ -17,6 +17,14 @@ interface FilingEntry {
   report_date?: string | undefined;
 }
 
+/** Format SEC's MMDD fiscal year end string as MM-DD (e.g., "0926" → "09-26"). */
+function formatFiscalYearEnd(raw: string): string {
+  if (/^\d{4}$/.test(raw)) {
+    return `${raw.slice(0, 2)}-${raw.slice(2)}`;
+  }
+  return raw;
+}
+
 export const companySearchTool = tool('secedgar_company_search', {
   description:
     'Find companies and retrieve entity info with optional recent filings. Entry point for most EDGAR workflows — resolves tickers, names, or CIKs to entity details, with accession numbers in the result feeding secedgar_get_filing for document content.',
@@ -78,7 +86,9 @@ export const companySearchTool = tool('secedgar_company_search', {
       .describe(
         'State of incorporation (US two-letter code, e.g. "DE"). Omitted for some entities, including many foreign filers and individuals.',
       ),
-    fiscal_year_end: z.string().describe('Fiscal year end (MMDD format).'),
+    fiscal_year_end: z
+      .string()
+      .describe('Fiscal year end (MM-DD format, e.g., "09-26" for September 26).'),
     filings: z
       .array(
         z
@@ -185,7 +195,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       sic: submissions.sic,
       sic_description: submissions.sicDescription,
       state_of_incorporation: submissions.stateOfIncorporation || undefined,
-      fiscal_year_end: submissions.fiscalYearEnd,
+      fiscal_year_end: formatFiscalYearEnd(submissions.fiscalYearEnd),
       filings,
       total_filings: totalFilings,
     };

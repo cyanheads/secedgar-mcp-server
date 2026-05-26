@@ -60,7 +60,7 @@ describe('companySearchTool', () => {
     expect(result.name).toBe('Apple Inc.');
     expect(result.tickers).toEqual(['AAPL']);
     expect(result.sic).toBe('3571');
-    expect(result.fiscal_year_end).toBe('0930');
+    expect(result.fiscal_year_end).toBe('09-30');
   });
 
   it('includes filings by default', async () => {
