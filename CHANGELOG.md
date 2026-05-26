@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-05-25
+
+Concept catalog 16 → 33; get_financials companyfacts probe on no_concept_data; FY bracket label dropped; get_filing primary_document preserved on exhibit fetches; search_filings form_distribution fixed for forms filter; fiscal_year_end formatted MM-DD.
+
 ## [0.5.2](changelog/0.5.x/0.5.2.md) — 2026-05-23
 
 `@cyanheads/mcp-ts-core ^0.9.1 → ^0.9.6`. `RequestContextLike` canvas cast removed. `zod` added as explicit dependency. `manifest.json` + `.mcpbignore` scaffolded for MCPB bundle support. Install badges added to README.

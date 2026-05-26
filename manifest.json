@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "secedgar-mcp-server",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.",
   "author": { "name": "cyanheads" },
   "server": {
