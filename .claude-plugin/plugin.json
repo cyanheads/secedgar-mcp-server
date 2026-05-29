@@ -1,0 +1,21 @@
+{
+  "name": "@cyanheads/secedgar-mcp-server",
+  "version": "0.6.2",
+  "description": "Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.",
+  "author": {
+    "name": "cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/secedgar-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/secedgar-mcp-server",
+  "license": "Apache-2.0",
+  "mcpServers": {
+    "@cyanheads/secedgar-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "@cyanheads/secedgar-mcp-server"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "EDGAR_USER_AGENT": "${EDGAR_USER_AGENT}"
+      }
+    }
+  }
+}
