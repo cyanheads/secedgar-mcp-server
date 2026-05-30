@@ -281,6 +281,84 @@ describe('getFinancialsTool', () => {
     await expect(getFinancialsTool.handler(input, ctx)).rejects.toThrow(/not found/);
   });
 
+  it('throws ambiguous_company when resolveCik returns multiple matches (#23)', async () => {
+    mockApi.resolveCik.mockResolvedValue([
+      { cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' },
+      { cik: '0006084276', name: 'Apple Bank for Savings', ticker: undefined },
+    ]);
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({ company: 'Apple', concept: 'revenue' });
+
+    await expect(getFinancialsTool.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'ambiguous_company',
+        matches: expect.arrayContaining([
+          expect.objectContaining({ cik: '0000320193', name: 'Apple Inc.' }),
+        ]),
+      },
+    });
+  });
+
+  it('caps ambiguous_company matches at 10 (#23)', async () => {
+    const manyMatches = Array.from({ length: 15 }, (_, i) => ({
+      cik: `000000000${i}`,
+      name: `Company ${i}`,
+      ticker: undefined,
+    }));
+    mockApi.resolveCik.mockResolvedValue(manyMatches);
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({ company: 'Company', concept: 'revenue' });
+
+    await expect(getFinancialsTool.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'ambiguous_company',
+        matches: expect.arrayContaining([expect.objectContaining({ cik: '0000000000' })]),
+      },
+    });
+    const err = await getFinancialsTool.handler(input, ctx).catch((e) => e);
+    expect(err.data.matches.length).toBeLessThanOrEqual(10);
+  });
+
+  it('uses ifrsTags when taxonomy is ifrs-full for a friendly name (#19)', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({
+      company: 'SPOT',
+      concept: 'revenue',
+      taxonomy: 'ifrs-full',
+    });
+    await getFinancialsTool.handler(input, ctx);
+
+    // Should use the IFRS tag, not the us-gaap tags
+    expect(mockApi.tryGetCompanyConcept).toHaveBeenCalledWith(
+      '0000320193',
+      'ifrs-full',
+      'RevenueFromContractsWithCustomers',
+    );
+    // Should NOT have been called with a us-gaap tag under ifrs-full
+    expect(mockApi.tryGetCompanyConcept).not.toHaveBeenCalledWith(
+      '0000320193',
+      'ifrs-full',
+      'RevenueFromContractWithCustomerExcludingAssessedTax',
+    );
+  });
+
+  it('falls back to standard tags for ifrs-full when concept has no ifrsTags (#19)', async () => {
+    // equity has no ifrsTags — standard tags should be used
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({
+      company: 'SPOT',
+      concept: 'equity',
+      taxonomy: 'ifrs-full',
+    });
+    await getFinancialsTool.handler(input, ctx);
+
+    expect(mockApi.tryGetCompanyConcept).toHaveBeenCalledWith(
+      '0000320193',
+      'ifrs-full',
+      'StockholdersEquity',
+    );
+  });
+
   it('throws notFound when no XBRL data exists', async () => {
     mockApi.tryGetCompanyConcept.mockResolvedValue(null);
     const ctx = createMockContext({ errors: getFinancialsTool.errors });

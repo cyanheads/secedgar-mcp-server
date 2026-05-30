@@ -20,7 +20,7 @@ const GROUP_LABELS: Record<ConceptGroup, string> = {
 export const conceptsResource = resource('secedgar://concepts', {
   name: 'XBRL Financial Concepts',
   description:
-    'Reference list of common XBRL financial concepts grouped by financial statement, mapping friendly names accepted by secedgar_get_financials and secedgar_compare_metric to their XBRL tags.',
+    'Reference list of common XBRL financial concepts grouped by financial statement, mapping friendly names accepted by secedgar_get_financials and secedgar_fetch_frames to their XBRL tags.',
   mimeType: 'text/markdown',
 
   handler(_params, _ctx) {
@@ -33,7 +33,7 @@ export const conceptsResource = resource('secedgar://concepts', {
 
     const lines: string[] = ['# XBRL Financial Concepts', ''];
     lines.push(
-      'Use these friendly names with `secedgar_get_financials` and `secedgar_compare_metric`.',
+      'Use these friendly names with `secedgar_get_financials` and `secedgar_fetch_frames`.',
       '',
     );
     lines.push(

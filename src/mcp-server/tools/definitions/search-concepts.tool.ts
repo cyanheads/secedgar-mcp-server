@@ -1,6 +1,6 @@
 /**
  * @fileoverview Search supported XBRL financial concepts by keyword, statement group, or taxonomy.
- * Discovery tool for the friendly names accepted by secedgar_get_financials and secedgar_compare_metric.
+ * Discovery tool for the friendly names accepted by secedgar_get_financials and secedgar_fetch_frames.
  * Also performs reverse lookup: passing a raw XBRL tag returns the friendly mapping(s) it belongs to.
  * @module mcp-server/tools/definitions/search-concepts
  */
@@ -25,7 +25,7 @@ const TAXONOMY_VALUES = [
 
 export const searchConceptsTool = tool('secedgar_search_concepts', {
   description:
-    'Search supported XBRL financial concepts by keyword, statement group, or taxonomy. Use before secedgar_get_financials or secedgar_compare_metric to discover the right friendly name, or pass a raw XBRL tag (e.g., "NetIncomeLoss") to reverse-lookup which friendly names map to it. Empty search with no filters returns the full catalog.',
+    'Search supported XBRL financial concepts by keyword, statement group, or taxonomy. Use before secedgar_get_financials or secedgar_fetch_frames to discover the right friendly name, or pass a raw XBRL tag (e.g., "NetIncomeLoss") to reverse-lookup which friendly names map to it. Empty search with no filters returns the full catalog.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   input: z.object({
@@ -39,7 +39,7 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
       .enum(GROUP_VALUES)
       .optional()
       .describe(
-        'Filter to a single financial statement group. income_statement covers P&L items; balance_sheet covers position items (use instant periods in secedgar_compare_metric); cash_flow covers CF statement items; per_share covers EPS; entity_info covers DEI items like shares outstanding.',
+        'Filter to a single financial statement group. income_statement covers P&L items; balance_sheet covers position items (use instant periods in secedgar_fetch_frames); cash_flow covers CF statement items; per_share covers EPS; entity_info covers DEI items like shares outstanding.',
       ),
     taxonomy: z
       .enum(TAXONOMY_VALUES)
@@ -69,7 +69,7 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
             name: z
               .string()
               .describe(
-                'Friendly name to pass as the concept argument to secedgar_get_financials or secedgar_compare_metric.',
+                'Friendly name to pass as the concept argument to secedgar_get_financials or secedgar_fetch_frames.',
               ),
             label: z.string().describe('Human-readable concept label.'),
             tags: z
@@ -85,7 +85,7 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
             unit: z
               .string()
               .describe(
-                'Unit of measure (USD, USD/shares, shares, pure). secedgar_compare_metric accepts both slash and dashed forms.',
+                'Unit of measure (USD, USD/shares, shares, pure). secedgar_fetch_frames accepts both slash and dashed forms.',
               ),
             group: z
               .enum(GROUP_VALUES)
@@ -99,12 +99,17 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
   }),
 
   handler(input, ctx) {
-    let results = searchConcepts(input.search ?? '');
+    // Pass taxonomy to searchConcepts so ifrs-full queries are pre-filtered to
+    // concepts with confirmed IFRS tag mappings, rather than falling back to
+    // us-gaap-only entries whose taxonomy field never equals 'ifrs-full'.
+    let results = searchConcepts(input.search ?? '', input.taxonomy);
 
     if (input.group) {
       results = results.filter((c) => c.group === input.group);
     }
-    if (input.taxonomy) {
+    if (input.taxonomy && input.taxonomy !== 'ifrs-full') {
+      // ifrs-full filtering is handled inside searchConcepts; standard taxonomy
+      // filtering (us-gaap, dei) still uses the taxonomy field on the entry.
       results = results.filter((c) => c.taxonomy === input.taxonomy);
     }
 

@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { getAllConcepts, resolveConcept } from '@/services/edgar/concept-map.js';
+import { getAllConcepts, resolveConcept, searchConcepts } from '@/services/edgar/concept-map.js';
 
 describe('resolveConcept', () => {
   it('resolves a known friendly name', () => {
@@ -72,6 +72,74 @@ describe('resolveConcept', () => {
     expect(mapping).toBeDefined();
     expect(mapping!.group).toBe('balance_sheet');
     expect(mapping!.tags).toEqual(['LongTermNotesPayable', 'NotesPayable', 'LongTermDebt']);
+  });
+});
+
+describe('resolveConcept — IFRS tag variants', () => {
+  it('revenue mapping includes ifrsTags', () => {
+    const mapping = resolveConcept('revenue');
+    expect(mapping?.ifrsTags).toBeDefined();
+    expect(mapping!.ifrsTags).toContain('RevenueFromContractsWithCustomers');
+  });
+
+  it('net_income mapping includes ifrsTags', () => {
+    const mapping = resolveConcept('net_income');
+    expect(mapping?.ifrsTags).toBeDefined();
+    expect(mapping!.ifrsTags).toContain('ProfitLoss');
+  });
+
+  it('assets mapping includes ifrsTags', () => {
+    const mapping = resolveConcept('assets');
+    expect(mapping?.ifrsTags).toBeDefined();
+    expect(mapping!.ifrsTags).toContain('Assets');
+  });
+
+  it('concepts without IFRS variants have no ifrsTags', () => {
+    // equity has no confirmed universal IFRS tag
+    const mapping = resolveConcept('equity');
+    expect(mapping?.ifrsTags).toBeUndefined();
+  });
+});
+
+describe('searchConcepts — taxonomy filtering', () => {
+  it('returns non-empty results for taxonomy ifrs-full', () => {
+    const results = searchConcepts('', 'ifrs-full');
+    expect(results.length).toBeGreaterThan(0);
+  });
+
+  it('returns only concepts with ifrsTags when taxonomy is ifrs-full', () => {
+    const results = searchConcepts('', 'ifrs-full');
+    for (const r of results) {
+      expect(r.ifrsTags).toBeDefined();
+      expect(r.ifrsTags!.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('includes revenue, net_income, assets when taxonomy is ifrs-full', () => {
+    const results = searchConcepts('', 'ifrs-full');
+    const names = results.map((r) => r.name);
+    expect(names).toContain('revenue');
+    expect(names).toContain('net_income');
+    expect(names).toContain('assets');
+  });
+
+  it('does not include equity when taxonomy is ifrs-full (no confirmed IFRS tag)', () => {
+    const results = searchConcepts('', 'ifrs-full');
+    const names = results.map((r) => r.name);
+    expect(names).not.toContain('equity');
+  });
+
+  it('matches IFRS tag names in search when taxonomy is ifrs-full', () => {
+    const results = searchConcepts('ProfitLoss', 'ifrs-full');
+    expect(results.some((r) => r.name === 'net_income')).toBe(true);
+  });
+
+  it('returns all concepts when taxonomy is us-gaap (standard behaviour)', () => {
+    const allResults = searchConcepts('');
+    const usgaapResults = searchConcepts('', 'us-gaap');
+    // us-gaap taxonomy filters by mapping.taxonomy === 'us-gaap', which is handled in the tool
+    // searchConcepts itself doesn't filter for us-gaap — that is done post-call in the tool handler
+    expect(usgaapResults.length).toBe(allResults.length);
   });
 });
 

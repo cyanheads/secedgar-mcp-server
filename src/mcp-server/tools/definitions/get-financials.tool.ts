@@ -24,6 +24,12 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       recovery: 'Use a ticker symbol or 10-digit CIK number for an exact match.',
     },
     {
+      reason: 'ambiguous_company',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The company input resolves to multiple entities and the target is ambiguous',
+      recovery: 'Use a ticker symbol or 10-digit CIK from the matches list for an exact match.',
+    },
+    {
       reason: 'no_concept_data',
       code: JsonRpcErrorCode.NotFound,
       when: 'The company does not report any XBRL data for the resolved concept and taxonomy',
@@ -135,8 +141,23 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
 
     // Resolve company to CIK
     const resolved = await api.resolveCik(input.company);
+    if (Array.isArray(resolved) && resolved.length === 0) {
+      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`, {
+        ...ctx.recoveryFor('company_not_found'),
+      });
+    }
+    if (Array.isArray(resolved) && resolved.length > 1) {
+      throw ctx.fail('ambiguous_company', `'${input.company}' matches multiple companies.`, {
+        ...ctx.recoveryFor('ambiguous_company'),
+        matches: resolved.slice(0, 10).map((m) => ({
+          cik: m.cik,
+          name: m.name,
+          ticker: m.ticker,
+        })),
+      });
+    }
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
-    if (!match || (Array.isArray(resolved) && resolved.length === 0)) {
+    if (!match) {
       throw ctx.fail('company_not_found', `Company '${input.company}' not found.`, {
         ...ctx.recoveryFor('company_not_found'),
       });
@@ -144,8 +165,6 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
 
     // Resolve concept to XBRL tag(s)
     const mapping = resolveConcept(input.concept);
-    const tags = mapping ? mapping.tags : [input.concept];
-    const label = mapping?.label ?? input.concept;
 
     // When the user overrides the default taxonomy, honor their choice;
     // otherwise fall back to the mapping's preferred taxonomy (e.g. `dei` for shares_outstanding).
@@ -153,6 +172,15 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     if (mapping && input.taxonomy === 'us-gaap') {
       taxonomy = mapping.taxonomy as typeof input.taxonomy;
     }
+
+    // Use IFRS-specific tags when the effective taxonomy is ifrs-full and the mapping
+    // has confirmed IFRS variants; fall back to the standard tags otherwise.
+    const tags = mapping
+      ? taxonomy === 'ifrs-full' && mapping.ifrsTags?.length
+        ? mapping.ifrsTags
+        : mapping.tags
+      : [input.concept];
+    const label = mapping?.label ?? input.concept;
 
     // Balance-sheet items emit instant frames (CYxxxxQxI), which the "annual" filter
     // (/^CY\d{4}$/) excludes. Default to "all" for them so a bare friendly-name call returns data.

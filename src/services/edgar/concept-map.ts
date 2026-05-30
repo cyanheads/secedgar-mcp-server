@@ -15,6 +15,8 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
       'SalesRevenueNet',
       'SalesRevenueGoodsNet',
     ],
+    // IFRS tag verified against Spotify (SPOT, 20-F IFRS filer).
+    ifrsTags: ['RevenueFromContractsWithCustomers', 'Revenue'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Revenue',
@@ -22,6 +24,8 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   net_income: {
     group: 'income_statement',
     tags: ['NetIncomeLoss'],
+    // IFRS tag verified against Spotify (SPOT, 20-F IFRS filer).
+    ifrsTags: ['ProfitLoss'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Net Income (Loss)',
@@ -57,6 +61,8 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   assets: {
     group: 'balance_sheet',
     tags: ['Assets'],
+    // IFRS tag verified against Spotify (SPOT, 20-F IFRS filer).
+    ifrsTags: ['Assets'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Total Assets',
@@ -302,16 +308,27 @@ function normalizeForSearch(s: string): string {
  * Search concepts by substring against friendly name, label, and XBRL tags.
  * Passing a raw XBRL tag will reverse-lookup the friendly mapping(s).
  * Empty/whitespace query returns all entries.
+ *
+ * When `taxonomy` is `'ifrs-full'`, only concepts that have `ifrsTags` are
+ * returned (they are the only ones with confirmed IFRS-friendly-name support).
  */
-export function searchConcepts(query: string): ConceptEntry[] {
+export function searchConcepts(query: string, taxonomy?: string): ConceptEntry[] {
   const needle = normalizeForSearch(query);
-  if (!needle) return listConcepts();
+  let entries = listConcepts();
 
-  return listConcepts().filter((entry) => {
+  // For ifrs-full, narrow to concepts that have confirmed IFRS tag mappings.
+  if (taxonomy === 'ifrs-full') {
+    entries = entries.filter((e) => e.ifrsTags && e.ifrsTags.length > 0);
+  }
+
+  if (!needle) return entries;
+
+  return entries.filter((entry) => {
     const haystacks = [
       normalizeForSearch(entry.name),
       normalizeForSearch(entry.label),
       ...entry.tags.map(normalizeForSearch),
+      ...(entry.ifrsTags ?? []).map(normalizeForSearch),
     ];
     return haystacks.some((h) => h.includes(needle));
   });

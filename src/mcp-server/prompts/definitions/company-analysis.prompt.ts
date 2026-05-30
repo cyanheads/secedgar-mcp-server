@@ -32,7 +32,7 @@ export const companyAnalysisPrompt = prompt('secedgar_company_analysis', {
           '2. **Financial Trends** — Use `secedgar_get_financials` to pull key metrics (revenue, net_income, eps_diluted, assets, debt, operating_cash_flow) and identify trends over the last 3-5 years.',
           '3. **Recent Filings Review** — Use `secedgar_get_filing` to read the most recent 10-K or 10-Q for qualitative insights (risk factors, MD&A, business overview).',
           '4. **Material Events** — Use `secedgar_search_filings` (or call `secedgar_company_search` with `form_types: ["8-K"]`) to surface recent material events (M&A, leadership changes, earnings surprises).',
-          '5. **Industry Context** — Use `secedgar_compare_metric` to compare key metrics against peers.',
+          '5. **Industry Context** — Use `secedgar_fetch_frames` to compare key metrics against peers.',
           '',
           'Present findings as:',
           '- **Company Overview** — entity details, industry, fiscal year',

@@ -148,6 +148,12 @@ export type ConceptTaxonomy = 'us-gaap' | 'ifrs-full' | 'dei';
 /** Friendly concept name mapping. */
 export interface ConceptMapping {
   group: ConceptGroup;
+  /**
+   * IFRS tag variants for this concept (used when taxonomy === 'ifrs-full').
+   * When present, these replace `tags` for IFRS lookups so friendly names resolve
+   * correctly against ifrs-full filers (e.g. Spotify's 20-F filings).
+   */
+  ifrsTags?: string[];
   label: string;
   tags: string[];
   taxonomy: ConceptTaxonomy;
