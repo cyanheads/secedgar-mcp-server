@@ -49,6 +49,17 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
       ),
   }),
 
+  // Agent-facing context — empty-result guidance populated via ctx.enrich so it
+  // reaches structuredContent and content[] automatically; no format() entry needed.
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance when no concepts matched — echoes the search term and suggests alternatives.',
+      ),
+  },
+
   output: z.object({
     total: z.number().describe('Number of concepts matching the filters.'),
     concepts: z
@@ -104,6 +115,16 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
       matches: results.length,
     });
 
+    if (results.length === 0) {
+      const filters: string[] = [];
+      if (input.group) filters.push(`group=${input.group}`);
+      if (input.taxonomy) filters.push(`taxonomy=${input.taxonomy}`);
+      const filterSuffix = filters.length ? ` with filters (${filters.join(', ')})` : '';
+      ctx.enrich.notice(
+        `No concepts matched "${input.search ?? '(all)'}"${filterSuffix}. Try a broader search term, a different group, or call with no filters to see the full catalog.`,
+      );
+    }
+
     return {
       total: results.length,
       concepts: results.map((c) => ({
@@ -119,12 +140,7 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
 
   format: (result) => {
     if (result.total === 0) {
-      return [
-        {
-          type: 'text',
-          text: 'No concepts matched. Try a broader search, different group, or call with no filters to see the full catalog.',
-        },
-      ];
+      return [{ type: 'text', text: `Found 0 concepts.` }];
     }
 
     const lines = [`Found ${result.total} concept${result.total === 1 ? '' : 's'}:`, ''];

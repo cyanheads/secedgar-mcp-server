@@ -3,7 +3,7 @@
  * @module tests/mcp-server/tools/definitions/search-filings.tool
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
 import type { EftsResponse } from '@/services/edgar/types.js';
@@ -358,6 +358,30 @@ describe('searchFilingsTool', () => {
 
     expect(result.total).toBe(0);
     expect(result.results).toHaveLength(0);
+  });
+
+  it('populates enrichment effectiveQuery on success', async () => {
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({ query: 'material weakness' });
+    await searchFilingsTool.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.effectiveQuery).toBe('material weakness');
+    expect(enrichment.notice).toBeUndefined();
+  });
+
+  it('populates enrichment notice when results are empty', async () => {
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: { total: { value: 0, relation: 'eq' }, hits: [] },
+    });
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({ query: 'zzznomatch' });
+    await searchFilingsTool.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(typeof enrichment.notice).toBe('string');
+    expect(enrichment.notice).toContain('zzznomatch');
   });
 
   it('handles hits without adsh (falls back to _id)', async () => {

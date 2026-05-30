@@ -30,6 +30,16 @@ export const companySearchTool = tool('secedgar_company_search', {
     'Find companies and retrieve entity info with optional recent filings. Entry point for most EDGAR workflows — resolves tickers, names, or CIKs to entity details, with accession numbers in the result feeding secedgar_get_filing for document content.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
+  // Agent-facing context — notice for empty filings (e.g. filtered form types with
+  // no matches) populated via ctx.enrich so it reaches both structuredContent and
+  // content[] automatically; no format() entry needed.
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe('Guidance when include_filings=true but no filings matched the form_types filter.'),
+  },
+
   errors: [
     {
       reason: 'no_match',
@@ -185,6 +195,12 @@ export const companySearchTool = tool('secedgar_company_search', {
 
       totalFilings = filtered.length;
       filings = filtered.slice(0, input.filing_limit);
+    }
+
+    if (input.include_filings && input.form_types?.length && totalFilings === 0) {
+      ctx.enrich.notice(
+        `No filings matched form types [${input.form_types.join(', ')}] for this entity. Try different form types or remove the filter.`,
+      );
     }
 
     return {

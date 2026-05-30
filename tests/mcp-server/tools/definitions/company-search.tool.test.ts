@@ -3,7 +3,7 @@
  * @module tests/mcp-server/tools/definitions/company-search.tool
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { companySearchTool } from '@/mcp-server/tools/definitions/company-search.tool.js';
 import type { SubmissionsResponse } from '@/services/edgar/types.js';
@@ -161,6 +161,27 @@ describe('companySearchTool', () => {
     expect(blocks[0].text).toContain('Apple Inc.');
     expect(blocks[0].text).toContain('AAPL');
     expect(blocks[0].text).toContain('10-K');
+  });
+
+  it('populates enrichment notice when form_types filter returns no filings', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({ query: 'AAPL', form_types: ['S-1'] });
+    await companySearchTool.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(typeof enrichment.notice).toBe('string');
+    expect(enrichment.notice).toContain('S-1');
+  });
+
+  it('does not populate enrichment notice when filings are returned', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({ query: 'AAPL', form_types: ['10-K'] });
+    await companySearchTool.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toBeUndefined();
   });
 
   it('formats output without filings', () => {

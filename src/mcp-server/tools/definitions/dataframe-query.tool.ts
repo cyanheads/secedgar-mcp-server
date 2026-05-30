@@ -17,6 +17,15 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
     'Run a single-statement SELECT against the canvas dataframes registered by secedgar_fetch_frames, secedgar_search_filings, and secedgar_get_financials. Read-only: writes, DDL, DROP, COPY, PRAGMA, ATTACH, and external-file table functions are rejected. System catalogs (information_schema, pg_catalog, sqlite_master, duckdb_*) are denied at the bridge layer — list dataframes via secedgar_dataframe_describe. Optional register_as chains the result as a new dataframe with a fresh TTL.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
+  // Agent-facing context — empty-result and row-cap notices populated via ctx.enrich
+  // so they reach structuredContent and content[] automatically.
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe('Guidance when the query returned no rows, or when results were capped.'),
+  },
+
   errors: [
     {
       reason: 'canvas_unavailable',
@@ -98,6 +107,16 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       returned: result.rows.length,
       registeredAs: meta?.tableName,
     });
+
+    if (result.rowCount === 0) {
+      ctx.enrich.notice(
+        'Query returned 0 rows. Verify dataframe names (use secedgar_dataframe_describe) and check your WHERE conditions.',
+      );
+    } else if (result.rowCount > result.rows.length) {
+      ctx.enrich.notice(
+        `Showing ${result.rows.length} of ${result.rowCount} rows (capped). Use register_as to persist the full result, or raise row_limit (max 10000).`,
+      );
+    }
 
     return {
       columns: result.columns,

@@ -103,6 +103,23 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     'Search the full-text index of EDGAR filings since 1993. Supports exact phrases, boolean operators, wildcards, and entity targeting (ticker:AAPL or cik:320193 in query).',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
+  // Agent-facing context for the success path — the query as EDGAR executed it and
+  // an optional notice for empty results. Populated via ctx.enrich so it reaches
+  // both structuredContent and content[]; kept out of the domain return.
+  enrichment: {
+    effectiveQuery: z
+      .string()
+      .describe(
+        'The query as executed against EDGAR (ticker/cik: tokens resolved to entity names).',
+      ),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance when no results were returned — echoes the query and suggests how to broaden.',
+      ),
+  },
+
   errors: [
     {
       reason: 'invalid_date_range',
@@ -372,6 +389,13 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       resultCount: results.length,
       datasetName: dataset?.name,
     });
+
+    ctx.enrich.echo(query);
+    if (results.length === 0) {
+      ctx.enrich.notice(
+        `No filings matched "${input.query}"${input.forms?.length ? ` with forms ${input.forms.join(', ')}` : ''}. Try broader terms, remove form filters, or check entity targeting syntax (ticker:AAPL).`,
+      );
+    }
 
     return {
       total,
