@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.0](changelog/0.7.x/0.7.0.md) — 2026-05-30
+
+Insider transactions (Form 3/4/5), institutional holdings (13F), IFRS friendly-name resolution, ambiguous-company guard, and system_catalog_access error contract
+
 ## [0.6.3](changelog/0.6.x/0.6.3.md) — 2026-05-30
 
 enrichment adoption — search/concept tools surface query echoes and empty-result guidance via typed enrichment block

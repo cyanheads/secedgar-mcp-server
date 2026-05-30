@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-05-30 10:10:47
+Generated on: 2026-05-30 13:45:13
 
 ```text
 secedgar-mcp-server/
@@ -26,6 +26,7 @@ secedgar-mcp-server/
 │   ├── 0.4.x/
 │   ├── 0.5.x/
 │   ├── 0.6.x/
+│   ├── 0.7.x/
 │   └── template.md
 ├── claude-plans/
 ├── docs/
@@ -135,6 +136,8 @@ secedgar-mcp-server/
 │   │           ├── fetch-frames.tool.ts
 │   │           ├── get-filing.tool.ts
 │   │           ├── get-financials.tool.ts
+│   │           ├── get-insider-transactions.tool.ts
+│   │           ├── get-institutional-holdings.tool.ts
 │   │           ├── search-concepts.tool.ts
 │   │           └── search-filings.tool.ts
 │   ├── services/
@@ -146,6 +149,7 @@ secedgar-mcp-server/
 │   │       ├── edgar-api-service.ts
 │   │       ├── filing-headers.ts
 │   │       ├── filing-to-text.ts
+│   │       ├── ownership-parser.ts
 │   │       └── types.ts
 │   └── index.ts
 ├── tests/
@@ -170,7 +174,8 @@ secedgar-mcp-server/
 │       └── edgar/
 │           ├── concept-map.test.ts
 │           ├── edgar-api-service.test.ts
-│           └── filing-to-text.test.ts
+│           ├── filing-to-text.test.ts
+│           └── ownership-parser.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore

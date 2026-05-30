@@ -1,7 +1,7 @@
 <div align="center">
   <h1>@cyanheads/secedgar-mcp-server</h1>
   <p><b>Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.</b>
-  <div>8 Tools (+1 opt-in) • 2 Resources • 1 Prompt</div>
+  <div>10 Tools (+1 opt-in) • 2 Resources • 1 Prompt</div>
   </p>
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Tools
 
-Six tools for querying SEC EDGAR data, plus three for SQL analytics over the DuckDB-backed canvas dataframes those tools materialize:
+Eight tools for querying SEC EDGAR data, plus three for SQL analytics over the DuckDB-backed canvas dataframes those tools materialize:
 
 | Tool | Description |
 |:---|:---|
@@ -37,6 +37,8 @@ Six tools for querying SEC EDGAR data, plus three for SQL analytics over the Duc
 | `secedgar_search_filings` | Full-text search across all EDGAR filing documents since 1993 |
 | `secedgar_get_filing` | Fetch a specific filing's metadata and document content |
 | `secedgar_get_financials` | Get historical XBRL financial data for a company |
+| `secedgar_get_insider_transactions` | Form 3/4/5 insider transactions (buys, sells, grants, exercises) parsed from ownership XML |
+| `secedgar_get_institutional_holdings` | 13F-HR quarterly institutional holdings parsed from the information table |
 | `secedgar_fetch_frames` | Fetch SEC XBRL frames for one concept × one period across all reporting companies |
 | `secedgar_search_concepts` | Discover supported XBRL concept names or reverse-lookup a raw tag |
 | `secedgar_dataframe_describe` | List canvas dataframes with provenance, TTL, and schema |
@@ -85,6 +87,28 @@ Get historical XBRL financial data for a company with friendly concept name reso
 - Automatic deduplication to one value per standard calendar period
 - Filter by annual, quarterly, or all periods
 - See `secedgar://concepts` resource for the full mapping
+
+---
+
+### `secedgar_get_insider_transactions`
+
+Surface Form 3/4/5 insider activity for a company by parsing ownership XML.
+
+- Reporting person, relationship to issuer (director, officer + title, 10% owner), and transaction date
+- Transaction code mapped to a readable type (purchase, sale, gift, award, exercise, …); shares signed by acquired/disposed
+- Price per share and shares owned after each transaction; covers non-derivative (open-market) and derivative (option/RSU) lines
+- Filter by `transaction_type` (`purchase`, `sale`, `all`); scans newest filings first
+
+---
+
+### `secedgar_get_institutional_holdings`
+
+Surface 13F-HR quarterly institutional holdings by parsing the information table.
+
+- Pass an institution (CIK or name) to see what it holds, or a company CIK to find its own 13F filings
+- Per position: issuer name, CUSIP, market value (thousands USD), shares/principal, put/call, and investment discretion
+- Resolves the filing-manager name and reporting quarter from the cover page; target a specific quarter with `quarter` (e.g. `"2025-Q4"`)
+- `total_holdings_in_filing` reports the full position count before `limit`
 
 ---
 
@@ -290,7 +314,7 @@ docker run -e EDGAR_USER_AGENT="MyApp my@email.com" -p 3010:3010 secedgar-mcp-se
 
 | Directory | Purpose |
 |:---|:---|
-| `src/mcp-server/tools/definitions/` | Tool definitions (`*.tool.ts`). Six SEC EDGAR tools plus three `dataframe_*` tools for SQL analytics. |
+| `src/mcp-server/tools/definitions/` | Tool definitions (`*.tool.ts`). Eight SEC EDGAR tools plus three `dataframe_*` tools for SQL analytics. |
 | `src/mcp-server/resources/definitions/` | Resource definitions. XBRL concepts and filing types. |
 | `src/mcp-server/prompts/definitions/` | Prompt definitions. Company analysis prompt. |
 | `src/services/edgar/` | SEC EDGAR API client, XBRL concept mapping, HTML-to-text conversion. |

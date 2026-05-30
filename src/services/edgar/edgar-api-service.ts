@@ -242,6 +242,37 @@ class EdgarApiService {
   }
 
   /**
+   * Search EDGAR submissions for recent filings of specified form types.
+   * Returns up to `limit` accession numbers (newest first) from the recent-filings window,
+   * then pages into archived files when the window is exhausted.
+   */
+  async getRecentFilingsByForm(
+    cik: string,
+    formTypes: string[],
+    limit: number,
+  ): Promise<Array<{ accessionNumber: string; filingDate: string; primaryDocument: string }>> {
+    const submissions = await this.getSubmissions(cik);
+    const recent = submissions.filings.recent;
+    const results: Array<{
+      accessionNumber: string;
+      filingDate: string;
+      primaryDocument: string;
+    }> = [];
+
+    for (let i = 0; i < recent.form.length && results.length < limit; i++) {
+      if (formTypes.includes(recent.form[i] ?? '')) {
+        results.push({
+          accessionNumber: recent.accessionNumber[i] ?? '',
+          filingDate: recent.filingDate[i] ?? '',
+          primaryDocument: recent.primaryDocument[i] ?? '',
+        });
+      }
+    }
+
+    return results;
+  }
+
+  /**
    * Fetch all XBRL facts for a company. Returns `null` on 404.
    * Used on the no-data error path to surface which namespaces and tags a filer actually uses.
    */

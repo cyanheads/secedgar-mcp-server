@@ -16,6 +16,8 @@ import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-que
 import { fetchFramesTool } from '@/mcp-server/tools/definitions/fetch-frames.tool.js';
 import { getFilingTool } from '@/mcp-server/tools/definitions/get-filing.tool.js';
 import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials.tool.js';
+import { getInsiderTransactionsTool } from '@/mcp-server/tools/definitions/get-insider-transactions.tool.js';
+import { getInstitutionalHoldingsTool } from '@/mcp-server/tools/definitions/get-institutional-holdings.tool.js';
 import { searchConceptsTool } from '@/mcp-server/tools/definitions/search-concepts.tool.js';
 import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
 import { initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
@@ -38,6 +40,8 @@ await createApp({
     searchFilingsTool,
     getFilingTool,
     getFinancialsTool,
+    getInsiderTransactionsTool,
+    getInstitutionalHoldingsTool,
     fetchFramesTool,
     searchConceptsTool,
     dataframeDescribeTool,
