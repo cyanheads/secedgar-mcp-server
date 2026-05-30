@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/secedgar-mcp-server",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.",
   "mcpName": "io.github.cyanheads/secedgar-mcp-server",
   "type": "module",
@@ -19,7 +19,8 @@
     "clean": "bun scripts/clean.ts",
     "devcheck": "bun scripts/devcheck.ts",
     "tree": "bun scripts/tree.ts",
-    "format": "biome check --write --unsafe .",
+    "format": "biome check --write .",
+    "format:unsafe": "biome check --write --unsafe .",
     "lint:mcp": "bun scripts/lint-mcp.ts",
     "changelog:build": "bun scripts/build-changelog.ts",
     "changelog:check": "bun scripts/build-changelog.ts --check",
@@ -77,7 +78,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@cyanheads/mcp-ts-core": "^0.9.13",
+    "@cyanheads/mcp-ts-core": "^0.9.16",
     "@duckdb/node-api": "^1.5.3-r.2",
     "html-to-text": "^10.0.0",
     "pino-pretty": "^13.1.3",

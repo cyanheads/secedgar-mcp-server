@@ -1,8 +1,8 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.6.2
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core)
+**Version:** 0.6.3
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.16`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 
 Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-only, no API keys required. Full design: `docs/sec-edgar-mcp-design.md`.
@@ -19,6 +19,22 @@ Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-onl
 - **Check `ctx.elicit` / `ctx.sample`** for presence before calling.
 - **Secrets in env vars only** — never hardcoded.
 - **Close the loop on issues.** When implementing work tracked by a GitHub issue, comment on the issue with what landed and close it. Do both — a comment without a close leaves stale issues open; a close without a comment leaves no record of what shipped. The comment is for future readers — state the concrete changes, not the conversation that produced them.
+
+---
+
+## What's Next?
+
+When the user asks what's next or needs direction, suggest options based on the current project state. Common next steps:
+
+1. **Add tools/resources/prompts** — scaffold new definitions using the `add-tool`, `add-app-tool`, `add-resource`, `add-prompt` skills
+2. **Add services** — scaffold domain service integrations using the `add-service` skill
+3. **Add tests** — scaffold tests for existing definitions using the `add-test` skill
+4. **Field-test definitions** — exercise tools/resources/prompts with real inputs using the `field-test` skill, get a report of issues and pain points
+5. **Run the `security-pass` skill** — audit handlers for MCP-specific security gaps: output injection, scope blast radius, input sinks, tenant isolation
+6. **Run the `polish-docs-meta` skill** — finalize README, CHANGELOG, metadata, and agent protocol for shipping
+7. **Run the `maintenance` skill** — investigate changelogs, adopt upstream changes, and sync skills after `bun update --latest`
+
+Tailor suggestions to what's actually missing or stale — don't recite the full list every time.
 
 ---
 
