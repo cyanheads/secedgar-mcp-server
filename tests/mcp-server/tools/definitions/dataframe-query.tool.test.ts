@@ -33,6 +33,35 @@ describe('dataframeQueryTool', () => {
     });
   });
 
+  it('declares system_catalog_access in errors contract (#22)', () => {
+    const entry = dataframeQueryTool.errors?.find((e) => e.reason === 'system_catalog_access');
+    expect(entry).toBeDefined();
+    expect(entry!.code).toBe(JsonRpcErrorCode.ValidationError);
+  });
+
+  it('surfaces system_catalog_access reason when query targets information_schema (#22)', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+    // The bridge query itself would throw via assertNoSystemCatalogAccess, simulate it
+    mockBridge.query.mockRejectedValue(
+      Object.assign(new Error('SQL references a denied system catalog: information_schema.'), {
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'system_catalog_access',
+          catalog: 'information_schema',
+          recovery: { hint: 'Query only df_<id> tables.' },
+        },
+      }),
+    );
+    const ctx = createMockContext({ errors: dataframeQueryTool.errors });
+    const input = dataframeQueryTool.input.parse({
+      sql: 'SELECT * FROM information_schema.tables',
+    });
+
+    await expect(dataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'system_catalog_access' },
+    });
+  });
+
   it('returns query results', async () => {
     vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
     mockBridge.query.mockResolvedValue({

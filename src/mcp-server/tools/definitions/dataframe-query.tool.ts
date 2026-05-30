@@ -33,6 +33,13 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       when: 'The DataCanvas service is not configured for this deployment',
       recovery: 'Set CANVAS_PROVIDER_TYPE=duckdb in the server environment to enable dataframes.',
     },
+    {
+      reason: 'system_catalog_access',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The SQL query references a denied DuckDB system catalog (information_schema, pg_catalog, sqlite_master, duckdb_*)',
+      recovery:
+        'Query only df_<id> tables. Use secedgar_dataframe_describe to list available dataframes.',
+    },
   ],
 
   input: z.object({
