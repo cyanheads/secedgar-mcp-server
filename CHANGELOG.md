@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.3](changelog/0.6.x/0.6.3.md) — 2026-05-30
+
+enrichment adoption — search/concept tools surface query echoes and empty-result guidance via typed enrichment block
+
 ## [0.6.2](changelog/0.6.x/0.6.2.md) — 2026-05-28 · 🛡️ Security
 
 mcp-ts-core ^0.9.9 → ^0.9.13: HTTP body cap (413), session-init gate, quieter 401/403/400/404 logs, GET /mcp keywords; @biomejs/biome ^2.4.15 → ^2.4.16; plugin metadata files; code-simplifier skill.

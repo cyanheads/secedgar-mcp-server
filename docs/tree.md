@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-05-29 05:38:10
+Generated on: 2026-05-30 10:10:47
 
 ```text
 secedgar-mcp-server/
@@ -90,8 +90,6 @@ secedgar-mcp-server/
 │   │   └── SKILL.md
 │   ├── design-mcp-server/
 │   │   └── SKILL.md
-│   ├── devcheck/
-│   │   └── SKILL.md
 │   ├── field-test/
 │   │   └── SKILL.md
 │   ├── git-wrapup/
@@ -159,9 +157,11 @@ secedgar-mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── company-search.tool.test.ts
+│   │           ├── dataframe-query.tool.test.ts
 │   │           ├── fetch-frames.tool.test.ts
 │   │           ├── get-filing.tool.test.ts
 │   │           ├── get-financials.tool.test.ts
+│   │           ├── search-concepts.tool.test.ts
 │   │           └── search-filings.tool.test.ts
 │   └── services/
 │       ├── canvas-bridge/
