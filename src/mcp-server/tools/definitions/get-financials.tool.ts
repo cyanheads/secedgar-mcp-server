@@ -52,9 +52,11 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
   input: z.object({
     company: z
       .string()
+      .min(1)
       .describe('Ticker symbol (e.g., "AAPL") or CIK number. Ticker is preferred.'),
     concept: z
       .string()
+      .min(1)
       .describe(
         'Financial concept — friendly name (e.g., "revenue", "net_income", "assets", "eps_diluted") or raw XBRL tag (e.g., "AccountsPayableCurrent"). Friendly names auto-resolve to the correct XBRL tags and handle historical tag changes.',
       ),

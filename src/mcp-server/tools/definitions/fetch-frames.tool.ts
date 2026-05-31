@@ -61,11 +61,13 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
   input: z.object({
     concept: z
       .string()
+      .min(1)
       .describe(
         'Financial concept — same friendly names as secedgar_get_financials (e.g., "revenue", "assets", "eps_basic") or raw XBRL tag.',
       ),
     period: z
       .string()
+      .min(1)
       .describe(
         'Calendar period. Use duration periods (no I suffix) for income/cash-flow items: "CY2023" (full year), "CY2024Q2" (single quarter). Use instant periods (I suffix) for balance-sheet items: "CY2023Q4I" (snapshot at Q4 close).',
       ),

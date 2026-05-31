@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.1](changelog/0.7.x/0.7.1.md) — 2026-05-30
+
+Empty strings now rejected for required string fields — company/concept on secedgar_get_financials and concept/period on secedgar_fetch_frames return a clean ValidationError instead of reaching the handler.
+
 ## [0.7.0](changelog/0.7.x/0.7.0.md) — 2026-05-30
 
 Insider transactions (Form 3/4/5), institutional holdings (13F), IFRS friendly-name resolution, ambiguous-company guard, and system_catalog_access error contract

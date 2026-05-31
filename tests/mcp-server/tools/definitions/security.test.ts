@@ -263,15 +263,12 @@ describe('getFilingTool — input validation', () => {
 // ---------------------------------------------------------------------------
 
 describe('getFinancialsTool — input validation', () => {
-  it('accepts empty company string (schema lacks .min(1) — see bug #N)', () => {
-    // The schema currently accepts empty strings; a .min(1) constraint is missing.
-    // Filed: bug(get_financials): empty company/concept strings not rejected by schema
-    expect(() => getFinancialsTool.input.parse({ company: '', concept: 'revenue' })).not.toThrow();
+  it('rejects empty company string (#24)', () => {
+    expect(() => getFinancialsTool.input.parse({ company: '', concept: 'revenue' })).toThrow();
   });
 
-  it('accepts empty concept string (schema lacks .min(1) — see bug #N)', () => {
-    // The schema currently accepts empty strings; a .min(1) constraint is missing.
-    expect(() => getFinancialsTool.input.parse({ company: 'AAPL', concept: '' })).not.toThrow();
+  it('rejects empty concept string (#24)', () => {
+    expect(() => getFinancialsTool.input.parse({ company: 'AAPL', concept: '' })).toThrow();
   });
 
   it('rejects invalid taxonomy', () => {
@@ -309,15 +306,12 @@ describe('getFinancialsTool — input validation', () => {
 // ---------------------------------------------------------------------------
 
 describe('fetchFramesTool — input validation', () => {
-  it('accepts empty concept (schema lacks .min(1) — see bug #N)', () => {
-    // The schema currently accepts empty strings; a .min(1) constraint is missing.
-    // Filed: bug(fetch_frames): empty concept/period strings not rejected by schema
-    expect(() => fetchFramesTool.input.parse({ concept: '', period: 'CY2023' })).not.toThrow();
+  it('rejects empty concept (#24)', () => {
+    expect(() => fetchFramesTool.input.parse({ concept: '', period: 'CY2023' })).toThrow();
   });
 
-  it('accepts empty period (schema lacks .min(1) — see bug #N)', () => {
-    // The schema currently accepts empty strings; a .min(1) constraint is missing.
-    expect(() => fetchFramesTool.input.parse({ concept: 'revenue', period: '' })).not.toThrow();
+  it('rejects empty period (#24)', () => {
+    expect(() => fetchFramesTool.input.parse({ concept: 'revenue', period: '' })).toThrow();
   });
 
   it('rejects limit below 1', () => {
