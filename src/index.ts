@@ -5,6 +5,7 @@
  */
 
 import { createApp } from '@cyanheads/mcp-ts-core';
+import { requestContextService, runtimeCaps, schedulerService } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { companyAnalysisPrompt } from '@/mcp-server/prompts/definitions/company-analysis.prompt.js';
 import { conceptsResource } from '@/mcp-server/resources/definitions/concepts.resource.js';
@@ -22,6 +23,7 @@ import { searchConceptsTool } from '@/mcp-server/tools/definitions/search-concep
 import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
 import { initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { initEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+import { initEdgarMirror } from '@/services/edgar/mirror/index.js';
 
 // DuckDB is the only canvas engine we support and ships as a direct dep, so
 // enable the canvas by default. Set CANVAS_PROVIDER_TYPE=none explicitly to
@@ -52,8 +54,48 @@ await createApp({
   prompts: [companyAnalysisPrompt],
   instructions:
     'Use the secedgar_* tools to query SEC EDGAR — US public-company filings since 1993 plus historical XBRL financials. Resolve companies with secedgar_company_search (accepts ticker, name, or CIK), fetch document text with secedgar_get_filing by accession number, and run full-text search across all filings with secedgar_search_filings (supports boolean operators and inline ticker:AAPL / cik:320193 targeting). For financials, secedgar_get_financials and secedgar_fetch_frames accept friendly names like "revenue" or "eps_diluted" (discover them with secedgar_search_concepts) or raw XBRL tags. Data-returning tools also materialize their full upstream response as a df_<id> handle for downstream SQL via secedgar_dataframe_query — list dataframes with secedgar_dataframe_describe.',
-  setup(core) {
+  async setup(core) {
     initEdgarApiService();
     initCanvasBridge(core.canvas);
+
+    // Optional local mirror of company_tickers + XBRL company-facts. Needs SQLite
+    // and a persistent filesystem, so it is Node/Bun only — skipped on Cloudflare
+    // Workers, where the live SEC API stays the only path.
+    const cfg = getServerConfig();
+    if (cfg.mirrorEnabled && runtimeCaps.isNode && !runtimeCaps.isWorkerLike) {
+      const mirror = initEdgarMirror({ dir: cfg.mirrorPath, userAgent: cfg.userAgent });
+
+      // In-process nightly refresh, HTTP transport only. Under stdio, operators run
+      // `bun run mirror:refresh` out-of-band; the full init always runs out-of-band.
+      const transport = core.config?.mcpTransportType ?? 'stdio';
+      if (cfg.mirrorRefreshCron && transport === 'http') {
+        const bootCtx = requestContextService.createRequestContext({
+          operation: 'edgar-mirror-refresh-init',
+        });
+        core.logger.info('Scheduling EDGAR mirror refresh', {
+          ...bootCtx,
+          cron: cfg.mirrorRefreshCron,
+        });
+        await schedulerService.schedule(
+          'edgar-mirror-refresh',
+          cfg.mirrorRefreshCron,
+          async (jobCtx) => {
+            try {
+              const result = await mirror.runRefresh({
+                signal: AbortSignal.timeout(6 * 60 * 60_000),
+              });
+              core.logger.info('EDGAR mirror refresh complete', { ...jobCtx, ...result });
+            } catch (err) {
+              core.logger.error('EDGAR mirror refresh failed', {
+                ...jobCtx,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          },
+          'Refresh the EDGAR mirror (company_tickers + XBRL company-facts) from the SEC bulk files.',
+        );
+        schedulerService.start('edgar-mirror-refresh');
+      }
+    }
   },
 });

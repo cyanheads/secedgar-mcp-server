@@ -279,6 +279,10 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `EDGAR_TICKER_CACHE_TTL` | Seconds to cache the company tickers lookup file. | `3600` |
 | `EDGAR_DATASET_TTL_SECONDS` | Per-table TTL for canvas-registered dataframes. Sliding window touched on every dataframe op. | `86400` |
 | `EDGAR_DATAFRAME_DROP_ENABLED` | Set to `true` to expose `secedgar_dataframe_drop` — the only destructive tool on this server. Off by default; TTL handles cleanup. | `false` |
+| `EDGAR_MIRROR_ENABLED` | Enable the local SQLite mirror of `company_tickers` + XBRL company-facts so CIK resolution and financials read from disk instead of the live API. Node/Bun only (skipped on Workers). Bootstrap once with `bun run mirror:init`. | `false` |
+| `EDGAR_MIRROR_PATH` | Directory holding the mirror SQLite databases. | `./data/edgar-mirror` |
+| `EDGAR_MIRROR_REFRESH_CRON` | Cron for the in-process nightly refresh (HTTP transport only). Recommended `0 9 * * *`. Omit to refresh out-of-band via `bun run mirror:refresh`. | — |
+| `EDGAR_MIRROR_FALLBACK_LIVE` | When the mirror misses (not yet synced, or a filing newer than the last refresh), fall back to the live SEC API. Set `false` for strict mirror-only reads. | `true` |
 | `CANVAS_PROVIDER_TYPE` | Canvas engine. Defaults to `duckdb`; set to `none` to disable the canvas (e.g. when running on Cloudflare Workers, where DuckDB has no V8-isolate build). | `duckdb` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http` | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port | `3010` |

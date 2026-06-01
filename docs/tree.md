@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-05-30 13:45:13
+Generated on: 2026-06-01 06:13:43
 
 ```text
 secedgar-mcp-server/
@@ -32,16 +32,22 @@ secedgar-mcp-server/
 ├── docs/
 │   └── sec-edgar-mcp-design.md
 ├── scripts/
+│   ├── _mirror-context.ts
 │   ├── build-changelog.ts
 │   ├── build.ts
 │   ├── check-docs-sync.ts
 │   ├── check-framework-antipatterns.ts
+│   ├── check-skill-versions.ts
 │   ├── check-skills-sync.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
+│   ├── edgar-mirror-init.ts
+│   ├── edgar-mirror-refresh.ts
+│   ├── edgar-mirror-verify.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── release-github.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
 ├── skills/
@@ -68,6 +74,8 @@ secedgar-mcp-server/
 │   ├── api-errors/
 │   │   └── SKILL.md
 │   ├── api-linter/
+│   │   └── SKILL.md
+│   ├── api-mirror/
 │   │   └── SKILL.md
 │   ├── api-services/
 │   │   ├── references/
@@ -145,6 +153,12 @@ secedgar-mcp-server/
 │   │   │   ├── canvas-bridge.ts
 │   │   │   └── sql-gate-extras.ts
 │   │   └── edgar/
+│   │       ├── mirror/
+│   │       │   ├── companyfacts-sync.ts
+│   │       │   ├── edgar-mirror.ts
+│   │       │   ├── index.ts
+│   │       │   ├── tickers-sync.ts
+│   │       │   └── types.ts
 │   │       ├── concept-map.ts
 │   │       ├── edgar-api-service.ts
 │   │       ├── filing-headers.ts
@@ -161,18 +175,27 @@ secedgar-mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── company-search.tool.test.ts
+│   │           ├── dataframe-describe.tool.test.ts
+│   │           ├── dataframe-drop.tool.test.ts
 │   │           ├── dataframe-query.tool.test.ts
 │   │           ├── fetch-frames.tool.test.ts
 │   │           ├── get-filing.tool.test.ts
 │   │           ├── get-financials.tool.test.ts
+│   │           ├── get-insider-transactions.tool.test.ts
+│   │           ├── get-institutional-holdings.tool.test.ts
 │   │           ├── search-concepts.tool.test.ts
-│   │           └── search-filings.tool.test.ts
+│   │           ├── search-filings.tool.test.ts
+│   │           └── security.test.ts
 │   └── services/
 │       ├── canvas-bridge/
 │       │   ├── canvas-bridge.test.ts
 │       │   └── sql-gate-extras.test.ts
 │       └── edgar/
+│           ├── mirror/
+│           │   ├── companyfacts-sync.test.ts
+│           │   └── edgar-mirror.test.ts
 │           ├── concept-map.test.ts
+│           ├── edgar-api-service.mirror.test.ts
 │           ├── edgar-api-service.test.ts
 │           ├── filing-to-text.test.ts
 │           └── ownership-parser.test.ts

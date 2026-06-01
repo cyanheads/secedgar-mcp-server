@@ -8,6 +8,7 @@
 import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { httpErrorFromResponse } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
+import { getEdgarMirror } from '@/services/edgar/mirror/index.js';
 import { type FilingDocumentHeader, parseFilingHeaders } from './filing-headers.js';
 import type {
   CikMatch,
@@ -285,28 +286,73 @@ class EdgarApiService {
     );
   }
 
-  /** Fetch XBRL data for a concept. Returns `null` if the company does not report this tag. */
+  /**
+   * Fetch XBRL data for a concept. Returns `null` if the company does not report this tag.
+   * Served from the local mirror when enabled and synced; the live API is the
+   * fallback (and covers filings newer than the last refresh when `mirrorFallbackLive`).
+   */
   tryGetCompanyConcept(
     cik: string,
     taxonomy: string,
     tag: string,
   ): Promise<CompanyConceptResponse | null> {
     const padded = cik.padStart(10, '0');
-    return this.tryFetchJson<CompanyConceptResponse>(
-      `https://data.sec.gov/api/xbrl/companyconcept/CIK${padded}/${taxonomy}/${tag}.json`,
+    return this.mirrorOrLive(
+      (m) => m.getCompanyConcept(cik, taxonomy, tag),
+      () =>
+        this.tryFetchJson<CompanyConceptResponse>(
+          `https://data.sec.gov/api/xbrl/companyconcept/CIK${padded}/${taxonomy}/${tag}.json`,
+        ),
     );
   }
 
-  /** Fetch cross-company frame data. Returns `null` if no companies report this combination. */
+  /**
+   * Fetch cross-company frame data. Returns `null` if no companies report this combination.
+   * Served from the local mirror when enabled and synced (assembled from the
+   * company-facts store); the live API is the fallback.
+   */
   tryGetFrames(
     taxonomy: string,
     tag: string,
     unit: string,
     period: string,
   ): Promise<FramesResponse | null> {
-    return this.tryFetchJson<FramesResponse>(
-      `https://data.sec.gov/api/xbrl/frames/${taxonomy}/${tag}/${unit}/${period}.json`,
+    return this.mirrorOrLive(
+      (m) => m.getFrames(taxonomy, tag, unit, period),
+      () =>
+        this.tryFetchJson<FramesResponse>(
+          `https://data.sec.gov/api/xbrl/frames/${taxonomy}/${tag}/${unit}/${period}.json`,
+        ),
     );
+  }
+
+  /**
+   * Route a company-facts query through the local mirror when ready, with live-API
+   * fallback. Three paths:
+   * - Mirror ready + hit → return mirror result
+   * - Mirror ready + miss + fallbackLive → fall through to live()
+   * - Mirror ready + miss + strict → return null
+   * - Mirror not ready + strict → throw ServiceUnavailable
+   * - No mirror → fall through to live()
+   */
+  private async mirrorOrLive<T>(
+    mirrorRead: (mirror: NonNullable<ReturnType<typeof getEdgarMirror>>) => Promise<T | null>,
+    live: () => Promise<T | null>,
+  ): Promise<T | null> {
+    const mirror = getEdgarMirror();
+    if (mirror) {
+      if (await mirror.companyFactsReady()) {
+        const hit = await mirrorRead(mirror);
+        if (hit != null) return hit;
+        if (!getServerConfig().mirrorFallbackLive) return null;
+      } else if (!getServerConfig().mirrorFallbackLive) {
+        throw serviceUnavailable(
+          'EDGAR mirror enabled but the company-facts layer is not synced; run `bun run mirror:init`',
+          { layer: 'companyfacts' },
+        );
+      }
+    }
+    return live();
   }
 
   // --- Internals ---
@@ -378,21 +424,45 @@ class EdgarApiService {
     return this.tickerCacheLoad;
   }
 
+  /**
+   * Load the ticker index, preferring the local mirror when enabled and synced.
+   * The live directory is the cold-start / not-ready fallback (and the only path
+   * when the mirror is off).
+   */
   private async loadTickerCache(): Promise<TickerCache> {
+    const mirror = getEdgarMirror();
+    if (mirror && (await mirror.tickersReady())) {
+      const rows = await mirror.getTickerRows();
+      if (rows.length > 0) return this.buildTickerCache(rows);
+    } else if (mirror && !getServerConfig().mirrorFallbackLive) {
+      throw serviceUnavailable(
+        'EDGAR mirror enabled but the ticker layer is not synced; run `bun run mirror:init`',
+        { layer: 'tickers' },
+      );
+    }
+
     const raw = await this.fetchJson<Record<string, TickerEntry>>(
       'https://www.sec.gov/files/company_tickers.json',
     );
+    return this.buildTickerCache(
+      Object.values(raw).map((entry) => ({
+        cik: String(entry.cik_str).padStart(10, '0'),
+        name: entry.title,
+        ticker: entry.ticker,
+      })),
+    );
+  }
 
+  /** Build the in-memory CIK index from normalized entries (live JSON or mirror rows). */
+  private buildTickerCache(
+    entries: Array<{ cik: string; name: string; ticker: string }>,
+  ): TickerCache {
     const byTicker = new Map<string, CikMatch>();
     const byCik = new Map<string, CikMatch>();
     const allEntries: CikMatch[] = [];
 
-    for (const entry of Object.values(raw)) {
-      const match: CikMatch = {
-        cik: String(entry.cik_str).padStart(10, '0'),
-        name: entry.title,
-        ticker: entry.ticker,
-      };
+    for (const entry of entries) {
+      const match: CikMatch = { cik: entry.cik, name: entry.name, ticker: entry.ticker };
       byTicker.set(entry.ticker.toUpperCase(), match);
       const existing = byCik.get(match.cik);
       byCik.set(match.cik, existing ? pickPreferredTicker(existing, match) : match);

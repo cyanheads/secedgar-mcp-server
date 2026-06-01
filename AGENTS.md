@@ -1,8 +1,8 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.7.1
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.16`
+**Version:** 0.7.2
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.19`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 
 Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-only, no API keys required. Full design: `docs/sec-edgar-mcp-design.md`.
@@ -81,6 +81,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 - **EFTS quirks:** `dateRange=custom` must be set when using date params; `entity` param is ignored (use `cik:` in query string)
 - **Filing content:** HTML → text via `html-to-text` library; pre-2005 filings produce noisier output
 - **Dataframes:** `secedgar_search_filings`, `secedgar_get_financials`, and `secedgar_fetch_frames` materialize their full upstream response as `df_<id>` on a shared DuckDB-backed canvas (one per tenant). Each row set carries an all-nullable schema (sparse SEC columns must not trip DuckDB's NOT NULL appender rollback). Per-table TTL is bridge-side bookkeeping in `ctx.state` until [cyanheads/mcp-ts-core#140](https://github.com/cyanheads/mcp-ts-core/issues/140) lands. `secedgar_dataframe_query` runs framework's SQL gate plus a bridge-layer deny on `information_schema`, `pg_catalog`, `sqlite_master`, and `duckdb_*` catalogs.
+- **Local mirror (opt-in, `EDGAR_MIRROR_ENABLED`):** routes `resolveCik`, `tryGetCompanyConcept`, and `tryGetFrames` to a local SQLite mirror (framework `MirrorService`) of `company_tickers.json` + the `companyfacts.zip` bulk archive; the live API is the fallback on a miss (`EDGAR_MIRROR_FALLBACK_LIVE`). Bootstrap out-of-band with `bun run mirror:init`; refresh nightly via cron (HTTP) or `bun run mirror:refresh`. Node/Bun only — skipped on Workers. Frames are assembled from the company-facts store, so `loc` (business location) is absent. No FTS5 — every routed lookup is exact/indexed (cik+taxonomy+tag point, taxonomy+tag scan, ticker/CIK).
 
 ---
 
@@ -93,6 +94,10 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 | `EDGAR_TICKER_CACHE_TTL` | No | `3600` | Seconds to cache company_tickers.json |
 | `EDGAR_DATASET_TTL_SECONDS` | No | `86400` | Per-table TTL for canvas-registered dataframes. Sliding window touched on every dataframe op. |
 | `EDGAR_DATAFRAME_DROP_ENABLED` | No | `false` | Set to `true` to expose `secedgar_dataframe_drop`. TTL handles cleanup otherwise. |
+| `EDGAR_MIRROR_ENABLED` | No | `false` | Enable the local SQLite mirror of company_tickers + XBRL company-facts. Node/Bun only (skipped on Workers). Bootstrap once with `bun run mirror:init`. |
+| `EDGAR_MIRROR_PATH` | No | `./data/edgar-mirror` | Directory holding the mirror SQLite databases (tickers + companyfacts). |
+| `EDGAR_MIRROR_REFRESH_CRON` | No | — | In-process nightly refresh cron (HTTP transport only). Recommended `0 9 * * *`. Omit to refresh out-of-band via `bun run mirror:refresh`. |
+| `EDGAR_MIRROR_FALLBACK_LIVE` | No | `true` | Fall back to the live SEC API on a mirror miss (unsynced, or a filing newer than the last refresh). Set `false` for strict mirror-only reads. |
 | `CANVAS_PROVIDER_TYPE` | No | `duckdb` | Canvas engine. Set to `none` to disable the canvas (e.g. on Cloudflare Workers). |
 
 ---
@@ -106,6 +111,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 | `filing-to-text` | `src/services/edgar/filing-to-text.ts` | HTML → readable plain text conversion |
 | `CanvasBridge` | `src/services/canvas-bridge/canvas-bridge.ts` | Adapter over framework `DataCanvas`: `df_<id>` minting, all-nullable schema derivation, per-table TTL, shared-canvas acquire |
 | `sql-gate-extras` | `src/services/canvas-bridge/sql-gate-extras.ts` | System-catalog SQL deny on top of the framework's read-only gate |
+| `EdgarMirror` | `src/services/edgar/mirror/` | Opt-in local SQLite mirror (framework `MirrorService`) of company_tickers + XBRL company-facts; ready-gated read helpers back `resolveCik`/`tryGetCompanyConcept`/`tryGetFrames` |
 
 ---
 
@@ -174,6 +180,12 @@ src/
       concept-map.ts                    # Friendly name → XBRL tag mapping
       filing-to-text.ts                 # HTML → plain text
       types.ts                          # Domain types
+      mirror/                           # Opt-in local SQLite mirror (framework MirrorService)
+        edgar-mirror.ts                 #   two stores + ready-gated read helpers
+        tickers-sync.ts                 #   company_tickers.json ingester
+        companyfacts-sync.ts            #   companyfacts.zip streaming ingester (fflate)
+        index.ts                        #   barrel + server-side singleton
+        types.ts                        #   row shapes + constants
     canvas-bridge/
       canvas-bridge.ts                  # Framework DataCanvas adapter, df_<id> minting, per-table TTL
       sql-gate-extras.ts                # Bridge-layer system-catalog deny on top of framework SQL gate
@@ -243,6 +255,7 @@ Available skills:
 | `api-context` | Context interface, logger, state, progress |
 | `api-errors` | McpError, JsonRpcErrorCode, error patterns |
 | `api-linter` | Definition linter rule catalog — invoked by `bun run lint:mcp` and `devcheck` |
+| `api-mirror` | MirrorService: persistent local mirror of a bulk upstream dataset (embedded SQLite + FTS5) — Tier 3, Node/Bun only |
 | `api-services` | LLM, Speech, Graph services |
 | `api-telemetry` | OTel catalog: spans, metrics, completion logs, env config, cardinality rules |
 | `api-testing` | createMockContext, test patterns |
@@ -271,6 +284,9 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync with `changelog/` (used by devcheck) |
 | `bun run bundle` | Build and pack as `.mcpb` for one-click Claude Desktop install |
 | `bun run test` | Run tests |
+| `bun run mirror:init` | Bootstrap the local mirror (download company_tickers + companyfacts.zip). Out-of-band; resumable. |
+| `bun run mirror:refresh` | Incrementally refresh the local mirror from the SEC bulk files. |
+| `bun run mirror:verify` | Print mirror sync status + run sample reads. |
 | `bun run start` | Production mode (`.env`-respecting transport) |
 | `bun run start:stdio` | Production mode (stdio) |
 | `bun run start:http` | Production mode (HTTP) |

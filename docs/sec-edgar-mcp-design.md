@@ -543,6 +543,44 @@ function filingToText(html: string, limit?: number): {
 
 ---
 
+## Local Mirror (opt-in)
+
+`EDGAR_MIRROR_ENABLED=true` stands up a persistent local SQLite mirror of the two **bounded** SEC reference layers so the throttled live API is bypassed for the highest-volume calls. Built on the framework `MirrorService` (`@cyanheads/mcp-ts-core/mirror`); Node/Bun only (SQLite + filesystem), skipped on Cloudflare Workers.
+
+### Layers
+
+| Layer | Source | Store | Backs |
+|:------|:-------|:------|:------|
+| Ticker/CIK | `company_tickers.json` (~200 KB JSON) | `tickers` — PK `ticker`, index `cik` | `resolveCik`, `cikToTicker` |
+| XBRL company-facts | `companyfacts.zip` (~1.3 GB bulk archive) | `company_concepts` — PK `cik\|taxonomy\|tag`, `units` JSON blob, index `taxonomy,tag` | `tryGetCompanyConcept`, `tryGetFrames` |
+
+One row per `(cik, taxonomy, tag)` stores the concept's full `units` map verbatim, so a point read (`getByIds`) reconstructs the `companyconcept` API shape and a `taxonomy+tag` scan reconstructs the `frames` API shape off the same ~2.5M-row table — no separate ~10⁸-row fact-inversion table, keeping the store inside the embedded-SQLite tier.
+
+**No FTS5.** Every routed lookup is exact/indexed (cik+taxonomy+tag point, taxonomy+tag scan, ticker/CIK equality); full-text search would add ingestion cost and disk with no access path to serve. EFTS filing-text search stays live and out of scope.
+
+### Sync model
+
+- **Init** (`bun run mirror:init`) — out-of-band one-shot. Downloads `company_tickers.json`, then streams `companyfacts.zip` through fflate (`Unzip` + `UnzipInflate`), parsing each `CIK*.json` entry into rows with bounded memory. Resumable: the framework persists cursor/checkpoint per page transaction, so an interrupt re-runs harmlessly (idempotent upserts).
+- **Refresh** (`bun run mirror:refresh`, or in-process via `EDGAR_MIRROR_REFRESH_CRON` on HTTP) — re-downloads the ticker file and, for company-facts, a `Last-Modified` HEAD short-circuits when the nightly archive (rebuilt ~03:00 ET) is unchanged; otherwise re-ingests. Upsert-only — a company/ticker dropped upstream lingers (low-harm; CIKs are permanent).
+- **Readiness** keys off the durable completion marker (`mirror.ready()`), so the mirror keeps serving during a refresh.
+
+### Routing
+
+`resolveCik`, `tryGetCompanyConcept`, and `tryGetFrames` check the mirror first when enabled and ready; on a miss they fall back to the live API when `EDGAR_MIRROR_FALLBACK_LIVE` (default `true`) — covering filings newer than the last refresh — or return empty/throw under strict mirror-only mode. Frames are assembled from the company-facts store and therefore carry no `loc` (business location); the live frames endpoint adds it, and the tool treats an empty value as absent.
+
+### Config
+
+| Env Var | Default | Description |
+|:--------|:--------|:------------|
+| `EDGAR_MIRROR_ENABLED` | `false` | Enable the mirror. |
+| `EDGAR_MIRROR_PATH` | `./data/edgar-mirror` | Directory for the two SQLite databases. |
+| `EDGAR_MIRROR_REFRESH_CRON` | — | In-process nightly refresh cron (HTTP only); recommended `0 9 * * *`. |
+| `EDGAR_MIRROR_FALLBACK_LIVE` | `true` | Fall back to the live API on a miss. |
+
+`submissions.zip` (filing-history metadata) and the EFTS full-text index are out of scope — a follow-on issue for the former, no bulk download for the latter.
+
+---
+
 ## Config
 
 | Env Var | Required | Default | Description |
