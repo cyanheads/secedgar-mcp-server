@@ -560,13 +560,13 @@ One row per `(cik, taxonomy, tag)` stores the concept's full `units` map verbati
 
 ### Sync model
 
-- **Init** (`bun run mirror:init`) — out-of-band one-shot. Downloads `company_tickers.json`, then streams `companyfacts.zip` through fflate (`Unzip` + `UnzipInflate`), parsing each `CIK*.json` entry into rows with bounded memory. Resumable: the framework persists cursor/checkpoint per page transaction, so an interrupt re-runs harmlessly (idempotent upserts).
+- **Init** (`bun run mirror:init`) — out-of-band one-shot. Downloads `company_tickers.json`, then streams `companyfacts.zip` through fflate (`Unzip` + `UnzipInflate`), parsing each `CIK*.json` entry into rows with bounded memory. The durable `checkpoint` (the archive's `Last-Modified`) is emitted only on a terminal page after the whole archive has drained, so an interrupted ingest leaves no completion checkpoint and the next refresh re-streams the full archive (idempotent upserts) rather than skipping a partial store as already-synced.
 - **Refresh** (`bun run mirror:refresh`, or in-process via `EDGAR_MIRROR_REFRESH_CRON` on HTTP) — re-downloads the ticker file and, for company-facts, a `Last-Modified` HEAD short-circuits when the nightly archive (rebuilt ~03:00 ET) is unchanged; otherwise re-ingests. Upsert-only — a company/ticker dropped upstream lingers (low-harm; CIKs are permanent).
-- **Readiness** keys off the durable completion marker (`mirror.ready()`), so the mirror keeps serving during a refresh.
+- **Readiness** — point lookups (`resolveCik`, `tryGetCompanyConcept`) key off the durable completion marker (`mirror.ready()`), so they keep serving during a refresh. The cross-company frames aggregation gates on the stricter `companyFactsComplete()` (`status === 'complete'`): a full-table scan over a partial or mid-(re)sync store would yield a silently-incomplete frame, so frames fall back to the live API until the layer is fully synced.
 
 ### Routing
 
-`resolveCik`, `tryGetCompanyConcept`, and `tryGetFrames` check the mirror first when enabled and ready; on a miss they fall back to the live API when `EDGAR_MIRROR_FALLBACK_LIVE` (default `true`) — covering filings newer than the last refresh — or return empty/throw under strict mirror-only mode. Frames are assembled from the company-facts store and therefore carry no `loc` (business location); the live frames endpoint adds it, and the tool treats an empty value as absent.
+`resolveCik`, `tryGetCompanyConcept`, and `tryGetFrames` check the mirror first when enabled and ready (`tryGetFrames` requires the stricter completeness gate above); on a miss they fall back to the live API when `EDGAR_MIRROR_FALLBACK_LIVE` (default `true`) — covering filings newer than the last refresh — or return empty/throw under strict mirror-only mode. Frames are assembled from the company-facts store and therefore carry no `loc` (business location); the live frames endpoint adds it, and the tool treats an empty value as absent.
 
 ### Config
 

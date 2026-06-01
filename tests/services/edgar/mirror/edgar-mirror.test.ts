@@ -143,6 +143,12 @@ describe('EdgarMirror — init + read helpers', () => {
     expect(await mirror.companyFactsReady()).toBe(true);
   });
 
+  it('reports the company-facts layer complete after a clean init (#29)', async () => {
+    // The frames aggregation gates on this stricter marker, not on the durable
+    // readiness flag; a clean init leaves status === 'complete'.
+    expect(await mirror.companyFactsComplete()).toBe(true);
+  });
+
   it('returns all ticker rows', async () => {
     const rows = await mirror.getTickerRows();
     expect(rows).toHaveLength(2);

@@ -298,6 +298,7 @@ class EdgarApiService {
   ): Promise<CompanyConceptResponse | null> {
     const padded = cik.padStart(10, '0');
     return this.mirrorOrLive(
+      (m) => m.companyFactsReady(),
       (m) => m.getCompanyConcept(cik, taxonomy, tag),
       () =>
         this.tryFetchJson<CompanyConceptResponse>(
@@ -308,8 +309,11 @@ class EdgarApiService {
 
   /**
    * Fetch cross-company frame data. Returns `null` if no companies report this combination.
-   * Served from the local mirror when enabled and synced (assembled from the
-   * company-facts store); the live API is the fallback.
+   * A frame is a full scan of the company-facts store, so it is served from the
+   * mirror only when that layer is fully synced (`companyFactsComplete()`) — a
+   * partial or mid-sync store would yield a silently-incomplete frame, so frames
+   * fall back to the live API until the mirror is complete. The live API is also
+   * the fallback on a genuine miss.
    */
   tryGetFrames(
     taxonomy: string,
@@ -318,6 +322,7 @@ class EdgarApiService {
     period: string,
   ): Promise<FramesResponse | null> {
     return this.mirrorOrLive(
+      (m) => m.companyFactsComplete(),
       (m) => m.getFrames(taxonomy, tag, unit, period),
       () =>
         this.tryFetchJson<FramesResponse>(
@@ -328,20 +333,25 @@ class EdgarApiService {
 
   /**
    * Route a company-facts query through the local mirror when ready, with live-API
-   * fallback. Three paths:
+   * fallback. The `ready` predicate is the caller's readiness gate — point lookups
+   * pass `companyFactsReady()` (tolerant of an in-progress refresh); the frames
+   * aggregation passes the stricter `companyFactsComplete()` so a partial or
+   * mid-sync store never yields an incomplete frame. Paths:
    * - Mirror ready + hit → return mirror result
    * - Mirror ready + miss + fallbackLive → fall through to live()
    * - Mirror ready + miss + strict → return null
+   * - Mirror not ready + fallbackLive → fall through to live()
    * - Mirror not ready + strict → throw ServiceUnavailable
    * - No mirror → fall through to live()
    */
   private async mirrorOrLive<T>(
+    ready: (mirror: NonNullable<ReturnType<typeof getEdgarMirror>>) => Promise<boolean>,
     mirrorRead: (mirror: NonNullable<ReturnType<typeof getEdgarMirror>>) => Promise<T | null>,
     live: () => Promise<T | null>,
   ): Promise<T | null> {
     const mirror = getEdgarMirror();
     if (mirror) {
-      if (await mirror.companyFactsReady()) {
+      if (await ready(mirror)) {
         const hit = await mirrorRead(mirror);
         if (hit != null) return hit;
         if (!getServerConfig().mirrorFallbackLive) return null;

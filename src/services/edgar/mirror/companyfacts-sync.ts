@@ -80,8 +80,11 @@ async function headLastModifiedIso(
  * Build the company-facts ingester. On `refresh`, a HEAD check short-circuits
  * when the archive has not been rebuilt since the stored checkpoint. The bulk
  * archive is a full nightly snapshot, so a sync re-streams it whole and relies
- * on idempotent upserts; the framework persists each page transactionally, so an
- * interrupted run is crash-safe (a resume re-applies harmlessly).
+ * on idempotent upserts. The framework persists each page transactionally, and
+ * the durable `checkpoint` is emitted only on the terminal page (after the whole
+ * archive has drained) — so an interrupted run leaves no completion checkpoint
+ * and the next refresh re-streams from scratch instead of skipping a partial
+ * store as already-synced.
  */
 export function makeCompanyFactsSync(opts: {
   userAgent: string;
@@ -157,12 +160,9 @@ export function makeCompanyFactsSync(opts: {
         if (done) break;
         unzip.push(value, false);
         if (streamError) throw streamError;
+        // Data pages carry no checkpoint — only the terminal page does (below).
         while (pending.length >= BATCH_ROWS) {
-          yield {
-            records: pending.splice(0, BATCH_ROWS),
-            cursor: String(completedFiles),
-            checkpoint,
-          };
+          yield { records: pending.splice(0, BATCH_ROWS), cursor: String(completedFiles) };
         }
       }
       unzip.push(EMPTY, true);
@@ -174,7 +174,17 @@ export function makeCompanyFactsSync(opts: {
     if (skipped > 0)
       opts.log?.notice?.('companyfacts sync complete with skips', { completedFiles, skipped });
     while (pending.length) {
-      yield { records: pending.splice(0, BATCH_ROWS), cursor: String(completedFiles), checkpoint };
+      yield { records: pending.splice(0, BATCH_ROWS), cursor: String(completedFiles) };
     }
+
+    // Completion marker. The checkpoint is the archive's `Last-Modified` for the
+    // WHOLE snapshot, so it is valid only once every entry has been ingested:
+    // emit it on a terminal page after the stream has fully drained, never on a
+    // data page. A per-page checkpoint marks a partial (interrupted) ingest as
+    // "synced as of <archive date>", so the next refresh's HEAD skip-check sees
+    // the archive unchanged and short-circuits forever, freezing the store on a
+    // fraction of the data. Emitting it only here means an interrupted run leaves
+    // no checkpoint, and the next refresh re-streams the whole archive (#33).
+    yield { records: [], cursor: String(completedFiles), checkpoint };
   };
 }

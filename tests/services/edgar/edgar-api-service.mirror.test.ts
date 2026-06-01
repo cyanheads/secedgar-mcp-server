@@ -27,6 +27,7 @@ import { getEdgarApiService, initEdgarApiService } from '@/services/edgar/edgar-
 function makeMirrorStub() {
   return {
     companyFactsReady: vi.fn(),
+    companyFactsComplete: vi.fn(),
     tickersReady: vi.fn(),
     getCompanyConcept: vi.fn(),
     getFrames: vi.fn(),
@@ -87,7 +88,7 @@ describe('EdgarApiService — mirror routing', () => {
   it('returns null on a mirror miss under strict mirror-only mode (no live call)', async () => {
     config.mirrorFallbackLive = false;
     const mirror = makeMirrorStub();
-    mirror.companyFactsReady.mockResolvedValue(true);
+    mirror.companyFactsComplete.mockResolvedValue(true);
     mirror.getFrames.mockResolvedValue(null);
     mirrorRef.current = mirror;
     const fetchMock = vi.fn();
@@ -102,12 +103,53 @@ describe('EdgarApiService — mirror routing', () => {
   it('throws when the mirror is enabled but not yet synced under strict mode', async () => {
     config.mirrorFallbackLive = false;
     const mirror = makeMirrorStub();
-    mirror.companyFactsReady.mockResolvedValue(false);
+    mirror.companyFactsComplete.mockResolvedValue(false);
     mirrorRef.current = mirror;
 
     await expect(
       getEdgarApiService().tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023'),
     ).rejects.toThrow(/not synced/);
+  });
+
+  it('falls frames back to live when the company-facts layer is not fully synced (#29)', async () => {
+    // A partial or mid-(re)sync store: point-lookup readiness can be true, but the
+    // frames aggregation gates on the stricter completeness marker. Frames must go
+    // live rather than serve a silently-incomplete frame from a partial store.
+    const mirror = makeMirrorStub();
+    mirror.companyFactsReady.mockResolvedValue(true);
+    mirror.companyFactsComplete.mockResolvedValue(false);
+    mirrorRef.current = mirror;
+    const fetchMock = vi.fn(async () => jsonResponse({ taxonomy: 'us-gaap', data: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await getEdgarApiService().tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023');
+
+    expect(mirror.getFrames).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('serves frames from the mirror when the layer is complete, without a live call', async () => {
+    const mirror = makeMirrorStub();
+    mirror.companyFactsComplete.mockResolvedValue(true);
+    mirror.getFrames.mockResolvedValue({
+      ccp: 'CY2023',
+      data: [
+        { accn: 'a', cik: 320193, end: '2023-09-30', entityName: 'Apple Inc.', loc: '', val: 1 },
+      ],
+      label: 'Revenues',
+      pts: 1,
+      tag: 'Revenues',
+      taxonomy: 'us-gaap',
+      uom: 'USD',
+    });
+    mirrorRef.current = mirror;
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await getEdgarApiService().tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023');
+
+    expect((result as { pts?: number } | null)?.pts).toBe(1);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it('uses the live API directly when no mirror is registered', async () => {

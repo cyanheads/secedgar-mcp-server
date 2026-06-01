@@ -6,7 +6,7 @@
  * @module tests/services/edgar/mirror/companyfacts-sync
  */
 
-import type { MirrorRow, SyncContext } from '@cyanheads/mcp-ts-core/mirror';
+import type { MirrorRow, SyncContext, SyncPage } from '@cyanheads/mcp-ts-core/mirror';
 import { strToU8, zipSync } from 'fflate';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -120,19 +120,26 @@ describe('makeCompanyFactsSync', () => {
 
     const sync = makeCompanyFactsSync({ userAgent: 'test test@example.com' });
     const ctx: SyncContext = { mode: 'init', signal: new AbortController().signal };
-    const records: MirrorRow[] = [];
-    let checkpoint: string | undefined;
-    for await (const page of sync(ctx)) {
-      records.push(...page.records);
-      checkpoint = page.checkpoint;
-    }
+    const pages: SyncPage[] = [];
+    for await (const page of sync(ctx)) pages.push(page);
+    const records = pages.flatMap((p) => p.records);
 
     expect(records.map((r) => r.id).sort()).toEqual([
       '0000320193|us-gaap|Revenues',
       '0000789019|us-gaap|Assets',
       '0000789019|us-gaap|Revenues',
     ]);
-    expect(checkpoint).toBe(LM_ISO);
+    // #33: the checkpoint marks completion, so it is emitted only on a terminal
+    // (zero-record) page after the whole archive drained — never on a data page.
+    // An interrupted ingest therefore persists no checkpoint, and the next refresh
+    // re-streams instead of skipping a partial store as already-synced.
+    for (const page of pages) {
+      if (page.records.length > 0) expect(page.checkpoint).toBeUndefined();
+    }
+    expect(pages.filter((p) => p.checkpoint !== undefined)).toHaveLength(1);
+    const last = pages.at(-1);
+    expect(last?.records).toHaveLength(0);
+    expect(last?.checkpoint).toBe(LM_ISO);
   });
 
   it('short-circuits a refresh (HEAD only, no GET) when the archive is unchanged', async () => {

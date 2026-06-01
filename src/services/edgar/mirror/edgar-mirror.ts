@@ -114,6 +114,20 @@ export class EdgarMirror {
     return this._companyFactsReady;
   }
 
+  /**
+   * Stricter readiness for the cross-company frames AGGREGATION. `getFrames`
+   * scans every row for a (taxonomy, tag), so a partial or mid-sync store yields
+   * a plausible-but-incomplete frame with no detectable "miss" to trigger a live
+   * fallback — unlike a point lookup, where a missing key falls through cleanly.
+   * Keys off `status === 'complete'` (read fresh, never memoized): false while a
+   * sync is in progress or after a failed one, so frames fall back to live until
+   * the layer is fully synced again. Contrast `companyFactsReady()` — the durable
+   * "ever completed" marker that stays true through a refresh for point reads. (#29)
+   */
+  async companyFactsComplete(): Promise<boolean> {
+    return (await this.companyFacts.status()).status === 'complete';
+  }
+
   /** All ticker rows, for rebuilding the in-memory CIK index. Assumes the layer is ready. */
   async getTickerRows(): Promise<TickerRow[]> {
     const handle = await this.tickers.raw();
