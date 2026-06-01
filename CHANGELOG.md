@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.0](changelog/0.8.x/0.8.0.md) — 2026-06-01 · ⚠️ Breaking
+
+get_institutional_holdings: whole-USD market values, distinct-position consolidation, working quarter targeting
+
 ## [0.7.4](changelog/0.7.x/0.7.4.md) — 2026-06-01
 
 Gate cross-company frames on a full-coverage completion marker (falling back to live while the store is partial or re-syncing); fix the companyfacts ingester to checkpoint only after the full archive drains so an interrupted ingest re-streams on the next refresh.

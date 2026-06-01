@@ -268,7 +268,7 @@ describe('parseInfoTableXml', () => {
     expect(h.issuer_name).toBe('1 800 FLOWERS COM INC');
     expect(h.title_of_class).toBe('CL A');
     expect(h.cusip).toBe('68243Q106');
-    expect(h.value_in_thousands).toBe(412257);
+    expect(h.value_reported).toBe(412257);
     expect(h.shares_or_principal_amount).toBe(104900);
     expect(h.shares_or_principal_type).toBe('SH');
     expect(h.put_call).toBe('Call');
@@ -281,7 +281,7 @@ describe('parseInfoTableXml', () => {
     expect(h.issuer_name).toBe('APPLE INC');
     expect(h.put_call).toBeUndefined();
     expect(h.investment_discretion).toBe('SOLE');
-    expect(h.value_in_thousands).toBe(5000000);
+    expect(h.value_reported).toBe(5000000);
   });
 
   it('handles ns1: namespace prefix variant', () => {

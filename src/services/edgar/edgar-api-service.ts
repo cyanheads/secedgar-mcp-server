@@ -243,21 +243,29 @@ class EdgarApiService {
   }
 
   /**
-   * Search EDGAR submissions for recent filings of specified form types.
-   * Returns up to `limit` accession numbers (newest first) from the recent-filings window,
-   * then pages into archived files when the window is exhausted.
+   * Search EDGAR submissions for recent filings of specified form types, newest first.
+   * Returns up to `limit` matches from the submissions recent-filings window. Each carries
+   * `reportDate` (the period-of-report end date) for callers that target a specific period.
    */
   async getRecentFilingsByForm(
     cik: string,
     formTypes: string[],
     limit: number,
-  ): Promise<Array<{ accessionNumber: string; filingDate: string; primaryDocument: string }>> {
+  ): Promise<
+    Array<{
+      accessionNumber: string;
+      filingDate: string;
+      primaryDocument: string;
+      reportDate: string;
+    }>
+  > {
     const submissions = await this.getSubmissions(cik);
     const recent = submissions.filings.recent;
     const results: Array<{
       accessionNumber: string;
       filingDate: string;
       primaryDocument: string;
+      reportDate: string;
     }> = [];
 
     for (let i = 0; i < recent.form.length && results.length < limit; i++) {
@@ -266,6 +274,7 @@ class EdgarApiService {
           accessionNumber: recent.accessionNumber[i] ?? '',
           filingDate: recent.filingDate[i] ?? '',
           primaryDocument: recent.primaryDocument[i] ?? '',
+          reportDate: recent.reportDate[i] ?? '',
         });
       }
     }

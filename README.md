@@ -106,9 +106,10 @@ Surface Form 3/4/5 insider activity for a company by parsing ownership XML.
 Surface 13F-HR quarterly institutional holdings by parsing the information table.
 
 - Pass an institution (CIK or name) to see what it holds, or a company CIK to find its own 13F filings
-- Per position: issuer name, CUSIP, market value (thousands USD), shares/principal, put/call, and investment discretion
+- Each holding: issuer name, CUSIP, market value (whole USD), shares/principal, and put/call; raw rows also carry investment discretion
+- Sub-lines for the same security (one per manager/account) are consolidated into distinct positions sorted by value by default — pass `consolidate: false` for raw filing rows
 - Resolves the filing-manager name and reporting quarter from the cover page; target a specific quarter with `quarter` (e.g. `"2025-Q4"`)
-- `total_holdings_in_filing` reports the full position count before `limit`
+- `total_holdings_in_filing` counts raw info-table rows; `total_positions` counts distinct positions after consolidation (both before `limit`)
 
 ---
 

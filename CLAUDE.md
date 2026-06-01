@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.7.4
+**Version:** 0.8.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.19`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 
@@ -49,7 +49,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 | `secedgar_get_filing` | Fetch a specific filing's metadata and document content | `accession_number`, `cik?`, `content_limit?`, `document?` |
 | `secedgar_get_financials` | Get historical XBRL financial data for a company | `company`, `concept`, `taxonomy?`, `period_type?` |
 | `secedgar_get_insider_transactions` | Form 3/4/5 insider transactions parsed from ownership XML | `ticker_or_cik`, `transaction_type?`, `limit?` |
-| `secedgar_get_institutional_holdings` | 13F-HR quarterly institutional holdings parsed from the information table | `ticker_or_cik`, `quarter?`, `limit?` |
+| `secedgar_get_institutional_holdings` | 13F-HR quarterly institutional holdings parsed from the information table | `ticker_or_cik`, `quarter?`, `limit?`, `consolidate?` |
 | `secedgar_fetch_frames` | Fetch SEC XBRL frames for one concept × one period across all reporting companies | `concept`, `period`, `unit?`, `limit?`, `sort?` |
 | `secedgar_search_concepts` | Discover supported XBRL concept names or reverse-lookup a raw tag | `search?`, `group?`, `taxonomy?` |
 | `secedgar_dataframe_describe` | List canvas dataframes with provenance, TTL, and schema | `name?` |

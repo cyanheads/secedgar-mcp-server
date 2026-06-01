@@ -85,8 +85,12 @@ export interface HoldingRow {
   /** SH = shares, PRN = principal (bonds). */
   shares_or_principal_type: 'SH' | 'PRN' | undefined;
   title_of_class: string | undefined;
-  /** Market value in thousands of USD. */
-  value_in_thousands: number | undefined;
+  /**
+   * Raw `<value>` from the information table. Unit is thousands of USD for filings before
+   * the 2023 Form 13F amendments (effective 2023-01-03) and whole USD since; callers
+   * normalize to whole USD using the filing date.
+   */
+  value_reported: number | undefined;
 }
 
 /** Parsed result from a 13F information table XML. */
@@ -336,7 +340,7 @@ export function parseInfoTableXml(xml: string): ParsedInfoTable {
       issuer_name: nameOfIssuer,
       title_of_class: titleOfClass || undefined,
       cusip: cusip || undefined,
-      value_in_thousands: parseFloat2(valueStr),
+      value_reported: parseFloat2(valueStr),
       shares_or_principal_amount: parseFloat2(sshPrnamt),
       shares_or_principal_type: typeNorm,
       put_call: putCallNorm as 'Put' | 'Call' | undefined,

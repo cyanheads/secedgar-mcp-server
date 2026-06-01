@@ -6,30 +6,74 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { parseInfoTableXml } from '@/services/edgar/ownership-parser.js';
 
 /**
- * Parse a quarter string like "2025-Q3" into startDate/endDate for EFTS search.
- * Returns undefined when the quarter string is absent or malformed.
+ * Map a quarter string like "2025-Q4" to its calendar quarter-end date (YYYY-MM-DD) — the
+ * filing's reporting-period end (`reportDate`) in the SEC submissions API. Returns undefined
+ * when the quarter string is absent or malformed.
  */
-function quarterToDateRange(
-  quarter: string | undefined,
-): { startDate: string; endDate: string } | undefined {
+function quarterEndDate(quarter: string | undefined): string | undefined {
   if (!quarter) return;
   const m = quarter.match(/^(\d{4})-Q([1-4])$/i);
   if (!m) return;
-  const year = Number(m[1]);
-  const q = Number(m[2]);
-  // 13F filing deadlines: 45 days after quarter end.
-  // Q1 ends Mar 31 → filed by May 15; Q2 ends Jun 30 → by Aug 15; etc.
-  const quarterEndMonth = q * 3; // 3, 6, 9, 12
-  const filingWindowStart = new Date(year, quarterEndMonth - 1, 1).toISOString().slice(0, 10);
-  // Window: from quarter end month to 3 months after (covers the 45-day lag)
-  const filingWindowEndDate = new Date(year, quarterEndMonth + 2, 28);
-  const filingWindowEnd = filingWindowEndDate.toISOString().slice(0, 10);
-  return { startDate: filingWindowStart, endDate: filingWindowEnd };
+  // Q1→03-31, Q2→06-30, Q3→09-30, Q4→12-31.
+  const day = ['03-31', '06-30', '09-30', '12-31'][Number(m[2]) - 1];
+  return `${m[1]}-${day}`;
+}
+
+/** One holdings row as returned to the caller (post unit-normalization / consolidation). */
+interface HoldingOut {
+  cusip: string | undefined;
+  investment_discretion: 'SOLE' | 'DFND' | 'OTR' | undefined;
+  issuer_name: string;
+  market_value_usd: number | undefined;
+  put_call: 'Put' | 'Call' | undefined;
+  shares_or_principal_amount: number | undefined;
+  shares_or_principal_type: 'SH' | 'PRN' | undefined;
+  title_of_class: string | undefined;
+}
+
+/** Sum two optional numbers; undefined only when both are absent. */
+function addMaybe(a: number | undefined, b: number | undefined): number | undefined {
+  if (a === undefined && b === undefined) return;
+  return (a ?? 0) + (b ?? 0);
+}
+
+/**
+ * Collapse info-table sub-lines into distinct positions, keyed by (CUSIP ?? issuer, class,
+ * put/call). Sums market value and shares; drops `investment_discretion` — a per-sub-line
+ * attribute with no meaning once managers/accounts are rolled up. Sorted by value descending,
+ * so a small `limit` returns the largest distinct holdings.
+ */
+function consolidatePositions(rows: HoldingOut[]): HoldingOut[] {
+  const byPosition = new Map<string, HoldingOut>();
+  for (const r of rows) {
+    const key = `${r.cusip ?? r.issuer_name}|${r.title_of_class ?? ''}|${r.put_call ?? ''}`;
+    const existing = byPosition.get(key);
+    if (existing) {
+      existing.market_value_usd = addMaybe(existing.market_value_usd, r.market_value_usd);
+      existing.shares_or_principal_amount = addMaybe(
+        existing.shares_or_principal_amount,
+        r.shares_or_principal_amount,
+      );
+    } else {
+      byPosition.set(key, { ...r, investment_discretion: undefined });
+    }
+  }
+  return [...byPosition.values()].sort(
+    (a, b) => (b.market_value_usd ?? 0) - (a.market_value_usd ?? 0),
+  );
+}
+
+/** Render a whole-USD amount with a scaled B/M/K suffix — 13F positions span $100M–$60B+. */
+function formatUsd(value: number): string {
+  if (value >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(2)}B`;
+  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `$${(value / 1_000).toFixed(2)}K`;
+  return `$${value.toFixed(2)}`;
 }
 
 /**
@@ -54,7 +98,7 @@ function findInfoTableDocument(items: Array<{ name: string }>): string | undefin
 export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_holdings', {
   title: 'Get Institutional Holdings',
   description:
-    'Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR information table XML. Use ticker_or_cik to look up an institution (e.g., "Vanguard Group" or its CIK) and see what it holds — or pass a company ticker/CIK to find which institutions filed 13Fs covering that period. The 13F information table lists each position: issuer name, CUSIP, shares held, market value (in thousands), and put/call designation for options. Institutions with less than $100M in 13(f) securities are exempt and may not file. Use secedgar_search_filings with forms=["13F-HR"] for broader search.',
+    'Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR information table XML. Use ticker_or_cik to look up an institution (e.g., "Vanguard Group" or its CIK) and see what it holds — or pass a company ticker/CIK to find which institutions filed 13Fs covering that period. The 13F information table lists each position: issuer name, CUSIP, shares held, market value (in whole USD), and put/call designation for options. Sub-lines for the same security are consolidated into distinct positions sorted by value by default (set consolidate=false for raw filing rows). Institutions with less than $100M in 13(f) securities are exempt and may not file. Use secedgar_search_filings with forms=["13F-HR"] for broader search.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -102,6 +146,12 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       .describe(
         'Maximum number of holdings rows to return. 13F filings from large institutions can contain thousands of positions. Default 20.',
       ),
+    consolidate: z
+      .boolean()
+      .default(true)
+      .describe(
+        'When true (default), info-table sub-lines for the same security (CUSIP + class + put/call) are summed into one position and results are sorted by market value descending, so `limit` returns the largest distinct holdings. Set false to return raw information-table rows in filing order (one per investment-discretion/manager sub-line), preserving investment_discretion.',
+      ),
   }),
 
   output: z.object({
@@ -121,7 +171,15 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       ),
     total_holdings_in_filing: z
       .number()
-      .describe('Total number of infoTable rows in this filing before the limit was applied.'),
+      .describe(
+        'Total number of raw information-table rows in this filing, before consolidation and the limit.',
+      ),
+    total_positions: z
+      .number()
+      .optional()
+      .describe(
+        'Number of distinct positions after consolidating info-table sub-lines, before the limit. Present only when consolidate=true.',
+      ),
     holdings: z
       .array(
         z
@@ -135,11 +193,11 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
               .string()
               .optional()
               .describe('9-digit CUSIP identifier. Absent when omitted by the filer.'),
-            value_in_thousands: z
+            market_value_usd: z
               .number()
               .optional()
               .describe(
-                'Market value of the position in thousands of USD at the reporting date. Absent when not reported.',
+                'Market value of the position in whole USD at the reporting date. SEC Form 13F has reported whole dollars since the 2023 amendments; values from filings before 2023-01-03 (originally thousands) are normalized to whole USD. Absent when not reported.',
               ),
             shares_or_principal_amount: z
               .number()
@@ -168,7 +226,9 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
           })
           .describe('One row from the 13F information table.'),
       )
-      .describe('Holdings rows from the information table, truncated to limit.'),
+      .describe(
+        'Holdings truncated to limit — consolidated positions sorted by market value when consolidate=true, else raw information-table rows in filing order.',
+      ),
   }),
 
   enrichment: {
@@ -192,39 +252,25 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       });
     }
 
-    // Use submissions API for recent 13F filings
-    let filingMeta:
-      | { accessionNumber: string; filingDate: string; primaryDocument: string }
-      | undefined;
-
+    // Validate the requested quarter's format before any lookup (fail fast on bad input).
+    let periodEnd: string | undefined;
     if (input.quarter) {
-      // With a quarter filter, use EFTS to search for the filing in the right window
-      const dateRange = quarterToDateRange(input.quarter);
-      if (dateRange) {
-        const eftsResp = await api.searchFilings({
-          query: `cik:${match.cik}`,
-          forms: ['13F-HR'],
-          startDate: dateRange.startDate,
-          endDate: dateRange.endDate,
-          from: 0,
-          size: 5,
-        });
-        const hit = eftsResp.hits.hits.find((h) => h._source.ciks?.includes(match.cik));
-        if (hit) {
-          filingMeta = {
-            accessionNumber: hit._source.adsh,
-            filingDate: hit._source.file_date,
-            primaryDocument: 'primary_doc.xml',
-          };
-        }
+      periodEnd = quarterEndDate(input.quarter);
+      if (!periodEnd) {
+        throw validationError(
+          `Invalid quarter "${input.quarter}" — use "YYYY-QN" format, e.g. "2025-Q4".`,
+        );
       }
     }
 
-    if (!filingMeta) {
-      // Fall back to submissions API most-recent
-      const recentFilings = await api.getRecentFilingsByForm(match.cik, ['13F-HR'], 3);
-      filingMeta = recentFilings[0];
-    }
+    // Pull this entity's recent 13F-HR filings from the submissions API. Each carries a
+    // reportDate (the period-end), so a requested quarter is matched exactly — EFTS full-text
+    // is unfit here (its `cik:` query is a doc-text phrase, not a CIK filter). No quarter →
+    // most-recent; with a quarter, a miss is reported, never silently the latest filing.
+    const recentFilings = await api.getRecentFilingsByForm(match.cik, ['13F-HR'], 80);
+    const filingMeta = periodEnd
+      ? recentFilings.find((f) => f.reportDate === periodEnd)
+      : recentFilings[0];
 
     if (!filingMeta) {
       const quarterNote = input.quarter ? ` for quarter "${input.quarter}"` : '';
@@ -308,8 +354,27 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       );
     }
 
-    const totalHoldings = parsed.holdings.length;
-    const holdings = parsed.holdings.slice(0, input.limit);
+    // SEC's 2022 Form 13F amendments (effective 2023-01-03) switched Information Table
+    // Column 4 from thousands of dollars to whole dollars. Normalize older filings (still
+    // reported in thousands) up to whole USD using the filing date — the literal compliance
+    // boundary, and always present (unlike the cover-page reporting period).
+    const valuesInThousands = filingMeta.filingDate < '2023-01-03';
+    const toUsd = (v: number | undefined): number | undefined =>
+      v === undefined ? undefined : valuesInThousands ? v * 1000 : v;
+
+    const rows: HoldingOut[] = parsed.holdings.map((h) => ({
+      issuer_name: h.issuer_name,
+      title_of_class: h.title_of_class,
+      cusip: h.cusip,
+      market_value_usd: toUsd(h.value_reported),
+      shares_or_principal_amount: h.shares_or_principal_amount,
+      shares_or_principal_type: h.shares_or_principal_type,
+      put_call: h.put_call,
+      investment_discretion: h.investment_discretion,
+    }));
+
+    const positions = input.consolidate ? consolidatePositions(rows) : rows;
+    const holdings = positions.slice(0, input.limit);
 
     if (holdings.length === 0) {
       ctx.enrich.notice(
@@ -322,7 +387,8 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     ctx.log.info('Institutional holdings retrieved', {
       cik: match.cik,
       accessionNumber: filingMeta.accessionNumber,
-      totalHoldings,
+      totalHoldings: parsed.holdings.length,
+      totalPositions: positions.length,
       returned: holdings.length,
     });
 
@@ -332,33 +398,29 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       reporting_period: reportingPeriod,
       filing_date: filingMeta.filingDate,
       accession_number: filingMeta.accessionNumber,
-      total_holdings_in_filing: totalHoldings,
-      holdings: holdings.map((h) => ({
-        issuer_name: h.issuer_name,
-        title_of_class: h.title_of_class,
-        cusip: h.cusip,
-        value_in_thousands: h.value_in_thousands,
-        shares_or_principal_amount: h.shares_or_principal_amount,
-        shares_or_principal_type: h.shares_or_principal_type,
-        put_call: h.put_call,
-        investment_discretion: h.investment_discretion,
-      })),
+      total_holdings_in_filing: parsed.holdings.length,
+      total_positions: input.consolidate ? positions.length : undefined,
+      holdings,
     };
   },
 
   format: (result) => {
     const period = result.reporting_period ? ` (period: ${result.reporting_period})` : '';
+    const countLine =
+      result.total_positions !== undefined
+        ? `Showing ${result.holdings.length} of ${result.total_positions} positions (consolidated from ${result.total_holdings_in_filing} info-table rows)`
+        : `Showing ${result.holdings.length} of ${result.total_holdings_in_filing} info-table rows`;
     const lines: string[] = [
       `**13F-HR Holdings** — ${result.filer_name} (CIK ${result.filer_cik})`,
       `Filed: ${result.filing_date}${period} | Accession: ${result.accession_number}`,
-      `Showing ${result.holdings.length} of ${result.total_holdings_in_filing} total positions`,
+      countLine,
     ];
 
     for (const h of result.holdings) {
       lines.push('');
       const valueStr =
-        h.value_in_thousands !== undefined
-          ? `$${(h.value_in_thousands / 1000).toFixed(2)}M (${h.value_in_thousands}K)`
+        h.market_value_usd !== undefined
+          ? `${formatUsd(h.market_value_usd)} ($${h.market_value_usd.toLocaleString()})`
           : 'value N/A';
       const sharesStr =
         h.shares_or_principal_amount !== undefined
@@ -367,9 +429,10 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       const putCallStr = h.put_call ? ` [${h.put_call}]` : '';
       const cusipStr = h.cusip ? ` CUSIP ${h.cusip}` : '';
       const classStr = h.title_of_class ? ` (${h.title_of_class})` : '';
+      const discStr = h.investment_discretion ? ` | discretion: ${h.investment_discretion}` : '';
 
       lines.push(`**${h.issuer_name}**${classStr}${cusipStr}${putCallStr}`);
-      lines.push(`${sharesStr} | ${valueStr} | discretion: ${h.investment_discretion ?? 'N/A'}`);
+      lines.push(`${sharesStr} | ${valueStr}${discStr}`);
     }
 
     return [{ type: 'text', text: lines.join('\n') }];
