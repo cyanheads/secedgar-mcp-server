@@ -72,29 +72,43 @@ await createApp({
         const bootCtx = requestContextService.createRequestContext({
           operation: 'edgar-mirror-refresh-init',
         });
-        core.logger.info('Scheduling EDGAR mirror refresh', {
-          ...bootCtx,
-          cron: cfg.mirrorRefreshCron,
-        });
-        await schedulerService.schedule(
-          'edgar-mirror-refresh',
-          cfg.mirrorRefreshCron,
-          async (jobCtx) => {
-            try {
-              const result = await mirror.runRefresh({
-                signal: AbortSignal.timeout(6 * 60 * 60_000),
-              });
-              core.logger.info('EDGAR mirror refresh complete', { ...jobCtx, ...result });
-            } catch (err) {
-              core.logger.error('EDGAR mirror refresh failed', {
-                ...jobCtx,
-                error: err instanceof Error ? err.message : String(err),
-              });
-            }
-          },
-          'Refresh the EDGAR mirror (company_tickers + XBRL company-facts) from the SEC bulk files.',
-        );
-        schedulerService.start('edgar-mirror-refresh');
+        // The framework scheduler lazily imports the optional `node-cron` peer.
+        // If scheduling fails for any reason, degrade gracefully: the mirror still
+        // answers reads (with live fallback) and can be refreshed out-of-band via
+        // `bun run mirror:refresh`. A scheduling fault must not crash the server.
+        try {
+          core.logger.info('Scheduling EDGAR mirror refresh', {
+            ...bootCtx,
+            cron: cfg.mirrorRefreshCron,
+          });
+          await schedulerService.schedule(
+            'edgar-mirror-refresh',
+            cfg.mirrorRefreshCron,
+            async (jobCtx) => {
+              try {
+                const result = await mirror.runRefresh({
+                  signal: AbortSignal.timeout(6 * 60 * 60_000),
+                });
+                core.logger.info('EDGAR mirror refresh complete', { ...jobCtx, ...result });
+              } catch (err) {
+                core.logger.error('EDGAR mirror refresh failed', {
+                  ...jobCtx,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              }
+            },
+            'Refresh the EDGAR mirror (company_tickers + XBRL company-facts) from the SEC bulk files.',
+          );
+          schedulerService.start('edgar-mirror-refresh');
+        } catch (err) {
+          core.logger.warning(
+            'Could not schedule EDGAR mirror refresh; serving with live fallback. Run `bun run mirror:refresh` out-of-band to refresh the mirror.',
+            {
+              ...bootCtx,
+              error: err instanceof Error ? err.message : String(err),
+            },
+          );
+        }
       }
     }
   },

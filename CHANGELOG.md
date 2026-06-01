@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.3](changelog/0.7.x/0.7.3.md) — 2026-06-01
+
+Declare node-cron dependency so EDGAR_MIRROR_REFRESH_CRON works in the published package and Docker image; wrap scheduler init in try/catch so a scheduling fault degrades gracefully instead of crashing startup.
+
 ## [0.7.2](changelog/0.7.x/0.7.2.md) — 2026-05-31
 
 Opt-in local SQLite mirror of company_tickers and XBRL company-facts via MirrorService; routed lookups hit SQLite with live-API fallback. Adds EDGAR_MIRROR_* env vars, mirror:init/refresh/verify scripts, and Node/Bun-only Workers guard.
