@@ -60,10 +60,10 @@ Entry point for most EDGAR workflows — resolve tickers, names, or CIKs to enti
 Full-text search across all EDGAR filing documents since 1993.
 
 - Exact phrases (`"material weakness"`), boolean operators (`revenue OR income`), wildcards (`account*`)
-- Entity targeting within query string (`cik:320193` or `ticker:AAPL`)
+- Entity targeting within query string (`cik:320193` or `ticker:AAPL`) — scoped server-side by CIK, so filings made under a former company name (same CIK) are included
 - Date range filtering, form type filtering, pagination up to 10,000 results
 - Returns form distribution for narrowing follow-up searches
-- When post-filter hits exceed the inline limit, the already-fetched EFTS window (entity-filtered when `ticker:`/`cik:` is used) is materialized as a `df_<id>` dataframe — query it with `secedgar_dataframe_query`
+- When the entity-scoped window exceeds the inline limit, the already-fetched EFTS window is materialized as a `df_<id>` dataframe — query it with `secedgar_dataframe_query`
 
 ---
 
@@ -86,6 +86,7 @@ Get historical XBRL financial data for a company with friendly concept name reso
 - Handles historical tag changes (e.g., ASC 606 revenue recognition)
 - Automatic deduplication to one value per standard calendar period
 - Filter by annual, quarterly, or all periods
+- Optional `limit` caps the inline series to the most-recent N periods; the full series stays queryable via the `df_<id>` dataframe
 - See `secedgar://concepts` resource for the full mapping
 
 ---

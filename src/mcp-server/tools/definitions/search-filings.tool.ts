@@ -54,45 +54,32 @@ function extractTicker(displayName: string): string | null {
   return first ? first : null;
 }
 
+/** Strip an entity-targeting token from the query and collapse whitespace. */
+function stripToken(query: string, token: string): string {
+  return query.replace(token, '').replace(/\s+/g, ' ').trim();
+}
+
 /**
- * Extract entity targeting (cik: or ticker:) from a query string,
- * resolve to a CIK, and return the cleaned query + resolved CIK.
+ * Extract entity targeting (cik: or ticker:) from a query string and resolve it
+ * to a CIK. Returns the free-text query with the token stripped (no company name
+ * injected) plus the resolved CIK — the caller applies the CIK to EFTS's
+ * server-side `ciks` param, so the scope is independent of the document's name
+ * text and filings made under a former company name (same CIK) are matched (#35).
  */
 async function resolveEntityTargeting(
   query: string,
 ): Promise<{ query: string; entityCik?: string }> {
   const tickerMatch = query.match(/\bticker:(\S+)/i);
-  const cikMatch = query.match(/\bcik:(\S+)/i);
-
-  const api = getEdgarApiService();
-
   if (tickerMatch?.[1]) {
-    const token = tickerMatch[0];
-    const ticker = tickerMatch[1];
-    const resolved = await api.resolveCik(ticker);
+    const resolved = await getEdgarApiService().resolveCik(tickerMatch[1]);
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
-    if (match?.name) {
-      return {
-        query: query.replace(token, `"${match.name}"`).trim(),
-        entityCik: match.cik,
-      };
-    }
-    return { query: query.replace(token, '').trim() };
+    const cleaned = stripToken(query, tickerMatch[0]);
+    return match?.cik ? { query: cleaned, entityCik: match.cik } : { query: cleaned };
   }
 
+  const cikMatch = query.match(/\bcik:(\S+)/i);
   if (cikMatch?.[1]) {
-    const token = cikMatch[0];
-    const rawCik = cikMatch[1];
-    const padded = rawCik.padStart(10, '0');
-    const resolved = await api.resolveCik(rawCik);
-    const match = Array.isArray(resolved) ? resolved[0] : resolved;
-    if (match?.name) {
-      return {
-        query: query.replace(token, `"${match.name}"`).trim(),
-        entityCik: padded,
-      };
-    }
-    return { query: query.replace(token, '').trim(), entityCik: padded };
+    return { query: stripToken(query, cikMatch[0]), entityCik: cikMatch[1].padStart(10, '0') };
   }
 
   return { query };
@@ -143,13 +130,25 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         'Filter to specific form types (e.g., ["10-K", "10-Q", "8-K"]). Without this, searches all form types. Note: "10-K" also matches amendments filed as 10-K/A.',
       ),
     start_date: z
-      .string()
+      .union([
+        z.literal(''),
+        z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD')
+          .describe('YYYY-MM-DD'),
+      ])
       .optional()
       .describe(
         'Start of date range (YYYY-MM-DD). Both start_date and end_date must be provided for date filtering.',
       ),
     end_date: z
-      .string()
+      .union([
+        z.literal(''),
+        z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD')
+          .describe('YYYY-MM-DD'),
+      ])
       .optional()
       .describe(
         'End of date range (YYYY-MM-DD). Both start_date and end_date must be provided for date filtering.',
@@ -176,13 +175,9 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     total: z
       .number()
       .describe(
-        'Total matching filings (capped at 10,000). Under entity targeting (ticker:/cik:), this becomes the count of entity-matching hits within the sampled window of search results — a lower bound when more matches exist beyond the window.',
+        "Total matching filings (capped at 10,000). Entity targeting (ticker:/cik:) scopes server-side via the EFTS ciks param, so this is the entity's exact match count up to the cap.",
       ),
-    total_is_exact: z
-      .boolean()
-      .describe(
-        'False when total hits the 10,000 cap, or when entity targeting filtered a sample that did not cover the full match set.',
-      ),
+    total_is_exact: z.boolean().describe('False only when total hits the 10,000 cap.'),
     results: z
       .array(
         z
@@ -256,7 +251,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       })
       .optional()
       .describe(
-        'Canvas dataframe holding the hits already fetched for the inline response. Absent when total ≤ inline limit, canvas is unavailable, or materialization failed. The dataframe contains the raw EFTS results (entity-filtered when ticker:/cik: was used) — query with secedgar_dataframe_query SQL.',
+        'Canvas dataframe holding the hits already fetched for the inline response. Absent when total ≤ inline limit, canvas is unavailable, or materialization failed. The dataframe contains the raw EFTS results (entity-scoped server-side via the ciks param when ticker:/cik: was used) — query with secedgar_dataframe_query SQL.',
       ),
   }),
 
@@ -285,27 +280,21 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     const response = await api.searchFilings({
       query,
       forms: input.forms,
+      ciks: entityCik ? [entityCik] : undefined,
       startDate: input.start_date,
       endDate: input.end_date,
       from: fetchFrom,
       size: fetchSize,
     });
 
-    let total = response.hits.total.value;
-    let totalIsExact = response.hits.total.relation === 'eq';
+    // EFTS scopes by the server-side `ciks` param (set above when entity
+    // targeting was used), so total/total_is_exact come straight from the
+    // response: no client-side CIK post-filter, and the count is the entity's
+    // true match total (up to the 10k cap), not a sampled-window lower bound.
+    const total = response.hits.total.value;
+    const totalIsExact = response.hits.total.relation === 'eq';
 
     let hits = response.hits.hits;
-
-    // Post-filter by entity CIK when entity targeting was used. We can only claim
-    // an exact total when the EFTS sample window already contained the full match
-    // set; if EFTS reported more matches than fit in our sample, additional
-    // entity hits may exist beyond the window and `total` is a lower bound.
-    if (entityCik) {
-      const sampleCoversAll = total <= hits.length;
-      hits = hits.filter((h) => h._source.ciks?.includes(entityCik));
-      total = hits.length;
-      totalIsExact = sampleCoversAll;
-    }
 
     if (input.sort === 'filing_date_desc') {
       hits = [...hits].sort((a, b) => b._source.file_date.localeCompare(a._source.file_date));
@@ -390,7 +379,10 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       datasetName: dataset?.name,
     });
 
-    ctx.enrich.echo(query);
+    const effectiveQuery = entityCik
+      ? `${query ? `${query} ` : ''}(entity scope: CIK ${entityCik})`
+      : query;
+    ctx.enrich.echo(effectiveQuery);
     if (results.length === 0) {
       ctx.enrich.notice(
         `No filings matched "${input.query}"${input.forms?.length ? ` with forms ${input.forms.join(', ')}` : ''}. Try broader terms, remove form filters, or check entity targeting syntax (ticker:AAPL).`,

@@ -145,6 +145,36 @@ describe('searchFilingsTool — input validation', () => {
     expect(() => searchFilingsTool.input.parse({ query: 'test', offset: -1 })).toThrow();
   });
 
+  it('accepts valid YYYY-MM-DD dates (#25)', () => {
+    expect(() =>
+      searchFilingsTool.input.parse({
+        query: 'test',
+        start_date: '2023-01-01',
+        end_date: '2023-12-31',
+      }),
+    ).not.toThrow();
+  });
+
+  it('accepts empty-string dates as no-filter (#25)', () => {
+    // Form-based clients may send "" for an omitted optional field — the union
+    // variant accepts it and the handler treats it as absent.
+    expect(() =>
+      searchFilingsTool.input.parse({ query: 'test', start_date: '', end_date: '' }),
+    ).not.toThrow();
+  });
+
+  it('rejects malformed start_date via the pattern (#25)', () => {
+    expect(() =>
+      searchFilingsTool.input.parse({ query: 'test', start_date: '2023/01/01' }),
+    ).toThrow();
+  });
+
+  it('rejects malformed end_date via the pattern (#25)', () => {
+    expect(() =>
+      searchFilingsTool.input.parse({ query: 'test', end_date: '01-31-2023' }),
+    ).toThrow();
+  });
+
   it('boolean operator injection in query is passed through safely to API', async () => {
     const emptyResponse = {
       hits: { total: { value: 0, relation: 'eq' }, hits: [] },
@@ -320,10 +350,22 @@ describe('fetchFramesTool — input validation', () => {
     ).toThrow();
   });
 
-  it('rejects limit above 500', () => {
+  it('rejects limit above 100', () => {
     expect(() =>
-      fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2023', limit: 501 }),
+      fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2023', limit: 101 }),
     ).toThrow();
+  });
+
+  it('accepts CY####, CY####Q#, and CY####Q#I periods (#25)', () => {
+    for (const period of ['CY2023', 'CY2024Q2', 'CY2023Q4I']) {
+      expect(() => fetchFramesTool.input.parse({ concept: 'revenue', period })).not.toThrow();
+    }
+  });
+
+  it('rejects malformed period via the pattern (#25)', () => {
+    for (const period of ['2023Q4', 'CY23', 'CY2023Q5', 'FY2023']) {
+      expect(() => fetchFramesTool.input.parse({ concept: 'revenue', period })).toThrow();
+    }
   });
 
   it('rejects invalid sort value', () => {

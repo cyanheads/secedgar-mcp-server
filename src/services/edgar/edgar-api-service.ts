@@ -149,14 +149,20 @@ class EdgarApiService {
   searchFilings(params: {
     query: string;
     forms?: string[] | undefined;
+    ciks?: string[] | undefined;
     startDate?: string | undefined;
     endDate?: string | undefined;
     from?: number | undefined;
     size?: number | undefined;
   }): Promise<EftsResponse> {
     const url = new URL('https://efts.sec.gov/LATEST/search-index');
-    url.searchParams.set('q', params.query);
+    // `q` is optional — EFTS honors `ciks` for pure entity scope with no
+    // full-text query, so a bare cik:/ticker: search sends no `q`.
+    if (params.query) url.searchParams.set('q', params.query);
     if (params.forms?.length) url.searchParams.set('forms', params.forms.join(','));
+    // Server-side entity scope by CIK, independent of the document's name text —
+    // includes filings made under a former company name sharing the same CIK.
+    if (params.ciks?.length) url.searchParams.set('ciks', params.ciks.join(','));
     if (params.startDate && params.endDate) {
       url.searchParams.set('dateRange', 'custom');
       url.searchParams.set('startdt', params.startDate);

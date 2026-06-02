@@ -227,7 +227,7 @@ output: z.object({
 ```
 
 **Handler flow:**
-1. Build query params: `q`, `forms` (comma-join), `dateRange=custom` + `startdt`/`enddt` if dates provided, `from`, `size`
+1. Build query params: `q` (omitted when empty), `forms` (comma-join), `ciks` when `cik:`/`ticker:` targeting resolved a CIK, `dateRange=custom` + `startdt`/`enddt` if dates provided, `from`, `size`
 2. Fetch `efts.sec.gov/LATEST/search-index`
 3. Map Elasticsearch hits to clean output objects
 4. Extract `form_filter` aggregation for distribution info
@@ -235,7 +235,7 @@ output: z.object({
 **Key design decisions:**
 - Default `limit: 20` (not 100) — most searches don't need 100 results and it keeps LLM context lean
 - Include `form_distribution` from ES aggregations — lets the agent see "142 results in 10-K, 89 in 8-K" and refine
-- Entity filtering via `cik:` / `ticker:` in the `query` string (the `entity` parameter is ignored server-side)
+- Entity filtering via `cik:` / `ticker:` in the `query` string, resolved to a CIK passed through EFTS's plural `ciks` param (the singular `entity` param is ignored) — server-side scope, so filings under a former company name on the same CIK are included
 
 **Error guidance:**
 - No results → `"No filings match. Try broader terms, remove date filters, or check spelling. Exact phrases require double quotes."`

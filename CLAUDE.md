@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.8.0
+**Version:** 0.8.1
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.19`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 
@@ -47,7 +47,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 | `secedgar_company_search` | Find companies and retrieve entity info with optional recent filings | `query`, `include_filings?`, `form_types?`, `filing_limit?` |
 | `secedgar_search_filings` | Full-text search across all EDGAR filing documents since 1993 | `query`, `forms?`, `start_date?`, `end_date?`, `limit?` |
 | `secedgar_get_filing` | Fetch a specific filing's metadata and document content | `accession_number`, `cik?`, `content_limit?`, `document?` |
-| `secedgar_get_financials` | Get historical XBRL financial data for a company | `company`, `concept`, `taxonomy?`, `period_type?` |
+| `secedgar_get_financials` | Get historical XBRL financial data for a company | `company`, `concept`, `taxonomy?`, `period_type?`, `limit?` |
 | `secedgar_get_insider_transactions` | Form 3/4/5 insider transactions parsed from ownership XML | `ticker_or_cik`, `transaction_type?`, `limit?` |
 | `secedgar_get_institutional_holdings` | 13F-HR quarterly institutional holdings parsed from the information table | `ticker_or_cik`, `quarter?`, `limit?`, `consolidate?` |
 | `secedgar_fetch_frames` | Fetch SEC XBRL frames for one concept × one period across all reporting companies | `concept`, `period`, `unit?`, `limit?`, `sort?` |
@@ -78,7 +78,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 - **CIK zero-padding:** URLs require 10-digit zero-padded CIK (`String(cik).padStart(10, '0')`)
 - **XBRL friendly names:** `concept-map.ts` maps `"revenue"` → real XBRL tags; handles historical tag changes (ASC 606)
 - **XBRL deduplication:** Filter to entries with `frame` field to get one value per standard calendar period
-- **EFTS quirks:** `dateRange=custom` must be set when using date params; `entity` param is ignored (use `cik:` in query string)
+- **EFTS quirks:** `dateRange=custom` must be set when using date params; the singular `entity` param is ignored — `cik:`/`ticker:` targeting passes the resolved CIK via the plural `ciks` param (server-side scope, independent of the filing's name text, so former-name filings on the same CIK are matched)
 - **Filing content:** HTML → text via `html-to-text` library; pre-2005 filings produce noisier output
 - **Dataframes:** `secedgar_search_filings`, `secedgar_get_financials`, and `secedgar_fetch_frames` materialize their full upstream response as `df_<id>` on a shared DuckDB-backed canvas (one per tenant). Each row set carries an all-nullable schema (sparse SEC columns must not trip DuckDB's NOT NULL appender rollback). Per-table TTL is bridge-side bookkeeping in `ctx.state` until [cyanheads/mcp-ts-core#140](https://github.com/cyanheads/mcp-ts-core/issues/140) lands. `secedgar_dataframe_query` runs framework's SQL gate plus a bridge-layer deny on `information_schema`, `pg_catalog`, `sqlite_master`, and `duckdb_*` catalogs.
 - **Local mirror (opt-in, `EDGAR_MIRROR_ENABLED`):** routes `resolveCik`, `tryGetCompanyConcept`, and `tryGetFrames` to a local SQLite mirror (framework `MirrorService`) of `company_tickers.json` + the `companyfacts.zip` bulk archive; the live API is the fallback on a miss (`EDGAR_MIRROR_FALLBACK_LIVE`). Bootstrap out-of-band with `bun run mirror:init`; refresh nightly via cron (HTTP) or `bun run mirror:refresh`. Node/Bun only — skipped on Workers. Frames are assembled from the company-facts store, so `loc` (business location) is absent. No FTS5 — every routed lookup is exact/indexed (cik+taxonomy+tag point, taxonomy+tag scan, ticker/CIK).

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.1](changelog/0.8.x/0.8.1.md) — 2026-06-01
+
+search_filings cik:/ticker: now scopes server-side via EFTS ciks param; date/period validators; dataframe_query register_as preserves real DuckDB types; get_financials limit param
+
 ## [0.8.0](changelog/0.8.x/0.8.0.md) — 2026-06-01 · ⚠️ Breaking
 
 get_institutional_holdings: whole-USD market values, distinct-position consolidation, working quarter targeting

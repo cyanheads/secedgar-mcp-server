@@ -68,6 +68,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     period: z
       .string()
       .min(1)
+      .regex(/^CY\d{4}(Q[1-4]I?)?$/, 'Expected CY####, CY####Q#, or CY####Q#I')
       .describe(
         'Calendar period. Use duration periods (no I suffix) for income/cash-flow items: "CY2023" (full year), "CY2024Q2" (single quarter). Use instant periods (I suffix) for balance-sheet items: "CY2023Q4I" (snapshot at Q4 close).',
       ),
