@@ -153,3 +153,87 @@ describe('CanvasBridge.drop', () => {
     expect(dropped).toBe(false);
   });
 });
+
+describe('CanvasBridge.query with registerAs', () => {
+  it("records the registered table's real DuckDB column types — not all VARCHAR (#28)", async () => {
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockResolvedValue({
+        columns: ['rev_b', 'ticker'],
+        rowCount: 2,
+        rows: [
+          { rev_b: 383.285, ticker: 'AAPL' },
+          { rev_b: 211.915, ticker: 'MSFT' },
+        ],
+        tableName: 'df_NEW01_NEW02',
+      }),
+      describe: vi.fn().mockResolvedValue([
+        {
+          name: 'df_NEW01_NEW02',
+          kind: 'table',
+          rowCount: 2,
+          columns: [
+            { name: 'rev_b', type: 'DOUBLE', nullable: false },
+            { name: 'ticker', type: 'VARCHAR', nullable: true },
+          ],
+        },
+      ]),
+    };
+    const acquire = vi.fn().mockResolvedValue(instance);
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+    const { meta } = await bridge.query(
+      ctx,
+      'SELECT CAST(value AS DOUBLE)/1e9 AS rev_b, ticker FROM df_A',
+      { registerAs: 'df_NEW01_NEW02' },
+    );
+
+    expect(instance.describe).toHaveBeenCalledWith({ tableName: 'df_NEW01_NEW02' });
+    const byName = Object.fromEntries((meta?.columnSchema ?? []).map((c) => [c.name, c]));
+    expect(byName.rev_b?.type).toBe('DOUBLE');
+    expect(byName.ticker?.type).toBe('VARCHAR');
+    // Forced all-nullable per the bridge convention, regardless of DuckDB's view.
+    expect(meta?.columnSchema.every((c) => c.nullable)).toBe(true);
+  });
+
+  it('types a BIGINT column from describe even with zero result rows (#28)', async () => {
+    // DuckDB serializes BIGINT as strings in query rows, and a 0-row result has
+    // nothing to sniff — describe() is the authoritative source for both.
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockResolvedValue({
+        columns: ['total_value', 'ticker'],
+        rowCount: 0,
+        rows: [],
+        tableName: 'df_BIG01_BIG02',
+      }),
+      describe: vi.fn().mockResolvedValue([
+        {
+          name: 'df_BIG01_BIG02',
+          kind: 'table',
+          rowCount: 0,
+          columns: [
+            { name: 'total_value', type: 'BIGINT', nullable: true },
+            { name: 'ticker', type: 'VARCHAR', nullable: true },
+          ],
+        },
+      ]),
+    };
+    const acquire = vi.fn().mockResolvedValue(instance);
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+    const { meta } = await bridge.query(
+      ctx,
+      'SELECT SUM(value) AS total_value, ticker FROM df_A WHERE 1=0 GROUP BY ticker',
+      { registerAs: 'df_BIG01_BIG02' },
+    );
+
+    const byName = Object.fromEntries((meta?.columnSchema ?? []).map((c) => [c.name, c]));
+    expect(byName.total_value?.type).toBe('BIGINT');
+    expect(byName.ticker?.type).toBe('VARCHAR');
+  });
+});

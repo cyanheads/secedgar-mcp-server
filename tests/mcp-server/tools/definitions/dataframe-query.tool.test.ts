@@ -132,6 +132,31 @@ describe('dataframeQueryTool', () => {
     expect(enrichment.notice).toBeUndefined();
   });
 
+  it('surfaces registered_as and expires_at when register_as is set (#28)', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+    mockBridge.query.mockResolvedValue({
+      result: {
+        columns: ['rev_b', 'ticker'],
+        rowCount: 2,
+        rows: [
+          { rev_b: 383.285, ticker: 'AAPL' },
+          { rev_b: 211.915, ticker: 'MSFT' },
+        ],
+        tableName: 'df_NEW01_NEW02',
+      },
+      meta: { tableName: 'df_NEW01_NEW02', expiresAt: '2026-05-18T00:00:00.000Z' },
+    });
+    const ctx = createMockContext({ errors: dataframeQueryTool.errors });
+    const input = dataframeQueryTool.input.parse({
+      sql: 'SELECT CAST(value AS DOUBLE)/1e9 AS rev_b, ticker FROM df_A',
+      register_as: 'df_NEW01_NEW02',
+    });
+    const result = await dataframeQueryTool.handler(input, ctx);
+
+    expect(result.registered_as).toBe('df_NEW01_NEW02');
+    expect(result.expires_at).toBe('2026-05-18T00:00:00.000Z');
+  });
+
   it('formats results as a markdown table', async () => {
     const result = {
       columns: ['name', 'value'],

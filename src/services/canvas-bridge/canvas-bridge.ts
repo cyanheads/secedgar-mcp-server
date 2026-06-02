@@ -218,10 +218,20 @@ export class CanvasBridge {
 
     let meta: DataframeMeta | undefined;
     if (registerAs && result.tableName) {
+      const tableName = result.tableName;
       const now = Date.now();
       const ttlMs = getServerConfig().datasetTtlSeconds * 1000;
+      // Read the registered table's real DuckDB column types so dataframe_describe
+      // reports them accurately (#28). Row inference can't be used here: DuckDB
+      // serializes BIGINT as strings in query results (would mistype as VARCHAR),
+      // and a zero-row result has nothing to sniff. describe() is authoritative
+      // for both. Force all-nullable per the bridge convention.
+      const [info] = await instance.describe({ tableName });
+      const columnSchema: ColumnSchema[] = (
+        info?.columns ?? result.columns.map((name) => ({ name, type: 'VARCHAR' as const }))
+      ).map((col) => ({ ...col, nullable: true }));
       meta = {
-        tableName: result.tableName,
+        tableName,
         sourceTool: options.sourceTool ?? 'secedgar_dataframe_query',
         queryParams: options.queryParams ?? { sql },
         createdAt: new Date(now).toISOString(),
@@ -229,13 +239,9 @@ export class CanvasBridge {
         rowCount: result.rowCount,
         truncated: false,
         maxRows: undefined,
-        columnSchema: result.columns.map((name) => ({
-          name,
-          type: 'VARCHAR',
-          nullable: true,
-        })),
+        columnSchema,
       };
-      await ctx.state.set(`${META_PREFIX}${result.tableName}`, meta);
+      await ctx.state.set(`${META_PREFIX}${tableName}`, meta);
     }
 
     return meta ? { result, meta } : { result };
