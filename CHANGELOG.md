@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.2](changelog/0.8.x/0.8.2.md) — 2026-06-02
+
+mirror:init/verify/refresh commands ship in the production Docker image; docker exec now a supported lever for mirror bootstrap and re-ingest
+
 ## [0.8.1](changelog/0.8.x/0.8.1.md) — 2026-06-01
 
 search_filings cik:/ticker: now scopes server-side via EFTS ciks param; date/period validators; dataframe_query register_as preserves real DuckDB types; get_financials limit param

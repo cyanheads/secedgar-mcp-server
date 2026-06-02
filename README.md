@@ -316,6 +316,14 @@ docker build -t secedgar-mcp-server .
 docker run -e EDGAR_USER_AGENT="MyApp my@email.com" -p 3010:3010 secedgar-mcp-server
 ```
 
+The image ships the mirror CLI, so the local mirror (`EDGAR_MIRROR_ENABLED`) can be bootstrapped, inspected, and refreshed inside a running container:
+
+```sh
+docker exec <container> bun run mirror:verify    # sync status + sample reads
+docker exec <container> bun run mirror:init      # one-time bootstrap (downloads the SEC bulk archive)
+docker exec <container> bun run mirror:refresh   # re-ingest when the archive has been rebuilt
+```
+
 ## Project structure
 
 | Directory | Purpose |

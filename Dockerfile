@@ -75,6 +75,22 @@ RUN if [ "$OTEL_ENABLED" = "true" ]; then \
 # Copy the compiled application code from the build stage
 COPY --from=build /usr/src/app/dist ./dist
 
+# Copy the mirror lifecycle scripts. `bun run mirror:init` / `mirror:refresh` /
+# `mirror:verify` invoke these directly (Bun runs `.ts` natively) — they must
+# exist inside the container or an operator can't bootstrap, inspect, or refresh
+# the local mirror via `docker exec`.
+COPY --from=build /usr/src/app/scripts/edgar-mirror-init.ts \
+                  /usr/src/app/scripts/edgar-mirror-refresh.ts \
+                  /usr/src/app/scripts/edgar-mirror-verify.ts \
+                  /usr/src/app/scripts/_mirror-context.ts \
+                  ./scripts/
+
+# Emit a minimal `tsconfig.json` so Bun can resolve the `@/...` path alias the
+# mirror scripts import through. The source `tsconfig.json` maps `@/*` to `./src/*`,
+# but production only carries `./dist/*` — without this file, `bun run mirror:init`
+# fails with `Cannot find module '@/config/server-config.js'`.
+RUN echo '{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./dist/*"]}}}' > tsconfig.json
+
 # The 'oven/bun' image already provides a non-root user named 'bun'.
 # We will use this existing user for enhanced security.
 

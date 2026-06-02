@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/secedgar-mcp-server",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "description": "Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.",
   "mcpName": "io.github.cyanheads/secedgar-mcp-server",
   "type": "module",
@@ -12,7 +12,17 @@
   "exports": {
     ".": "./dist/index.js"
   },
-  "files": ["dist/", "README.md", "LICENSE", "Dockerfile", "server.json"],
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "Dockerfile",
+    "server.json",
+    "scripts/edgar-mirror-init.ts",
+    "scripts/edgar-mirror-refresh.ts",
+    "scripts/edgar-mirror-verify.ts",
+    "scripts/_mirror-context.ts"
+  ],
   "scripts": {
     "build": "bun scripts/build.ts",
     "rebuild": "bun scripts/clean.ts && bun scripts/build.ts",
