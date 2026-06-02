@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.3](changelog/0.8.x/0.8.3.md) — 2026-06-02
+
+Adopt @cyanheads/mcp-ts-core ^0.9.21 — per-request log context fix, secret-stripped error messages, and fail-fast retry behavior
+
 ## [0.8.2](changelog/0.8.x/0.8.2.md) — 2026-06-02
 
 mirror:init/verify/refresh commands ship in the production Docker image; docker exec now a supported lever for mirror bootstrap and re-ingest

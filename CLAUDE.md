@@ -1,8 +1,8 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.8.2
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.19`
+**Version:** 0.8.3
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.21`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 
 Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-only, no API keys required. Full design: `docs/sec-edgar-mcp-design.md`.
@@ -249,6 +249,7 @@ Available skills:
 | `report-issue-local` | File a bug or feature request against this server's own repo via `gh` CLI |
 | `report-issue-framework` | File a bug or feature request against `@cyanheads/mcp-ts-core` via `gh` CLI |
 | `maintenance` | Investigate changelogs, adopt upstream changes, sync skills to agent dirs |
+| `orchestrations` | Chain task skills into a gated multi-phase pipeline — build-out, QA-fix, update-ship — when you can spawn sub-agents |
 | `api-auth` | Auth modes, scopes, JWT/OAuth |
 | `api-config` | AppConfig, parseConfig, env vars |
 | `api-canvas` | DataCanvas: register tabular data, run SQL, export, plus the `spillover()` helper for big result sets — Tier 3 opt-in |
