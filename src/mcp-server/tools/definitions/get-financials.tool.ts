@@ -72,6 +72,15 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       .describe(
         'Filter to annual (FY) or quarterly (Q1-Q4) data. "all" returns both. When omitted, defaults to "annual" for income/cash-flow concepts and "all" for balance-sheet (instant) items so balance-sheet calls return data on the first attempt.',
       ),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe(
+        'Cap the inline data[] to the most-recent N periods (the series is newest-first). The full series is always registered to the dataframe, so older periods stay queryable via secedgar_dataframe_query. Omit to return every period inline.',
+      ),
   }),
 
   output: z.object({
@@ -378,7 +387,9 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       label: conceptResponse.label || label,
       description: conceptResponse.description || undefined,
       unit: unitKey,
-      data,
+      // Slice the inline view only; the dataframe registered above holds the
+      // full series, so older periods stay queryable via the dataframe handle (#32).
+      data: input.limit ? data.slice(0, input.limit) : data,
       tags_tried: tagsTried.length > 1 ? tagsTried : undefined,
       dataset,
     };
@@ -409,8 +420,12 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       lines.push(`${d.period}: ${formatted} (raw ${d.value}) | ${range} | ${filingCtx}`);
     }
     if (result.dataset) {
+      const sliceNote =
+        result.dataset.row_count > result.data.length
+          ? ` — showing the ${result.data.length} most-recent of ${result.dataset.row_count} periods inline; full series on the dataframe`
+          : '';
       lines.push(
-        `\nDataset: ${result.dataset.name} (${result.dataset.row_count} rows, expires ${result.dataset.expires_at}) — query with secedgar_dataframe_query.`,
+        `\nDataset: ${result.dataset.name} (${result.dataset.row_count} rows, expires ${result.dataset.expires_at})${sliceNote} — query with secedgar_dataframe_query.`,
       );
     }
     return [{ type: 'text', text: lines.join('\n') }];

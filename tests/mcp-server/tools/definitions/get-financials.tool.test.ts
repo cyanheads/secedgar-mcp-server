@@ -402,6 +402,64 @@ describe('getFinancialsTool', () => {
     expect(result.tags_tried).toBeUndefined();
   });
 
+  it('caps inline data[] to the most-recent N when limit is set (#32)', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({
+      company: 'AAPL',
+      concept: 'revenue',
+      period_type: 'all',
+      limit: 1,
+    });
+    const result = await getFinancialsTool.handler(input, ctx);
+
+    expect(result.data).toHaveLength(1);
+    // Series is newest-first, so the single inline row is the most recent period.
+    expect(result.data[0].period).toBe('CY2023');
+  });
+
+  it('returns every period inline when limit is omitted (#32)', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({
+      company: 'AAPL',
+      concept: 'revenue',
+      period_type: 'all',
+    });
+    const result = await getFinancialsTool.handler(input, ctx);
+
+    // 3 frame-bearing entries in the mock (CY2023, CY2023Q3, CY2022).
+    expect(result.data).toHaveLength(3);
+  });
+
+  it('format() flags the inline slice against the full dataframe series (#32)', () => {
+    const output = {
+      company: 'Apple Inc.',
+      cik: '0000320193',
+      concept: 'Revenues',
+      label: 'Revenue',
+      unit: 'USD',
+      data: [
+        {
+          period: 'CY2023',
+          value: 383285000000,
+          end: '2023-09-30',
+          fiscal_year: 2023,
+          fiscal_period: 'FY',
+          form: '10-K',
+          filed: '2023-11-03',
+          accession_number: '0000320193-23-000106',
+        },
+      ],
+      dataset: {
+        name: 'df_ABCDE_FGHIJ',
+        row_count: 5,
+        expires_at: '2026-05-18T00:00:00.000Z',
+      },
+    };
+    const blocks = getFinancialsTool.format!(output);
+    expect(blocks[0].text).toContain('showing the 1 most-recent of 5 periods');
+    expect(blocks[0].text).toContain('df_ABCDE_FGHIJ');
+  });
+
   it('formats USD values in millions', () => {
     const output = {
       company: 'Apple Inc.',
