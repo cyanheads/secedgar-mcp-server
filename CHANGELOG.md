@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.4](changelog/0.8.x/0.8.4.md) — 2026-06-04
+
+get_filing error data now returns categorized documents instead of a flat list; search_filings notes Form 3/4/5 index limitations
+
 ## [0.8.3](changelog/0.8.x/0.8.3.md) — 2026-06-02
 
 Adopt @cyanheads/mcp-ts-core ^0.9.21 — per-request log context fix, secret-stripped error messages, and fail-fast retry behavior
