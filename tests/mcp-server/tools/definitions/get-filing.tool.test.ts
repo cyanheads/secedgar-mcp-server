@@ -272,6 +272,75 @@ describe('getFilingTool', () => {
     await expect(getFilingTool.handler(input, ctx)).rejects.toThrow(/not found in this filing/);
   });
 
+  it('document_not_found error data carries categorized documents, not a flat array', async () => {
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: '0000320193-23-000106',
+      cik: '320193',
+      document: 'nonexistent.htm',
+    });
+
+    // Error data should have documents.primary/exhibits/auxiliary, not available_documents[]
+    await expect(getFilingTool.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'document_not_found',
+        requested_document: 'nonexistent.htm',
+        documents: {
+          // aapl-20230930.htm is the largest non-R .htm → primary (type inferred from name pattern)
+          primary: expect.arrayContaining([expect.objectContaining({ name: 'aapl-20230930.htm' })]),
+          exhibits: expect.any(Array),
+          auxiliary: expect.any(Array),
+        },
+      },
+    });
+    // Verify the old flat list is gone
+    await expect(getFilingTool.handler(input, ctx)).rejects.not.toMatchObject({
+      data: { available_documents: expect.any(Array) },
+    });
+  });
+
+  it('document_not_found recovery hint names the primary document', async () => {
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: '0000320193-23-000106',
+      cik: '320193',
+      document: 'nonexistent.htm',
+    });
+
+    await expect(getFilingTool.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        recovery: { hint: expect.stringContaining('aapl-20230930.htm') },
+      },
+    });
+  });
+
+  it('document_not_found does not surface XBRL viewer artifacts in documents.primary or exhibits', async () => {
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: '0000320193-23-000106',
+      cik: '320193',
+      document: 'nonexistent.htm',
+    });
+
+    let thrown: unknown;
+    try {
+      await getFilingTool.handler(input, ctx);
+    } catch (err) {
+      thrown = err;
+    }
+
+    const error = thrown as {
+      data: {
+        documents: { primary: { name: string }[]; exhibits: { name: string }[]; xbrl?: unknown };
+      };
+    };
+    const allSurfaced = [...error.data.documents.primary, ...error.data.documents.exhibits];
+    const hasR1 = allSurfaced.some((d) => d.name === 'R1.htm');
+    expect(hasR1).toBe(false);
+    // XBRL artifacts are suppressed from the error payload by default
+    expect(error.data.documents.xbrl).toBeUndefined();
+  });
+
   it('categorizes documents into primary, exhibits, and auxiliary; suppresses XBRL by default', async () => {
     const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({

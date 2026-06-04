@@ -127,7 +127,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .array(z.string())
       .optional()
       .describe(
-        'Filter to specific form types (e.g., ["10-K", "10-Q", "8-K"]). Without this, searches all form types. Note: "10-K" also matches amendments filed as 10-K/A.',
+        'Filter to specific form types (e.g., ["10-K", "10-Q", "8-K"]). Without this, searches all form types. Note: "10-K" also matches amendments filed as 10-K/A. Ownership forms (3, 4, 5) are indexed by the reporting person (e.g., "LEVINSON ARTHUR D"), not the issuer — rows carry no transaction code, share count, or price. Use secedgar_get_insider_transactions to retrieve parsed ownership XML with person, relationship, transaction code, shares, and price.',
       ),
     start_date: z
       .union([

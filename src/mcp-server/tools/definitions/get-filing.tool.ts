@@ -42,9 +42,15 @@ type ResolveOutcome =
       ok: false;
       kind: 'document_not_found';
       requestedDocument: string;
-      availableDocuments: string[];
+      /** Filing documents grouped by category (headers inferred from filename patterns). */
+      documents: CategorizedDocuments;
     }
-  | { ok: false; kind: 'no_documents'; availableDocuments: string[] }
+  | {
+      ok: false;
+      kind: 'no_documents';
+      /** Filing documents grouped by category (headers inferred from filename patterns). */
+      documents: CategorizedDocuments;
+    }
   | { ok: false; kind: 'filing_not_found'; providedCik: string | undefined };
 
 const documentEntrySchema = z
@@ -75,13 +81,13 @@ export const getFilingTool = tool('secedgar_get_filing', {
       reason: 'document_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'A specific document was requested but not present in the filing archive',
-      recovery: 'Pick a name from the available_documents list returned in error data.',
+      recovery: 'Pick a filename from documents.primary (or exhibits) in error data.',
     },
     {
       reason: 'no_documents',
       code: JsonRpcErrorCode.NotFound,
       when: 'Filing index lists items but no fetchable primary document was found',
-      recovery: 'Specify a document name from available_documents in error data.',
+      recovery: 'Specify a document filename from documents.primary in error data.',
     },
     {
       reason: 'filing_not_found',
@@ -200,22 +206,26 @@ export const getFilingTool = tool('secedgar_get_filing', {
     const resolved = await resolveFilingArchive(api, accn, input.cik, input.document);
     if (!resolved.ok) {
       if (resolved.kind === 'document_not_found') {
+        const primaryName = resolved.documents.primary[0]?.name;
+        const hint = primaryName
+          ? `Use document="${primaryName}" (the primary) or pick from documents.primary/exhibits in error data.`
+          : 'Pick a filename from documents.primary or exhibits in error data.';
         throw ctx.fail(
           'document_not_found',
           `Document '${resolved.requestedDocument}' not found in this filing.`,
           {
             requested_document: resolved.requestedDocument,
-            available_documents: resolved.availableDocuments,
-            recovery: { hint: `Pick one of: ${resolved.availableDocuments.join(', ')}.` },
+            documents: resolved.documents,
+            recovery: { hint },
           },
         );
       }
       if (resolved.kind === 'no_documents') {
         throw ctx.fail('no_documents', `No primary document found in filing ${accn}.`, {
           accession_number: accn,
-          available_documents: resolved.availableDocuments,
+          documents: resolved.documents,
           recovery: {
-            hint: `Specify the document input from: ${resolved.availableDocuments.join(', ')}.`,
+            hint: 'Specify the document input using a filename from documents.primary in error data.',
           },
         });
       }
@@ -352,15 +362,19 @@ async function resolveFilingArchive(
     return { ok: true, cik, html, index, targetName, filingPrimaryName };
   }
 
-  const availableDocuments = lastIndexedItems.map((item) => item.name);
+  if (lastIndexedItems.length === 0) {
+    return { ok: false, kind: 'filing_not_found', providedCik };
+  }
 
-  if (requestedDocument && availableDocuments.length > 0) {
-    return { ok: false, kind: 'document_not_found', requestedDocument, availableDocuments };
+  // Categorize using name-pattern inference (no submission headers at this point).
+  // The primary is inferred from the index items — the same logic the success path uses.
+  const errorPrimaryName = findPrimaryDocument(lastIndexedItems) ?? '';
+  const documents = categorizeDocuments(lastIndexedItems, errorPrimaryName, null, false);
+
+  if (requestedDocument) {
+    return { ok: false, kind: 'document_not_found', requestedDocument, documents };
   }
-  if (availableDocuments.length > 0) {
-    return { ok: false, kind: 'no_documents', availableDocuments };
-  }
-  return { ok: false, kind: 'filing_not_found', providedCik };
+  return { ok: false, kind: 'no_documents', documents };
 }
 
 async function resolveCandidateCiks(
