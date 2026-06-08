@@ -15,8 +15,8 @@
 
 import { execFile } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { copyFile, mkdir, readdir, stat } from 'node:fs/promises';
-import { dirname, join, relative } from 'node:path';
+import { readdir, stat } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -54,34 +54,6 @@ async function exec(
   }
 
   return { ok: exitCode === 0, stdout, stderr, ms };
-}
-
-/**
- * Recursively copy all `.json` files from `srcDir` into the matching path under `destDir`.
- * `tsc`/`tsc-alias` emit only `.js`/`.d.ts` — static JSON assets must be copied manually
- * so the built server can `import ... with { type: 'json' }` at runtime.
- */
-async function copyJsonAssets(srcDir: string, destDir: string): Promise<number> {
-  let copied = 0;
-  let entries: Awaited<ReturnType<typeof readdir>>;
-  try {
-    entries = await readdir(srcDir, { withFileTypes: true });
-  } catch {
-    return 0;
-  }
-  for (const entry of entries) {
-    const srcPath = join(srcDir, entry.name);
-    // Map src/**/* → dist/**/*
-    const destPath = join(destDir, relative(join(ROOT_DIR, 'src'), srcPath));
-    if (entry.isDirectory()) {
-      copied += await copyJsonAssets(srcPath, destDir);
-    } else if (entry.name.endsWith('.json')) {
-      await mkdir(dirname(destPath), { recursive: true });
-      await copyFile(srcPath, destPath);
-      copied++;
-    }
-  }
-  return copied;
 }
 
 /** Recursively count files and total size under a directory. */
@@ -141,16 +113,6 @@ async function main() {
     'tsc-alias',
   );
   if (!alias.ok) process.exit(1);
-
-  // Step 3: copy JSON assets from src/ → dist/
-  // tsc/tsc-alias emit only .js/.d.ts; static JSON files (e.g. data/former-names.json)
-  // must be copied manually so the built server can import them at runtime.
-  const jsonStart = performance.now();
-  const jsonCopied = await copyJsonAssets(join(ROOT_DIR, 'src'), DIST_DIR);
-  const jsonMs = Math.round(performance.now() - jsonStart);
-  console.log(
-    `  \x1b[32m✓\x1b[0m copy-json-assets \x1b[2m(${jsonCopied} files, ${jsonMs}ms)\x1b[0m`,
-  );
 
   const totalMs = Math.round(performance.now() - totalStart);
 

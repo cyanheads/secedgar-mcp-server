@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/secedgar-mcp-server",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.",
   "mcpName": "io.github.cyanheads/secedgar-mcp-server",
   "type": "module",
@@ -93,7 +93,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@cyanheads/mcp-ts-core": "^0.9.21",
+    "@cyanheads/mcp-ts-core": "^0.10.1",
     "@duckdb/node-api": "^1.5.3-r.3",
     "better-sqlite3": "^12.10.0",
     "domhandler": "^6.0.1",

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.1](changelog/0.10.x/0.10.1.md) — 2026-06-08 · 🛡️ Security
+
+Security: DataCanvas SQL gate fails closed on non-SELECT statements and denies pragma_* table functions; stringbool env-boolean parsing; .mcpbignore dev-dir anchoring; actionable node-cron peer error.
+
 ## [0.10.0](changelog/0.10.x/0.10.0.md) — 2026-06-08
 
 secedgar_company_search: ETF/fund ticker resolution, former-name lookup (Facebook→Meta, Square→Block), near-match suggestions on zero-result name queries, and robustness fixes for private/pre-IPO filers

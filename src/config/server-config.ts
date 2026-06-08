@@ -4,6 +4,7 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
+import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
   userAgent: z
@@ -31,16 +32,14 @@ const ServerConfigSchema = z.object({
       'Per-table TTL for canvas-registered dataframes, in seconds. Bridge-side bookkeeping in ctx.state (backstop for cyanheads/mcp-ts-core#140 until the framework exposes RegisterTableOptions.ttlMs).',
     ),
   dataframeDropEnabled: z
-    .string()
-    .optional()
-    .transform((v) => v === 'true' || v === '1')
+    .stringbool()
+    .default(false)
     .describe(
       'Set to "true" to expose secedgar_dataframe_drop. Off by default — the canvas already drops tables on the per-table TTL, and a write surface against the shared canvas is the only destructive tool on this server.',
     ),
   mirrorEnabled: z
-    .string()
-    .optional()
-    .transform((v) => v === 'true' || v === '1')
+    .stringbool()
+    .default(false)
     .describe(
       'Set to "true" to enable the local SQLite mirror of company_tickers + XBRL company-facts. Off by default — when off, every CIK resolution and financials lookup hits the live SEC API. Node/Bun only; ignored on Cloudflare Workers (no SQLite/filesystem).',
     ),
@@ -57,9 +56,8 @@ const ServerConfigSchema = z.object({
       'Cron expression for the in-process nightly refresh (HTTP transport only). Omit to disable scheduled refresh and run `bun run mirror:refresh` out-of-band instead. Recommended "0 9 * * *" (≈04:00–05:00 ET, after SEC rebuilds the bulk files ~03:00 ET).',
     ),
   mirrorFallbackLive: z
-    .string()
-    .optional()
-    .transform((v) => v !== 'false' && v !== '0')
+    .stringbool()
+    .default(true)
     .describe(
       'When the mirror is enabled but a lookup misses (company/concept not yet synced, or a filing newer than the last refresh), fall back to the live SEC API. Default true. Set "false" for strict mirror-only reads.',
     ),
@@ -70,16 +68,16 @@ export type ServerConfig = z.infer<typeof ServerConfigSchema>;
 let _config: ServerConfig | undefined;
 
 export function getServerConfig(): ServerConfig {
-  _config ??= ServerConfigSchema.parse({
-    userAgent: process.env.EDGAR_USER_AGENT,
-    rateLimitRps: process.env.EDGAR_RATE_LIMIT_RPS,
-    tickerCacheTtl: process.env.EDGAR_TICKER_CACHE_TTL,
-    datasetTtlSeconds: process.env.EDGAR_DATASET_TTL_SECONDS,
-    dataframeDropEnabled: process.env.EDGAR_DATAFRAME_DROP_ENABLED,
-    mirrorEnabled: process.env.EDGAR_MIRROR_ENABLED,
-    mirrorPath: process.env.EDGAR_MIRROR_PATH,
-    mirrorRefreshCron: process.env.EDGAR_MIRROR_REFRESH_CRON,
-    mirrorFallbackLive: process.env.EDGAR_MIRROR_FALLBACK_LIVE,
+  _config ??= parseEnvConfig(ServerConfigSchema, {
+    userAgent: 'EDGAR_USER_AGENT',
+    rateLimitRps: 'EDGAR_RATE_LIMIT_RPS',
+    tickerCacheTtl: 'EDGAR_TICKER_CACHE_TTL',
+    datasetTtlSeconds: 'EDGAR_DATASET_TTL_SECONDS',
+    dataframeDropEnabled: 'EDGAR_DATAFRAME_DROP_ENABLED',
+    mirrorEnabled: 'EDGAR_MIRROR_ENABLED',
+    mirrorPath: 'EDGAR_MIRROR_PATH',
+    mirrorRefreshCron: 'EDGAR_MIRROR_REFRESH_CRON',
+    mirrorFallbackLive: 'EDGAR_MIRROR_FALLBACK_LIVE',
   });
   return _config;
 }
