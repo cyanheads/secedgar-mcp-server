@@ -77,6 +77,12 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   equity: {
     group: 'balance_sheet',
     tags: ['StockholdersEquity'],
+    relatedTags: [
+      {
+        tag: 'StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest',
+        note: 'Total equity including noncontrolling interests; the primary line for filers with material minority interests.',
+      },
+    ],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: "Stockholders' Equity",
@@ -84,6 +90,12 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   cash: {
     group: 'balance_sheet',
     tags: ['CashAndCashEquivalentsAtCarryingValue'],
+    relatedTags: [
+      {
+        tag: 'CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents',
+        note: 'Total including restricted cash (the ASU 2016-18 cash-flow reconciliation total); the primary line for many banks and filers with restricted cash.',
+      },
+    ],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Cash and Cash Equivalents',
@@ -105,6 +117,12 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   operating_cash_flow: {
     group: 'cash_flow',
     tags: ['NetCashProvidedByUsedInOperatingActivities'],
+    relatedTags: [
+      {
+        tag: 'NetCashProvidedByUsedInOperatingActivitiesContinuingOperations',
+        note: 'Continuing operations only — excludes discontinued operations; some filers report only this variant.',
+      },
+    ],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Operating Cash Flow',
@@ -255,6 +273,12 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   investing_cash_flow: {
     group: 'cash_flow',
     tags: ['NetCashProvidedByUsedInInvestingActivities'],
+    relatedTags: [
+      {
+        tag: 'NetCashProvidedByUsedInInvestingActivitiesContinuingOperations',
+        note: 'Continuing operations only — excludes discontinued operations; some filers report only this variant.',
+      },
+    ],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Investing Cash Flow',
@@ -262,6 +286,12 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   financing_cash_flow: {
     group: 'cash_flow',
     tags: ['NetCashProvidedByUsedInFinancingActivities'],
+    relatedTags: [
+      {
+        tag: 'NetCashProvidedByUsedInFinancingActivitiesContinuingOperations',
+        note: 'Continuing operations only — excludes discontinued operations; some filers report only this variant.',
+      },
+    ],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Financing Cash Flow',
@@ -329,6 +359,7 @@ export function searchConcepts(query: string, taxonomy?: string): ConceptEntry[]
       normalizeForSearch(entry.label),
       ...entry.tags.map(normalizeForSearch),
       ...(entry.ifrsTags ?? []).map(normalizeForSearch),
+      ...(entry.relatedTags ?? []).map((r) => normalizeForSearch(r.tag)),
     ];
     return haystacks.some((h) => h.includes(needle));
   });

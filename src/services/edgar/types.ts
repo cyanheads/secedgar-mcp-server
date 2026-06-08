@@ -145,6 +145,14 @@ export type ConceptGroup =
 /** XBRL taxonomy a concept belongs to. */
 export type ConceptTaxonomy = 'us-gaap' | 'ifrs-full' | 'dei';
 
+/** An alternate-semantics XBRL tag related to a concept, with the reason it differs. */
+export interface RelatedTag {
+  /** How this tag differs semantically from the mapped tag (e.g. "includes restricted cash"). */
+  note: string;
+  /** XBRL tag a meaningful share of filers report this metric under instead. */
+  tag: string;
+}
+
 /** Friendly concept name mapping. */
 export interface ConceptMapping {
   group: ConceptGroup;
@@ -155,6 +163,15 @@ export interface ConceptMapping {
    */
   ifrsTags?: string[];
   label: string;
+  /**
+   * Alternate-semantics XBRL tags a meaningful share of filers use as their primary
+   * line for this metric, surfaced as a hint by `secedgar_fetch_frames`. NOT pure
+   * synonyms of `tags` (those differ historically but mean the same thing) — these
+   * carry a different definition (e.g. cash incl. restricted cash, equity incl.
+   * noncontrolling interest), so they are deliberately kept OUT of `tags` to avoid
+   * conflating them into `secedgar_get_financials`' first-non-null fallback chain.
+   */
+  relatedTags?: RelatedTag[];
   tags: string[];
   taxonomy: ConceptTaxonomy;
   unit: string;

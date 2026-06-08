@@ -225,6 +225,40 @@ describe('fetchFramesTool', () => {
     expect(result.unqueried_tags).toEqual([]);
   });
 
+  it('surfaces related_tags for single-tag concepts with a known alternate (cash) (#36)', async () => {
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({ concept: 'cash', period: 'CY2024Q4I' });
+    const result = await fetchFramesTool.handler(input, ctx);
+
+    // The queried tag stays tags[0] — related_tags is a hint, not a query target.
+    expect(result.concept).toBe('CashAndCashEquivalentsAtCarryingValue');
+    expect(result.unqueried_tags).toEqual([]);
+    expect(result.related_tags.map((r) => r.tag)).toContain(
+      'CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents',
+    );
+    expect(result.related_tags[0]!.note).toBeTruthy();
+  });
+
+  it('returns empty related_tags for multi-tag concepts without alternates (revenue) (#36)', async () => {
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2023' });
+    const result = await fetchFramesTool.handler(input, ctx);
+
+    expect(result.related_tags).toEqual([]);
+  });
+
+  it('returns empty related_tags for raw XBRL tags (#36)', async () => {
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({
+      concept: 'AccountsPayableCurrent',
+      period: 'CY2023Q4I',
+      unit: 'USD',
+    });
+    const result = await fetchFramesTool.handler(input, ctx);
+
+    expect(result.related_tags).toEqual([]);
+  });
+
   it('computes value_distribution over the full frame', async () => {
     const ctx = createMockContext({ errors: fetchFramesTool.errors });
     const input = fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2023' });
@@ -319,6 +353,7 @@ describe('fetchFramesTool', () => {
         },
       ],
       unqueried_tags: [],
+      related_tags: [],
       value_distribution: { median: 0, p95: 0, max: 0, max_to_p95_ratio: 0 },
       period_end_range: { min: '', max: '' },
       caveats: [],
@@ -349,6 +384,7 @@ describe('fetchFramesTool', () => {
         },
       ],
       unqueried_tags: [],
+      related_tags: [],
       value_distribution: { median: 0, p95: 0, max: 0, max_to_p95_ratio: 0 },
       period_end_range: { min: '', max: '' },
       caveats: [],
@@ -371,6 +407,7 @@ describe('fetchFramesTool', () => {
         expires_at: '2026-05-18T00:00:00.000Z',
       },
       unqueried_tags: [],
+      related_tags: [],
       value_distribution: { median: 0, p95: 0, max: 0, max_to_p95_ratio: 0 },
       period_end_range: { min: '', max: '' },
       caveats: [],
@@ -390,6 +427,7 @@ describe('fetchFramesTool', () => {
       total_companies: 3131,
       data: [],
       unqueried_tags: ['Revenues', 'SalesRevenueNet'],
+      related_tags: [],
       value_distribution: {
         median: 1200000000,
         p95: 42800000000,
@@ -404,6 +442,32 @@ describe('fetchFramesTool', () => {
     expect(blocks[0].text).toContain('Revenues, SalesRevenueNet');
     expect(blocks[0].text).toContain('max/p95 15×');
     expect(blocks[0].text).toContain('2023-01-31 → 2024-12-31');
+  });
+
+  it('renders related_tags hint in format text (#36)', () => {
+    const output = {
+      concept: 'CashAndCashEquivalentsAtCarryingValue',
+      period: 'CY2024Q4I',
+      unit: 'USD',
+      label: 'Cash and Cash Equivalents',
+      total_companies: 4118,
+      data: [],
+      unqueried_tags: [],
+      related_tags: [
+        {
+          tag: 'CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents',
+          note: 'Total including restricted cash.',
+        },
+      ],
+      value_distribution: { median: 0, p95: 0, max: 0, max_to_p95_ratio: 0 },
+      period_end_range: { min: '', max: '' },
+      caveats: [],
+    };
+    const blocks = fetchFramesTool.format!(output);
+    expect(blocks[0].text).toContain('Related tags');
+    expect(blocks[0].text).toContain(
+      'CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents',
+    );
   });
 
   it('emits fiscal-Q4 caveat for duration CY*Q[1-4] periods', async () => {
@@ -459,6 +523,7 @@ describe('fetchFramesTool', () => {
       total_companies: 3000,
       data: [],
       unqueried_tags: [],
+      related_tags: [],
       value_distribution: { median: 0, p95: 0, max: 0, max_to_p95_ratio: 0 },
       period_end_range: { min: '', max: '' },
       caveats: ['Filers whose fiscal Q4 closes in calendar Q3 are absent — AAPL Sep-end.'],

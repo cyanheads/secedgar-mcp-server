@@ -47,8 +47,14 @@ export const conceptsResource = resource('secedgar://concepts', {
       lines.push('| Friendly Name | Label | XBRL Tags | Taxonomy | Unit |');
       lines.push('|:------|:------|:----------|:---------|:-----|');
       for (const item of items) {
+        const tagCell = item.tags.map((t) => `\`${t}\``).join(', ');
+        const altCell = item.relatedTags?.length
+          ? `<br>_alt (different definition, query separately):_ ${item.relatedTags
+              .map((r) => `\`${r.tag}\` (${r.note})`)
+              .join('; ')}`
+          : '';
         lines.push(
-          `| \`${item.name}\` | ${item.label} | ${item.tags.map((t) => `\`${t}\``).join(', ')} | ${item.taxonomy} | ${item.unit} |`,
+          `| \`${item.name}\` | ${item.label} | ${tagCell}${altCell} | ${item.taxonomy} | ${item.unit} |`,
         );
       }
       lines.push('');

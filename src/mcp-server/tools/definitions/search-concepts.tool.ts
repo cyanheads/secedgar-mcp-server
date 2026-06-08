@@ -77,6 +77,25 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
               .describe(
                 'XBRL tags this friendly name resolves to, tried in order. Multiple tags cover historical naming changes (e.g., pre- vs post-ASC 606 revenue).',
               ),
+            related_tags: z
+              .array(
+                z
+                  .object({
+                    tag: z
+                      .string()
+                      .describe(
+                        'Alternate-definition XBRL tag some filers use as their primary line.',
+                      ),
+                    note: z
+                      .string()
+                      .describe('How this tag differs in definition from the mapped tags.'),
+                  })
+                  .describe('One alternate-definition tag and the reason it differs.'),
+              )
+              .optional()
+              .describe(
+                'Alternate-DEFINITION tags (different meaning from `tags`, not historical synonyms) that a meaningful share of filers report this metric under instead — surfaced by secedgar_fetch_frames as `related_tags`. Present only when the concept has a known high-coverage alternate (e.g. cash → restricted-cash-inclusive total, equity → NCI-inclusive total). Query these separately; do not blindly union them with the base tag.',
+              ),
             taxonomy: z
               .enum(TAXONOMY_VALUES)
               .describe(
@@ -136,6 +155,7 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
         name: c.name,
         label: c.label,
         tags: c.tags,
+        ...(c.relatedTags?.length ? { related_tags: c.relatedTags } : {}),
         taxonomy: c.taxonomy,
         unit: c.unit,
         group: c.group,
@@ -159,6 +179,10 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
       }
       const tagList = c.tags.map((t) => `\`${t}\``).join(', ');
       lines.push(`- \`${c.name}\` — ${c.label} (${c.taxonomy}, ${c.unit}) → ${tagList}`);
+      if (c.related_tags?.length) {
+        const rel = c.related_tags.map((r) => `\`${r.tag}\` (${r.note})`).join('; ');
+        lines.push(`    related (alternate definition): ${rel}`);
+      }
     }
 
     return [{ type: 'text', text: lines.join('\n') }];

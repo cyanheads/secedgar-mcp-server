@@ -73,4 +73,36 @@ describe('searchConceptsTool', () => {
 
     expect(blocks[0].text).toContain('0 concepts');
   });
+
+  it('surfaces related_tags for concepts with an alternate-definition tag (cash) (#36)', () => {
+    const ctx = createMockContext();
+    const input = searchConceptsTool.input.parse({ search: 'cash' });
+    const result = searchConceptsTool.handler(input, ctx);
+
+    const cash = result.concepts.find((c) => c.name === 'cash');
+    expect(cash?.related_tags?.map((r) => r.tag)).toContain(
+      'CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents',
+    );
+  });
+
+  it('omits related_tags for concepts without an alternate (revenue) (#36)', () => {
+    const ctx = createMockContext();
+    const input = searchConceptsTool.input.parse({ search: 'revenue' });
+    const result = searchConceptsTool.handler(input, ctx);
+
+    const revenue = result.concepts.find((c) => c.name === 'revenue');
+    expect(revenue?.related_tags).toBeUndefined();
+  });
+
+  it('renders the related (alternate definition) line in format text (#36)', () => {
+    const ctx = createMockContext();
+    const input = searchConceptsTool.input.parse({ search: 'cash' });
+    const result = searchConceptsTool.handler(input, ctx);
+    const blocks = searchConceptsTool.format!(result);
+
+    expect(blocks[0].text).toContain('related (alternate definition)');
+    expect(blocks[0].text).toContain(
+      'CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents',
+    );
+  });
 });

@@ -101,6 +101,52 @@ describe('resolveConcept — IFRS tag variants', () => {
   });
 });
 
+describe('resolveConcept — alternate-definition relatedTags (#36)', () => {
+  it('cash surfaces the restricted-cash-inclusive alternate', () => {
+    const mapping = resolveConcept('cash');
+    expect(mapping?.relatedTags).toBeDefined();
+    expect(mapping!.relatedTags!.map((r) => r.tag)).toContain(
+      'CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents',
+    );
+    for (const r of mapping!.relatedTags!) expect(r.note).toBeTruthy();
+  });
+
+  it('equity surfaces the noncontrolling-interest-inclusive alternate', () => {
+    const mapping = resolveConcept('equity');
+    expect(mapping!.relatedTags!.map((r) => r.tag)).toContain(
+      'StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest',
+    );
+  });
+
+  it('operating/investing/financing cash flow surface their continuing-operations variant', () => {
+    for (const name of ['operating_cash_flow', 'investing_cash_flow', 'financing_cash_flow']) {
+      const mapping = resolveConcept(name);
+      expect(mapping!.relatedTags, `${name} missing relatedTags`).toBeDefined();
+      expect(mapping!.relatedTags!.some((r) => /ContinuingOperations$/.test(r.tag))).toBe(true);
+    }
+  });
+
+  it('keeps alternate tags OUT of tags[] so get_financials never conflates them', () => {
+    // The whole reason relatedTags is separate from tags: alternates carry a
+    // different definition and must not enter get_financials' fallback chain.
+    const cash = resolveConcept('cash');
+    expect(cash!.tags).toEqual(['CashAndCashEquivalentsAtCarryingValue']);
+    expect(cash!.tags).not.toContain(
+      'CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents',
+    );
+  });
+
+  it('same-meaning multi-tag concepts have no relatedTags (revenue, assets)', () => {
+    expect(resolveConcept('revenue')?.relatedTags).toBeUndefined();
+    expect(resolveConcept('assets')?.relatedTags).toBeUndefined();
+  });
+
+  it('reverse-lookup: searching an alternate tag finds its base concept', () => {
+    const results = searchConcepts('CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents');
+    expect(results.some((r) => r.name === 'cash')).toBe(true);
+  });
+});
+
 describe('searchConcepts — taxonomy filtering', () => {
   it('returns non-empty results for taxonomy ifrs-full', () => {
     const results = searchConcepts('', 'ifrs-full');

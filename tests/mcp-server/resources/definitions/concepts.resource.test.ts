@@ -38,6 +38,13 @@ describe('conceptsResource', () => {
     expect(text).toContain('`shares_outstanding`');
   });
 
+  it('surfaces alternate-definition tags for concepts that have them (#36)', () => {
+    const ctx = createMockContext();
+    const text = conceptsResource.handler({}, ctx) as string;
+    expect(text).toContain('CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents');
+    expect(text).toContain('alt (different definition');
+  });
+
   it('lists resources correctly', async () => {
     const listing = await conceptsResource.list!();
     expect(listing.resources).toHaveLength(1);

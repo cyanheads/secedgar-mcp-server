@@ -40,7 +40,7 @@ function fiscalQ4Caveats(period: string): string[] {
 
 export const fetchFramesTool = tool('secedgar_fetch_frames', {
   description:
-    'Fetch SEC XBRL frames for one concept × one period across all reporting companies. Inline response returns the top N ranked companies; the full frames response (all reporters) is materialized as df_<id> when a canvas is available, queryable via secedgar_dataframe_query. Accepts friendly names like "revenue" or "assets" (discover via secedgar_search_concepts) or raw XBRL tags. One call hits one XBRL tag — when a friendly name maps to multiple tags, the response\'s `unqueried_tags` lists the others; call again per tag and UNION/COALESCE in SQL with an analysis-specific priority (e.g. SalesRevenueGoodsNet is goods-only). Response includes `value_distribution` and `period_end_range` to flag XBRL scale-factor anomalies and fiscal-year mixing.',
+    'Fetch SEC XBRL frames for one concept × one period across all reporting companies. Inline response returns the top N ranked companies; the full frames response (all reporters) is materialized as df_<id> when a canvas is available, queryable via secedgar_dataframe_query. Accepts friendly names like "revenue" or "assets" (discover via secedgar_search_concepts) or raw XBRL tags. One call hits one XBRL tag — when a friendly name maps to multiple same-meaning tags, the response\'s `unqueried_tags` lists the others; call again per tag and UNION/COALESCE in SQL with an analysis-specific priority (e.g. SalesRevenueGoodsNet is goods-only). The response\'s `related_tags` separately flags alternate-DEFINITION tags a meaningful share of filers use as their primary line (e.g. cash incl. restricted cash, equity incl. noncontrolling interest) — a whole-universe screen on the base tag silently omits those filers; query them separately, but do not blindly union (the semantics differ). Response includes `value_distribution` and `period_end_range` to flag XBRL scale-factor anomalies and fiscal-year mixing.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -137,7 +137,23 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     unqueried_tags: z
       .array(z.string())
       .describe(
-        'Other XBRL tags in the same friendly-name mapping that this call did NOT query. Empty for raw tags or single-tag concepts. For "revenue" this typically lists `Revenues`, `SalesRevenueNet`, `SalesRevenueGoodsNet` — filers reporting under legacy variants are absent from `data`; call again per tag and UNION/COALESCE in SQL to recover them.',
+        'Other same-meaning XBRL tags in the friendly-name mapping that this call did NOT query (historical/variant spellings of the same metric). Empty for raw tags or single-tag concepts — for alternate-DEFINITION tags some filers use instead, see `related_tags`. For "revenue" this typically lists `Revenues`, `SalesRevenueNet`, `SalesRevenueGoodsNet` — filers reporting under legacy variants are absent from `data`; call again per tag and UNION/COALESCE in SQL to recover them.',
+      ),
+    related_tags: z
+      .array(
+        z
+          .object({
+            tag: z
+              .string()
+              .describe(
+                'Alternate XBRL tag a meaningful share of filers report this metric under instead.',
+              ),
+            note: z.string().describe('How this tag differs in definition from the queried tag.'),
+          })
+          .describe('One alternate-definition tag and the reason it differs.'),
+      )
+      .describe(
+        'Alternate-DEFINITION XBRL tags (distinct from same-meaning `unqueried_tags`) that a meaningful share of filers use as their primary line for this metric — e.g. `cash` filers reporting `CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents` (incl. restricted cash), `equity` filers reporting `StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest` (incl. noncontrolling interest). These filers are NOT in `data` or the dataframe, so a whole-universe screen on the base tag silently under-counts. To recover them, run a separate fetch_frames against the alternate tag — do NOT blindly UNION (definitions differ; you would mix or double-count). Empty when the concept has no known high-coverage alternate.',
       ),
     value_distribution: z
       .object({
@@ -264,6 +280,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     };
 
     const unqueriedTags = mapping ? mapping.tags.slice(1) : [];
+    const relatedTags = mapping?.relatedTags ?? [];
     const caveats = fiscalQ4Caveats(input.period);
 
     ctx.log.info('Frames fetched', {
@@ -284,6 +301,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       data,
       dataset,
       unqueried_tags: unqueriedTags,
+      related_tags: relatedTags,
       value_distribution: valueDistribution,
       period_end_range: periodEndRange,
       caveats,
@@ -317,6 +335,12 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     const alsoUnder =
       result.unqueried_tags.length > 0 ? ` — also: ${result.unqueried_tags.join(', ')}` : '';
     lines.push(`Coverage: 1 of ${tagCount} XBRL tags queried${alsoUnder}`);
+    if (result.related_tags.length > 0) {
+      const rel = result.related_tags.map((r) => `${r.tag} (${r.note})`).join('; ');
+      lines.push(
+        `Related tags (alternate definitions — not in data/df; query separately, don't blindly union): ${rel}`,
+      );
+    }
     lines.push(
       `Value dispersion: median ${result.value_distribution.median.toLocaleString()}, p95 ${result.value_distribution.p95.toLocaleString()}, max ${result.value_distribution.max.toLocaleString()}, max/p95 ${result.value_distribution.max_to_p95_ratio}×`,
     );
