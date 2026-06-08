@@ -40,6 +40,20 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       recovery:
         'Query only df_<id> tables. Use secedgar_dataframe_describe to list available dataframes.',
     },
+    {
+      reason: 'missing_table',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The SQL query references a df_<id> table that does not exist or has expired',
+      recovery:
+        'Use secedgar_dataframe_describe to list available dataframes and verify the table name.',
+    },
+    {
+      reason: 'invalid_sql',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The SQL statement contains a syntax or execution error not covered by a more specific reason',
+      recovery:
+        'Check SQL syntax, column names, and table references against secedgar_dataframe_describe.',
+    },
   ],
 
   input: z.object({

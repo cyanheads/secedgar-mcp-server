@@ -27,7 +27,7 @@ const FORBIDDEN_CATALOG_PATTERNS: ReadonlyArray<RegExp> = [
  * in string constants do not cause false positives. Cheap heuristic — the
  * framework gate runs a real parser afterwards, this is a fast text gate.
  */
-function stripStringLiterals(sql: string): string {
+export function stripStringLiterals(sql: string): string {
   return sql.replace(/'([^'\\]|\\.|'')*'/g, "''").replace(/"([^"\\]|\\.|"")*"/g, '""');
 }
 

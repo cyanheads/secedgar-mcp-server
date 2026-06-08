@@ -21,9 +21,10 @@ import {
   inferSchemaFromRows,
   type QueryResult,
 } from '@cyanheads/mcp-ts-core/canvas';
+import { McpError, notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { idGenerator } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
-import { assertNoSystemCatalogAccess } from './sql-gate-extras.js';
+import { assertNoSystemCatalogAccess, stripStringLiterals } from './sql-gate-extras.js';
 
 /** Per-table provenance + TTL metadata persisted in `ctx.state`. */
 export interface DataframeMeta {
@@ -198,6 +199,12 @@ export class CanvasBridge {
    * `canvas.query`; this method additionally rejects system-catalog access
    * before handing the SQL off. Optional `registerAs` chains the result as a
    * new dataframe with a fresh per-table TTL (not inherited from parents).
+   *
+   * A pre-check surfaces a structured `missing_table` for an unregistered or
+   * TTL-expired `df_<id>` before the framework gate's generic rejection. Any raw
+   * DuckDB execution error that escapes the gate is re-thrown as a structured
+   * `invalid_sql`; already-structured McpErrors (framework gate,
+   * `assertNoSystemCatalogAccess`) propagate as-is (#47).
    */
   async query(
     ctx: Context,
@@ -206,15 +213,32 @@ export class CanvasBridge {
   ): Promise<{ result: QueryResult; meta?: DataframeMeta }> {
     assertNoSystemCatalogAccess(sql);
     await this.sweepExpired(ctx);
+    await this.assertReferencedDataframesExist(ctx, sql);
     const instance = await this.acquireSharedCanvas(ctx);
 
     const registerAs = options.registerAs;
-    const result = await instance.query(sql, {
-      ...(options.preview !== undefined && { preview: options.preview }),
-      ...(options.rowLimit !== undefined && { rowLimit: options.rowLimit }),
-      ...(registerAs !== undefined && { registerAs }),
-      signal: ctx.signal,
-    });
+    let result: QueryResult;
+    try {
+      result = await instance.query(sql, {
+        ...(options.preview !== undefined && { preview: options.preview }),
+        ...(options.rowLimit !== undefined && { rowLimit: options.rowLimit }),
+        ...(registerAs !== undefined && { registerAs }),
+        signal: ctx.signal,
+      });
+    } catch (err) {
+      // Already-structured errors (framework gate, assertNoSystemCatalogAccess) propagate as-is.
+      if (err instanceof McpError) throw err;
+      // Any unclassified raw DuckDB execution error that escaped the framework's
+      // prepare gate → structured invalid_sql. Missing tables are handled by the
+      // pre-check above (the gate rejects an unbindable statement first).
+      const msg = err instanceof Error ? err.message : String(err);
+      throw validationError(msg, {
+        reason: 'invalid_sql',
+        recovery: {
+          hint: 'Check the SQL statement for syntax errors and verify column and table names.',
+        },
+      });
+    }
 
     let meta: DataframeMeta | undefined;
     if (registerAs && result.tableName) {
@@ -245,6 +269,31 @@ export class CanvasBridge {
     }
 
     return meta ? { result, meta } : { result };
+  }
+
+  /**
+   * Surface a helpful, structured `missing_table` for a referenced `df_<id>`
+   * handle that isn't registered — mistyped, or TTL-expired since it was minted.
+   * Runs before the framework SQL gate, which otherwise rejects an unbindable
+   * table with a generic "could not be prepared" `non_select_statement` (the gate
+   * prepares every statement, so a missing table fails there first). Only the
+   * minted-handle pattern `df_<5>_<5>` is checked; string literals are stripped so
+   * a quoted handle never false-triggers, and other identifiers fall through to
+   * the gate (#47).
+   */
+  private async assertReferencedDataframesExist(ctx: Context, sql: string): Promise<void> {
+    const referenced = stripStringLiterals(sql).match(/\bdf_[A-Z0-9]{5}_[A-Z0-9]{5}\b/g);
+    if (!referenced) return;
+    for (const name of new Set(referenced)) {
+      if ((await ctx.state.get(`${META_PREFIX}${name}`)) === null) {
+        throw notFound(`Dataframe '${name}' does not exist or has expired.`, {
+          reason: 'missing_table',
+          recovery: {
+            hint: 'Use secedgar_dataframe_describe to list available dataframes, then reference one of those names.',
+          },
+        });
+      }
+    }
   }
 
   /**

@@ -5,6 +5,7 @@
  * @module tests/services/canvas-bridge/canvas-bridge
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -151,6 +152,96 @@ describe('CanvasBridge.drop', () => {
 
     const dropped = await bridge.drop(ctx, 'df_NOTHIN_GHEREE');
     expect(dropped).toBe(false);
+  });
+});
+
+describe('CanvasBridge.query error classification (#47)', () => {
+  it('unregistered df_<id> reference → structured missing_table via pre-check (#47)', async () => {
+    // The framework gate rejects an unbindable table with a generic
+    // non_select_statement; the bridge pre-check surfaces a useful missing_table
+    // first — before the canvas is even acquired.
+    const acquire = vi.fn();
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+    await expect(bridge.query(ctx, 'SELECT * FROM df_QQQQQ_QQQQQ LIMIT 1')).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'missing_table' },
+    });
+    expect(acquire).not.toHaveBeenCalled();
+  });
+
+  it('missing_table names the df and points to dataframe_describe, no catalog leak (#47)', async () => {
+    const acquire = vi.fn();
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+    const err = await bridge.query(ctx, 'SELECT * FROM df_QQQQQ_QQQQQ LIMIT 1').catch((e) => e);
+    expect(err.message).toContain('df_QQQQQ_QQQQQ');
+    expect(err.message).not.toMatch(/duckdb|catalog|did you mean/i);
+    expect(err.data.recovery.hint).toMatch(/dataframe_describe/);
+  });
+
+  it('a quoted df_<id> in a string literal does not false-trigger missing_table (#47)', async () => {
+    // String literals are stripped before the handle scan, so a registered df in
+    // FROM still runs even when an unregistered handle appears inside a string.
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockResolvedValue({ columns: ['note'], rows: [], rowCount: 0 }),
+    };
+    const acquire = vi.fn().mockResolvedValue(instance);
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    await ctx.state.set('df-meta/df_AAAAA_BBBBB', {
+      tableName: 'df_AAAAA_BBBBB',
+      expiresAt: '2999-01-01T00:00:00.000Z',
+    });
+
+    const { result } = await bridge.query(
+      ctx,
+      "SELECT note FROM df_AAAAA_BBBBB WHERE note = 'see df_OLDXX_OLDXX'",
+    );
+    expect(result.rowCount).toBe(0);
+    expect(instance.query).toHaveBeenCalled();
+  });
+
+  it('already-structured McpError rethrows as-is (preserves reason) (#47)', async () => {
+    const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
+    const structured = Object.assign(
+      new McpError(JsonRpcErrorCode.ValidationError, 'system catalog denied'),
+      { data: { reason: 'system_catalog_access' } },
+    );
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockRejectedValue(structured),
+    };
+    const acquire = vi.fn().mockResolvedValue(instance);
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+    const err = await bridge.query(ctx, 'SELECT 1').catch((e) => e);
+    expect(err).toBe(structured); // same reference — not re-wrapped
+    expect(err.data.reason).toBe('system_catalog_access');
+  });
+
+  it('unclassified DuckDB error → generic invalid_sql reason (#47)', async () => {
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockRejectedValue(new Error('Parser Error: syntax error at or near "SELEKT"')),
+    };
+    const acquire = vi.fn().mockResolvedValue(instance);
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+    await expect(bridge.query(ctx, 'SELEKT 1')).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'invalid_sql' },
+    });
   });
 });
 
