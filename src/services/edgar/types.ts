@@ -6,8 +6,12 @@
 /** CIK resolution result from company_tickers.json lookup. */
 export interface CikMatch {
   cik: string;
+  /** SEC fund class ID (e.g. "C000092055"). Present only for ETF/mutual-fund tickers resolved via company_tickers_mf.json. */
+  classId?: string;
   exchange?: string;
   name?: string;
+  /** SEC fund series ID (e.g. "S000002839"). Present only for ETF/mutual-fund tickers resolved via company_tickers_mf.json. */
+  seriesId?: string;
   ticker?: string;
 }
 
@@ -22,12 +26,14 @@ export interface TickerEntry {
 export interface SubmissionsResponse {
   cik: string;
   entityType: string;
-  exchanges: string[];
+  /** Listed exchanges. SEC returns `null` elements for entities with no listed exchange (e.g. private or pre-IPO filers). */
+  exchanges: Array<string | null>;
   filings: {
     recent: FilingsRecent;
     files: Array<{ name: string; filingCount: number; filingFrom: string; filingTo: string }>;
   };
-  fiscalYearEnd: string;
+  /** Fiscal year end (MMDD). `null` for filers SEC records no fiscal year end for. */
+  fiscalYearEnd: string | null;
   name: string;
   sic: string;
   sicDescription: string;

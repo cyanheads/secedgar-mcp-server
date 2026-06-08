@@ -6,7 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+import { getEdgarApiService, suggestCompanies } from '@/services/edgar/edgar-api-service.js';
 
 interface FilingEntry {
   accession_number: string;
@@ -45,7 +45,8 @@ export const companySearchTool = tool('secedgar_company_search', {
       reason: 'no_match',
       code: JsonRpcErrorCode.NotFound,
       when: 'No company matches the query',
-      recovery: 'Try a ticker symbol, full company name, or 10-digit CIK.',
+      recovery:
+        'Use a ticker symbol for ETFs, mutual funds, and equities (e.g. "VOO", "AAPL"), or try the full legal company name or a 10-digit CIK.',
     },
     {
       reason: 'multiple_matches',
@@ -60,7 +61,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       .string()
       .min(1)
       .describe(
-        'Company ticker symbol (e.g., "AAPL"), name (e.g., "Apple"), or CIK number (e.g., "320193"). Ticker is the fastest lookup. Name search does fuzzy matching.',
+        'Company ticker symbol (e.g., "AAPL", "VOO"), name (e.g., "Apple"), or CIK number (e.g., "320193"). Ticker is the fastest lookup and works for equities, ETFs, and mutual funds. Name search matches current and former names.',
       ),
     include_filings: z
       .boolean()
@@ -98,7 +99,22 @@ export const companySearchTool = tool('secedgar_company_search', {
       ),
     fiscal_year_end: z
       .string()
-      .describe('Fiscal year end (MM-DD format, e.g., "09-26" for September 26).'),
+      .optional()
+      .describe(
+        'Fiscal year end (MM-DD format, e.g., "09-26"). Absent for filers SEC records no fiscal year end for (e.g. private or pre-IPO entities).',
+      ),
+    series_id: z
+      .string()
+      .optional()
+      .describe(
+        'SEC fund series ID (e.g. "S000002839"). Present when the query resolved via a fund ticker (ETF or mutual fund).',
+      ),
+    class_id: z
+      .string()
+      .optional()
+      .describe(
+        'SEC fund class ID (e.g. "C000092055"). Present when the query resolved via a fund ticker (ETF or mutual fund).',
+      ),
     filings: z
       .array(
         z
@@ -138,8 +154,16 @@ export const companySearchTool = tool('secedgar_company_search', {
 
     if (Array.isArray(resolved)) {
       if (resolved.length === 0) {
-        throw ctx.fail('no_match', `No company found for '${input.query}'.`, {
+        // Run trigram suggestions on the zero-hit name-search path.
+        const allEntries = await api.getAllEntries();
+        const suggestions = suggestCompanies(input.query, allEntries);
+        const suggestionNote =
+          suggestions.length > 0
+            ? ` Near matches: ${suggestions.map((s) => `${s.name ?? s.cik}${s.ticker ? ` (${s.ticker})` : ''}`).join(', ')}.`
+            : '';
+        throw ctx.fail('no_match', `No company found for '${input.query}'.${suggestionNote}`, {
           ...ctx.recoveryFor('no_match'),
+          ...(suggestions.length > 0 ? { suggestions } : {}),
         });
       }
       if (resolved.length > 1) {
@@ -207,11 +231,15 @@ export const companySearchTool = tool('secedgar_company_search', {
       cik: match.cik,
       name: submissions.name,
       tickers: submissions.tickers,
-      exchanges: submissions.exchanges,
+      exchanges: submissions.exchanges.filter((e): e is string => e !== null),
       sic: submissions.sic,
       sic_description: submissions.sicDescription,
       state_of_incorporation: submissions.stateOfIncorporation || undefined,
-      fiscal_year_end: formatFiscalYearEnd(submissions.fiscalYearEnd),
+      fiscal_year_end: submissions.fiscalYearEnd
+        ? formatFiscalYearEnd(submissions.fiscalYearEnd)
+        : undefined,
+      series_id: match.seriesId,
+      class_id: match.classId,
       filings,
       total_filings: totalFilings,
     };
@@ -221,9 +249,16 @@ export const companySearchTool = tool('secedgar_company_search', {
     const lines = [`**${result.name}** (${result.tickers.join(', ') || 'no ticker'})`];
     const exchange = result.exchanges.length ? ` | Exchange: ${result.exchanges.join(', ')}` : '';
     lines.push(`CIK: ${result.cik} | SIC: ${result.sic} (${result.sic_description})${exchange}`);
-    lines.push(`Fiscal year end: ${result.fiscal_year_end}`);
+    if (result.fiscal_year_end) {
+      lines.push(`Fiscal year end: ${result.fiscal_year_end}`);
+    }
     if (result.state_of_incorporation) {
       lines.push(`State of incorporation: ${result.state_of_incorporation}`);
+    }
+    if (result.series_id) {
+      lines.push(
+        `Series ID: ${result.series_id}${result.class_id ? ` | Class ID: ${result.class_id}` : ''}`,
+      );
     }
     if (result.filings?.length) {
       lines.push(`\nRecent filings (${result.filings.length} of ${result.total_filings}):`);

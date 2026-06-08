@@ -15,6 +15,9 @@ import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings
 vi.mock('@/services/edgar/edgar-api-service.js', () => ({
   getEdgarApiService: vi.fn(),
   initEdgarApiService: vi.fn(),
+  suggestCompanies: vi.fn(() => []),
+  pickPreferredTicker: vi.fn(),
+  trigramSimilarity: vi.fn(),
 }));
 
 vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
@@ -33,6 +36,7 @@ import { filingToText } from '@/services/edgar/filing-to-text.js';
 const mockApi = {
   resolveCik: vi.fn(),
   getSubmissions: vi.fn(),
+  getAllEntries: vi.fn().mockResolvedValue([]),
   searchFilings: vi.fn(),
   findFilingCiks: vi.fn(),
   tryGetFilingIndex: vi.fn(),

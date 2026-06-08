@@ -161,4 +161,162 @@ describe('EdgarApiService — mirror routing', () => {
 
     expect(fetchMock).toHaveBeenCalledOnce();
   });
+
+  // --- Live-path ticker cache: MF ticker merge (issue #40) ---
+
+  it('merges MF tickers into byTicker so fund symbols resolve by ticker', async () => {
+    // No mirror — exercise the live-path loadTickerCache.
+    mirrorRef.current = undefined;
+
+    const operatingTickers = {
+      '0': { cik_str: 320193, ticker: 'AAPL', title: 'Apple Inc.' },
+    };
+    const mfTickers = {
+      fields: ['cik', 'seriesId', 'classId', 'symbol'],
+      data: [[36405, 'S000002839', 'C000092055', 'VOO']],
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.includes('company_tickers_mf.json')) return jsonResponse(mfTickers);
+        if (url.includes('company_tickers.json')) return jsonResponse(operatingTickers);
+        return jsonResponse(null);
+      }),
+    );
+
+    const vooMatch = await getEdgarApiService().resolveCik('VOO');
+    expect(Array.isArray(vooMatch)).toBe(false);
+    expect((vooMatch as { cik: string }).cik).toBe('0000036405');
+  });
+
+  it('carries seriesId and classId on MF resolved match', async () => {
+    mirrorRef.current = undefined;
+
+    const operatingTickers = {
+      '0': { cik_str: 320193, ticker: 'AAPL', title: 'Apple Inc.' },
+    };
+    const mfTickers = {
+      fields: ['cik', 'seriesId', 'classId', 'symbol'],
+      data: [[36405, 'S000002839', 'C000092055', 'VOO']],
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.includes('company_tickers_mf.json')) return jsonResponse(mfTickers);
+        if (url.includes('company_tickers.json')) return jsonResponse(operatingTickers);
+        return jsonResponse(null);
+      }),
+    );
+
+    const vooMatch = await getEdgarApiService().resolveCik('VOO');
+    const match = vooMatch as { cik: string; seriesId?: string; classId?: string };
+    expect(match.seriesId).toBe('S000002839');
+    expect(match.classId).toBe('C000092055');
+  });
+
+  it('does not add MF CIKs to byCik — equity AAPL resolve is unaffected', async () => {
+    mirrorRef.current = undefined;
+
+    const operatingTickers = {
+      '0': { cik_str: 320193, ticker: 'AAPL', title: 'Apple Inc.' },
+    };
+    const mfTickers = {
+      // Same CIK 36405 as VOO — must not pollute byCik
+      fields: ['cik', 'seriesId', 'classId', 'symbol'],
+      data: [[36405, 'S000002839', 'C000092055', 'VOO']],
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.includes('company_tickers_mf.json')) return jsonResponse(mfTickers);
+        if (url.includes('company_tickers.json')) return jsonResponse(operatingTickers);
+        return jsonResponse(null);
+      }),
+    );
+
+    const aaplMatch = await getEdgarApiService().resolveCik('AAPL');
+    expect(Array.isArray(aaplMatch)).toBe(false);
+    const m = aaplMatch as { cik: string; name?: string };
+    expect(m.cik).toBe('0000320193');
+    expect(m.name).toBe('Apple Inc.');
+  });
+
+  it('gracefully degrades when company_tickers_mf.json is unavailable', async () => {
+    mirrorRef.current = undefined;
+
+    const operatingTickers = {
+      '0': { cik_str: 320193, ticker: 'AAPL', title: 'Apple Inc.' },
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.includes('company_tickers_mf.json')) return new Response(null, { status: 404 });
+        if (url.includes('company_tickers.json')) return jsonResponse(operatingTickers);
+        return jsonResponse(null);
+      }),
+    );
+
+    // Equity ticker still resolves
+    const aaplMatch = await getEdgarApiService().resolveCik('AAPL');
+    expect(Array.isArray(aaplMatch)).toBe(false);
+    expect((aaplMatch as { cik: string }).cik).toBe('0000320193');
+  });
+
+  it('operating-company ticker wins over a fund symbol on a cross-file collision (SPCX)', async () => {
+    mirrorRef.current = undefined;
+
+    const operatingTickers = {
+      '0': { cik_str: 320193, ticker: 'AAPL', title: 'Apple Inc.' },
+      '1': { cik_str: 1181412, ticker: 'SPCX', title: 'Operating Co' },
+    };
+    const mfTickers = {
+      fields: ['cik', 'seriesId', 'classId', 'symbol'],
+      data: [
+        [1719812, 'S000000001', 'C000000001', 'SPCX'], // collides with the equity SPCX above
+        [36405, 'S000002839', 'C000092055', 'VOO'], // unique fund symbol — still resolves
+      ],
+    };
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.includes('company_tickers_mf.json')) return jsonResponse(mfTickers);
+        if (url.includes('company_tickers.json')) return jsonResponse(operatingTickers);
+        return jsonResponse(null);
+      }),
+    );
+
+    const spcx = (await getEdgarApiService().resolveCik('SPCX')) as {
+      cik: string;
+      seriesId?: string;
+    };
+    expect(spcx.cik).toBe('0001181412'); // the equity CIK, not the fund 0001719812
+    expect(spcx.seriesId).toBeUndefined();
+
+    const voo = (await getEdgarApiService().resolveCik('VOO')) as { cik: string };
+    expect(voo.cik).toBe('0000036405');
+  });
+
+  it('resolves a former name on the mirror path via the committed asset', async () => {
+    const mirror = makeMirrorStub();
+    mirror.tickersReady.mockResolvedValue(true);
+    mirror.getTickerRows.mockResolvedValue([
+      { cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' },
+    ]);
+    mirrorRef.current = mirror;
+    // The former-name asset is committed, not fetched — no live call should fire.
+    const fetchMock = vi.fn(() => {
+      throw new Error('unexpected live fetch on the mirror path');
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    // "Facebook" matches a former-name tuple in the committed former-names.json asset.
+    const match = (await getEdgarApiService().resolveCik('Facebook')) as { cik: string };
+    expect(match.cik).toBe('0001326801');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

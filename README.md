@@ -49,7 +49,10 @@ Eight tools for querying SEC EDGAR data, plus three for SQL analytics over the D
 
 Entry point for most EDGAR workflows — resolve tickers, names, or CIKs to entity details.
 
-- Supports ticker symbols (`AAPL`), company names (`Apple`), or CIK numbers (`320193`)
+- Supports ticker symbols (`AAPL`, `VOO`), company names (`Apple`), or CIK numbers (`320193`)
+- ETFs and mutual funds resolve by ticker via `company_tickers_mf.json`; fund results include `series_id` and `class_id` for downstream scoping
+- Current and former company names both resolve (`Facebook` → Meta Platforms, `Square` → Block)
+- Near-match suggestions on zero-result name search (e.g. `Microsfot` → `MICROSOFT CORP / MSFT`)
 - Optionally includes recent filings with form type filtering
 - Returns entity metadata: SIC code, exchanges, fiscal year end, state of incorporation
 
@@ -175,7 +178,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
 SEC EDGAR–specific:
 
 - Rate-limited HTTP client respecting SEC's 10 req/s limit with automatic inter-request delay
-- CIK resolution from tickers, company names, or raw CIK numbers with local caching
+- CIK resolution from tickers (including ETFs and mutual funds via `company_tickers_mf.json`), company names (current and former), or raw CIK numbers with local caching; near-match trigram suggestions on zero-result name queries; committed `former-names.json` asset for prior-name resolution (`Facebook` → Meta, `Square` → Block)
 - Friendly XBRL concept name mapping with historical tag change handling
 - Searchable concept catalog with statement-group metadata and reverse XBRL tag lookup
 - HTML-to-text conversion for filing documents via `html-to-text`

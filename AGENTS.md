@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.9.0
+**Version:** 0.10.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.9.21`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 
@@ -76,12 +76,15 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 - **Rate limit:** 10 req/s per IP — enforced by `EdgarApiService` (100ms inter-request delay)
 - **User-Agent required:** `"AppName contact@email.com"` on every SEC request or IP gets blocked
 - **CIK zero-padding:** URLs require 10-digit zero-padded CIK (`String(cik).padStart(10, '0')`)
+- **ETF/mutual-fund tickers:** `loadTickerCache` fetches `company_tickers_mf.json` alongside `company_tickers.json` and merges fund symbols (VOO, SCHD, JEPI…) into `byTicker`. Fund CIKs are registrant trusts (1:many with series), so MF entries go into `byTicker` only — not `byCik`. Resolved MF matches carry `seriesId`/`classId` (live path only; mirror path carries ticker→CIK, no series/class columns).
+- **Former-name resolution:** `src/services/edgar/data/former-names.json` is a committed asset (generated offline via `bun run gen:former-names`) containing `[lowercasedFormerName, zeroPaddedCIK]` tuples. `buildTickerCache` folds them into `allEntries` for name search and the trigram pass. Regenerate on demand after major M&A waves — former names are immutable, so the file rarely needs updating.
+- **Near-match suggestions:** `suggestCompanies(query, allEntries)` runs a Dice-coefficient trigram pass on the zero-hit name-search path, returning up to 3 candidates above a threshold. Suggestions appear in the `no_match` error `data.suggestions` and in the error message. Never auto-resolves.
 - **XBRL friendly names:** `concept-map.ts` maps `"revenue"` → real XBRL tags; handles historical tag changes (ASC 606)
 - **XBRL deduplication:** Filter to entries with `frame` field to get one value per standard calendar period
 - **EFTS quirks:** `dateRange=custom` must be set when using date params; the singular `entity` param is ignored — `cik:`/`ticker:` targeting passes the resolved CIK via the plural `ciks` param (server-side scope, independent of the filing's name text, so former-name filings on the same CIK are matched)
 - **Filing content:** HTML → text via `html-to-text` library; pre-2005 filings produce noisier output
 - **Dataframes:** `secedgar_search_filings`, `secedgar_get_financials`, `secedgar_fetch_frames`, `secedgar_get_insider_transactions`, and `secedgar_get_institutional_holdings` materialize their full result set as `df_<id>` on a shared DuckDB-backed canvas (one per tenant). The two ownership tools register the full parsed set (inline response is a preview capped at `limit`); `get_insider_transactions` caps its scan at `INSIDER_CANVAS_FILING_SCAN` recent filings and flags `dataset.truncated` when more exist. Each row set carries an all-nullable schema (sparse SEC columns must not trip DuckDB's NOT NULL appender rollback). Per-table TTL is bridge-side bookkeeping in `ctx.state` until [cyanheads/mcp-ts-core#140](https://github.com/cyanheads/mcp-ts-core/issues/140) lands. `secedgar_dataframe_query` runs framework's SQL gate plus a bridge-layer deny on `information_schema`, `pg_catalog`, `sqlite_master`, and `duckdb_*` catalogs.
-- **Local mirror (opt-in, `EDGAR_MIRROR_ENABLED`):** routes `resolveCik`, `tryGetCompanyConcept`, and `tryGetFrames` to a local SQLite mirror (framework `MirrorService`) of `company_tickers.json` + the `companyfacts.zip` bulk archive; the live API is the fallback on a miss (`EDGAR_MIRROR_FALLBACK_LIVE`). Bootstrap out-of-band with `bun run mirror:init`; refresh nightly via cron (HTTP) or `bun run mirror:refresh`. The three `mirror:*` commands also ship in the production Docker image — run them against a deployed container with `docker exec <container> bun run mirror:<init|refresh|verify>`. Node/Bun only — skipped on Workers. Frames are assembled from the company-facts store, so `loc` (business location) is absent. No FTS5 — every routed lookup is exact/indexed (cik+taxonomy+tag point, taxonomy+tag scan, ticker/CIK).
+- **Local mirror (opt-in, `EDGAR_MIRROR_ENABLED`):** routes `resolveCik`, `tryGetCompanyConcept`, and `tryGetFrames` to a local SQLite mirror (framework `MirrorService`) of `company_tickers.json` + the `companyfacts.zip` bulk archive; the live API is the fallback on a miss (`EDGAR_MIRROR_FALLBACK_LIVE`). Bootstrap out-of-band with `bun run mirror:init`; refresh nightly via cron (HTTP) or `bun run mirror:refresh`. The three `mirror:*` commands also ship in the production Docker image — run them against a deployed container with `docker exec <container> bun run mirror:<init|refresh|verify>`. Node/Bun only — skipped on Workers. Frames are assembled from the company-facts store, so `loc` (business location) is absent. No FTS5 — every routed lookup is exact/indexed (cik+taxonomy+tag point, taxonomy+tag scan, ticker/CIK). Mirror ingests MF fund symbols from `company_tickers_mf.json` so fund tickers resolve on the mirror path too (series/class enrichment remains live-path-only).
 
 ---
 

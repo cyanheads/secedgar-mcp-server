@@ -9,6 +9,7 @@ import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { httpErrorFromResponse } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { getEdgarMirror } from '@/services/edgar/mirror/index.js';
+import formerNamesData from './data/former-names.json' with { type: 'json' };
 import { type FilingDocumentHeader, parseFilingHeaders } from './filing-headers.js';
 import type {
   CikMatch,
@@ -24,12 +25,103 @@ const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 1000;
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
 
+/** URL for SEC's mutual-fund ticker file (ETFs and open-end funds). */
+const MF_TICKERS_URL = 'https://www.sec.gov/files/company_tickers_mf.json';
+
+/** Trigram similarity threshold — minimum Dice score to include a candidate suggestion. */
+const TRIGRAM_THRESHOLD = 0.3;
+/** Maximum number of near-match suggestions to include. */
+const TRIGRAM_TOP_N = 3;
+
+/** Raw entry from SEC's company_tickers_mf.json (columnar with a `fields` array). */
+interface MfTickerFile {
+  data: Array<[number, string, string, string]>;
+  fields: string[];
+}
+
 /** Indexed ticker data for O(1) lookups. */
 interface TickerCache {
   allEntries: CikMatch[];
   byCik: Map<string, CikMatch>;
   byTicker: Map<string, CikMatch>;
   loadedAt: number;
+}
+
+/** A candidate suggestion from the trigram scan on no-result name search. */
+export interface CompanySuggestion {
+  cik: string;
+  name?: string;
+  ticker?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Trigram (Dice-coefficient) similarity
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the set of trigrams for a string.
+ * Pads with two spaces on each side so edge characters are covered.
+ */
+function trigramSet(s: string): Set<string> {
+  const padded = `  ${s}  `;
+  const grams = new Set<string>();
+  for (let i = 0; i < padded.length - 2; i++) {
+    grams.add(padded.slice(i, i + 3));
+  }
+  return grams;
+}
+
+/**
+ * Dice-coefficient trigram similarity between two strings.
+ * Returns a value in [0, 1]; 1 means identical.
+ */
+export function trigramSimilarity(a: string, b: string): number {
+  if (a === b) return 1;
+  const ga = trigramSet(a);
+  const gb = trigramSet(b);
+  if (ga.size === 0 && gb.size === 0) return 1;
+  if (ga.size === 0 || gb.size === 0) return 0;
+  let intersection = 0;
+  for (const g of ga) {
+    if (gb.has(g)) intersection++;
+  }
+  return (2 * intersection) / (ga.size + gb.size);
+}
+
+/**
+ * Run a trigram similarity scan over the in-memory entry set.
+ * Only entries with a name are considered. Returns up to TRIGRAM_TOP_N
+ * candidates whose Dice score meets TRIGRAM_THRESHOLD, sorted descending.
+ */
+export function suggestCompanies(query: string, allEntries: CikMatch[]): CompanySuggestion[] {
+  const q = query.toLowerCase();
+  const scored: Array<{ score: number; entry: CikMatch }> = [];
+
+  for (const entry of allEntries) {
+    if (!entry.name) continue;
+    const score = trigramSimilarity(q, entry.name.toLowerCase());
+    if (score >= TRIGRAM_THRESHOLD) {
+      scored.push({ score, entry });
+    }
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  const top = scored.slice(0, TRIGRAM_TOP_N);
+
+  // Dedup by CIK — keep the highest-scored entry per CIK.
+  const seen = new Set<string>();
+  const suggestions: CompanySuggestion[] = [];
+  for (const { entry } of top) {
+    if (!seen.has(entry.cik)) {
+      seen.add(entry.cik);
+      suggestions.push({
+        cik: entry.cik,
+        ...(entry.name !== undefined ? { name: entry.name } : {}),
+        ...(entry.ticker !== undefined ? { ticker: entry.ticker } : {}),
+      });
+    }
+  }
+  return suggestions;
 }
 
 class EdgarApiService {
@@ -80,7 +172,10 @@ class EdgarApiService {
    * Resolve a query (ticker, name, or CIK) to company match(es).
    * - Numeric input → direct CIK lookup
    * - 1-5 uppercase letters → ticker lookup (O(1))
-   * - Otherwise → name search (prefix, then substring)
+   * - Otherwise → name search (prefix, then substring, then trigram suggestions)
+   * Returns a single match, an array of multiple matches, or an empty array (no match).
+   * On no-result name search, the returned empty array carries `suggestions` on
+   * the thrown error at the handler layer — call `suggestCompanies` there.
    */
   async resolveCik(query: string): Promise<CikMatch | CikMatch[]> {
     const cache = await this.getTickerCache();
@@ -96,14 +191,14 @@ class EdgarApiService {
       return { cik: padded };
     }
 
-    // Short alphabetic → ticker
+    // Short alphabetic → ticker (includes ETF/MF tickers from company_tickers_mf.json)
     const upper = trimmed.toUpperCase();
     if (/^[A-Z]{1,5}$/.test(upper)) {
       const match = cache.byTicker.get(upper);
       if (match) return match;
     }
 
-    // Name search: exact → prefix → substring
+    // Name search: exact → prefix → substring (current names + former names)
     const lower = trimmed.toLowerCase();
     const exact: CikMatch[] = [];
     const prefix: CikMatch[] = [];
@@ -121,12 +216,25 @@ class EdgarApiService {
       }
     }
 
-    const results = [...exact, ...prefix, ...substring].slice(0, 5);
+    const combined = [...exact, ...prefix, ...substring];
+
+    // Dedup by CIK (current + former names may match the same registrant).
+    const seen = new Set<string>();
+    const deduped: CikMatch[] = [];
+    for (const entry of combined) {
+      if (!seen.has(entry.cik)) {
+        seen.add(entry.cik);
+        deduped.push(entry);
+      }
+    }
+
+    const results = deduped.slice(0, 5);
     if (results.length > 0) {
       return results.length === 1 ? (results[0] as CikMatch) : results;
     }
 
-    // Also try as ticker if nothing matched
+    // Also try as ticker if nothing matched (handles >5-char and digit-containing symbols
+    // that bypassed the early ticker gate above)
     const tickerMatch = cache.byTicker.get(upper);
     return tickerMatch ?? [];
   }
@@ -135,6 +243,12 @@ class EdgarApiService {
   async cikToTicker(cik: string): Promise<string | undefined> {
     const cache = await this.getTickerCache();
     return cache.byCik.get(cik.padStart(10, '0'))?.ticker;
+  }
+
+  /** Return the current in-memory entry list (used by the handler for trigram suggestions). */
+  async getAllEntries(): Promise<CikMatch[]> {
+    const cache = await this.getTickerCache();
+    return cache.allEntries;
   }
 
   // --- SEC API Methods ---
@@ -453,12 +567,16 @@ class EdgarApiService {
    * Load the ticker index, preferring the local mirror when enabled and synced.
    * The live directory is the cold-start / not-ready fallback (and the only path
    * when the mirror is off).
+   *
+   * In addition to company_tickers.json (operating companies), also loads
+   * company_tickers_mf.json (ETFs and mutual funds) and merges fund symbols into
+   * the byTicker index so fund tickers like VOO, SCHD, and JEPI resolve correctly.
    */
   private async loadTickerCache(): Promise<TickerCache> {
     const mirror = getEdgarMirror();
     if (mirror && (await mirror.tickersReady())) {
       const rows = await mirror.getTickerRows();
-      if (rows.length > 0) return this.buildTickerCache(rows);
+      if (rows.length > 0) return this.buildTickerCache(rows, buildFormerNameEntries());
     } else if (mirror && !getServerConfig().mirrorFallbackLive) {
       throw serviceUnavailable(
         'EDGAR mirror enabled but the ticker layer is not synced; run `bun run mirror:init`',
@@ -466,37 +584,133 @@ class EdgarApiService {
       );
     }
 
+    // Fetch operating-company tickers (company_tickers.json)
     const raw = await this.fetchJson<Record<string, TickerEntry>>(
       'https://www.sec.gov/files/company_tickers.json',
     );
-    return this.buildTickerCache(
-      Object.values(raw).map((entry) => ({
+    const entries: Array<{ cik: string; name: string; ticker: string }> = Object.values(raw).map(
+      (entry) => ({
         cik: String(entry.cik_str).padStart(10, '0'),
         name: entry.title,
         ticker: entry.ticker,
-      })),
+      }),
     );
+
+    // Fetch ETF/mutual-fund tickers (company_tickers_mf.json).
+    // 404 or any error is non-fatal — degrade gracefully with operating-company-only index.
+    const mfEntries = await this.loadMfTickers();
+    entries.push(...mfEntries);
+
+    // Merge the committed former-names asset.
+    const formerEntries = buildFormerNameEntries();
+
+    return this.buildTickerCache(entries, formerEntries);
   }
 
-  /** Build the in-memory CIK index from normalized entries (live JSON or mirror rows). */
+  /**
+   * Fetch and parse company_tickers_mf.json. Returns an empty array on failure
+   * so a SEC file outage does not break company resolution entirely.
+   * Entries are MF-only: they carry seriesId/classId and no `name` field.
+   * These merge into byTicker only (not byCik) since one registrant trust
+   * holds many fund series.
+   */
+  private async loadMfTickers(): Promise<
+    Array<{ cik: string; name: string; ticker: string; seriesId: string; classId: string }>
+  > {
+    try {
+      const mfRaw = await this.fetchJson<MfTickerFile>(MF_TICKERS_URL);
+      if (!Array.isArray(mfRaw?.fields) || !Array.isArray(mfRaw?.data)) return [];
+
+      const fieldIdx = {
+        cik: mfRaw.fields.indexOf('cik'),
+        seriesId: mfRaw.fields.indexOf('seriesId'),
+        classId: mfRaw.fields.indexOf('classId'),
+        symbol: mfRaw.fields.indexOf('symbol'),
+      };
+      if (fieldIdx.cik < 0 || fieldIdx.symbol < 0) return [];
+
+      return mfRaw.data
+        .filter((row) => row[fieldIdx.symbol])
+        .map((row) => ({
+          cik: String(row[fieldIdx.cik]).padStart(10, '0'),
+          name: '',
+          ticker: String(row[fieldIdx.symbol]),
+          seriesId: fieldIdx.seriesId >= 0 ? String(row[fieldIdx.seriesId]) : '',
+          classId: fieldIdx.classId >= 0 ? String(row[fieldIdx.classId]) : '',
+        }));
+    } catch {
+      // Degrade gracefully — fund tickers won't resolve, but operating companies still work.
+      return [];
+    }
+  }
+
+  /**
+   * Build the in-memory CIK index from normalized entries (live JSON or mirror rows).
+   * MF entries (with seriesId/classId) go into byTicker only — not byCik — because
+   * a registrant trust (e.g. CIK 36405 = Vanguard Index Funds) holds many series.
+   * Former-name entries go into allEntries only (name search only, no ticker/CIK index).
+   */
   private buildTickerCache(
-    entries: Array<{ cik: string; name: string; ticker: string }>,
+    entries: Array<{
+      cik: string;
+      name: string;
+      ticker: string;
+      seriesId?: string;
+      classId?: string;
+    }>,
+    formerEntries: Array<{ cik: string; name: string }> = [],
   ): TickerCache {
     const byTicker = new Map<string, CikMatch>();
     const byCik = new Map<string, CikMatch>();
     const allEntries: CikMatch[] = [];
 
     for (const entry of entries) {
-      const match: CikMatch = { cik: entry.cik, name: entry.name, ticker: entry.ticker };
-      byTicker.set(entry.ticker.toUpperCase(), match);
-      const existing = byCik.get(match.cik);
-      byCik.set(match.cik, existing ? pickPreferredTicker(existing, match) : match);
-      allEntries.push(match);
+      const isMf = Boolean(entry.seriesId !== undefined && entry.seriesId !== '');
+      const hasName = Boolean(entry.name);
+      const match: CikMatch = {
+        cik: entry.cik,
+        ticker: entry.ticker,
+        ...(hasName ? { name: entry.name } : {}),
+        ...(isMf && entry.seriesId ? { seriesId: entry.seriesId } : {}),
+        ...(isMf && entry.classId ? { classId: entry.classId } : {}),
+      };
+
+      // Operating-company tickers take precedence: a fund symbol must not override an
+      // existing equity ticker on the rare cross-file symbol collision (e.g. SPCX).
+      const tickerKey = entry.ticker.toUpperCase();
+      if (!isMf || !byTicker.has(tickerKey)) {
+        byTicker.set(tickerKey, match);
+      }
+
+      // MF entries must not overwrite byCik — the trust CIK is 1:many with fund series.
+      if (!isMf) {
+        const existing = byCik.get(match.cik);
+        byCik.set(match.cik, existing ? pickPreferredTicker(existing, match) : match);
+      }
+
+      // Only push to allEntries if the entry has a name (for name search).
+      // MF entries have no name, so they're ticker-only.
+      if (match.name) {
+        allEntries.push(match);
+      }
+    }
+
+    // Former-name entries: allEntries only (name search + trigram), no ticker/CIK index.
+    for (const fn of formerEntries) {
+      allEntries.push({ cik: fn.cik, name: fn.name });
     }
 
     this.tickerCache = { byTicker, byCik, allEntries, loadedAt: Date.now() };
     return this.tickerCache;
   }
+}
+
+/**
+ * Build former-name entries from the committed static asset.
+ * Each tuple is [lowercasedName, zeroPaddedCIK].
+ */
+function buildFormerNameEntries(): Array<{ cik: string; name: string }> {
+  return (formerNamesData as Array<[string, string]>).map(([name, cik]) => ({ cik, name }));
 }
 
 /**

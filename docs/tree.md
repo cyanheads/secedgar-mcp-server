@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-06-08 16:46:31
+Generated on: 2026-06-08 18:39:05
 
 ```text
 secedgar-mcp-server/
@@ -21,6 +21,7 @@ secedgar-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.10.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
@@ -46,6 +47,7 @@ secedgar-mcp-server/
 │   ├── edgar-mirror-init.ts
 │   ├── edgar-mirror-refresh.ts
 │   ├── edgar-mirror-verify.ts
+│   ├── gen-former-names.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
@@ -162,6 +164,8 @@ secedgar-mcp-server/
 │   │   │   ├── canvas-bridge.ts
 │   │   │   └── sql-gate-extras.ts
 │   │   └── edgar/
+│   │       ├── data/
+│   │       │   └── former-names.json
 │   │       ├── mirror/
 │   │       │   ├── companyfacts-sync.ts
 │   │       │   ├── edgar-mirror.ts
@@ -202,7 +206,8 @@ secedgar-mcp-server/
 │       └── edgar/
 │           ├── mirror/
 │           │   ├── companyfacts-sync.test.ts
-│           │   └── edgar-mirror.test.ts
+│           │   ├── edgar-mirror.test.ts
+│           │   └── tickers-sync.test.ts
 │           ├── concept-map.test.ts
 │           ├── edgar-api-service.mirror.test.ts
 │           ├── edgar-api-service.test.ts

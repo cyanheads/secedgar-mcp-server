@@ -1,19 +1,24 @@
 /**
- * @fileoverview Tests for company-search tool — entity lookup with optional filings.
+ * @fileoverview Tests for company-search tool — entity lookup with optional filings,
+ * fund ticker resolution (series_id/class_id), no-match trigram suggestions,
+ * and former-name resolution.
  * @module tests/mcp-server/tools/definitions/company-search.tool
  */
 
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { companySearchTool } from '@/mcp-server/tools/definitions/company-search.tool.js';
-import type { SubmissionsResponse } from '@/services/edgar/types.js';
+import type { CikMatch, SubmissionsResponse } from '@/services/edgar/types.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', () => ({
   getEdgarApiService: vi.fn(),
   initEdgarApiService: vi.fn(),
+  suggestCompanies: vi.fn(),
+  pickPreferredTicker: vi.fn(),
+  trigramSimilarity: vi.fn(),
 }));
 
-import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+import { getEdgarApiService, suggestCompanies } from '@/services/edgar/edgar-api-service.js';
 
 const mockSubmissions: SubmissionsResponse = {
   cik: '0000320193',
@@ -38,18 +43,67 @@ const mockSubmissions: SubmissionsResponse = {
   tickers: ['AAPL'],
 };
 
+const mockVanguardSubmissions: SubmissionsResponse = {
+  cik: '0000036405',
+  entityType: 'investment-company',
+  exchanges: [],
+  filings: {
+    recent: {
+      accessionNumber: ['0000036405-24-000001'],
+      filingDate: ['2024-01-15'],
+      form: ['N-PORT'],
+      primaryDocDescription: ['N-PORT'],
+      primaryDocument: ['voo-nport.htm'],
+      reportDate: ['2023-12-31'],
+    },
+    files: [],
+  },
+  fiscalYearEnd: '1031',
+  name: 'Vanguard Index Funds',
+  sic: '6726',
+  sicDescription: 'INVESTMENT OFFICES, NEC',
+  tickers: ['VOO'],
+};
+
+const mockMetaSubmissions: SubmissionsResponse = {
+  cik: '0001326801',
+  entityType: 'operating',
+  exchanges: ['Nasdaq'],
+  filings: {
+    recent: {
+      accessionNumber: ['0001326801-24-000001'],
+      filingDate: ['2024-02-01'],
+      form: ['10-K'],
+      primaryDocDescription: ['10-K'],
+      primaryDocument: ['meta-20231231.htm'],
+      reportDate: ['2023-12-31'],
+    },
+    files: [],
+  },
+  fiscalYearEnd: '1231',
+  name: 'Meta Platforms, Inc.',
+  sic: '7370',
+  sicDescription: 'SERVICES-COMPUTER PROGRAMMING, DATA PROCESSING',
+  tickers: ['META'],
+};
+
 const mockApi = {
   resolveCik: vi.fn(),
   getSubmissions: vi.fn(),
+  getAllEntries: vi.fn(),
 };
 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(getEdgarApiService).mockReturnValue(mockApi as any);
+  vi.mocked(suggestCompanies).mockReturnValue([]);
   mockApi.getSubmissions.mockResolvedValue(mockSubmissions);
+  mockApi.getAllEntries.mockResolvedValue([]);
 });
 
 describe('companySearchTool', () => {
+  // --- Existing behaviour (regression) ---
+
   it('returns company info for a single match', async () => {
     mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
     const ctx = createMockContext({ errors: companySearchTool.errors });
@@ -106,15 +160,16 @@ describe('companySearchTool', () => {
     expect(result.total_filings).toBe(2);
   });
 
-  it('throws notFound when no matches', async () => {
+  it('throws no_match when zero results, with no suggestions', async () => {
     mockApi.resolveCik.mockResolvedValue([]);
+    vi.mocked(suggestCompanies).mockReturnValue([]);
     const ctx = createMockContext({ errors: companySearchTool.errors });
     const input = companySearchTool.input.parse({ query: 'XYZNOTREAL' });
 
     await expect(companySearchTool.handler(input, ctx)).rejects.toThrow(/No company found/);
   });
 
-  it('throws notFound when multiple matches', async () => {
+  it('throws multiple_matches when array > 1', async () => {
     mockApi.resolveCik.mockResolvedValue([
       { cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' },
       { cik: '0000001234', name: 'Apple Corp.', ticker: 'APCO' },
@@ -197,5 +252,145 @@ describe('companySearchTool', () => {
     const blocks = companySearchTool.format!(output);
     expect(blocks[0].text).toContain('no ticker');
     expect(blocks[0].text).not.toContain('Recent filings');
+  });
+
+  // --- ETF/MF fund ticker resolution (#40) ---
+
+  it('resolves a fund ticker and returns series_id and class_id', async () => {
+    const vooMatch: CikMatch = {
+      cik: '0000036405',
+      ticker: 'VOO',
+      seriesId: 'S000002839',
+      classId: 'C000092055',
+    };
+    mockApi.resolveCik.mockResolvedValue(vooMatch);
+    mockApi.getSubmissions.mockResolvedValue(mockVanguardSubmissions);
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({ query: 'VOO' });
+    const result = await companySearchTool.handler(input, ctx);
+
+    expect(result.cik).toBe('0000036405');
+    expect(result.name).toBe('Vanguard Index Funds');
+    expect(result.series_id).toBe('S000002839');
+    expect(result.class_id).toBe('C000092055');
+  });
+
+  it('does not set series_id/class_id for an equity match', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({ query: 'AAPL' });
+    const result = await companySearchTool.handler(input, ctx);
+
+    expect(result.series_id).toBeUndefined();
+    expect(result.class_id).toBeUndefined();
+  });
+
+  it('formats series_id and class_id in the text output when present', () => {
+    const output = {
+      cik: '0000036405',
+      name: 'Vanguard Index Funds',
+      tickers: ['VOO'],
+      exchanges: [],
+      sic: '6726',
+      sic_description: 'INVESTMENT OFFICES, NEC',
+      fiscal_year_end: '10-31',
+      series_id: 'S000002839',
+      class_id: 'C000092055',
+    };
+    const blocks = companySearchTool.format!(output);
+    expect(blocks[0].text).toContain('S000002839');
+    expect(blocks[0].text).toContain('C000092055');
+  });
+
+  // --- Trigram suggestions on no-match (#41) ---
+
+  it('throws no_match with suggestions when near-matches exist', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+    vi.mocked(suggestCompanies).mockReturnValue([
+      { cik: '0000789019', name: 'MICROSOFT CORP', ticker: 'MSFT' },
+    ]);
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({ query: 'Microsfot' });
+
+    let caught: unknown;
+    try {
+      await companySearchTool.handler(input, ctx);
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeDefined();
+    const err = caught as { data?: { suggestions?: unknown[] }; message?: string };
+    expect(err.data?.suggestions).toBeDefined();
+    expect(Array.isArray(err.data?.suggestions)).toBe(true);
+    expect((err.data!.suggestions as Array<{ cik: string }>)[0]).toMatchObject({
+      cik: '0000789019',
+    });
+    expect(err.message).toContain('MICROSOFT CORP');
+  });
+
+  it('throws a clean no_match (no suggestions key) when trigram finds nothing', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+    vi.mocked(suggestCompanies).mockReturnValue([]);
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({ query: 'XYZNOTREAL' });
+
+    let caught: unknown;
+    try {
+      await companySearchTool.handler(input, ctx);
+    } catch (e) {
+      caught = e;
+    }
+
+    const err = caught as { data?: { suggestions?: unknown } };
+    expect(err.data?.suggestions).toBeUndefined();
+  });
+
+  // --- Former-name resolution (#42) ---
+
+  it('resolves a former name to the current entity', async () => {
+    // resolveCik returns Meta's CIK because "Facebook" matched a former-name entry
+    const metaMatch: CikMatch = { cik: '0001326801', name: 'facebook inc' };
+    mockApi.resolveCik.mockResolvedValue(metaMatch);
+    mockApi.getSubmissions.mockResolvedValue(mockMetaSubmissions);
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({ query: 'Facebook' });
+    const result = await companySearchTool.handler(input, ctx);
+
+    // The handler fetches the current entity name from submissions, not from the CikMatch.
+    expect(result.cik).toBe('0001326801');
+    expect(result.name).toBe('Meta Platforms, Inc.');
+  });
+
+  // --- Null upstream fields (private / pre-IPO filers, e.g. SpaceX) ---
+
+  it('sanitizes null exchanges and null fiscal year end so output stays schema-valid', async () => {
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0001181412',
+      name: 'SPACE EXPLORATION TECHNOLOGIES CORP',
+      ticker: 'SPCX',
+    });
+    mockApi.getSubmissions.mockResolvedValue({
+      ...mockSubmissions,
+      cik: '0001181412',
+      name: 'SPACE EXPLORATION TECHNOLOGIES CORP',
+      tickers: ['SPCX'],
+      exchanges: [null],
+      fiscalYearEnd: null,
+    });
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({ query: 'SPCX', include_filings: false });
+    const result = await companySearchTool.handler(input, ctx);
+
+    expect(result.exchanges).toEqual([]);
+    expect(result.fiscal_year_end).toBeUndefined();
+    // The framework validates handler output against the declared schema at runtime —
+    // a null element here previously threw -32007. Parsing must now succeed.
+    expect(() => companySearchTool.output.parse(result)).not.toThrow();
   });
 });
