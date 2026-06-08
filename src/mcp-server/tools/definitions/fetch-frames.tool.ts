@@ -196,6 +196,26 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     const framesResponse = await api.tryGetFrames(taxonomy, tag, unit, input.period);
     if (!framesResponse) {
       if (!mapping) {
+        // Issue #45: a raw XBRL tag (e.g. 'SalesRevenueNet') is well-formed
+        // but may simply have no reporters for this period+unit (deprecated
+        // tags, no CY2024 data).  Treat well-formed raw tags as 'no_data'
+        // (valid tag, empty frame) instead of 'unknown_concept' (gibberish),
+        // so callers can UNION across `unqueried_tags` mechanically.
+        //   - well-formed raw tag: starts with a letter, contains only
+        //     letters/digits/underscore, no whitespace, length 2..120
+        //     (matches the SEC XBRL tag namespace)
+        //   - anything else: genuine gibberish, still 'unknown_concept'
+        const rawTagPattern = /^[A-Za-z][A-Za-z0-9_]{1,119}$/;
+        if (rawTagPattern.test(input.concept)) {
+          throw ctx.fail('no_data', `No data for ${input.concept}/${unit}/${input.period}.`, {
+            recovery: {
+              hint: 'Raw XBRL tag is well-formed but SEC returned no data for this period/unit. The tag may be deprecated, or no filer reports it for this period. Try the default friendly name (e.g. "revenue") and check `unqueried_tags` for live alternates.',
+            },
+            concept: input.concept,
+            period: input.period,
+            unit,
+          });
+        }
         throw ctx.fail('unknown_concept', `Unknown concept '${input.concept}'.`, {
           ...ctx.recoveryFor('unknown_concept'),
           concept: input.concept,

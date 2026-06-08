@@ -532,4 +532,46 @@ describe('fetchFramesTool', () => {
     expect(blocks[0].text).toContain('Caveat:');
     expect(blocks[0].text).toContain('AAPL Sep-end');
   });
+
+  it('treats well-formed raw XBRL tag with no SEC data as no_data, not unknown_concept (#45)', async () => {
+    // Issue #45: passing a well-formed raw XBRL tag (e.g. 'SalesRevenueNet',
+    // deprecated in 2018) used to fail with 'unknown_concept', which is
+    // misleading and breaks the UNION-across-unqueried_tags workflow.
+    // The fix: well-formed raw tags return 'no_data' (valid tag, empty
+    // frame); gibberish still returns 'unknown_concept'.
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({
+      concept: 'SalesRevenueNet',
+      period: 'CY2024',
+      unit: 'USD',
+    });
+    // Force tryGetFrames to return null for the raw tag.
+    mockApi.tryGetFrames.mockResolvedValueOnce(null as any);
+    await expect(fetchFramesTool.handler(input, ctx)).rejects.toMatchObject({
+      reason: 'no_data',
+    });
+  });
+
+  it('still rejects malformed raw XBRL tag as unknown_concept (#45)', async () => {
+    // Regression guard: the fix in #45 must not turn true gibberish
+    // (whitespace, punctuation, leading digit, too-short) into 'no_data'.
+    // A concept with whitespace / special chars is not a valid XBRL tag
+    // and should still raise 'unknown_concept'.
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const gibberishInputs = [
+      'has spaces',          // whitespace
+      '1leading-digit',      // starts with digit
+      'with-dash',           // dash is not a valid XBRL char
+      'x',                   // too short (< 2 chars)
+      '!@#$',                // punctuation
+    ];
+    for (const concept of gibberishInputs) {
+      const input = fetchFramesTool.input.parse({ concept, period: 'CY2024', unit: 'USD' });
+      mockApi.tryGetFrames.mockResolvedValueOnce(null as any);
+      await expect(
+        fetchFramesTool.handler(input, ctx),
+        `expected unknown_concept for ${JSON.stringify(concept)}`
+      ).rejects.toMatchObject({ reason: 'unknown_concept' });
+    }
+  });
 });
