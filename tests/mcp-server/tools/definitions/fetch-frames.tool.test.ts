@@ -171,6 +171,36 @@ describe('fetchFramesTool', () => {
     await expect(fetchFramesTool.handler(input, ctx)).rejects.toThrow(/No data for/);
   });
 
+  // ---- #45: well-formed deprecated tag → no_data, not unknown_concept ----
+
+  it('well-formed deprecated raw XBRL tag (404) surfaces no_data, not unknown_concept (#45)', async () => {
+    mockApi.tryGetFrames.mockResolvedValue(null);
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({
+      concept: 'SalesRevenueNet', // well-formed tag — deprecated in 2018 taxonomy
+      period: 'CY2024',
+      unit: 'USD',
+    });
+
+    await expect(fetchFramesTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'no_data' },
+    });
+  });
+
+  it('malformed concept (not a valid XBRL tag) still surfaces unknown_concept (#45)', async () => {
+    mockApi.tryGetFrames.mockResolvedValue(null);
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({
+      concept: 'foo bar concept!', // malformed — spaces and punctuation
+      period: 'CY2024',
+      unit: 'USD',
+    });
+
+    await expect(fetchFramesTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'unknown_concept' },
+    });
+  });
+
   it('re-throws non-404 errors', async () => {
     mockApi.tryGetFrames.mockRejectedValue(new Error('500 Internal Server Error'));
     const ctx = createMockContext({ errors: fetchFramesTool.errors });
@@ -512,6 +542,51 @@ describe('fetchFramesTool', () => {
     const result = await fetchFramesTool.handler(input, ctx);
 
     expect(result.caveats).toEqual([]);
+  });
+
+  // ---- #49: artifact caveat for high max/p95 ratio ----
+
+  it('appends artifact caveat when max/p95 ratio > 50 for per-share unit (#49)', async () => {
+    mockApi.tryGetFrames.mockResolvedValueOnce({
+      ccp: 'CY2024',
+      label: 'Earnings Per Share (Basic)',
+      tag: 'EarningsPerShareBasic',
+      taxonomy: 'us-gaap',
+      uom: 'USD-per-shares',
+      pts: 100,
+      // 99 normal per-share values (5–9) plus one split/denominator artifact far
+      // above p95, so max/p95 lands well over the 50× per-share threshold.
+      data: [
+        ...Array.from({ length: 99 }, (_, i) => ({
+          accn: `A${i}`,
+          cik: i + 1,
+          end: '2024-12-31',
+          entityName: `Normal Co ${i}`,
+          val: 5 + (i % 5),
+        })),
+        { accn: 'OUT', cik: 999, end: '2024-12-31', entityName: 'Artifact Inc', val: 5000 },
+      ],
+    });
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({
+      concept: 'eps_basic',
+      period: 'CY2024',
+      unit: 'USD-per-shares',
+    });
+    const result = await fetchFramesTool.handler(input, ctx);
+
+    expect(result.value_distribution.max_to_p95_ratio).toBeGreaterThan(50);
+    expect(result.caveats.some((c) => c.includes('split/denominator artifacts'))).toBe(true);
+  });
+
+  it('does not append artifact caveat for normal dispersion (#49)', async () => {
+    // mockFramesResponse has max/p95 ratio of 1 (all large values close together)
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2023' });
+    const result = await fetchFramesTool.handler(input, ctx);
+
+    expect(result.value_distribution.max_to_p95_ratio).toBeLessThanOrEqual(50);
+    expect(result.caveats.every((c) => !c.includes('split/denominator artifacts'))).toBe(true);
   });
 
   it('surfaces caveats in format text', () => {

@@ -195,7 +195,15 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
 
     const framesResponse = await api.tryGetFrames(taxonomy, tag, unit, input.period);
     if (!framesResponse) {
-      if (!mapping) {
+      /**
+       * Distinguish between malformed input and valid-but-empty XBRL tags (#45).
+       *
+       * A well-formed XBRL tag (letter followed by alphanumerics — e.g. `SalesRevenueNet`,
+       * `RevenueFromContractsWithCustomers`) may return 404 because the tag is deprecated or
+       * has no data for the requested period/unit. This is `no_data`, not `unknown_concept`.
+       * `unknown_concept` is reserved for genuinely malformed input (e.g. "foo bar", "123abc").
+       */
+      if (!mapping && !/^[A-Za-z][A-Za-z0-9]*$/.test(input.concept)) {
         throw ctx.fail('unknown_concept', `Unknown concept '${input.concept}'.`, {
           ...ctx.recoveryFor('unknown_concept'),
           concept: input.concept,
@@ -282,6 +290,19 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     const unqueriedTags = mapping ? mapping.tags.slice(1) : [];
     const relatedTags = mapping?.relatedTags ?? [];
     const caveats = fiscalQ4Caveats(input.period);
+
+    /**
+     * Artifact caveat (#49): when max/p95 ratio is suspiciously high, warn that
+     * top values may be reverse-split or tiny-denominator artifacts. Use a lower
+     * threshold for per-share units (USD-per-shares) where split artifacts are
+     * especially common.
+     */
+    const artifactThreshold = unit === 'USD-per-shares' ? 50 : 200;
+    if (valueDistribution.max_to_p95_ratio > artifactThreshold) {
+      caveats.push(
+        'Top values may be split/denominator artifacts — verify value_distribution before trusting absolute rankings.',
+      );
+    }
 
     ctx.log.info('Frames fetched', {
       concept: tag,
