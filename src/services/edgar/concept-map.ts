@@ -15,8 +15,15 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
       'SalesRevenueNet',
       'SalesRevenueGoodsNet',
     ],
-    // IFRS tag verified against Spotify (SPOT, 20-F IFRS filer).
-    ifrsTags: ['RevenueFromContractsWithCustomers', 'Revenue'],
+    /**
+     * IFRS tag verified against Spotify (SPOT, 20-F IFRS filer).
+     * Tag-array order is semantically meaningful — index 0 is the preferred total.
+     * `Revenue` (IAS 1 top-line total) leads over `RevenueFromContractsWithCustomers`
+     * (an IFRS 15 component line that Spotify also reports for CY2024 at a fraction
+     * of the consolidated total). The priority-aware frame dedup in get-financials
+     * enforces this order when both tags report the same frame (#44).
+     */
+    ifrsTags: ['Revenue', 'RevenueFromContractsWithCustomers'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Revenue',

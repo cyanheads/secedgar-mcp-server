@@ -6,6 +6,7 @@
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials.tool.js';
+import { resolveConcept } from '@/services/edgar/concept-map.js';
 import type { CompanyConceptResponse } from '@/services/edgar/types.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', () => ({
@@ -188,9 +189,51 @@ describe('getFinancialsTool', () => {
     }
   });
 
-  it('defaults balance-sheet concepts to period_type "all" so bare calls return data (issue #1)', async () => {
-    // Balance-sheet items emit instant frames (CYxxxxQxI). Pre-fix, the default 'annual' filter
-    // (/^CY\d{4}$/) excluded all of them and the call threw `no_period_data`.
+  // ---- #48: instant concept period_type fallback ----
+
+  it('raw instant tag (AssetsCurrent) with no period_type returns its instant series (#48)', async () => {
+    // Post-fetch fallback: annual filter empties a non-empty all-instant series → return full set.
+    const instantResponse: CompanyConceptResponse = {
+      cik: 320193,
+      entityName: 'Apple Inc.',
+      label: 'Assets, Current',
+      tag: 'AssetsCurrent',
+      taxonomy: 'us-gaap',
+      units: {
+        USD: [
+          {
+            accn: '0000320193-23-000106',
+            end: '2023-09-30',
+            filed: '2023-11-03',
+            form: '10-K',
+            fp: 'FY',
+            frame: 'CY2023Q3I',
+            fy: 2023,
+            val: 135405000000,
+          },
+          {
+            accn: '0000320193-22-000108',
+            end: '2022-09-24',
+            filed: '2022-10-28',
+            form: '10-K',
+            fp: 'FY',
+            frame: 'CY2022Q3I',
+            fy: 2022,
+            val: 128645000000,
+          },
+        ],
+      },
+    };
+    mockApi.tryGetCompanyConcept.mockResolvedValue(instantResponse);
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({ company: 'AAPL', concept: 'AssetsCurrent' });
+    const result = await getFinancialsTool.handler(input, ctx);
+
+    expect(result.data.length).toBeGreaterThan(0);
+    expect(result.data.every((d) => /I$/.test(d.period))).toBe(true);
+  });
+
+  it('friendly balance-sheet concept (assets) with no period_type returns instant series (#48)', async () => {
     const balanceSheetResponse: CompanyConceptResponse = {
       cik: 320193,
       entityName: 'Apple Inc.',
@@ -231,9 +274,17 @@ describe('getFinancialsTool', () => {
     expect(result.data[0].period).toMatch(/I$/);
   });
 
-  it('respects explicit period_type override on balance-sheet concepts', async () => {
-    // Caller passes period_type: 'annual' explicitly on a balance-sheet item — the no_period_data
-    // hint should still fire (now from the effective period_type, not the schema default).
+  it('duration concept still defaults to clean annual series (#48)', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({ company: 'AAPL', concept: 'revenue' });
+    const result = await getFinancialsTool.handler(input, ctx);
+
+    // mockConceptResponse has CY2023 and CY2022 (annual) — these should be returned
+    expect(result.data.length).toBeGreaterThan(0);
+    expect(result.data.every((d) => /^CY\d{4}$/.test(d.period))).toBe(true);
+  });
+
+  it('explicit period_type: annual on an instant concept still throws no_period_data (#48)', async () => {
     const balanceSheetResponse: CompanyConceptResponse = {
       cik: 320193,
       entityName: 'Apple Inc.',
@@ -271,6 +322,138 @@ describe('getFinancialsTool', () => {
         recovery: { hint: expect.stringMatching(/balance sheet \(instant\) item/) },
       },
     });
+  });
+
+  // ---- #44: tag-priority-aware frame dedup ----
+
+  it('lower tag-index wins when two tags report the same frame (#44)', async () => {
+    // Simulate the Spotify case: two IFRS tags report CY2024 with the same filed date.
+    // Revenue (index 0, the total) should win over RevenueFromContractsWithCustomers (index 1).
+    const totalRevenue = 15_673_000_000;
+    const sublineRevenue = 606_000_000;
+    const frame = 'CY2024';
+    const filed = '2026-02-10';
+
+    mockApi.tryGetCompanyConcept
+      .mockResolvedValueOnce({
+        // index 0 tag: Revenue (total)
+        cik: 1639920,
+        entityName: 'Spotify Technology S.A.',
+        label: 'Revenue',
+        tag: 'Revenue',
+        taxonomy: 'ifrs-full',
+        units: {
+          EUR: [
+            {
+              accn: '0001193125-26-040001',
+              end: '2024-12-31',
+              filed,
+              form: '20-F',
+              fp: 'FY',
+              frame,
+              fy: 2024,
+              val: totalRevenue,
+            },
+          ],
+        },
+      })
+      .mockResolvedValueOnce({
+        // index 1 tag: RevenueFromContractsWithCustomers (sub-line)
+        cik: 1639920,
+        entityName: 'Spotify Technology S.A.',
+        label: 'Revenue From Contracts With Customers',
+        tag: 'RevenueFromContractsWithCustomers',
+        taxonomy: 'ifrs-full',
+        units: {
+          EUR: [
+            {
+              accn: '0001193125-26-040001',
+              end: '2024-12-31',
+              filed,
+              form: '20-F',
+              fp: 'FY',
+              frame,
+              fy: 2024,
+              val: sublineRevenue,
+            },
+          ],
+        },
+      });
+
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0001639920',
+      name: 'Spotify Technology S.A.',
+      ticker: 'SPOT',
+    });
+
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({
+      company: 'SPOT',
+      concept: 'revenue',
+      taxonomy: 'ifrs-full',
+      period_type: 'annual',
+    });
+    const result = await getFinancialsTool.handler(input, ctx);
+
+    expect(result.data).toHaveLength(1);
+    // The total (Revenue, tag index 0) must win
+    expect(result.data[0].value).toBe(totalRevenue);
+  });
+
+  it('same tag / later filed wins over earlier filed (restatement) (#44)', async () => {
+    const amended = 400_000_000_000;
+    const original = 383_285_000_000;
+    mockApi.tryGetCompanyConcept.mockResolvedValue({
+      cik: 320193,
+      entityName: 'Apple Inc.',
+      label: 'Revenue',
+      tag: 'RevenueFromContractWithCustomerExcludingAssessedTax',
+      taxonomy: 'us-gaap',
+      units: {
+        USD: [
+          {
+            accn: '0000320193-23-000106',
+            end: '2023-09-30',
+            filed: '2023-11-03',
+            form: '10-K',
+            fp: 'FY',
+            frame: 'CY2023',
+            fy: 2023,
+            val: original,
+          },
+          {
+            accn: '0000320193-24-000001',
+            end: '2023-09-30',
+            filed: '2024-01-15', // Later filed = restatement
+            form: '10-K/A',
+            fp: 'FY',
+            frame: 'CY2023',
+            fy: 2023,
+            val: amended,
+          },
+        ],
+      },
+    });
+
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({
+      company: 'AAPL',
+      concept: 'revenue',
+      period_type: 'annual',
+    });
+    const result = await getFinancialsTool.handler(input, ctx);
+
+    expect(result.data).toHaveLength(1);
+    // Later filed (restatement) wins within the same tag
+    expect(result.data[0].value).toBe(amended);
+  });
+
+  it('IFRS revenue ifrsTags lists the IAS 1 total (Revenue) first (#44)', () => {
+    // Guards the reorder half of #44: the consolidated total must sit at index 0
+    // so the tag-priority dedup keeps it over the RevenueFromContractsWithCustomers sub-line.
+    const mapping = resolveConcept('revenue');
+    expect(mapping?.ifrsTags?.[0]).toBe('Revenue');
+    expect(mapping?.ifrsTags).toContain('RevenueFromContractsWithCustomers');
   });
 
   it('throws notFound when company not found', async () => {
@@ -328,7 +511,9 @@ describe('getFinancialsTool', () => {
     });
     await getFinancialsTool.handler(input, ctx);
 
-    // Should use the IFRS tag, not the us-gaap tags
+    // Should use the IFRS tags in order (Revenue first per #44 reorder)
+    expect(mockApi.tryGetCompanyConcept).toHaveBeenCalledWith('0000320193', 'ifrs-full', 'Revenue');
+    // Should also try the sub-line tag
     expect(mockApi.tryGetCompanyConcept).toHaveBeenCalledWith(
       '0000320193',
       'ifrs-full',

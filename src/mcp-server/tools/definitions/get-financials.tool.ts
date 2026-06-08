@@ -70,7 +70,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       .enum(['annual', 'quarterly', 'all'])
       .optional()
       .describe(
-        'Filter to annual (FY) or quarterly (Q1-Q4) data. "all" returns both. When omitted, defaults to "annual" for income/cash-flow concepts and "all" for balance-sheet (instant) items so balance-sheet calls return data on the first attempt.',
+        'Filter to annual (FY) or quarterly (Q1-Q4) data. "all" returns both. When omitted, defaults to "annual"; instant (balance-sheet) concepts automatically fall back to returning the full series on the first call when the annual filter yields nothing (#48).',
       ),
     limit: z
       .number()
@@ -193,10 +193,8 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       : [input.concept];
     const label = mapping?.label ?? input.concept;
 
-    // Balance-sheet items emit instant frames (CYxxxxQxI), which the "annual" filter
-    // (/^CY\d{4}$/) excludes. Default to "all" for them so a bare friendly-name call returns data.
-    const effectivePeriodType =
-      input.period_type ?? (mapping?.group === 'balance_sheet' ? 'all' : 'annual');
+    // Default to "annual" for unset period_type; post-fetch fallback handles instant concepts (#48).
+    const effectivePeriodType = input.period_type ?? 'annual';
 
     // Try each tag until we get data. `tryGetCompanyConcept` returns null for 404
     // (tag not reported by this company); other errors propagate.
@@ -209,9 +207,13 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
         }
       | undefined;
     const tagsTried: string[] = [];
-    const allUnits: CompanyConceptUnit[] = [];
+    /**
+     * Each unit is augmented with its source-tag index so the frame dedup can
+     * resolve collisions by tag priority (#44). Index 0 = preferred total.
+     */
+    const allUnits: Array<CompanyConceptUnit & { _tagIdx: number }> = [];
 
-    for (const tag of tags) {
+    for (const [tagIdx, tag] of tags.entries()) {
       tagsTried.push(tag);
       const resp = await api.tryGetCompanyConcept(match.cik, taxonomy, tag);
       if (!resp) continue;
@@ -224,7 +226,9 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
         };
       }
       for (const units of Object.values(resp.units)) {
-        allUnits.push(...units);
+        for (const u of units) {
+          allUnits.push({ ...u, _tagIdx: tagIdx });
+        }
       }
     }
 
@@ -271,7 +275,9 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     }
 
     // Deduplicate: keep only entries with frame field (one per standard calendar period)
-    const deduped = allUnits.filter((u): u is CompanyConceptUnit & { frame: string } => !!u.frame);
+    const deduped = allUnits.filter(
+      (u): u is CompanyConceptUnit & { frame: string; _tagIdx: number } => !!u.frame,
+    );
 
     // If deduplication removed everything, the concept exists but has no frame-aligned entries
     if (deduped.length === 0) {
@@ -285,41 +291,74 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       );
     }
 
-    // Remove duplicates by frame value (keep latest filed)
-    const byFrame = new Map<string, CompanyConceptUnit & { frame: string }>();
+    /**
+     * Remove duplicates by frame value using tag-priority-aware selection (#44).
+     *
+     * When two facts share a frame, the one with the lower `_tagIdx` wins
+     * (index 0 = preferred total, e.g. IFRS `Revenue` > `RevenueFromContractsWithCustomers`).
+     * Ties within the same tag index are broken by latest `filed` to preserve
+     * restatement handling (amended filing replaces the original).
+     */
+    const byFrame = new Map<string, CompanyConceptUnit & { frame: string; _tagIdx: number }>();
     for (const unit of deduped) {
       const existing = byFrame.get(unit.frame);
-      if (!existing || unit.filed > existing.filed) {
+      if (!existing) {
+        byFrame.set(unit.frame, unit);
+      } else if (
+        unit._tagIdx < existing._tagIdx ||
+        (unit._tagIdx === existing._tagIdx && unit.filed > existing.filed)
+      ) {
         byFrame.set(unit.frame, unit);
       }
     }
 
+    // Strip the internal _tagIdx from results before further use
+    const byFrameClean = new Map<string, CompanyConceptUnit & { frame: string }>();
+    for (const [k, v] of byFrame) {
+      const { _tagIdx: _, ...rest } = v;
+      byFrameClean.set(k, rest as CompanyConceptUnit & { frame: string });
+    }
+
     // Filter by period type using frame pattern (fp reflects the filing, not the data point)
-    let filtered = Array.from(byFrame.values());
+    // resolvedPeriodType tracks the actual period type after the instant fallback (#48).
+    let resolvedPeriodType = effectivePeriodType;
+    let filtered = Array.from(byFrameClean.values());
     if (effectivePeriodType === 'annual') {
       filtered = filtered.filter((u) => /^CY\d{4}$/.test(u.frame));
     } else if (effectivePeriodType === 'quarterly') {
       filtered = filtered.filter((u) => /^CY\d{4}Q\d/.test(u.frame));
     }
 
-    // If period_type filter removed everything, suggest the right period type
-    if (filtered.length === 0 && byFrame.size > 0) {
-      const sample = byFrame.values().next().value;
+    // If period_type filter removed everything, check for instant-concept fallback (#48)
+    if (filtered.length === 0 && byFrameClean.size > 0) {
+      const sample = byFrameClean.values().next().value;
       const hasInstant = sample && /I$/.test(sample.frame);
-      const hint = hasInstant
-        ? 'This is a balance sheet (instant) item — try period_type: "quarterly" or "all".'
-        : effectivePeriodType === 'annual'
-          ? 'No annual data found — try period_type: "quarterly" or "all".'
-          : 'No quarterly data found — try period_type: "annual" or "all".';
-      throw ctx.fail(
-        'no_period_data',
-        `No ${effectivePeriodType} data for '${conceptResponse.tag}'.`,
-        {
-          recovery: { hint },
-          tag: conceptResponse.tag,
-          period_type: effectivePeriodType,
-        },
-      );
+
+      /**
+       * Post-fetch instant fallback (#48): when `period_type` was NOT explicitly set
+       * and the annual filter emptied a non-empty series whose frames are all instant
+       * (CY####Q#I), return the full set. The caller asked for the concept's default
+       * period — the right answer is the series that actually exists, not an error.
+       */
+      if (hasInstant && input.period_type === undefined) {
+        filtered = Array.from(byFrameClean.values());
+        resolvedPeriodType = 'all';
+      } else {
+        const hint = hasInstant
+          ? 'This is a balance sheet (instant) item — try period_type: "quarterly" or "all".'
+          : effectivePeriodType === 'annual'
+            ? 'No annual data found — try period_type: "quarterly" or "all".'
+            : 'No quarterly data found — try period_type: "annual" or "all".';
+        throw ctx.fail(
+          'no_period_data',
+          `No ${effectivePeriodType} data for '${conceptResponse.tag}'.`,
+          {
+            recovery: { hint },
+            tag: conceptResponse.tag,
+            period_type: effectivePeriodType,
+          },
+        );
+      }
     }
 
     // Sort newest first
@@ -367,7 +406,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
           cik: match.cik,
           concept: conceptResponse.tag,
           taxonomy,
-          period_type: effectivePeriodType,
+          period_type: resolvedPeriodType,
         },
       });
       if (registered) dataset = toDatasetField(registered);
