@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.2](changelog/0.10.x/0.10.2.md) — 2026-06-08
+
+Fix get_financials frame collisions (Spotify IFRS Revenue 26× undercount), instant-period first-call fallback, fetch_frames no_data for empty tags, dataframe_query structured missing_table/invalid_sql, company_search MF fund tickers on mirror, insider shares_traded now unsigned with direction.
+
 ## [0.10.1](changelog/0.10.x/0.10.1.md) — 2026-06-08 · 🛡️ Security
 
 Security: DataCanvas SQL gate fails closed on non-SELECT statements and denies pragma_* table functions; stringbool env-boolean parsing; .mcpbignore dev-dir anchoring; actionable node-cron peer error.
