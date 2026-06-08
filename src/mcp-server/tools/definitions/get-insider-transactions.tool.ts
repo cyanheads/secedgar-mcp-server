@@ -48,7 +48,7 @@ function ownerRelationship(owner: ReportingOwner): string {
 export const getInsiderTransactionsTool = tool('secedgar_get_insider_transactions', {
   title: 'Get Insider Transactions',
   description:
-    'Fetch Form 4 insider transactions (purchases, sales, grants, exercises) for a company by parsing SEC EDGAR ownership XML. Returns the reporting person, their relationship to the issuer, transaction date, type, shares traded, price per share, and shares owned after the transaction. Covers nonDerivative transactions (open-market buys/sells, gifts) and derivative transactions (option exercises, RSU vests). When a canvas is available, the full set of transactions parsed from the scanned recent filings is materialized as df_<id> (the inline list is a preview capped at limit) — query it with secedgar_dataframe_query to aggregate net buy/sell by insider. Use secedgar_search_filings with forms=["4"] for broader date-range queries or to search across all companies.',
+    'Fetch Form 4 insider transactions (purchases, sales, grants, exercises) for a company by parsing SEC EDGAR ownership XML. Returns the reporting person, their relationship to the issuer, transaction date, type, shares traded (absolute magnitude), direction (acquire/dispose), price per share, and shares owned after the transaction. Covers nonDerivative transactions (open-market buys/sells, gifts) and derivative transactions (option exercises, RSU vests). When a canvas is available, the full set of transactions parsed from the scanned recent filings is materialized as df_<id> (the inline list is a preview capped at limit) — query it with secedgar_dataframe_query to aggregate net buy/sell by insider: SUM(CASE WHEN direction=\'dispose\' THEN -shares_traded ELSE shares_traded END). Use secedgar_search_filings with forms=["4"] for broader date-range queries or to search across all companies.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -134,7 +134,13 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
               .number()
               .optional()
               .describe(
-                'Shares involved. Negative = disposal (sale, return, gift), positive = acquisition. Absent when the filing omits this field.',
+                'Absolute number of shares involved (always positive). Absent when the filing omits this field. Use `direction` to distinguish acquisitions from disposals.',
+              ),
+            direction: z
+              .enum(['acquire', 'dispose'])
+              .optional()
+              .describe(
+                'Whether shares were acquired or disposed. "acquire" = buy, award, exercise; "dispose" = sale, gift, return. Absent when shares_traded is absent.',
               ),
             price_per_share: z
               .number()
@@ -232,7 +238,9 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       transaction_code: string;
       transaction_type: string;
       is_derivative: boolean;
+      /** Absolute magnitude — always positive when present. Use `direction` for sign. */
       shares_traded: number | undefined;
+      direction: 'acquire' | 'dispose' | undefined;
       price_per_share: number | undefined;
       shares_owned_after: number | undefined;
       ownership_type: 'direct' | 'indirect' | undefined;
@@ -278,6 +286,12 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       for (const tx of parsed.transactions) {
         if (!matchesFilter(tx, input.transaction_type)) continue;
 
+        // Derive direction from the raw signed shares_traded, then store magnitude (#46).
+        const rawShares = tx.shares_traded;
+        const direction: 'acquire' | 'dispose' | undefined =
+          rawShares !== undefined ? (rawShares < 0 ? 'dispose' : 'acquire') : undefined;
+        const sharesMagnitude = rawShares !== undefined ? Math.abs(rawShares) : undefined;
+
         transactions.push({
           filing_date: filing.filingDate,
           period_of_report: parsed.period_of_report,
@@ -289,7 +303,8 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
           transaction_code: tx.transaction_code,
           transaction_type: tx.transaction_type,
           is_derivative: tx.is_derivative,
-          shares_traded: tx.shares_traded,
+          shares_traded: sharesMagnitude,
+          direction,
           price_per_share: tx.price_per_share,
           shares_owned_after: tx.shares_owned_after,
           ownership_type: tx.ownership_type,
@@ -337,6 +352,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
           transaction_type: t.transaction_type,
           is_derivative: t.is_derivative,
           shares_traded: t.shares_traded ?? null,
+          direction: t.direction ?? null,
           price_per_share: t.price_per_share ?? null,
           shares_owned_after: t.shares_owned_after ?? null,
           ownership_type: t.ownership_type ?? null,
@@ -385,8 +401,8 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       lines.push('');
       const sharesStr =
         tx.shares_traded !== undefined
-          ? tx.shares_traded < 0
-            ? `${Math.abs(tx.shares_traded).toLocaleString()} shares disposed`
+          ? tx.direction === 'dispose'
+            ? `${tx.shares_traded.toLocaleString()} shares disposed`
             : `${tx.shares_traded.toLocaleString()} shares acquired`
           : 'shares not reported';
       const priceStr =

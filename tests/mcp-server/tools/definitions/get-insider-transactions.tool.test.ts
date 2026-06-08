@@ -162,7 +162,7 @@ describe('getInsiderTransactionsTool', () => {
     expect(result.transactions).toHaveLength(1);
   });
 
-  it('parses sale transaction fields correctly', async () => {
+  it('parses sale transaction fields correctly (#46: magnitude + direction)', async () => {
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
     const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
@@ -170,7 +170,8 @@ describe('getInsiderTransactionsTool', () => {
     const tx = result.transactions[0]!;
     expect(tx.transaction_code).toBe('S');
     expect(tx.transaction_type).toBe('sale');
-    expect(tx.shares_traded).toBe(-10000); // disposal → negative
+    expect(tx.shares_traded).toBe(10000); // disposal → positive magnitude (#46)
+    expect(tx.direction).toBe('dispose'); // direction field (#46)
     expect(tx.price_per_share).toBe(175.5);
     expect(tx.shares_owned_after).toBe(500000);
     expect(tx.ownership_type).toBe('direct');
@@ -206,7 +207,7 @@ describe('getInsiderTransactionsTool', () => {
     expect(enrichment.notice).toContain('purchase');
   });
 
-  it('returns purchase transaction when XML has purchase code', async () => {
+  it('returns purchase transaction when XML has purchase code (#46)', async () => {
     mockApi.tryGetFilingDocument.mockResolvedValue(PURCHASE_XML);
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
     const input = getInsiderTransactionsTool.input.parse({
@@ -217,7 +218,8 @@ describe('getInsiderTransactionsTool', () => {
 
     expect(result.transactions).toHaveLength(1);
     expect(result.transactions[0]!.transaction_code).toBe('P');
-    expect(result.transactions[0]!.shares_traded).toBe(5000); // acquisition → positive
+    expect(result.transactions[0]!.shares_traded).toBe(5000); // acquisition → positive magnitude
+    expect(result.transactions[0]!.direction).toBe('acquire'); // direction field
     expect(result.transactions[0]!.relationship).toContain('Officer');
   });
 
@@ -342,7 +344,7 @@ describe('getInsiderTransactionsTool', () => {
     expect(() => getInsiderTransactionsTool.input.parse({ ticker_or_cik: '' })).toThrow();
   });
 
-  it('formats transaction output correctly', () => {
+  it('formats transaction output correctly (#46: magnitude + direction)', () => {
     const output = {
       issuer_name: 'Apple Inc.',
       issuer_cik: '0000320193',
@@ -359,7 +361,8 @@ describe('getInsiderTransactionsTool', () => {
           transaction_code: 'S',
           transaction_type: 'sale',
           is_derivative: false,
-          shares_traded: -10000,
+          shares_traded: 10000, // positive magnitude (#46)
+          direction: 'dispose' as const, // direction field (#46)
           price_per_share: 175.5,
           shares_owned_after: 500000,
           ownership_type: 'direct' as const,
@@ -426,7 +429,7 @@ describe('getInsiderTransactionsTool', () => {
     expect(blocks[0].text).toContain('5 Form 4 filing(s)');
   });
 
-  it('format renders indirect ownership with nature', () => {
+  it('format renders indirect ownership with nature (#46)', () => {
     const output = {
       issuer_name: 'Test Corp',
       issuer_cik: '0000000001',
@@ -443,7 +446,8 @@ describe('getInsiderTransactionsTool', () => {
           transaction_code: 'G',
           transaction_type: 'gift',
           is_derivative: false,
-          shares_traded: -500,
+          shares_traded: 500, // positive magnitude (#46)
+          direction: 'dispose' as const, // gift is a disposal
           price_per_share: 0,
           shares_owned_after: undefined,
           ownership_type: 'indirect' as const,
@@ -455,6 +459,8 @@ describe('getInsiderTransactionsTool', () => {
     const blocks = getInsiderTransactionsTool.format!(output);
     expect(blocks[0].text).toContain('indirect: By Spouse');
     expect(blocks[0].text).not.toContain('[derivative]');
+    // Disposal renders as "shares disposed" not "shares acquired"
+    expect(blocks[0].text).toContain('shares disposed');
   });
 
   it('format marks derivative transactions', () => {
@@ -561,6 +567,34 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
       row_count: 5,
       truncated: false,
     });
+  });
+
+  it('disposal row: positive magnitude + direction:dispose in both inline and dataframe (#46)', async () => {
+    mockApi.getRecentFilingsByForm.mockResolvedValue([
+      {
+        accessionNumber: '0001214128-24-000010',
+        filingDate: '2024-03-16',
+        primaryDocument: 'form4.xml',
+      },
+    ]);
+    mockApi.tryGetFilingDocument.mockResolvedValue(SALE_XML);
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+
+    const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
+    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+    const result = await getInsiderTransactionsTool.handler(input, ctx);
+
+    // Inline: magnitude positive, direction 'dispose'
+    const tx = result.transactions[0]!;
+    expect(tx.shares_traded).toBe(10000);
+    expect(tx.direction).toBe('dispose');
+
+    // Dataframe: same magnitude and direction
+    const opts = bridge.registerDataframe.mock.calls[0]![1];
+    const row = opts.rows[0]!;
+    expect(row.shares_traded).toBe(10000);
+    expect(row.direction).toBe('dispose');
   });
 
   it('marks the dataframe truncated when the scan cap stops before the batch is exhausted', async () => {
