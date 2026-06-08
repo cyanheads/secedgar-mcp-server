@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-06-02 15:04:39
+Generated on: 2026-06-08 16:46:31
 
 ```text
 secedgar-mcp-server/
@@ -28,6 +28,7 @@ secedgar-mcp-server/
 │   ├── 0.6.x/
 │   ├── 0.7.x/
 │   ├── 0.8.x/
+│   ├── 0.9.x/
 │   └── template.md
 ├── claude-plans/
 ├── docs/

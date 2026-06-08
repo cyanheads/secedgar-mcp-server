@@ -99,6 +99,7 @@ Surface Form 3/4/5 insider activity for a company by parsing ownership XML.
 - Transaction code mapped to a readable type (purchase, sale, gift, award, exercise, …); shares signed by acquired/disposed
 - Price per share and shares owned after each transaction; covers non-derivative (open-market) and derivative (option/RSU) lines
 - Filter by `transaction_type` (`purchase`, `sale`, `all`); scans newest filings first
+- The full set of transactions parsed from the scanned recent filings is materialized as a `df_<id>` dataframe (the inline list is a preview capped at `limit`) — query it with `secedgar_dataframe_query` to aggregate net buy/sell by insider
 
 ---
 
@@ -111,6 +112,7 @@ Surface 13F-HR quarterly institutional holdings by parsing the information table
 - Sub-lines for the same security (one per manager/account) are consolidated into distinct positions sorted by value by default — pass `consolidate: false` for raw filing rows
 - Resolves the filing-manager name and reporting quarter from the cover page; target a specific quarter with `quarter` (e.g. `"2025-Q4"`)
 - `total_holdings_in_filing` counts raw info-table rows; `total_positions` counts distinct positions after consolidation (both before `limit`)
+- The full parsed holdings set is materialized as a `df_<id>` dataframe (the inline list is a preview capped at `limit`) — query it with `secedgar_dataframe_query` for full-filing aggregation or cross-quarter joins on `cusip` + `reporting_period`
 
 ---
 
@@ -122,6 +124,7 @@ Fetch SEC XBRL frames for one concept × one period across all reporting compani
 - Supports annual (`CY2023`), quarterly (`CY2024Q2`), and instant (`CY2023Q4I`) periods
 - Inline response returns the top N ranked companies (sort + limit), with ticker enrichment
 - The full frames response (all reporters, typically 2k–10k rows) is materialized as a `df_<id>` dataframe — query it with `secedgar_dataframe_query`
+- `related_tags` flags alternate-definition tags some filers use as their primary line (e.g. `cash` → restricted-cash-inclusive total, `equity` → NCI-inclusive total), so a whole-universe screen on the base tag isn't silently under-inclusive — query those separately
 
 ---
 
@@ -132,13 +135,14 @@ Discover supported XBRL concept names before querying financials or cross-compan
 - Search by friendly name, label, or raw XBRL tag
 - Filter by statement group (`income_statement`, `balance_sheet`, `cash_flow`, `per_share`, `entity_info`) or taxonomy
 - Reverse-lookup raw tags like `NetIncomeLoss` to the supported friendly names
+- Surfaces `related_tags` for concepts with a high-coverage alternate-definition tag (e.g. restricted-cash-inclusive cash) so callers can discover them before screening
 - Returns the same catalog used by `secedgar_get_financials`, `secedgar_fetch_frames`, and `secedgar://concepts`
 
 ---
 
 ### `secedgar_dataframe_describe` / `secedgar_dataframe_query` / `secedgar_dataframe_drop`
 
-In-conversation SQL analytics over the dataframes that `secedgar_fetch_frames`, `secedgar_search_filings`, and `secedgar_get_financials` materialize on a shared DuckDB-backed canvas. Each data-returning call adds a `dataset` field with a `df_XXXXX_XXXXX` handle; pass that handle to `secedgar_dataframe_query` for joins, aggregates, window functions, percentiles — standard DuckDB SQL.
+In-conversation SQL analytics over the dataframes that `secedgar_fetch_frames`, `secedgar_search_filings`, `secedgar_get_financials`, `secedgar_get_insider_transactions`, and `secedgar_get_institutional_holdings` materialize on a shared DuckDB-backed canvas. Each data-returning call adds a `dataset` field with a `df_XXXXX_XXXXX` handle; pass that handle to `secedgar_dataframe_query` for joins, aggregates, window functions, percentiles — standard DuckDB SQL.
 
 - **Read-only by default.** Writes, DDL, DROP, COPY, PRAGMA, ATTACH, and external-file table functions are rejected by the framework SQL gate. System catalogs (`information_schema`, `pg_catalog`, `sqlite_master`, `duckdb_*`) are denied at the bridge layer so callers can't enumerate dataframes they don't already hold a handle for. `secedgar_dataframe_drop` is the only destructive tool and is opt-in (`EDGAR_DATAFRAME_DROP_ENABLED=true`); TTL handles cleanup otherwise.
 - **Per-table TTL.** Each dataframe ages on its own clock (default 24h, override with `EDGAR_DATASET_TTL_SECONDS`). The canvas itself uses the framework's sliding TTL.
@@ -175,7 +179,7 @@ SEC EDGAR–specific:
 - Friendly XBRL concept name mapping with historical tag change handling
 - Searchable concept catalog with statement-group metadata and reverse XBRL tag lookup
 - HTML-to-text conversion for filing documents via `html-to-text`
-- In-conversation SQL analytics: `secedgar_fetch_frames`, `secedgar_search_filings`, and `secedgar_get_financials` materialize their full upstream response as a DuckDB-backed canvas dataframe queryable via `secedgar_dataframe_query`
+- In-conversation SQL analytics: `secedgar_fetch_frames`, `secedgar_search_filings`, `secedgar_get_financials`, `secedgar_get_insider_transactions`, and `secedgar_get_institutional_holdings` materialize their full result as a DuckDB-backed canvas dataframe queryable via `secedgar_dataframe_query`
 - No API keys required — SEC EDGAR is a free, public API
 
 ## Getting started

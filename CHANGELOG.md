@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.0](changelog/0.9.x/0.9.0.md) — 2026-06-08
+
+Ownership tools now register full parsed results to the canvas; fetch_frames surfaces alternate-definition XBRL tags that cover a meaningful share of filers for the base concept.
+
 ## [0.8.4](changelog/0.8.x/0.8.4.md) — 2026-06-04
 
 get_filing error data now returns categorized documents instead of a flat list; search_filings notes Form 3/4/5 index limitations
