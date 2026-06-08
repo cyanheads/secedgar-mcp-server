@@ -301,6 +301,55 @@ describe('EdgarApiService — mirror routing', () => {
     expect(voo.cik).toBe('0000036405');
   });
 
+  // --- Mirror-path MF merge (#43) ---
+
+  it('fund ticker resolves via live MF merge when mirrorFallbackLive=true (#43)', async () => {
+    // Mirror serves equity-only rows (no fund tickers) + mirrorFallbackLive=true →
+    // live MF fetch is merged in so VOO resolves.
+    config.mirrorFallbackLive = true;
+    const mirror = makeMirrorStub();
+    mirror.tickersReady.mockResolvedValue(true);
+    mirror.getTickerRows.mockResolvedValue([
+      { cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' },
+    ]); // equity-only, no VOO
+
+    mirrorRef.current = mirror;
+
+    const mfTickers = {
+      fields: ['cik', 'seriesId', 'classId', 'symbol'],
+      data: [[36405, 'S000002839', 'C000092055', 'VOO']],
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.includes('company_tickers_mf.json')) return jsonResponse(mfTickers);
+        throw new Error(`unexpected live fetch: ${url}`);
+      }),
+    );
+
+    const vooMatch = await getEdgarApiService().resolveCik('VOO');
+    expect(Array.isArray(vooMatch)).toBe(false);
+    expect((vooMatch as { cik: string }).cik).toBe('0000036405');
+  });
+
+  it('no live MF fetch when mirrorFallbackLive=false (#43)', async () => {
+    config.mirrorFallbackLive = false;
+    const mirror = makeMirrorStub();
+    mirror.tickersReady.mockResolvedValue(true);
+    mirror.getTickerRows.mockResolvedValue([
+      { cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' },
+    ]);
+    mirrorRef.current = mirror;
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    // VOO is not in the mirror and no live fetch is allowed
+    await getEdgarApiService().resolveCik('VOO');
+    // No fetch should occur — fund ticker stays unresolved but no live call
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('resolves a former name on the mirror path via the committed asset', async () => {
     const mirror = makeMirrorStub();
     mirror.tickersReady.mockResolvedValue(true);
@@ -308,6 +357,9 @@ describe('EdgarApiService — mirror routing', () => {
       { cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' },
     ]);
     mirrorRef.current = mirror;
+    // Strict mirror (no live fallback) isolates former-name resolution from the
+    // live MF-ticker merge (#43) — the committed asset is the only source here.
+    config.mirrorFallbackLive = false;
     // The former-name asset is committed, not fetched — no live call should fire.
     const fetchMock = vi.fn(() => {
       throw new Error('unexpected live fetch on the mirror path');

@@ -571,12 +571,35 @@ class EdgarApiService {
    * In addition to company_tickers.json (operating companies), also loads
    * company_tickers_mf.json (ETFs and mutual funds) and merges fund symbols into
    * the byTicker index so fund tickers like VOO, SCHD, and JEPI resolve correctly.
+   *
+   * Mirror path (#43): when `mirrorFallbackLive` is true, a live MF fetch is merged
+   * into the mirror-served equity base so fund tickers resolve even if the mirror
+   * was synced before MF ingestion was added. When `mirrorFallbackLive` is false
+   * (strict offline), the mirror's own MF rows are the sole source.
    */
   private async loadTickerCache(): Promise<TickerCache> {
     const mirror = getEdgarMirror();
     if (mirror && (await mirror.tickersReady())) {
       const rows = await mirror.getTickerRows();
-      if (rows.length > 0) return this.buildTickerCache(rows, buildFormerNameEntries());
+      if (rows.length > 0) {
+        const config = getServerConfig();
+        const allEntries: Array<{
+          cik: string;
+          name: string;
+          ticker: string;
+          seriesId?: string;
+          classId?: string;
+        }> = [...rows];
+
+        // When mirrorFallbackLive is enabled, supplement with a live MF fetch so
+        // fund tickers (VOO, SCHD, JEPI…) resolve even if the mirror predates MF
+        // ingestion. Failure is non-fatal — equity resolution still works.
+        if (config.mirrorFallbackLive) {
+          const mfEntries = await this.loadMfTickers();
+          allEntries.push(...mfEntries);
+        }
+        return this.buildTickerCache(allEntries, buildFormerNameEntries());
+      }
     } else if (mirror && !getServerConfig().mirrorFallbackLive) {
       throw serviceUnavailable(
         'EDGAR mirror enabled but the ticker layer is not synced; run `bun run mirror:init`',
@@ -640,6 +663,9 @@ class EdgarApiService {
         }));
     } catch {
       // Degrade gracefully — fund tickers won't resolve, but operating companies still work.
+      // Note: no service-layer logger is available here; a request-scoped ctx.log would require
+      // plumbing ctx through the ticker-cache lifecycle. The failure is visible via no fund
+      // resolution rather than a silent cache poison (#43).
       return [];
     }
   }
