@@ -15,6 +15,34 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
 
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+  getCanvasBridge: vi.fn(),
+  toDatasetField: (r: { tableName: string; rowCount: number; expiresAt: string }) => ({
+    name: r.tableName,
+    row_count: r.rowCount,
+    expires_at: r.expiresAt,
+  }),
+}));
+
+import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+
+/** A canvas bridge stub whose registerDataframe echoes the row count it received. */
+function stubBridge() {
+  return {
+    registerDataframe: vi.fn(
+      async (
+        _ctx: unknown,
+        opts: { rows: Array<Record<string, unknown>>; sourceTool: string; truncated?: boolean },
+      ) => ({
+        tableName: 'df_TEST0_TEST1',
+        rowCount: opts.rows.length,
+        expiresAt: '2026-12-31T00:00:00.000Z',
+        columnSchema: [],
+      }),
+    ),
+  };
+}
+
 const INFO_TABLE_XML = `<?xml version="1.0" ?>
 <informationTable xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable">
   <infoTable>
@@ -123,6 +151,8 @@ const mockApi = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default to no canvas — individual tests opt in by returning a stub bridge.
+  vi.mocked(getCanvasBridge).mockReturnValue(undefined as never);
   vi.mocked(getEdgarApiService).mockReturnValue(mockApi as any);
   mockApi.resolveCik.mockResolvedValue({
     cik: '0000102909',
@@ -601,5 +631,81 @@ describe('quarter parameter handling', () => {
     // 'badformat' doesn't match YYYY-QN — rejected outright, not silently treated as "latest".
     await expect(getInstitutionalHoldingsTool.handler(input, ctx)).rejects.toThrow(/quarter/i);
     expect(mockApi.getRecentFilingsByForm).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// canvas dataframe registration (#39)
+// ---------------------------------------------------------------------------
+
+describe('getInstitutionalHoldingsTool — canvas registration (#39)', () => {
+  it('omits dataset when the canvas is unavailable', async () => {
+    const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const result = await getInstitutionalHoldingsTool.handler(input, ctx);
+
+    expect(result.dataset).toBeUndefined();
+  });
+
+  it('registers the full position set and caps the inline list at limit', async () => {
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+    const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+    const input = getInstitutionalHoldingsTool.input.parse({
+      ticker_or_cik: '0000102909',
+      limit: 1,
+    });
+    const result = await getInstitutionalHoldingsTool.handler(input, ctx);
+
+    // Inline preview is capped; the full 2-position set lands on the canvas.
+    expect(result.holdings).toHaveLength(1);
+    expect(bridge.registerDataframe).toHaveBeenCalledTimes(1);
+    const opts = bridge.registerDataframe.mock.calls[0]![1];
+    expect(opts.sourceTool).toBe('secedgar_get_institutional_holdings');
+    expect(opts.rows).toHaveLength(2);
+    // Filer + period metadata is denormalized onto every row for self-contained joins.
+    expect(opts.rows[0]).toMatchObject({
+      filer_cik: '0000102909',
+      reporting_period: '2024-12-31',
+      filing_date: '2024-02-15',
+      accession_number: '0000102909-24-000001',
+    });
+    expect(result.dataset).toMatchObject({ name: 'df_TEST0_TEST1', row_count: 2 });
+  });
+
+  it('registers raw sub-line rows (with investment_discretion) when consolidate=false', async () => {
+    mockApi.tryGetFilingDocument.mockImplementation(
+      async (_cik: string, _accn: string, docName: string) =>
+        docName === 'primary_doc.xml' ? PRIMARY_DOC_XML : SUBLINE_INFO_TABLE_XML,
+    );
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+    const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+    const input = getInstitutionalHoldingsTool.input.parse({
+      ticker_or_cik: '0000102909',
+      consolidate: false,
+    });
+    await getInstitutionalHoldingsTool.handler(input, ctx);
+
+    const rows = bridge.registerDataframe.mock.calls[0]![1].rows;
+    expect(rows).toHaveLength(3); // raw sub-lines, not consolidated
+    expect(rows.some((r) => r.investment_discretion === 'DFND')).toBe(true);
+  });
+
+  it('does not register a dataframe for an empty info table', async () => {
+    mockApi.tryGetFilingDocument.mockImplementation(
+      async (_cik: string, _accn: string, docName: string) =>
+        docName === 'primary_doc.xml'
+          ? PRIMARY_DOC_XML
+          : '<informationTable xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable"></informationTable>',
+    );
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+    const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const result = await getInstitutionalHoldingsTool.handler(input, ctx);
+
+    expect(bridge.registerDataframe).not.toHaveBeenCalled();
+    expect(result.dataset).toBeUndefined();
   });
 });

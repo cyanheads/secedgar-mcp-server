@@ -6,6 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import {
   type InsiderTransaction,
@@ -16,6 +17,14 @@ import {
 /** Transaction type filter → SEC transaction codes. */
 const PURCHASE_CODES = new Set(['P']);
 const SALE_CODES = new Set(['S']);
+
+/**
+ * When a canvas is available, scan up to this many recent Form 4 filings (one
+ * rate-limited fetch each) so the dataframe holds a useful window for aggregation
+ * beyond the inline `limit`. Without a canvas, scanning stops as soon as the
+ * inline limit is met — no extra latency.
+ */
+const INSIDER_CANVAS_FILING_SCAN = 40;
 
 function matchesFilter(tx: InsiderTransaction, filter: 'purchase' | 'sale' | 'all'): boolean {
   if (filter === 'all') return true;
@@ -39,7 +48,7 @@ function ownerRelationship(owner: ReportingOwner): string {
 export const getInsiderTransactionsTool = tool('secedgar_get_insider_transactions', {
   title: 'Get Insider Transactions',
   description:
-    'Fetch Form 4 insider transactions (purchases, sales, grants, exercises) for a company by parsing SEC EDGAR ownership XML. Returns the reporting person, their relationship to the issuer, transaction date, type, shares traded, price per share, and shares owned after the transaction. Covers nonDerivative transactions (open-market buys/sells, gifts) and derivative transactions (option exercises, RSU vests). Use secedgar_search_filings with forms=["4"] for broader date-range queries or to search across all companies.',
+    'Fetch Form 4 insider transactions (purchases, sales, grants, exercises) for a company by parsing SEC EDGAR ownership XML. Returns the reporting person, their relationship to the issuer, transaction date, type, shares traded, price per share, and shares owned after the transaction. Covers nonDerivative transactions (open-market buys/sells, gifts) and derivative transactions (option exercises, RSU vests). When a canvas is available, the full set of transactions parsed from the scanned recent filings is materialized as df_<id> (the inline list is a preview capped at limit) — query it with secedgar_dataframe_query to aggregate net buy/sell by insider. Use secedgar_search_filings with forms=["4"] for broader date-range queries or to search across all companies.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -154,8 +163,27 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
           })
           .describe('One insider transaction parsed from a Form 4 filing.'),
       )
-      .describe('Insider transactions, newest filing first.'),
+      .describe(
+        'Insider transactions, newest filing first. Preview capped at `limit` — the full scanned set lives on the canvas dataframe (see `dataset`).',
+      ),
     filings_scanned: z.number().describe('Number of Form 4 filings scanned to produce the result.'),
+    dataset: z
+      .object({
+        name: z
+          .string()
+          .describe('Dataframe handle (df_XXXXX_XXXXX) — pass to secedgar_dataframe_query.'),
+        row_count: z.number().describe('Rows materialized in the dataframe.'),
+        expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
+        truncated: z
+          .boolean()
+          .describe(
+            'True when more recent Form 4 filings exist beyond the scanned window — the dataframe is a recent sample, not the issuer\'s full Form 4 history. Use secedgar_search_filings with forms=["4"] for exhaustive coverage.',
+          ),
+      })
+      .optional()
+      .describe(
+        'Canvas dataframe holding the full parsed transaction set from the scanned filings (the inline transactions[] is a preview capped at limit). Each row carries the issuer (issuer_cik, issuer_ticker) plus the transaction fields, so it aggregates net buy/sell by insider and joins across issuers. Query with secedgar_dataframe_query. Absent when canvas is unavailable or no transactions were parsed.',
+      ),
   }),
 
   enrichment: {
@@ -213,8 +241,14 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
 
     let filingsScanned = 0;
 
+    // With a canvas available, scan deeper than the inline `limit` so the dataframe
+    // holds a useful window for aggregation; without one, stop as soon as the inline
+    // limit is met (preserves the fast, low-fetch path).
+    const bridge = getCanvasBridge();
+    const scanFloor = bridge ? INSIDER_CANVAS_FILING_SCAN : 0;
+
     for (const filing of filingBatch) {
-      if (transactions.length >= input.limit) break;
+      if (transactions.length >= input.limit && filingsScanned >= scanFloor) break;
 
       // primaryDocument may be prefixed with xslF345X06/ — strip to get the bare filename
       const docName = filing.primaryDocument.replace(/^xsl[^/]+\//, '');
@@ -239,9 +273,10 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       const personName = primaryOwner?.name ?? 'Unknown';
       const relationship = primaryOwner ? ownerRelationship(primaryOwner) : 'Unknown';
 
+      // Collect every matching transaction — the full set backs the canvas; the
+      // inline response is sliced to `limit` after the scan completes.
       for (const tx of parsed.transactions) {
         if (!matchesFilter(tx, input.transaction_type)) continue;
-        if (transactions.length >= input.limit) break;
 
         transactions.push({
           filing_date: filing.filingDate,
@@ -274,23 +309,69 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       );
     }
 
+    // Use issuer data from the resolved entity (the submissions API may not always
+    // surface ticker in the same place).
+    const issuerTicker = match.ticker ?? undefined;
+
+    // Register the full scanned transaction set to the canvas; the inline response
+    // is a preview sliced to `limit`. Denormalize the issuer onto every row so the
+    // dataframe is self-contained for SQL aggregation and cross-issuer joins.
+    let dataset:
+      | { name: string; row_count: number; expires_at: string; truncated: boolean }
+      | undefined;
+    if (bridge && transactions.length > 0) {
+      // The scanned window is a recent sample — more Form 4 filings exist when we
+      // stopped before exhausting the fetched batch.
+      const truncated = filingsScanned < filingBatch.length;
+      const registered = await bridge.registerDataframe(ctx, {
+        rows: transactions.map((t) => ({
+          issuer_cik: match.cik,
+          issuer_ticker: issuerTicker ?? null,
+          reporting_person: t.reporting_person,
+          relationship: t.relationship,
+          security_title: t.security_title,
+          transaction_date: t.transaction_date ?? null,
+          filing_date: t.filing_date,
+          period_of_report: t.period_of_report ?? null,
+          transaction_code: t.transaction_code,
+          transaction_type: t.transaction_type,
+          is_derivative: t.is_derivative,
+          shares_traded: t.shares_traded ?? null,
+          price_per_share: t.price_per_share ?? null,
+          shares_owned_after: t.shares_owned_after ?? null,
+          ownership_type: t.ownership_type ?? null,
+          ownership_nature: t.ownership_nature ?? null,
+          accession_number: t.accession_number,
+        })),
+        sourceTool: 'secedgar_get_insider_transactions',
+        queryParams: {
+          ticker_or_cik: input.ticker_or_cik,
+          cik: match.cik,
+          transaction_type: input.transaction_type,
+        },
+        truncated,
+      });
+      if (registered) dataset = { ...toDatasetField(registered), truncated };
+    }
+
+    const inlineTransactions = transactions.slice(0, input.limit);
+
     ctx.log.info('Insider transactions retrieved', {
       cik: match.cik,
       filingsScanned,
       transactionCount: transactions.length,
+      returned: inlineTransactions.length,
       filter: input.transaction_type,
+      datasetName: dataset?.name,
     });
-
-    // Use issuer data from the first successfully parsed filing when available
-    // (the submissions API may not always surface ticker in the same place)
-    const issuerTicker = match.ticker ?? undefined;
 
     return {
       issuer_name: match.name ?? input.ticker_or_cik,
       issuer_cik: match.cik,
       issuer_ticker: issuerTicker,
-      transactions,
+      transactions: inlineTransactions,
       filings_scanned: filingsScanned,
+      dataset,
     };
   },
 
@@ -331,6 +412,15 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       );
       lines.push(
         `Code: ${tx.transaction_code} | Filed: ${tx.filing_date} [${tx.accession_number}]`,
+      );
+    }
+
+    if (result.dataset) {
+      const truncatedNote = result.dataset.truncated
+        ? ' (truncated — more recent Form 4 filings exist beyond the scanned window)'
+        : '';
+      lines.push(
+        `\nDataset: ${result.dataset.name} (${result.dataset.row_count} rows, expires ${result.dataset.expires_at})${truncatedNote} — query with secedgar_dataframe_query.`,
       );
     }
 

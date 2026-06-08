@@ -14,6 +14,34 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
 
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+  getCanvasBridge: vi.fn(),
+  toDatasetField: (r: { tableName: string; rowCount: number; expiresAt: string }) => ({
+    name: r.tableName,
+    row_count: r.rowCount,
+    expires_at: r.expiresAt,
+  }),
+}));
+
+import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+
+/** A canvas bridge stub whose registerDataframe echoes the rows + truncated flag it received. */
+function stubBridge() {
+  return {
+    registerDataframe: vi.fn(
+      async (
+        _ctx: unknown,
+        opts: { rows: Array<Record<string, unknown>>; sourceTool: string; truncated?: boolean },
+      ) => ({
+        tableName: 'df_TEST0_TEST1',
+        rowCount: opts.rows.length,
+        expiresAt: '2026-12-31T00:00:00.000Z',
+        columnSchema: [],
+      }),
+    ),
+  };
+}
+
 const SALE_XML = `<?xml version="1.0"?>
 <ownershipDocument>
   <periodOfReport>2024-03-15</periodOfReport>
@@ -107,6 +135,8 @@ const mockApi = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default to no canvas — individual tests opt in by returning a stub bridge.
+  vi.mocked(getCanvasBridge).mockReturnValue(undefined as never);
   vi.mocked(getEdgarApiService).mockReturnValue(mockApi as any);
   mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
   mockApi.getRecentFilingsByForm.mockResolvedValue([
@@ -484,5 +514,83 @@ describe('getInsiderTransactionsTool', () => {
     expect(() =>
       getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 101 }),
     ).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// canvas dataframe registration (#39)
+// ---------------------------------------------------------------------------
+
+describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
+  /** N recent Form 4 filings, each resolving to SALE_XML (one transaction). */
+  const filings = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      accessionNumber: `000000000${i}-24-000001`,
+      filingDate: '2024-03-16',
+      primaryDocument: 'form4.xml',
+    }));
+
+  it('omits dataset when the canvas is unavailable', async () => {
+    const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
+    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+    const result = await getInsiderTransactionsTool.handler(input, ctx);
+
+    expect(result.dataset).toBeUndefined();
+  });
+
+  it('registers the full scanned set, caps the inline list, and denormalizes the issuer', async () => {
+    mockApi.getRecentFilingsByForm.mockResolvedValue(filings(5));
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+
+    const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
+    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 2 });
+    const result = await getInsiderTransactionsTool.handler(input, ctx);
+
+    // Inline preview capped at limit; the full 5-filing scan lands on the canvas.
+    expect(result.transactions).toHaveLength(2);
+    expect(bridge.registerDataframe).toHaveBeenCalledTimes(1);
+    const opts = bridge.registerDataframe.mock.calls[0]![1];
+    expect(opts.sourceTool).toBe('secedgar_get_insider_transactions');
+    expect(opts.rows).toHaveLength(5);
+    expect(opts.rows[0]).toMatchObject({ issuer_cik: '0000320193', issuer_ticker: 'AAPL' });
+    // Whole fetched batch scanned (5 of 5) → not truncated.
+    expect(opts.truncated).toBe(false);
+    expect(result.dataset).toMatchObject({
+      name: 'df_TEST0_TEST1',
+      row_count: 5,
+      truncated: false,
+    });
+  });
+
+  it('marks the dataframe truncated when the scan cap stops before the batch is exhausted', async () => {
+    // More filings than INSIDER_CANVAS_FILING_SCAN (40) → the scan stops early.
+    mockApi.getRecentFilingsByForm.mockResolvedValue(filings(45));
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+
+    const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
+    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 2 });
+    const result = await getInsiderTransactionsTool.handler(input, ctx);
+
+    const opts = bridge.registerDataframe.mock.calls[0]![1];
+    expect(opts.rows).toHaveLength(40); // capped at the scan floor
+    expect(opts.truncated).toBe(true);
+    expect(result.dataset?.truncated).toBe(true);
+    expect(result.filings_scanned).toBe(40);
+  });
+
+  it('stops at the inline limit when no canvas is present (no extra fetches)', async () => {
+    // No canvas → scanning stops as soon as the inline limit is met, even with
+    // many filings available. Guards the "no extra latency without canvas" path.
+    mockApi.getRecentFilingsByForm.mockResolvedValue(filings(45));
+
+    const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
+    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 2 });
+    const result = await getInsiderTransactionsTool.handler(input, ctx);
+
+    expect(result.dataset).toBeUndefined();
+    // Each SALE_XML yields one transaction, so 2 filings suffice for limit=2.
+    expect(result.filings_scanned).toBe(2);
   });
 });

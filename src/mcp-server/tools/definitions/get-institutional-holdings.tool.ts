@@ -7,6 +7,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { parseInfoTableXml } from '@/services/edgar/ownership-parser.js';
 
@@ -98,7 +99,7 @@ function findInfoTableDocument(items: Array<{ name: string }>): string | undefin
 export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_holdings', {
   title: 'Get Institutional Holdings',
   description:
-    'Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR information table XML. Use ticker_or_cik to look up an institution (e.g., "Vanguard Group" or its CIK) and see what it holds — or pass a company ticker/CIK to find which institutions filed 13Fs covering that period. The 13F information table lists each position: issuer name, CUSIP, shares held, market value (in whole USD), and put/call designation for options. Sub-lines for the same security are consolidated into distinct positions sorted by value by default (set consolidate=false for raw filing rows). Institutions with less than $100M in 13(f) securities are exempt and may not file. Use secedgar_search_filings with forms=["13F-HR"] for broader search.',
+    'Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR information table XML. Use ticker_or_cik to look up an institution (e.g., "Vanguard Group" or its CIK) and see what it holds — or pass a company ticker/CIK to find which institutions filed 13Fs covering that period. The 13F information table lists each position: issuer name, CUSIP, shares held, market value (in whole USD), and put/call designation for options. Sub-lines for the same security are consolidated into distinct positions sorted by value by default (set consolidate=false for raw filing rows). The full parsed holdings set is materialized as df_<id> when a canvas is available — the inline holdings list is a preview capped at limit — so query it with secedgar_dataframe_query to aggregate the whole filing or self-join across quarters on cusip + reporting_period. Institutions with less than $100M in 13(f) securities are exempt and may not file. Use secedgar_search_filings with forms=["13F-HR"] for broader search.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -228,6 +229,18 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       )
       .describe(
         'Holdings truncated to limit — consolidated positions sorted by market value when consolidate=true, else raw information-table rows in filing order.',
+      ),
+    dataset: z
+      .object({
+        name: z
+          .string()
+          .describe('Dataframe handle (df_XXXXX_XXXXX) — pass to secedgar_dataframe_query.'),
+        row_count: z.number().describe('Rows materialized in the dataframe.'),
+        expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
+      })
+      .optional()
+      .describe(
+        'Canvas dataframe holding every parsed position from this 13F filing (the inline holdings[] is a preview capped at limit). Each row carries the filer metadata (filer_cik, filer_name, reporting_period, filing_date, accession_number) plus the position fields, so it self-joins across quarters/filers on cusip + reporting_period. Reflects the consolidate setting (consolidated positions when true, raw info-table sub-lines with investment_discretion when false). Query with secedgar_dataframe_query. Absent when canvas is unavailable or the filing had no holdings.',
       ),
   }),
 
@@ -374,6 +387,43 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     }));
 
     const positions = input.consolidate ? consolidatePositions(rows) : rows;
+
+    // Register the full parsed position set to the canvas (the inline holdings list
+    // is a preview capped at `limit`). Denormalize the filer/period metadata onto
+    // every row so the dataframe self-joins across quarters and filers on cusip +
+    // reporting_period without a separate lookup. Best-effort: a canvas failure
+    // leaves the inline response intact.
+    let dataset: { name: string; row_count: number; expires_at: string } | undefined;
+    const bridge = getCanvasBridge();
+    if (bridge && positions.length > 0) {
+      const registered = await bridge.registerDataframe(ctx, {
+        rows: positions.map((p) => ({
+          filer_cik: match.cik,
+          filer_name: filerName ?? match.name ?? null,
+          reporting_period: reportingPeriod ?? null,
+          filing_date: filingMeta.filingDate,
+          accession_number: filingMeta.accessionNumber,
+          issuer_name: p.issuer_name,
+          cusip: p.cusip ?? null,
+          title_of_class: p.title_of_class ?? null,
+          shares_or_principal_amount: p.shares_or_principal_amount ?? null,
+          shares_or_principal_type: p.shares_or_principal_type ?? null,
+          market_value_usd: p.market_value_usd ?? null,
+          put_call: p.put_call ?? null,
+          investment_discretion: p.investment_discretion ?? null,
+        })),
+        sourceTool: 'secedgar_get_institutional_holdings',
+        queryParams: {
+          ticker_or_cik: input.ticker_or_cik,
+          cik: match.cik,
+          quarter: input.quarter,
+          consolidate: input.consolidate,
+          accession_number: filingMeta.accessionNumber,
+        },
+      });
+      if (registered) dataset = toDatasetField(registered);
+    }
+
     const holdings = positions.slice(0, input.limit);
 
     if (holdings.length === 0) {
@@ -390,6 +440,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       totalHoldings: parsed.holdings.length,
       totalPositions: positions.length,
       returned: holdings.length,
+      datasetName: dataset?.name,
     });
 
     return {
@@ -401,6 +452,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       total_holdings_in_filing: parsed.holdings.length,
       total_positions: input.consolidate ? positions.length : undefined,
       holdings,
+      dataset,
     };
   },
 
@@ -433,6 +485,16 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
 
       lines.push(`**${h.issuer_name}**${classStr}${cusipStr}${putCallStr}`);
       lines.push(`${sharesStr} | ${valueStr}${discStr}`);
+    }
+
+    if (result.dataset) {
+      const note =
+        result.dataset.row_count > result.holdings.length
+          ? ` — showing ${result.holdings.length} of ${result.dataset.row_count} positions inline; full set on the dataframe`
+          : '';
+      lines.push(
+        `\nDataset: ${result.dataset.name} (${result.dataset.row_count} rows, expires ${result.dataset.expires_at})${note} — query with secedgar_dataframe_query.`,
+      );
     }
 
     return [{ type: 'text', text: lines.join('\n') }];
