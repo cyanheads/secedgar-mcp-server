@@ -283,6 +283,22 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     const relatedTags = mapping?.relatedTags ?? [];
     const caveats = fiscalQ4Caveats(input.period);
 
+    // Dispersion-caveat (issue #49): when the top of the distribution
+    // dwarfs the p95 by >= 50x, per-share frames are typically topped by
+    // reverse-split or tiny-denominator artifacts (e.g. EPS = $4,106 from
+    // a 1-for-10000 split, NVR = $540). Surface a one-line hint so callers
+    // don't trust absolute rankings blindly. The existing
+    // value_distribution schema already cites ~200x for scale-factor
+    // anomalies; ~50x is the bar that catches split/denominator artifacts
+    // on per-share frames without false-positiving normal sectors.
+    // Filtering/re-ranking is out of scope per the issue.
+    const DISPERSION_CAVEAT_THRESHOLD = 50;
+    if (valueDistribution.max_to_p95_ratio >= DISPERSION_CAVEAT_THRESHOLD) {
+      caveats.push(
+        "Top values may be split/denominator artifacts -- see value_distribution before trusting absolute rankings."
+      );
+    }
+
     ctx.log.info('Frames fetched', {
       concept: tag,
       period: input.period,

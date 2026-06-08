@@ -532,4 +532,61 @@ describe('fetchFramesTool', () => {
     expect(blocks[0].text).toContain('Caveat:');
     expect(blocks[0].text).toContain('AAPL Sep-end');
   });
+
+  it('renders dispersion caveat line in format text when ratio is high (#49)', () => {
+    // Issue #49: the handler appends an inline caveat when
+    // value_distribution.max_to_p95_ratio >= 50 (e.g. per-share frames
+    // topped by reverse-split artifacts). The format layer surfaces any
+    // caveat as a "Caveat: ..." line, so this verifies the render path
+    // end-to-end with a fabricated high-ratio distribution.
+    const output = {
+      concept: 'EarningsPerShareBasic',
+      period: 'CY2024',
+      unit: 'USD-per-shares',
+      label: 'Basic EPS',
+      total_companies: 4118,
+      data: [
+        { rank: 1, entityName: 'GLUCOTRACK, INC.', value: 4106, cik: 1, accn: 'x', end: '2024-12-31', ticker: 'GCT' },
+        { rank: 2, entityName: 'HIGHWATER ETHANOL, LLC', value: 1286, cik: 2, accn: 'x', end: '2024-12-31' },
+        { rank: 3, entityName: 'PISMO COAST VILLAGE, INC.', value: 629, cik: 3, accn: 'x', end: '2024-12-31' },
+      ],
+      unqueried_tags: [],
+      related_tags: [],
+      value_distribution: { median: 0, p95: 10, max: 500, max_to_p95_ratio: 50 },
+      period_end_range: { min: '2024-01-31', max: '2024-12-31' },
+      caveats: [
+        'Top values may be split/denominator artifacts -- see value_distribution before trusting absolute rankings.',
+      ],
+    };
+    const blocks = fetchFramesTool.format!(output);
+    expect(blocks[0].text).toContain('Caveat:');
+    expect(blocks[0].text).toContain('split/denominator artifacts');
+    expect(blocks[0].text).toContain('see value_distribution');
+  });
+
+  it('omits dispersion caveat when caveats array is empty (#49)', () => {
+    // Same fabricated output as the 'renders coverage, value dispersion'
+    // test, but with empty caveats — verifies the format does NOT inject
+    // a dispersion caveat when the handler chose not to add one.
+    const output = {
+      concept: 'Revenues',
+      period: 'CY2023',
+      unit: 'USD',
+      label: 'Revenue',
+      total_companies: 3131,
+      data: [],
+      unqueried_tags: ['Revenues', 'SalesRevenueNet'],
+      related_tags: [],
+      value_distribution: {
+        median: 1200000000,
+        p95: 42800000000,
+        max: 642000000000,
+        max_to_p95_ratio: 15,
+      },
+      period_end_range: { min: '2023-01-31', max: '2024-12-31' },
+      caveats: [],
+    };
+    const blocks = fetchFramesTool.format!(output);
+    expect(blocks[0].text).not.toContain('split/denominator artifacts');
+  });
 });
