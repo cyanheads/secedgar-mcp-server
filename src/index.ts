@@ -37,6 +37,8 @@ process.env.CANVAS_PROVIDER_TYPE ??= 'duckdb';
 const dropEnabled = getServerConfig().dataframeDropEnabled;
 
 await createApp({
+  title: 'SEC EDGAR MCP Server',
+  websiteUrl: 'https://github.com/cyanheads/secedgar-mcp-server',
   tools: [
     companySearchTool,
     searchFilingsTool,

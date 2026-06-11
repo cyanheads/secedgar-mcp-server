@@ -16,6 +16,12 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     'Get historical XBRL financial data for a company. Accepts friendly concept names (e.g., "revenue", "net_income", "assets") or raw XBRL tags. Discover available friendly names with secedgar_search_concepts. Handles historical tag changes and deduplicates data automatically.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
+  enrichment: {
+    truncated: z.boolean().optional().describe('True when the inline data[] was capped by limit.'),
+    shown: z.number().optional().describe('Number of periods shown inline.'),
+    cap: z.number().optional().describe('The limit cap applied.'),
+  },
+
   errors: [
     {
       reason: 'company_not_found',
@@ -412,6 +418,13 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       if (registered) dataset = toDatasetField(registered);
     }
 
+    // Slice inline view when a limit was requested; the dataframe holds the
+    // full series, so older periods stay queryable via the dataframe handle (#32).
+    const inlineData = input.limit ? data.slice(0, input.limit) : data;
+    if (input.limit && data.length > input.limit) {
+      ctx.enrich.truncated({ shown: input.limit, cap: input.limit });
+    }
+
     ctx.log.info('Financials retrieved', {
       company: match.cik,
       concept: conceptResponse.tag,
@@ -426,9 +439,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       label: conceptResponse.label || label,
       description: conceptResponse.description || undefined,
       unit: unitKey,
-      // Slice the inline view only; the dataframe registered above holds the
-      // full series, so older periods stay queryable via the dataframe handle (#32).
-      data: input.limit ? data.slice(0, input.limit) : data,
+      data: inlineData,
       tags_tried: tagsTried.length > 1 ? tagsTried : undefined,
       dataset,
     };

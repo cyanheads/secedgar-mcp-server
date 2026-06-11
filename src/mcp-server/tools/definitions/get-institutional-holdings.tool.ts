@@ -251,6 +251,12 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       .describe(
         'Guidance when no filings were found or the result set is empty — suggests alternatives.',
       ),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when the inline holdings[] was capped by limit.'),
+    shown: z.number().optional().describe('Number of holdings shown inline.'),
+    cap: z.number().optional().describe('The limit cap applied.'),
   },
 
   async handler(input, ctx) {
@@ -425,6 +431,9 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     }
 
     const holdings = positions.slice(0, input.limit);
+    if (positions.length > input.limit) {
+      ctx.enrich.truncated({ shown: holdings.length, cap: input.limit });
+    }
 
     if (holdings.length === 0) {
       ctx.enrich.notice(

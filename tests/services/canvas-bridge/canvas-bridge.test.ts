@@ -5,12 +5,12 @@
  * @module tests/services/canvas-bridge/canvas-bridge
  */
 
+import { inferSchemaFromRows } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CanvasBridge,
-  deriveAllNullableSchema,
   getCanvasBridge,
   initCanvasBridge,
 } from '@/services/canvas-bridge/canvas-bridge.js';
@@ -27,13 +27,16 @@ afterEach(() => {
   initCanvasBridge(undefined);
 });
 
-describe('deriveAllNullableSchema', () => {
+// Since mcp-ts-core 0.10.4, inferSchemaFromRows always emits nullable: true —
+// the bridge's deriveAllNullableSchema wrapper was removed. These tests verify
+// the framework guarantee the bridge relies on.
+describe('inferSchemaFromRows — always-nullable guarantee (mcp-ts-core ≥0.10.4)', () => {
   it('marks every inferred column nullable, including dense ones', () => {
     const rows = [
       { cik: '0000320193', name: 'Apple', value: 1 },
       { cik: '0000789019', name: 'Microsoft', value: 2 },
     ];
-    const schema = deriveAllNullableSchema(rows);
+    const schema = inferSchemaFromRows(rows);
     expect(schema).toHaveLength(3);
     for (const col of schema) {
       expect(col.nullable).toBe(true);
@@ -45,7 +48,7 @@ describe('deriveAllNullableSchema', () => {
       { cik: '0000320193', value: 383285000000, ratio: 0.25, flag: true },
       { cik: '0000789019', value: 211915000000, ratio: 0.31, flag: false },
     ];
-    const schema = deriveAllNullableSchema(rows);
+    const schema = inferSchemaFromRows(rows);
     const byName = Object.fromEntries(schema.map((c) => [c.name, c]));
     expect(byName.cik?.type).toBe('VARCHAR');
     expect(byName.value?.type).toBe('BIGINT');
@@ -53,12 +56,12 @@ describe('deriveAllNullableSchema', () => {
     expect(byName.flag?.type).toBe('BOOLEAN');
   });
 
-  it('handles sparse columns the framework would normally infer NOT NULL on', () => {
+  it('marks columns nullable even when all sampled rows are non-null', () => {
     const rows = [
       { cik: '0000320193', loc: 'CA' },
       { cik: '0000789019', loc: 'WA' },
     ];
-    const schema = deriveAllNullableSchema(rows);
+    const schema = inferSchemaFromRows(rows);
     const loc = schema.find((c) => c.name === 'loc');
     expect(loc?.nullable).toBe(true);
   });
@@ -264,7 +267,7 @@ describe('CanvasBridge.query with registerAs', () => {
           kind: 'table',
           rowCount: 2,
           columns: [
-            { name: 'rev_b', type: 'DOUBLE', nullable: false },
+            { name: 'rev_b', type: 'DOUBLE', nullable: true },
             { name: 'ticker', type: 'VARCHAR', nullable: true },
           ],
         },
@@ -285,7 +288,8 @@ describe('CanvasBridge.query with registerAs', () => {
     const byName = Object.fromEntries((meta?.columnSchema ?? []).map((c) => [c.name, c]));
     expect(byName.rev_b?.type).toBe('DOUBLE');
     expect(byName.ticker?.type).toBe('VARCHAR');
-    // Forced all-nullable per the bridge convention, regardless of DuckDB's view.
+    // Framework's inferSchemaFromRows always emits nullable: true since 0.10.4;
+    // bridge reads DuckDB column types verbatim from describe() after registerAs.
     expect(meta?.columnSchema.every((c) => c.nullable)).toBe(true);
   });
 

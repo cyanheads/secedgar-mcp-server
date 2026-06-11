@@ -1,15 +1,12 @@
 /**
  * @fileoverview Adapter between the SEC EDGAR tools and the framework
  * DataCanvas primitive. Holds one shared canvas per tenant, generates
- * `df_XXXXX_XXXXX` table names, derives all-nullable schemas (sparse SEC
- * columns must not trip NOT NULL appender rollbacks), tracks per-table TTL +
- * provenance in `ctx.state`, and lazy-sweeps expired tables on every public
- * op. Best-effort: failed canvas operations log a warning and return
+ * `df_XXXXX_XXXXX` table names, tracks per-table TTL + provenance in
+ * `ctx.state`, and lazy-sweeps expired metadata on every public op. The
+ * framework handles DuckDB-level TTL via `RegisterTableOptions.ttlMs`;
+ * system-catalog access is denied via `QueryOptions.denySystemCatalogs`.
+ * Best-effort: failed canvas operations log a warning and return
  * `undefined`/empty so the caller's inline response remains useful.
- *
- * Per-table TTL is bridge-side bookkeeping; backstop for
- * cyanheads/mcp-ts-core#140 until the framework exposes
- * `RegisterTableOptions.ttlMs`.
  * @module services/canvas-bridge/canvas-bridge
  */
 
@@ -24,7 +21,7 @@ import {
 import { McpError, notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { idGenerator } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
-import { assertNoSystemCatalogAccess, stripStringLiterals } from './sql-gate-extras.js';
+import { stripStringLiterals } from './sql-gate-extras.js';
 
 /** Per-table provenance + TTL metadata persisted in `ctx.state`. */
 export interface DataframeMeta {
@@ -105,17 +102,6 @@ const CANVAS_ID_KEY = 'canvas-id';
 /** Token character set for `df_XXXXX_XXXXX` table names. */
 const TABLE_NAME_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
-/**
- * Walk a sample of rows, infer column types, force every column to
- * `nullable: true`. The framework's default sniffer infers NOT NULL from
- * non-null samples; DuckDB rolls back the entire appender batch the first
- * time a sparse SEC column (e.g. `loc`, `ticker`) carries a null on a row
- * past the sample window.
- */
-export function deriveAllNullableSchema(rows: Record<string, unknown>[]): ColumnSchema[] {
-  return inferSchemaFromRows(rows).map((col) => ({ ...col, nullable: true }));
-}
-
 export class CanvasBridge {
   constructor(private readonly canvas: DataCanvas) {}
 
@@ -139,12 +125,15 @@ export class CanvasBridge {
       await this.sweepExpired(ctx);
       const instance = await this.acquireSharedCanvas(ctx);
       const tableName = this.mintTableName();
-      const schema = deriveAllNullableSchema(options.rows);
-
-      const result = await instance.registerTable(tableName, options.rows, { schema });
+      // inferSchemaFromRows always emits nullable: true since mcp-ts-core 0.10.4,
+      // so the explicit force-nullable pass is no longer needed.
+      const schema = inferSchemaFromRows(options.rows);
 
       const now = Date.now();
       const ttlMs = getServerConfig().datasetTtlSeconds * 1000;
+      // Pass ttlMs to the framework so it manages DuckDB-level TTL natively.
+      const result = await instance.registerTable(tableName, options.rows, { schema, ttlMs });
+
       const meta: DataframeMeta = {
         tableName: result.tableName,
         sourceTool: options.sourceTool,
@@ -204,29 +193,30 @@ export class CanvasBridge {
    * TTL-expired `df_<id>` before the framework gate's generic rejection. Any raw
    * DuckDB execution error that escapes the gate is re-thrown as a structured
    * `invalid_sql`; already-structured McpErrors (framework gate,
-   * `assertNoSystemCatalogAccess`) propagate as-is (#47).
+   * `denySystemCatalogs`) propagate as-is (#47).
    */
   async query(
     ctx: Context,
     sql: string,
     options: BridgeQueryOptions = {},
   ): Promise<{ result: QueryResult; meta?: DataframeMeta }> {
-    assertNoSystemCatalogAccess(sql);
     await this.sweepExpired(ctx);
     await this.assertReferencedDataframesExist(ctx, sql);
     const instance = await this.acquireSharedCanvas(ctx);
 
     const registerAs = options.registerAs;
+    const ttlMs = getServerConfig().datasetTtlSeconds * 1000;
     let result: QueryResult;
     try {
       result = await instance.query(sql, {
         ...(options.preview !== undefined && { preview: options.preview }),
         ...(options.rowLimit !== undefined && { rowLimit: options.rowLimit }),
-        ...(registerAs !== undefined && { registerAs }),
+        ...(registerAs !== undefined && { registerAs, ttlMs }),
+        denySystemCatalogs: true,
         signal: ctx.signal,
       });
     } catch (err) {
-      // Already-structured errors (framework gate, assertNoSystemCatalogAccess) propagate as-is.
+      // Already-structured errors (framework gate, denySystemCatalogs) propagate as-is.
       if (err instanceof McpError) throw err;
       // Any unclassified raw DuckDB execution error that escaped the framework's
       // prepare gate → structured invalid_sql. Missing tables are handled by the
@@ -244,16 +234,14 @@ export class CanvasBridge {
     if (registerAs && result.tableName) {
       const tableName = result.tableName;
       const now = Date.now();
-      const ttlMs = getServerConfig().datasetTtlSeconds * 1000;
       // Read the registered table's real DuckDB column types so dataframe_describe
       // reports them accurately (#28). Row inference can't be used here: DuckDB
       // serializes BIGINT as strings in query results (would mistype as VARCHAR),
       // and a zero-row result has nothing to sniff. describe() is authoritative
-      // for both. Force all-nullable per the bridge convention.
+      // for both. Framework always emits nullable: true on inferred columns since 0.10.4.
       const [info] = await instance.describe({ tableName });
-      const columnSchema: ColumnSchema[] = (
-        info?.columns ?? result.columns.map((name) => ({ name, type: 'VARCHAR' as const }))
-      ).map((col) => ({ ...col, nullable: true }));
+      const columnSchema: ColumnSchema[] =
+        info?.columns ?? result.columns.map((name) => ({ name, type: 'VARCHAR' as const }));
       meta = {
         tableName,
         sourceTool: options.sourceTool ?? 'secedgar_dataframe_query',

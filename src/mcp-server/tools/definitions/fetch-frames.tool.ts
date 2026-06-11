@@ -43,6 +43,12 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     'Fetch SEC XBRL frames for one concept × one period across all reporting companies. Inline response returns the top N ranked companies; the full frames response (all reporters) is materialized as df_<id> when a canvas is available, queryable via secedgar_dataframe_query. Accepts friendly names like "revenue" or "assets" (discover via secedgar_search_concepts) or raw XBRL tags. One call hits one XBRL tag — when a friendly name maps to multiple same-meaning tags, the response\'s `unqueried_tags` lists the others; call again per tag and UNION/COALESCE in SQL with an analysis-specific priority (e.g. SalesRevenueGoodsNet is goods-only). The response\'s `related_tags` separately flags alternate-DEFINITION tags a meaningful share of filers use as their primary line (e.g. cash incl. restricted cash, equity incl. noncontrolling interest) — a whole-universe screen on the base tag silently omits those filers; query them separately, but do not blindly union (the semantics differ). Response includes `value_distribution` and `period_end_range` to flag XBRL scale-factor anomalies and fiscal-year mixing.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
+  enrichment: {
+    truncated: z.boolean().optional().describe('True when the inline data[] was capped by limit.'),
+    shown: z.number().optional().describe('Number of companies shown inline.'),
+    cap: z.number().optional().describe('The limit cap applied.'),
+  },
+
   errors: [
     {
       reason: 'unknown_concept',
@@ -231,7 +237,11 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       input.sort === 'desc' ? b.entry.val - a.entry.val : a.entry.val - b.entry.val,
     );
 
-    const data = sorted.slice(0, input.limit).map(({ entry, cik, ticker }, i) => ({
+    const sliced = sorted.slice(0, input.limit);
+    if (sorted.length > input.limit) {
+      ctx.enrich.truncated({ shown: input.limit, cap: input.limit });
+    }
+    const data = sliced.map(({ entry, cik, ticker }, i) => ({
       rank: i + 1,
       company_name: entry.entityName,
       cik,

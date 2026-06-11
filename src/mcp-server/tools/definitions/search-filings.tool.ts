@@ -105,6 +105,9 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .describe(
         'Guidance when no results were returned — echoes the query and suggests how to broaden.',
       ),
+    truncated: z.boolean().optional().describe('True when results were capped by limit.'),
+    shown: z.number().optional().describe('Number of results shown inline.'),
+    cap: z.number().optional().describe('The limit cap applied.'),
   },
 
   errors: [
@@ -387,6 +390,8 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       ctx.enrich.notice(
         `No filings matched "${input.query}"${input.forms?.length ? ` with forms ${input.forms.join(', ')}` : ''}. Try broader terms, remove form filters, or check entity targeting syntax (ticker:AAPL).`,
       );
+    } else if (total > results.length) {
+      ctx.enrich.truncated({ shown: results.length, cap: input.limit });
     }
 
     return {

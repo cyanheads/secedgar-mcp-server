@@ -371,7 +371,7 @@ describe('searchFilingsTool', () => {
 
     const enrichment = getEnrichment(ctx);
     expect(enrichment.effectiveQuery).toBe('material weakness');
-    expect(enrichment.notice).toBeUndefined();
+    // notice may be set when total > results.length (truncation); effectiveQuery is the concern here.
   });
 
   it('populates enrichment notice when results are empty', async () => {

@@ -2,9 +2,8 @@
  * @fileoverview Run a single-statement SELECT against the canvas dataframes
  * registered by SEC EDGAR data-returning tools. Layered SQL gate: framework
  * (single-statement → SELECT only → plan-walk allowlist + denied table
- * functions) plus a bridge-layer deny on DuckDB system catalogs
- * (information_schema, pg_catalog, sqlite_master, duckdb_*) so callers cannot
- * enumerate every df_<id> on the shared canvas.
+ * functions + system-catalog denial via `denySystemCatalogs`) so callers
+ * cannot enumerate every df_<id> on the shared canvas.
  * @module mcp-server/tools/definitions/dataframe-query
  */
 
@@ -14,7 +13,7 @@ import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 
 export const dataframeQueryTool = tool('secedgar_dataframe_query', {
   description:
-    'Run a single-statement SELECT against the canvas dataframes registered by secedgar_fetch_frames, secedgar_search_filings, and secedgar_get_financials. Read-only: writes, DDL, DROP, COPY, PRAGMA, ATTACH, and external-file table functions are rejected. System catalogs (information_schema, pg_catalog, sqlite_master, duckdb_*) are denied at the bridge layer — list dataframes via secedgar_dataframe_describe. Optional register_as chains the result as a new dataframe with a fresh TTL.',
+    'Run a single-statement SELECT against the canvas dataframes registered by secedgar_fetch_frames, secedgar_search_filings, and secedgar_get_financials. Read-only: writes, DDL, DROP, COPY, PRAGMA, ATTACH, and external-file table functions are rejected. System catalogs (information_schema, pg_catalog, sqlite_master, duckdb_*) are denied — list dataframes via secedgar_dataframe_describe. Optional register_as chains the result as a new dataframe with a fresh TTL.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   // Agent-facing context — empty-result and row-cap notices populated via ctx.enrich

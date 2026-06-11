@@ -1,82 +1,46 @@
 /**
- * @fileoverview Tests for the bridge-layer system-catalog deny that sits on
- * top of the framework SQL gate.
+ * @fileoverview Tests for the bridge-layer SQL utility — `stripStringLiterals`.
+ * System-catalog denial is now delegated to the framework via
+ * `QueryOptions.denySystemCatalogs` (added in mcp-ts-core 0.10.4); the
+ * `assertNoSystemCatalogAccess` function was removed from this module.
+ * Catalog-denial behavior is exercised by the bridge integration tests.
  * @module tests/services/canvas-bridge/sql-gate-extras
  */
 
 import { describe, expect, it } from 'vitest';
-import { assertNoSystemCatalogAccess } from '@/services/canvas-bridge/sql-gate-extras.js';
+import { stripStringLiterals } from '@/services/canvas-bridge/sql-gate-extras.js';
 
-describe('assertNoSystemCatalogAccess', () => {
-  it('allows ordinary SELECTs against df_ tables', () => {
-    expect(() => assertNoSystemCatalogAccess('SELECT * FROM df_ABCDE_FGHIJ')).not.toThrow();
-    expect(() =>
-      assertNoSystemCatalogAccess(
-        "SELECT loc, COUNT(*) FROM df_ABC WHERE loc LIKE 'US-%' GROUP BY loc",
-      ),
-    ).not.toThrow();
+describe('stripStringLiterals', () => {
+  it('passes plain SQL through unchanged (no literals)', () => {
+    const sql = 'SELECT * FROM df_ABCDE_FGHIJ';
+    expect(stripStringLiterals(sql)).toBe(sql);
   });
 
-  it('rejects information_schema', () => {
-    expect(() => assertNoSystemCatalogAccess('SELECT * FROM information_schema.tables')).toThrow(
-      /system catalog/i,
+  it('strips single-quoted literals to empty single-quoted strings', () => {
+    const result = stripStringLiterals(
+      "SELECT * FROM df_ABCDE_FGHIJ WHERE entity_name LIKE '%information_schema%'",
     );
+    expect(result).not.toContain('information_schema');
+    expect(result).toContain("''");
   });
 
-  it('rejects pg_catalog', () => {
-    expect(() => assertNoSystemCatalogAccess('SELECT * FROM pg_catalog.pg_tables')).toThrow(
-      /system catalog/i,
+  it('strips double-quoted identifiers to empty double-quoted strings', () => {
+    const result = stripStringLiterals('SELECT "information_schema" FROM df_ABCDE_FGHIJ');
+    expect(result).not.toContain('information_schema');
+    expect(result).toContain('""');
+  });
+
+  it('handles escaped quotes inside literals', () => {
+    const result = stripStringLiterals("SELECT * FROM df_A WHERE x = 'it\\'s a test'");
+    expect(result).toContain("''");
+  });
+
+  it('preserves df_<id> handles outside literals', () => {
+    const result = stripStringLiterals(
+      "SELECT * FROM df_ABCDE_FGHIJ WHERE note = 'see df_OLD01_OLD02'",
     );
-  });
-
-  it('rejects sqlite_master', () => {
-    expect(() => assertNoSystemCatalogAccess('SELECT * FROM sqlite_master')).toThrow(
-      /system catalog/i,
-    );
-  });
-
-  it('rejects duckdb_tables() table function', () => {
-    expect(() => assertNoSystemCatalogAccess('SELECT * FROM duckdb_tables()')).toThrow(
-      /system catalog/i,
-    );
-  });
-
-  it('rejects duckdb_columns reference', () => {
-    expect(() => assertNoSystemCatalogAccess('SELECT column_name FROM duckdb_columns')).toThrow(
-      /system catalog/i,
-    );
-  });
-
-  it('rejects when catalog name appears in any case', () => {
-    expect(() => assertNoSystemCatalogAccess('SELECT * FROM INFORMATION_SCHEMA.TABLES')).toThrow(
-      /system catalog/i,
-    );
-  });
-
-  it('tolerates catalog tokens inside string literals', () => {
-    expect(() =>
-      assertNoSystemCatalogAccess(
-        "SELECT * FROM df_ABCDE_FGHIJ WHERE entity_name LIKE '%information_schema%'",
-      ),
-    ).not.toThrow();
-  });
-
-  it('attaches structured data.reason on rejection', () => {
-    try {
-      assertNoSystemCatalogAccess('SELECT * FROM information_schema.tables');
-      expect.fail('expected throw');
-    } catch (err) {
-      expect((err as { data?: { reason?: string } }).data?.reason).toBe('system_catalog_access');
-    }
-  });
-
-  it('attaches recovery hint pointing to dataframe_describe', () => {
-    try {
-      assertNoSystemCatalogAccess('SELECT * FROM duckdb_views');
-      expect.fail('expected throw');
-    } catch (err) {
-      const data = (err as { data?: { recovery?: { hint?: string } } }).data;
-      expect(data?.recovery?.hint).toMatch(/secedgar_dataframe_describe/);
-    }
+    // The real df_ in FROM is preserved; the one inside the string is stripped.
+    expect(result).toContain('df_ABCDE_FGHIJ');
+    expect(result).not.toContain('df_OLD01_OLD02');
   });
 });

@@ -199,6 +199,12 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       .describe(
         'Guidance when results are empty after filtering — explains the filter applied and suggests alternatives.',
       ),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when the inline transactions[] was capped by limit.'),
+    shown: z.number().optional().describe('Number of transactions shown inline.'),
+    cap: z.number().optional().describe('The limit cap applied.'),
   },
 
   async handler(input, ctx) {
@@ -371,6 +377,9 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     }
 
     const inlineTransactions = transactions.slice(0, input.limit);
+    if (transactions.length > input.limit) {
+      ctx.enrich.truncated({ shown: inlineTransactions.length, cap: input.limit });
+    }
 
     ctx.log.info('Insider transactions retrieved', {
       cik: match.cik,
