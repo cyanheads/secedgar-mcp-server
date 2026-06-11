@@ -27,11 +27,24 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
 
 vi.mock('@/services/edgar/filing-to-text.js', () => ({
   filingToText: vi.fn(),
+  filingToExtract: vi.fn(),
+  hasExtractCache: vi.fn(),
+  getExtractCache: vi.fn(),
+  setExtractCache: vi.fn(),
+  clearExtractCache: vi.fn(),
+  extractCacheSize: vi.fn(),
+  detectHeadings: vi.fn(),
+  windowText: vi.fn(),
 }));
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import { filingToText } from '@/services/edgar/filing-to-text.js';
+import {
+  detectHeadings,
+  filingToExtract,
+  getExtractCache,
+  windowText,
+} from '@/services/edgar/filing-to-text.js';
 
 const mockApi = {
   resolveCik: vi.fn(),
@@ -77,7 +90,18 @@ beforeEach(() => {
   mockApi.resolveCik.mockResolvedValue([]);
   mockApi.getSubmissions.mockResolvedValue(mockSubmissions);
   mockApi.findFilingCiks.mockResolvedValue([]);
-  vi.mocked(filingToText).mockReturnValue({ text: '', truncated: false, totalLength: 0 });
+  vi.mocked(getExtractCache).mockReturnValue(undefined);
+  vi.mocked(filingToExtract).mockReturnValue('');
+  vi.mocked(detectHeadings).mockReturnValue([]);
+  vi.mocked(windowText).mockImplementation((full: string, offset: number, limit: number) => {
+    const truncated = full.length > offset + limit;
+    return {
+      text: full.slice(offset, offset + limit),
+      truncated,
+      totalLength: full.length,
+      ...(truncated ? { nextOffset: offset + limit } : {}),
+    };
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -248,7 +272,7 @@ describe('getFilingTool — input validation', () => {
     });
     mockApi.tryGetFilingDocument.mockResolvedValue('<html>content</html>');
     mockApi.tryGetFilingHeaders.mockResolvedValue(null);
-    vi.mocked(filingToText).mockReturnValue({ text: 'content', truncated: false, totalLength: 7 });
+    vi.mocked(filingToExtract).mockReturnValue('content');
 
     const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({
@@ -279,11 +303,7 @@ describe('getFilingTool — input validation', () => {
     });
     mockApi.tryGetFilingDocument.mockResolvedValue('<html>SEC filing content</html>');
     mockApi.tryGetFilingHeaders.mockResolvedValue(null);
-    vi.mocked(filingToText).mockReturnValue({
-      text: 'SEC filing content',
-      truncated: false,
-      totalLength: 18,
-    });
+    vi.mocked(filingToExtract).mockReturnValue('SEC filing content');
     const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({ accession_number: '0000320193-23-000106' });
     const result = await getFilingTool.handler(input, ctx);

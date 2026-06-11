@@ -7,10 +7,19 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import type { FilingDocumentHeader } from '@/services/edgar/filing-headers.js';
-import { filingToText } from '@/services/edgar/filing-to-text.js';
+import {
+  detectHeadings,
+  filingToExtract,
+  getExtractCache,
+  setExtractCache,
+  windowText,
+} from '@/services/edgar/filing-to-text.js';
 import type { FilingIndex } from '@/services/edgar/types.js';
 
 const MAX_DOCUMENTS_IN_FORMAT = 10;
+/** Sentinel key suffix when no specific document is requested (primary document path). */
+const PRIMARY_SENTINEL = '\x00primary';
+
 type FilingIndexItem = FilingIndex['directory']['item'][number];
 
 interface DocumentEntry {
@@ -73,7 +82,7 @@ const documentEntrySchema = z
 
 export const getFilingTool = tool('secedgar_get_filing', {
   description:
-    "Fetch a specific filing's metadata and document content by accession number. Returns the primary document as readable text, with option to fetch specific exhibits.",
+    "Fetch a specific filing's metadata and document content by accession number. Returns the primary document as readable text. Use offset/next_offset for multi-page access to large filings (10-K, S-1 can exceed 1M chars): pass the next_offset from a truncated response to read the next page. Use section to jump directly to a heading (e.g. 'risk factors', 'item 7') without needing an offset.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -94,6 +103,18 @@ export const getFilingTool = tool('secedgar_get_filing', {
       code: JsonRpcErrorCode.NotFound,
       when: 'No filing matches the accession number under any candidate CIK',
       recovery: 'Verify the accession number and pass the company CIK explicitly.',
+    },
+    {
+      reason: 'offset_out_of_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The provided offset is at or beyond the end of the document',
+      recovery: 'Use an offset less than the total document length shown in the error message.',
+    },
+    {
+      reason: 'section_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The section string did not match any detected heading in the document',
+      recovery: 'Pick a heading from the outline in error data, or use offset paging instead.',
     },
   ],
 
@@ -116,7 +137,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .max(200000)
       .default(50000)
       .describe(
-        'Maximum characters of document text to return. 10-K filings can exceed 500,000 characters. Default 50,000 captures ~12,000 words (typically business overview, risk factors, and MD&A). Increase to 200,000 for full financial statements, or decrease for quick summaries.',
+        'Maximum characters of document text to return per page. 10-K filings can exceed 500,000 characters; S-1/A can exceed 1,000,000. Default 50,000 captures ~12,000 words (typically business overview, risk factors, and MD&A). Increase to 200,000 for full financial statements, or decrease for quick summaries. Use offset or section for subsequent pages.',
       ),
     document: z
       .string()
@@ -129,6 +150,21 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .default(false)
       .describe(
         'Include XBRL viewer artifacts and machine-readable taxonomy files (R*.htm fragments, *_cal/_def/_lab/_pre.xml linkbases, *_htm.xml inline instance, *.xsd schemas, MetaLinks.json, FilingSummary.xml, Show.js, report.css, *-xbrl.zip, Financial_Report.xlsx, EX-101.* technical exhibits) under documents.xbrl. Off by default — these dominate filing indexes (~100 entries on a typical 10-K) and are rarely relevant when reading filing content.',
+      ),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        'Character offset into the extracted document text. Pass next_offset from a truncated response to continue reading the next page. Default 0 reads from the beginning.',
+      ),
+    section: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Jump to a named section by case-insensitive substring match against detected headings (e.g. 'risk factors', 'item 7', 'certain relationships'). Takes precedence over offset when both are provided. On a miss, the error data carries the detected outline so you can pick the correct heading.",
       ),
   }),
 
@@ -193,9 +229,32 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .describe(
         'Filing documents grouped by category. Names from any list are valid values for the document input. XBRL viewer artifacts are suppressed by default; setting include_xbrl=true surfaces them under the xbrl bucket.',
       ),
-    content: z.string().describe('Document text content, truncated to content_limit.'),
-    content_truncated: z.boolean().describe('True if content was truncated.'),
-    content_total_length: z.number().describe('Full document length before truncation.'),
+    content: z.string().describe('Document text content for this page window.'),
+    content_truncated: z.boolean().describe('True if content was truncated at content_limit.'),
+    content_total_length: z.number().describe('Full document length before any truncation.'),
+    next_offset: z
+      .number()
+      .optional()
+      .describe(
+        'Character offset to pass as offset on the next call to continue reading. Only present when the response was truncated. Calling agents should follow this until content_truncated is false.',
+      ),
+    outline: z
+      .array(
+        z
+          .object({
+            heading: z.string().describe('Detected heading text.'),
+            offset: z
+              .number()
+              .describe(
+                'Character offset of this heading in the full document. Pass as offset to jump directly to this section.',
+              ),
+          })
+          .describe('One detected heading with its offset.'),
+      )
+      .optional()
+      .describe(
+        'Document outline — detected headings with their character offsets. Present on the first page of a truncated response (offset=0, no section). Use a heading offset as offset, or pass heading text as section, to jump to that section.',
+      ),
     filing_url: z.string().describe('Direct URL to the filing on SEC.gov.'),
   }),
 
@@ -203,55 +262,133 @@ export const getFilingTool = tool('secedgar_get_filing', {
     const api = getEdgarApiService();
 
     const accn = normalizeAccessionNumber(input.accession_number);
-    const resolved = await resolveFilingArchive(api, accn, input.cik, input.document);
-    if (!resolved.ok) {
-      if (resolved.kind === 'document_not_found') {
-        const primaryName = resolved.documents.primary[0]?.name;
-        const hint = primaryName
-          ? `Use document="${primaryName}" (the primary) or pick from documents.primary/exhibits in error data.`
-          : 'Pick a filename from documents.primary or exhibits in error data.';
-        throw ctx.fail(
-          'document_not_found',
-          `Document '${resolved.requestedDocument}' not found in this filing.`,
-          {
-            requested_document: resolved.requestedDocument,
+    const documentKey = input.document ?? PRIMARY_SENTINEL;
+    const cacheKey = `${accn}:${documentKey}`;
+
+    // If we have a cache hit, skip the document fetch entirely.
+    let fullText = getExtractCache(cacheKey);
+
+    let resolvedCik: string;
+    let index: FilingIndex;
+    let targetName: string;
+    let filingPrimaryName: string;
+
+    if (fullText === undefined) {
+      // Cache miss — fetch, convert, and cache.
+      const resolved = await resolveFilingArchive(api, accn, input.cik, input.document);
+      if (!resolved.ok) {
+        if (resolved.kind === 'document_not_found') {
+          const primaryName = resolved.documents.primary[0]?.name;
+          const hint = primaryName
+            ? `Use document="${primaryName}" (the primary) or pick from documents.primary/exhibits in error data.`
+            : 'Pick a filename from documents.primary or exhibits in error data.';
+          throw ctx.fail(
+            'document_not_found',
+            `Document '${resolved.requestedDocument}' not found in this filing.`,
+            {
+              requested_document: resolved.requestedDocument,
+              documents: resolved.documents,
+              recovery: { hint },
+            },
+          );
+        }
+        if (resolved.kind === 'no_documents') {
+          throw ctx.fail('no_documents', `No primary document found in filing ${accn}.`, {
+            accession_number: accn,
             documents: resolved.documents,
-            recovery: { hint },
+            recovery: {
+              hint: 'Specify the document input using a filename from documents.primary in error data.',
+            },
+          });
+        }
+        const cikSuffix = resolved.providedCik
+          ? ` (CIK ${resolved.providedCik.padStart(10, '0')})`
+          : '';
+        const recoveryHint = resolved.providedCik
+          ? 'Verify the accession number and CIK are correct.'
+          : 'Verify the accession number and pass the company CIK explicitly.';
+        throw ctx.fail('filing_not_found', `Filing '${accn}' not found${cikSuffix}.`, {
+          accession_number: accn,
+          cik: resolved.providedCik,
+          recovery: { hint: recoveryHint },
+        });
+      }
+
+      resolvedCik = resolved.cik;
+      index = resolved.index;
+      targetName = resolved.targetName;
+      filingPrimaryName = resolved.filingPrimaryName;
+
+      fullText = filingToExtract(resolved.html);
+      setExtractCache(cacheKey, fullText);
+    } else {
+      // Cache hit — still need metadata. Re-resolve the index (no document body fetch).
+      // A resolution failure here is a real failure (EDGAR index unavailable or the
+      // filing gone): fail honestly rather than fabricating placeholder metadata.
+      const metaResolved = await resolveFilingMeta(api, accn, input.cik, input.document);
+      if (!metaResolved.ok) {
+        throw ctx.fail('filing_not_found', `Filing '${accn}' could not be resolved.`, {
+          accession_number: accn,
+          cik: input.cik,
+          recovery: { hint: 'Verify the accession number and pass the company CIK explicitly.' },
+        });
+      }
+      resolvedCik = metaResolved.cik;
+      index = metaResolved.index;
+      targetName = metaResolved.targetName;
+      filingPrimaryName = metaResolved.filingPrimaryName;
+    }
+
+    // Determine effective offset (section wins over raw offset)
+    let effectiveOffset = input.offset ?? 0;
+
+    if (input.section) {
+      const headings = detectHeadings(fullText, 50);
+      const needle = input.section.toLowerCase();
+      const match = headings.find((h) => h.heading.toLowerCase().includes(needle));
+      if (!match) {
+        throw ctx.fail(
+          'section_not_found',
+          `Section '${input.section}' not found in this document.`,
+          {
+            section: input.section,
+            outline: headings,
+            ...ctx.recoveryFor('section_not_found'),
           },
         );
       }
-      if (resolved.kind === 'no_documents') {
-        throw ctx.fail('no_documents', `No primary document found in filing ${accn}.`, {
-          accession_number: accn,
-          documents: resolved.documents,
-          recovery: {
-            hint: 'Specify the document input using a filename from documents.primary in error data.',
-          },
-        });
-      }
-      const cikSuffix = resolved.providedCik
-        ? ` (CIK ${resolved.providedCik.padStart(10, '0')})`
-        : '';
-      const recoveryHint = resolved.providedCik
-        ? 'Verify the accession number and CIK are correct.'
-        : 'Verify the accession number and pass the company CIK explicitly.';
-      throw ctx.fail('filing_not_found', `Filing '${accn}' not found${cikSuffix}.`, {
-        accession_number: accn,
-        cik: resolved.providedCik,
-        recovery: { hint: recoveryHint },
-      });
+      effectiveOffset = match.offset;
     }
-    const { cik, index, html, targetName, filingPrimaryName } = resolved;
-    const accnNoDashes = accn.replace(/-/g, '');
 
-    const { text, truncated, totalLength } = filingToText(html, input.content_limit);
+    // Validate offset
+    if (effectiveOffset >= fullText.length && fullText.length > 0) {
+      throw ctx.fail(
+        'offset_out_of_range',
+        `Offset ${effectiveOffset} is beyond the end of this document (total length: ${fullText.length}).`,
+        {
+          offset: effectiveOffset,
+          content_total_length: fullText.length,
+          ...ctx.recoveryFor('offset_out_of_range'),
+        },
+      );
+    }
+
+    const { text, truncated, totalLength, nextOffset } = windowText(
+      fullText,
+      effectiveOffset,
+      input.content_limit,
+    );
+
+    // Emit outline on first-page truncated responses (not on subsequent pages or section jumps)
+    const shouldEmitOutline = truncated && effectiveOffset === 0 && !input.section;
+    const outline = shouldEmitOutline ? detectHeadings(fullText, 50) : undefined;
 
     // Parallelize: submissions metadata (recent-window enrichment) and submission
     // headers (canonical document types). Headers are best-effort — categorization
     // falls back to name-pattern inference when absent.
     const [submissions, headers] = await Promise.all([
-      api.getSubmissions(cik),
-      api.tryGetFilingHeaders(cik, accn),
+      api.getSubmissions(resolvedCik),
+      api.tryGetFilingHeaders(resolvedCik, accn),
     ]);
 
     const documents = categorizeDocuments(
@@ -273,12 +410,14 @@ export const getFilingTool = tool('secedgar_get_filing', {
 
     ctx.log.info('Filing retrieved', {
       accessionNumber: accn,
-      cik,
+      cik: resolvedCik,
       contentLength: totalLength,
+      offset: effectiveOffset,
       inRecentWindow: idx >= 0,
       headersResolved: headers !== null,
     });
 
+    const accnNoDashes = accn.replace(/-/g, '');
     const requestedDocument =
       input.document && input.document !== filingPrimaryName ? input.document : undefined;
 
@@ -287,7 +426,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       form: form || undefined,
       filing_date: filingDate || undefined,
       company_name: submissions.name || undefined,
-      cik,
+      cik: resolvedCik,
       period_ending: periodEnding,
       primary_document: filingPrimaryName,
       requested_document: requestedDocument,
@@ -295,7 +434,9 @@ export const getFilingTool = tool('secedgar_get_filing', {
       content: text,
       content_truncated: truncated,
       content_total_length: totalLength,
-      filing_url: `https://www.sec.gov/Archives/edgar/data/${cik}/${accnNoDashes}/${targetName}`,
+      next_offset: nextOffset,
+      outline,
+      filing_url: `https://www.sec.gov/Archives/edgar/data/${resolvedCik}/${accnNoDashes}/${targetName}`,
     };
   },
 
@@ -311,13 +452,24 @@ export const getFilingTool = tool('secedgar_get_filing', {
     const docLabel = result.requested_document
       ? `Primary: ${result.primary_document} | Requested: ${result.requested_document}`
       : `Primary: ${result.primary_document}`;
-    const meta = `Accession: ${result.accession_number} | ${docLabel} | ${result.content_total_length} chars${result.content_truncated ? ' (truncated)' : ''}`;
+    const truncatedNote = result.content_truncated
+      ? ` (truncated, next_offset: ${result.next_offset ?? '?'})`
+      : '';
+    const meta = `Accession: ${result.accession_number} | ${docLabel} | ${result.content_total_length} chars${truncatedNote}`;
 
     const docs = formatDocumentSection(result.documents);
 
+    const outlineText =
+      result.outline && result.outline.length > 0
+        ? `\n\nOutline:\n${result.outline.map((h) => `  [${h.offset}] ${h.heading}`).join('\n')}`
+        : '';
+
     const url = `\nURL: ${result.filing_url}`;
     return [
-      { type: 'text', text: `${header}\n${dateLine}\n${meta}${docs}${url}\n\n${result.content}` },
+      {
+        type: 'text',
+        text: `${header}\n${dateLine}\n${meta}${docs}${outlineText}${url}\n\n${result.content}`,
+      },
     ];
   },
 });
@@ -333,6 +485,10 @@ function normalizeAccessionNumber(input: string): string {
   return cleaned;
 }
 
+/**
+ * Resolve filing archive: fetch index + primary document HTML.
+ * Used on cache misses to get both the document content and index metadata.
+ */
 async function resolveFilingArchive(
   api: ReturnType<typeof getEdgarApiService>,
   accessionNumber: string,
@@ -375,6 +531,45 @@ async function resolveFilingArchive(
     return { ok: false, kind: 'document_not_found', requestedDocument, documents };
   }
   return { ok: false, kind: 'no_documents', documents };
+}
+
+type MetaOutcome =
+  | {
+      ok: true;
+      cik: string;
+      index: FilingIndex;
+      targetName: string;
+      filingPrimaryName: string;
+    }
+  | { ok: false };
+
+/**
+ * Resolve filing index and document names WITHOUT fetching the document body.
+ * Used on cache hits to get metadata while skipping the expensive document fetch.
+ */
+async function resolveFilingMeta(
+  api: ReturnType<typeof getEdgarApiService>,
+  accessionNumber: string,
+  providedCik: string | undefined,
+  requestedDocument: string | undefined,
+): Promise<MetaOutcome> {
+  const candidateCiks = await resolveCandidateCiks(api, accessionNumber, providedCik);
+
+  for (const cik of candidateCiks) {
+    const index = await api.tryGetFilingIndex(cik, accessionNumber);
+    if (!index) continue;
+
+    const items = index.directory.item;
+    const filingPrimaryName = findPrimaryDocument(items);
+    if (!filingPrimaryName) continue;
+
+    const targetName = requestedDocument ?? filingPrimaryName;
+    if (!items.some((item) => item.name === targetName)) continue;
+
+    return { ok: true, cik, index, targetName, filingPrimaryName };
+  }
+
+  return { ok: false };
 }
 
 async function resolveCandidateCiks(
