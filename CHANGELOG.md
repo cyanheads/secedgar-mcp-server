@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.4](changelog/0.10.x/0.10.4.md) — 2026-06-11
+
+Server identity: name and title now use the machine name secedgar-mcp-server (was 'SEC EDGAR MCP Server')
+
 ## [0.10.3](changelog/0.10.x/0.10.3.md) — 2026-06-11
 
 DataCanvas adoption: framework TTL, denySystemCatalogs, inferSchemaFromRows always-nullable; ctx.enrich.truncated() on 5 list tools; server identity fields; mcp-ts-core ^0.10.1 → ^0.10.5
