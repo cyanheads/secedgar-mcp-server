@@ -122,7 +122,8 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
   input: z.object({
     query: z
       .string()
-      .min(1)
+      .trim()
+      .min(1, 'Query cannot be blank')
       .describe(
         'Full-text search query. Supports: exact phrases ("material weakness"), boolean operators (revenue OR income), exclusion (-preliminary), wildcard suffix (account*), entity targeting (ticker:AAPL or cik:320193 in the query). Terms are AND\'d by default.',
       ),
@@ -164,7 +165,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .max(9999)
       .default(0)
       .describe(
-        'Pagination offset. Increment by limit for the next page. EDGAR caps total accessible results at 10,000 — offsets past this return nothing. Under date sort, pagination is bounded to the first 100 hits.',
+        'Pagination offset. For sort=relevance, EDGAR pages server-side up to its 10,000-result cap. For date sorts (the default) and entity targeting, the tool fetches a single 100-row window and slices it client-side — offsets at or past the window return nothing; switch to sort=relevance for deep pagination, or narrow the search (forms, dates, entity targeting).',
       ),
     sort: z
       .enum(['filing_date_desc', 'filing_date_asc', 'relevance'])
@@ -386,9 +387,22 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       ? `${query ? `${query} ` : ''}(entity scope: CIK ${entityCik})`
       : query;
     ctx.enrich.echo(effectiveQuery);
-    if (results.length === 0) {
+    if (total === 0) {
+      // Genuine no-match — EFTS returned zero hits. Echo all active criteria.
+      const formsPart = input.forms?.length ? ` | Forms: ${input.forms.join(', ')}` : '';
+      const datePart =
+        input.start_date && input.end_date
+          ? ` | Date: ${input.start_date} to ${input.end_date}`
+          : '';
       ctx.enrich.notice(
-        `No filings matched "${input.query}"${input.forms?.length ? ` with forms ${input.forms.join(', ')}` : ''}. Try broader terms, remove form filters, or check entity targeting syntax (ticker:AAPL).`,
+        `No filings matched "${input.query}"${formsPart}${datePart}. Try broader search terms, remove form filters, or widen the date range.`,
+      );
+    } else if (results.length === 0 && wideFetch && input.offset >= hits.length) {
+      // The offset exceeded the client-side window (wideFetch fetches 100 rows max).
+      // There are results — the caller just paged past the available window. The
+      // materialized dataframe holds the same window, so SQL paging reaches no further.
+      ctx.enrich.notice(
+        `Offset (${input.offset}) exceeds the fetched window (${hits.length} rows — date sorts and entity targeting fetch a single window). ${total} filings matched: switch to sort=relevance for EDGAR-side pagination up to 10,000 results, or narrow the search with forms, dates, or entity targeting.`,
       );
     } else if (total > results.length) {
       ctx.enrich.truncated({ shown: results.length, cap: input.limit });

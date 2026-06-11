@@ -603,6 +603,106 @@ describe('searchFilingsTool', () => {
     expect(input.sort).toBe('filing_date_desc');
   });
 
+  // --- Whitespace-only query validation (#57) ---
+
+  it('rejects a whitespace-only query at parse time', () => {
+    expect(() => searchFilingsTool.input.parse({ query: '   ' })).toThrow();
+  });
+
+  it('rejects an empty query at parse time', () => {
+    expect(() => searchFilingsTool.input.parse({ query: '' })).toThrow();
+  });
+
+  // --- Zero-total notice echoes all criteria including date range (#58) ---
+
+  it('populates enrichment notice with date range when total is zero', async () => {
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: { total: { value: 0, relation: 'eq' }, hits: [] },
+    });
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      query: 'xyzabc123',
+      forms: ['S-1'],
+      start_date: '2022-01-01',
+      end_date: '2022-06-30',
+    });
+    await searchFilingsTool.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(typeof enrichment.notice).toBe('string');
+    expect(enrichment.notice).toContain('xyzabc123');
+    expect(enrichment.notice).toContain('S-1');
+    expect(enrichment.notice).toContain('2022-01-01');
+    expect(enrichment.notice).toContain('2022-06-30');
+  });
+
+  // --- Offset-exceeds-window notice (wideFetch path) vs genuine no-match (#56) ---
+
+  it('fires window-exceeded notice (not no-match) when total > 0 but offset >= fetched window', async () => {
+    // EFTS returns total=10000 but only 2 hits in the window (simulates a narrow wideFetch)
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: {
+        total: { value: 10000, relation: 'eq' },
+        hits: [
+          {
+            _id: 'a',
+            _source: {
+              adsh: 'A',
+              form: '10-K',
+              file_date: '2024-01-01',
+              display_names: ['Test Corp'],
+              ciks: ['0001234567'],
+            },
+          },
+          {
+            _id: 'b',
+            _source: {
+              adsh: 'B',
+              form: '10-K',
+              file_date: '2024-01-02',
+              display_names: ['Test Corp'],
+              ciks: ['0001234567'],
+            },
+          },
+        ],
+      },
+    });
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    // offset=5 exceeds the 2-hit window → sliced to empty, but total > 0
+    const input = searchFilingsTool.input.parse({
+      query: 'annual report',
+      limit: 3,
+      offset: 5,
+    });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    expect(result.total).toBe(10000);
+    expect(result.results).toHaveLength(0);
+
+    const enrichment = getEnrichment(ctx);
+    expect(typeof enrichment.notice).toBe('string');
+    // Must mention the offset value and a route to sort=relevance or dataframe
+    expect(enrichment.notice).toContain('5');
+    // Must NOT use the no-match phrasing
+    expect(enrichment.notice).not.toContain('No filings matched');
+  });
+
+  it('fires no-match notice (not window notice) when total is zero', async () => {
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: { total: { value: 0, relation: 'eq' }, hits: [] },
+    });
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({ query: 'zzznomatch2' });
+    await searchFilingsTool.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toContain('No filings matched');
+    expect(enrichment.notice).toContain('zzznomatch2');
+  });
+
   it('formats output correctly', () => {
     const output = {
       total: 42,
