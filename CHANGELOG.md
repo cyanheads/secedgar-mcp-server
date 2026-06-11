@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.5](changelog/0.10.x/0.10.5.md) — 2026-06-11
+
+mcp-ts-core ^0.10.6: post-pack bundle cleaner, packaging linter checks 8-9, skill syncs, websiteUrl removed from createApp()
+
 ## [0.10.4](changelog/0.10.x/0.10.4.md) — 2026-06-11
 
 Server identity: name and title now use the machine name secedgar-mcp-server (was 'SEC EDGAR MCP Server')

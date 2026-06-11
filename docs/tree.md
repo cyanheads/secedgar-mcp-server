@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-06-08 19:36:03
+Generated on: 2026-06-11 21:05:43
 
 ```text
 secedgar-mcp-server/
@@ -42,6 +42,7 @@ secedgar-mcp-server/
 │   ├── check-framework-antipatterns.ts
 │   ├── check-skill-versions.ts
 │   ├── check-skills-sync.ts
+│   ├── clean-mcpb.ts
 │   ├── clean.ts
 │   ├── devcheck.ts
 │   ├── edgar-mirror-init.ts
