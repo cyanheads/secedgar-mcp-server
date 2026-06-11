@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.10.3](changelog/0.10.x/0.10.3.md) — 2026-06-11
+
+DataCanvas adoption: framework TTL, denySystemCatalogs, inferSchemaFromRows always-nullable; ctx.enrich.truncated() on 5 list tools; server identity fields; mcp-ts-core ^0.10.1 → ^0.10.5
+
 ## [0.10.2](changelog/0.10.x/0.10.2.md) — 2026-06-08
 
 Fix get_financials frame collisions (Spotify IFRS Revenue 26× undercount), instant-period first-call fallback, fetch_frames no_data for empty tags, dataframe_query structured missing_table/invalid_sql, company_search MF fund tickers on mirror, insider shares_traded now unsigned with direction.

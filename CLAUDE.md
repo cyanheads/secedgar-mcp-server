@@ -1,8 +1,8 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.10.2
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.10.1`
+**Version:** 0.10.3
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.10.5`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 
 Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-only, no API keys required. Full design: `docs/sec-edgar-mcp-design.md`.
@@ -16,7 +16,7 @@ Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-onl
 - **Logic throws, framework catches.** Tool/resource handlers are pure — throw on failure, no `try/catch`. Plain `Error` is fine; the framework catches, classifies, and formats. Use error factories (`notFound()`, `validationError()`, etc.) when the error code matters.
 - **Use `ctx.log`** for request-scoped logging. No `console` calls.
 - **Use `ctx.state`** for tenant-scoped storage. Never access persistence directly.
-- **Check `ctx.elicit` / `ctx.sample`** for presence before calling.
+- **Check `ctx.elicit`** for presence before calling.
 - **Secrets in env vars only** — never hardcoded.
 - **Close the loop on issues.** When implementing work tracked by a GitHub issue, comment on the issue with what landed and close it. Do both — a comment without a close leaves stale issues open; a close without a comment leaves no record of what shipped. The comment is for future readers — state the concrete changes, not the conversation that produced them.
 
@@ -84,7 +84,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 - **`get_financials` period default:** with `period_type` unset the series defaults to `annual` (clean FY series); if the annual filter empties a non-empty series whose frames are all instant (`CY####Q#I` — balance-sheet, shares-outstanding, raw instant tags), it falls back to the full series so the first call returns data (#48). An explicit `period_type` is honored as-is and still errors when it excludes everything.
 - **EFTS quirks:** `dateRange=custom` must be set when using date params; the singular `entity` param is ignored — `cik:`/`ticker:` targeting passes the resolved CIK via the plural `ciks` param (server-side scope, independent of the filing's name text, so former-name filings on the same CIK are matched)
 - **Filing content:** HTML → text via `html-to-text` library; pre-2005 filings produce noisier output
-- **Dataframes:** `secedgar_search_filings`, `secedgar_get_financials`, `secedgar_fetch_frames`, `secedgar_get_insider_transactions`, and `secedgar_get_institutional_holdings` materialize their full result set as `df_<id>` on a shared DuckDB-backed canvas (one per tenant). The two ownership tools register the full parsed set (inline response is a preview capped at `limit`); `get_insider_transactions` caps its scan at `INSIDER_CANVAS_FILING_SCAN` recent filings and flags `dataset.truncated` when more exist; its `shares_traded` is an unsigned magnitude paired with a `direction` (acquire/dispose) column, so net activity is `SUM(CASE WHEN direction='dispose' THEN -shares_traded ELSE shares_traded END)` (#46). Each row set carries an all-nullable schema (sparse SEC columns must not trip DuckDB's NOT NULL appender rollback). Per-table TTL is bridge-side bookkeeping in `ctx.state` until [cyanheads/mcp-ts-core#140](https://github.com/cyanheads/mcp-ts-core/issues/140) lands. `secedgar_dataframe_query` runs framework's SQL gate plus a bridge-layer deny on `information_schema`, `pg_catalog`, `sqlite_master`, and `duckdb_*` catalogs. Raw DuckDB execution errors (missing table, syntax) are caught in `bridge.query` and re-thrown as structured `missing_table`/`invalid_sql` reasons, with DuckDB's "Did you mean …?" hint stripped so internal catalog names don't leak (#47).
+- **Dataframes:** `secedgar_search_filings`, `secedgar_get_financials`, `secedgar_fetch_frames`, `secedgar_get_insider_transactions`, and `secedgar_get_institutional_holdings` materialize their full result set as `df_<id>` on a shared DuckDB-backed canvas (one per tenant). The two ownership tools register the full parsed set (inline response is a preview capped at `limit`); `get_insider_transactions` caps its scan at `INSIDER_CANVAS_FILING_SCAN` recent filings and flags `dataset.truncated` when more exist; its `shares_traded` is an unsigned magnitude paired with a `direction` (acquire/dispose) column, so net activity is `SUM(CASE WHEN direction='dispose' THEN -shares_traded ELSE shares_traded END)` (#46). Each row set carries an all-nullable schema (framework's `inferSchemaFromRows` always emits `nullable: true` since mcp-ts-core 0.10.4). Per-table TTL is delegated to the framework via `RegisterTableOptions.ttlMs` (resolved in mcp-ts-core#140); bridge still tracks metadata expiry in `ctx.state` for provenance. `secedgar_dataframe_query` runs framework's SQL gate with `denySystemCatalogs: true` to block `information_schema`, `pg_catalog`, `sqlite_master`, and `duckdb_*` catalog access. Raw DuckDB execution errors (missing table, syntax) are caught in `bridge.query` and re-thrown as structured `missing_table`/`invalid_sql` reasons, with DuckDB's "Did you mean …?" hint stripped so internal catalog names don't leak (#47).
 - **Local mirror (opt-in, `EDGAR_MIRROR_ENABLED`):** routes `resolveCik`, `tryGetCompanyConcept`, and `tryGetFrames` to a local SQLite mirror (framework `MirrorService`) of `company_tickers.json` + the `companyfacts.zip` bulk archive; the live API is the fallback on a miss (`EDGAR_MIRROR_FALLBACK_LIVE`). Bootstrap out-of-band with `bun run mirror:init`; refresh nightly via cron (HTTP) or `bun run mirror:refresh`. The three `mirror:*` commands also ship in the production Docker image — run them against a deployed container with `docker exec <container> bun run mirror:<init|refresh|verify>`. Node/Bun only — skipped on Workers. Frames are assembled from the company-facts store, so `loc` (business location) is absent. No FTS5 — every routed lookup is exact/indexed (cik+taxonomy+tag point, taxonomy+tag scan, ticker/CIK). Mirror ingests MF fund symbols from `company_tickers_mf.json`; on the mirror path a live MF merge supplements them when `FALLBACK_LIVE` is on (adding series/class and covering a mirror synced before MF ingestion), so funds resolve there too (#43).
 
 ---
@@ -128,7 +128,6 @@ Handlers receive a unified `ctx` object. Key properties:
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
 | `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
 | `ctx.elicit` | Ask user for structured input. **Check for presence first:** `if (ctx.elicit) { ... }` |
-| `ctx.sample` | Request LLM completion from the client. **Check for presence first:** `if (ctx.sample) { ... }` |
 | `ctx.signal` | `AbortSignal` for cancellation. |
 | `ctx.progress` | Task progress (present when `task: true`) — `.setTotal(n)`, `.increment()`, `.update(message)`. |
 | `ctx.requestId` | Unique request ID. |
