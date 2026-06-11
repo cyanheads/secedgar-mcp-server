@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.11.0](changelog/0.11.x/0.11.0.md) — 2026-06-11
+
+Dataframe-query error reclassification and register_as fix (#52, #53, #54); company_search and search_filings whitespace + pagination fixes (#55, #56, #57, #58); get_filing offset paging, section targeting, and extract cache (#59)
+
 ## [0.10.5](changelog/0.10.x/0.10.5.md) — 2026-06-11
 
 mcp-ts-core ^0.10.6: post-pack bundle cleaner, packaging linter checks 8-9, skill syncs, websiteUrl removed from createApp()
