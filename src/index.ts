@@ -39,7 +39,6 @@ const dropEnabled = getServerConfig().dataframeDropEnabled;
 await createApp({
   name: 'secedgar-mcp-server',
   title: 'secedgar-mcp-server',
-  websiteUrl: 'https://github.com/cyanheads/secedgar-mcp-server',
   tools: [
     companySearchTool,
     searchFilingsTool,
