@@ -5,7 +5,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getEdgarApiService, suggestCompanies } from '@/services/edgar/edgar-api-service.js';
 
 interface FilingEntry {
@@ -59,7 +59,8 @@ export const companySearchTool = tool('secedgar_company_search', {
   input: z.object({
     query: z
       .string()
-      .min(1)
+      .trim()
+      .min(1, 'Query cannot be blank')
       .describe(
         'Company ticker symbol (e.g., "AAPL", "VOO"), name (e.g., "Apple"), or CIK number (e.g., "320193"). Ticker is the fastest lookup and works for equities, ETFs, and mutual funds. Name search matches current and former names.',
       ),
@@ -184,7 +185,28 @@ export const companySearchTool = tool('secedgar_company_search', {
         ...ctx.recoveryFor('no_match'),
       });
     }
-    const submissions = await api.getSubmissions(match.cik);
+
+    // Bare-CIK fallback: resolveCik returns { cik } with no name/ticker when a numeric
+    // query missed the ticker cache — getSubmissions 404s for non-existent CIKs (#55).
+    // For cache-hit matches (name or ticker present), a 404 signals an EDGAR-side
+    // problem and must propagate unchanged.
+    const isBareCikFallback = !match.name && !match.ticker;
+    let submissions: Awaited<ReturnType<typeof api.getSubmissions>>;
+    try {
+      submissions = await api.getSubmissions(match.cik);
+    } catch (err) {
+      if (isBareCikFallback && err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
+        ctx.log.debug('CIK not found in EDGAR submissions', {
+          cik: match.cik,
+          query: input.query,
+        });
+        throw ctx.fail('no_match', `No company found for '${input.query}'.`, {
+          ...ctx.recoveryFor('no_match'),
+        });
+      }
+      throw err;
+    }
+
     ctx.log.info('Company resolved', {
       query: input.query,
       cik: match.cik,

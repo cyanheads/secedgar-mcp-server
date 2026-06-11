@@ -5,6 +5,7 @@
  * @module tests/mcp-server/tools/definitions/company-search.tool
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { companySearchTool } from '@/mcp-server/tools/definitions/company-search.tool.js';
@@ -364,6 +365,80 @@ describe('companySearchTool', () => {
     // The handler fetches the current entity name from submissions, not from the CikMatch.
     expect(result.cik).toBe('0001326801');
     expect(result.name).toBe('Meta Platforms, Inc.');
+  });
+
+  // --- Whitespace-only query validation (#57) ---
+
+  it('rejects a whitespace-only query at parse time', () => {
+    expect(() => companySearchTool.input.parse({ query: '   ' })).toThrow();
+  });
+
+  it('rejects an empty query at parse time', () => {
+    expect(() => companySearchTool.input.parse({ query: '' })).toThrow();
+  });
+
+  // --- Bare-CIK 404 surfaced as no_match (#55) ---
+
+  it('converts a bare-CIK 404 to no_match with recovery hint and no URL in message', async () => {
+    // resolveCik returns { cik } with no name/ticker — the bare-CIK fallback path
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000099999' });
+    mockApi.getSubmissions.mockRejectedValue(
+      new McpError(
+        JsonRpcErrorCode.NotFound,
+        'SEC EDGAR API returned 404 for https://data.sec.gov/submissions/CIK0000099999.json',
+        { url: 'https://data.sec.gov/submissions/CIK0000099999.json', status: 404 },
+      ),
+    );
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({ query: '99999', include_filings: false });
+
+    let caught: unknown;
+    try {
+      await companySearchTool.handler(input, ctx);
+    } catch (e) {
+      caught = e;
+    }
+
+    expect(caught).toBeDefined();
+    const err = caught as {
+      message?: string;
+      data?: { reason?: string; recovery?: { hint?: string } };
+    };
+    // Must surface as no_match, not a raw 404
+    expect(err.data?.reason).toBe('no_match');
+    // Recovery hint must be present
+    expect(typeof err.data?.recovery?.hint).toBe('string');
+    expect(err.data!.recovery!.hint!.length).toBeGreaterThan(0);
+    // Internal SEC URL must NOT appear in the error message
+    expect(err.message).not.toContain('data.sec.gov');
+    expect(err.message).not.toContain('CIK0000099999');
+    // Message must reference the query
+    expect(err.message).toContain('99999');
+  });
+
+  it('propagates a 404 unchanged when the match came from the ticker cache (has name/ticker)', async () => {
+    // Cache-hit match carries name and ticker — a 404 from getSubmissions is an EDGAR-side error
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+    const edgarError = new McpError(
+      JsonRpcErrorCode.NotFound,
+      'SEC EDGAR API returned 404 for https://data.sec.gov/submissions/CIK0000320193.json',
+      { url: 'https://data.sec.gov/submissions/CIK0000320193.json', status: 404 },
+    );
+    mockApi.getSubmissions.mockRejectedValue(edgarError);
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({ query: 'AAPL', include_filings: false });
+
+    let caught: unknown;
+    try {
+      await companySearchTool.handler(input, ctx);
+    } catch (e) {
+      caught = e;
+    }
+
+    // Must propagate the original error — not converted to no_match
+    expect(caught).toBe(edgarError);
   });
 
   // --- Null upstream fields (private / pre-IPO filers, e.g. SpaceX) ---
