@@ -211,7 +211,7 @@ describe('CanvasBridge.query error classification (#47)', () => {
     expect(instance.query).toHaveBeenCalled();
   });
 
-  it('already-structured McpError rethrows as-is (preserves reason) (#47)', async () => {
+  it('already-structured McpError (system_catalog_access) rethrows as-is (#47)', async () => {
     const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
     const structured = Object.assign(
       new McpError(JsonRpcErrorCode.ValidationError, 'system catalog denied'),
@@ -246,10 +246,181 @@ describe('CanvasBridge.query error classification (#47)', () => {
       data: { reason: 'invalid_sql' },
     });
   });
+
+  // #54 — framework gate emits internal SDK method names in missing_table hint;
+  // bridge catch rewrites it with an agent-facing recovery hint.
+  it('framework missing_table McpError → rewritten with agent-facing recovery hint (#54)', async () => {
+    const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
+    const frameworkErr = Object.assign(
+      new McpError(JsonRpcErrorCode.NotFound, 'Canvas table "mydata" does not exist.'),
+      {
+        data: {
+          reason: 'missing_table',
+          recovery: {
+            hint: 'Re-stage the table via registerTable() or call describe() to see what tables are currently available.',
+          },
+        },
+      },
+    );
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockRejectedValue(frameworkErr),
+    };
+    const acquire = vi.fn().mockResolvedValue(instance);
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+    const err = await bridge.query(ctx, 'SELECT * FROM mydata').catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err.data.reason).toBe('missing_table');
+    expect(err.data.recovery.hint).toMatch(/secedgar_dataframe_describe/);
+    expect(err.data.recovery.hint).not.toMatch(/registerTable|describe\(\)/);
+  });
+
+  it('framework missing_table for lowercase df_ handle → agent-facing recovery hint (#54)', async () => {
+    const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
+    const frameworkErr = Object.assign(
+      new McpError(JsonRpcErrorCode.NotFound, 'Canvas table "df_xxxxx_yyyyy" does not exist.'),
+      {
+        data: {
+          reason: 'missing_table',
+          recovery: {
+            hint: 'Re-stage the table via registerTable() or call describe() to see what tables are currently available.',
+          },
+        },
+      },
+    );
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockRejectedValue(frameworkErr),
+    };
+    const acquire = vi.fn().mockResolvedValue(instance);
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+    const err = await bridge.query(ctx, 'SELECT * FROM df_xxxxx_yyyyy').catch((e) => e);
+    expect(err.data.reason).toBe('missing_table');
+    expect(err.data.recovery.hint).toMatch(/secedgar_dataframe_describe/);
+  });
+
+  // #52 — SELECT with unknown column gets misclassified by the framework gate as
+  // non_select_statement + UNKNOWN; bridge reclassifies to invalid_sql when SELECT-shaped.
+  it('non_select_statement+UNKNOWN with SELECT-shaped SQL → reclassified invalid_sql (#52)', async () => {
+    const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
+    const gateErr = Object.assign(
+      new McpError(
+        JsonRpcErrorCode.ValidationError,
+        'Canvas query must be SELECT; the statement could not be parsed or prepared.',
+      ),
+      { data: { reason: 'non_select_statement', statementType: 'UNKNOWN' } },
+    );
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockRejectedValue(gateErr),
+    };
+    const acquire = vi.fn().mockResolvedValue(instance);
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    await ctx.state.set('df-meta/df_AAAAA_BBBBB', {
+      tableName: 'df_AAAAA_BBBBB',
+      expiresAt: '2999-01-01T00:00:00.000Z',
+    });
+
+    const err = await bridge
+      .query(ctx, 'SELECT nonexistent_col FROM df_AAAAA_BBBBB LIMIT 5')
+      .catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(err.data.reason).toBe('invalid_sql');
+    expect(err.data.recovery.hint).toMatch(/secedgar_dataframe_describe/);
+  });
+
+  it('non_select_statement+UNKNOWN with CTE SELECT → reclassified invalid_sql (#52)', async () => {
+    const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
+    const gateErr = Object.assign(
+      new McpError(
+        JsonRpcErrorCode.ValidationError,
+        'Canvas query must be SELECT; the statement could not be parsed or prepared.',
+      ),
+      { data: { reason: 'non_select_statement', statementType: 'UNKNOWN' } },
+    );
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockRejectedValue(gateErr),
+    };
+    const acquire = vi.fn().mockResolvedValue(instance);
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    await ctx.state.set('df-meta/df_AAAAA_BBBBB', {
+      tableName: 'df_AAAAA_BBBBB',
+      expiresAt: '2999-01-01T00:00:00.000Z',
+    });
+
+    const err = await bridge
+      .query(ctx, 'WITH x AS (SELECT 1) SELECT bad_col FROM x')
+      .catch((e) => e);
+    expect(err.data.reason).toBe('invalid_sql');
+  });
+
+  it('non_select_statement+UNKNOWN with INSERT SQL → stays non_select_statement (#52)', async () => {
+    // An INSERT that reaches DuckDB and gets UNKNOWN statementType should not be
+    // reclassified — it is NOT SELECT-shaped. In practice the gate catches it
+    // earlier (INSERT would get statementType: 'INSERT'), but the isSelectShaped
+    // guard covers the case regardless. Use a table name outside the df_ pattern
+    // so the pre-check doesn't intercept it first.
+    const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
+    const gateErr = Object.assign(
+      new McpError(
+        JsonRpcErrorCode.ValidationError,
+        'Canvas query must be SELECT; the statement could not be parsed or prepared.',
+      ),
+      { data: { reason: 'non_select_statement', statementType: 'UNKNOWN' } },
+    );
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockRejectedValue(gateErr),
+    };
+    const acquire = vi.fn().mockResolvedValue(instance);
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+    // Use non-pattern table name so the pre-check doesn't intercept it.
+    const err = await bridge.query(ctx, 'INSERT INTO my_table VALUES (1)').catch((e) => e);
+    expect(err.data.reason).toBe('non_select_statement');
+  });
+
+  it('non_select_statement with non-UNKNOWN statementType → stays as-is (#52)', async () => {
+    // A statement that prepares successfully as INSERT carries statementType: 'INSERT'.
+    // The bridge must NOT reclassify it — only UNKNOWN is the column-not-found signal.
+    const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
+    const gateErr = Object.assign(
+      new McpError(JsonRpcErrorCode.ValidationError, 'Canvas query must be SELECT.'),
+      { data: { reason: 'non_select_statement', statementType: 'INSERT' } },
+    );
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockRejectedValue(gateErr),
+    };
+    const acquire = vi.fn().mockResolvedValue(instance);
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+    const err = await bridge.query(ctx, 'INSERT INTO t VALUES (1)').catch((e) => e);
+    expect(err).toBe(gateErr); // same reference — not re-wrapped
+    expect(err.data.statementType).toBe('INSERT');
+  });
 });
 
 describe('CanvasBridge.query with registerAs', () => {
-  it("records the registered table's real DuckDB column types — not all VARCHAR (#28)", async () => {
+  it("records the registered table's real DuckDB column types via describe-all + find (#28, #53)", async () => {
+    // WORKAROUND (#53): describe({ tableName }) triggers an ambiguous-column binder
+    // error in the framework. Bridge now calls unfiltered describe() and finds the
+    // entry by name. Mock returns the full table list; bridge finds the registered one.
     const instance = {
       canvasId: 'cid_test',
       query: vi.fn().mockResolvedValue({
@@ -262,6 +433,12 @@ describe('CanvasBridge.query with registerAs', () => {
         tableName: 'df_NEW01_NEW02',
       }),
       describe: vi.fn().mockResolvedValue([
+        {
+          name: 'df_OTHER_TABLE',
+          kind: 'table',
+          rowCount: 5,
+          columns: [{ name: 'x', type: 'INTEGER', nullable: true }],
+        },
         {
           name: 'df_NEW01_NEW02',
           kind: 'table',
@@ -284,7 +461,9 @@ describe('CanvasBridge.query with registerAs', () => {
       { registerAs: 'df_NEW01_NEW02' },
     );
 
-    expect(instance.describe).toHaveBeenCalledWith({ tableName: 'df_NEW01_NEW02' });
+    // Must call unfiltered describe() — no tableName arg (#53 workaround).
+    expect(instance.describe).toHaveBeenCalledWith();
+    expect(instance.describe).not.toHaveBeenCalledWith({ tableName: expect.any(String) });
     const byName = Object.fromEntries((meta?.columnSchema ?? []).map((c) => [c.name, c]));
     expect(byName.rev_b?.type).toBe('DOUBLE');
     expect(byName.ticker?.type).toBe('VARCHAR');
@@ -330,5 +509,35 @@ describe('CanvasBridge.query with registerAs', () => {
     const byName = Object.fromEntries((meta?.columnSchema ?? []).map((c) => [c.name, c]));
     expect(byName.total_value?.type).toBe('BIGINT');
     expect(byName.ticker?.type).toBe('VARCHAR');
+  });
+
+  it('falls back to VARCHAR when describe-all find-miss occurs (#53)', async () => {
+    // If the registered table is not found in describe()'s result list, the bridge
+    // falls back to mapping result.columns to VARCHAR — same as the pre-#53 behavior
+    // on a describe() empty-return.
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockResolvedValue({
+        columns: ['col_a', 'col_b'],
+        rowCount: 1,
+        rows: [{ col_a: 'x', col_b: 'y' }],
+        tableName: 'df_NEWTB_LEONE',
+      }),
+      // describe() returns an empty list — simulates a find-miss
+      describe: vi.fn().mockResolvedValue([]),
+    };
+    const acquire = vi.fn().mockResolvedValue(instance);
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+    const { meta } = await bridge.query(ctx, 'SELECT col_a, col_b FROM df_A', {
+      registerAs: 'df_NEWTB_LEONE',
+    });
+
+    // Falls back to VARCHAR for each column in result.columns
+    const byName = Object.fromEntries((meta?.columnSchema ?? []).map((c) => [c.name, c]));
+    expect(byName.col_a?.type).toBe('VARCHAR');
+    expect(byName.col_b?.type).toBe('VARCHAR');
   });
 });

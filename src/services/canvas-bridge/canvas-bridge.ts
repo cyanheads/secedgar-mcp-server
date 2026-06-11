@@ -21,7 +21,7 @@ import {
 import { McpError, notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { idGenerator } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
-import { stripStringLiterals } from './sql-gate-extras.js';
+import { isSelectShaped, stripStringLiterals } from './sql-gate-extras.js';
 
 /** Per-table provenance + TTL metadata persisted in `ctx.state`. */
 export interface DataframeMeta {
@@ -216,8 +216,54 @@ export class CanvasBridge {
         signal: ctx.signal,
       });
     } catch (err) {
-      // Already-structured errors (framework gate, denySystemCatalogs) propagate as-is.
-      if (err instanceof McpError) throw err;
+      if (err instanceof McpError) {
+        const data = err.data as Record<string, unknown> | undefined;
+        // (#54) The framework gate's missing_table message and hint name internal SDK
+        // methods ("registerTable()", "describe()"). Rebuild both with agent-facing
+        // tool guidance so clients see consistent recovery text regardless of which
+        // code path rejected.
+        if (data?.reason === 'missing_table') {
+          const tableName = data.tableName;
+          const subject =
+            typeof tableName === 'string' ? `Canvas table "${tableName}"` : 'Canvas table';
+          throw notFound(
+            `${subject} does not exist — it may have expired or was never registered.`,
+            {
+              reason: 'missing_table',
+              ...(tableName !== undefined && { tableName }),
+              recovery: {
+                hint: 'Use secedgar_dataframe_describe to list available dataframes and verify the table name.',
+              },
+            },
+          );
+        }
+        // (#52) The framework gate prepares every statement. When a SELECT has an
+        // unknown column, DuckDB's binder throws before it can determine the statement
+        // type, so the gate assigns statementType: 'UNKNOWN' and reason:
+        // 'non_select_statement'. Guard on UNKNOWN (a genuine non-SELECT that prepares
+        // successfully carries its real statementType, e.g. 'INSERT') and re-check the
+        // SQL text — if it starts with SELECT or WITH it was a column/expression error,
+        // not a non-SELECT. The framework discards the binder detail, so we cannot name
+        // the offending column; point to dataframe_describe instead.
+        if (
+          data?.reason === 'non_select_statement' &&
+          data?.statementType === 'UNKNOWN' &&
+          isSelectShaped(sql)
+        ) {
+          throw validationError(
+            'The query is SELECT-shaped but failed to prepare — most likely an unknown column name or invalid expression. Use secedgar_dataframe_describe to check column names.',
+            {
+              reason: 'invalid_sql',
+              recovery: {
+                hint: 'Use secedgar_dataframe_describe to check column names and verify the query.',
+              },
+            },
+          );
+        }
+        // All other structured McpErrors (system_catalog_access, genuine non-SELECT
+        // statements, etc.) propagate as-is.
+        throw err;
+      }
       // Any unclassified raw DuckDB execution error that escaped the framework's
       // prepare gate → structured invalid_sql. Missing tables are handled by the
       // pre-check above (the gate rejects an unbindable statement first).
@@ -239,7 +285,15 @@ export class CanvasBridge {
       // serializes BIGINT as strings in query results (would mistype as VARCHAR),
       // and a zero-row result has nothing to sniff. describe() is authoritative
       // for both. Framework always emits nullable: true on inferred columns since 0.10.4.
-      const [info] = await instance.describe({ tableName });
+      //
+      // WORKAROUND (#53): instance.describe({ tableName }) triggers a DuckDB binder
+      // error — "Ambiguous reference to column name 'table_name'" — because the
+      // framework's describe() pushes an unqualified table_name filter into a WHERE
+      // clause where a LEFT JOIN to duckdb_tables() is in scope. Use the unfiltered
+      // describe() and find the entry by name instead. Revert to describe({ tableName })
+      // when the framework qualifies the filter (t.table_name).
+      const allTables = await instance.describe();
+      const info = allTables.find((t) => t.name === tableName);
       const columnSchema: ColumnSchema[] =
         info?.columns ?? result.columns.map((name) => ({ name, type: 'VARCHAR' as const }));
       meta = {

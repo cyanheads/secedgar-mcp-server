@@ -189,6 +189,24 @@ describe('dataframeQueryTool', () => {
     expect(enrichment.notice).toBeUndefined();
   });
 
+  it('register_as rejects names not matching df_XXXXX_XXXXX pattern (#53)', () => {
+    // The Zod schema enforces the pattern at parse time — arbitrary names should never
+    // reach DuckDB. register_as has never worked before (#53), so tightening breaks no one.
+    expect(() =>
+      dataframeQueryTool.input.parse({ sql: 'SELECT 1', register_as: 'aapl_big_years' }),
+    ).toThrow();
+    expect(() =>
+      dataframeQueryTool.input.parse({ sql: 'SELECT 1', register_as: 'df_xxxxx_yyyyy' }),
+    ).toThrow();
+    expect(() =>
+      dataframeQueryTool.input.parse({ sql: 'SELECT 1', register_as: 'df_ABCDE' }),
+    ).toThrow();
+    // Valid pattern passes
+    expect(() =>
+      dataframeQueryTool.input.parse({ sql: 'SELECT 1', register_as: 'df_ABCDE_12345' }),
+    ).not.toThrow();
+  });
+
   it('surfaces registered_as and expires_at when register_as is set (#28)', async () => {
     vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
     mockBridge.query.mockResolvedValue({
