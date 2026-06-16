@@ -1,5 +1,5 @@
 {
-  "name": "@cyanheads/secedgar-mcp-server",
+  "name": "secedgar-mcp-server",
   "version": "0.11.0",
   "description": "Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.",
   "author": {
@@ -13,7 +13,7 @@
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "sec", "edgar", "xbrl", "filings", "financial-data"],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
-    "displayName": "@cyanheads/secedgar-mcp-server",
+    "displayName": "secedgar-mcp-server",
     "shortDescription": "Query SEC EDGAR filings, XBRL financials, and company data through MCP.",
     "longDescription": "",
     "developerName": "cyanheads",
