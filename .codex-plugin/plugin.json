@@ -1,6 +1,6 @@
 {
   "name": "secedgar-mcp-server",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.",
   "author": {
     "name": "cyanheads",
@@ -15,7 +15,7 @@
   "interface": {
     "displayName": "secedgar-mcp-server",
     "shortDescription": "Query SEC EDGAR filings, XBRL financials, and company data through MCP.",
-    "longDescription": "",
+    "longDescription": "Read-only access to SEC EDGAR: resolve companies by ticker, name, or CIK; run full-text search across filings since 1993; fetch filing document text; and pull historical XBRL financials and frames by friendly concept name or raw tag. Insider (Form 3/4/5) and institutional (13F-HR) holdings are parsed from source, and data-returning tools also stage their full result set as a DuckDB dataframe for downstream SQL. No API keys required.",
     "developerName": "cyanheads",
     "category": "",
     "capabilities": ["Read"],
