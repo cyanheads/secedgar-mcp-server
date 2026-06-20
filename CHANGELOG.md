@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.11.1](changelog/0.11.x/0.11.1.md) — 2026-06-20
+
+Adopt mcp-ts-core ^0.10.9: dataframe_describe filtered-table binder fix and dataframe_query SELECT-shaped prepare failures now classified invalid_sql with DuckDB binder detail; plugin-manifest devcheck lint, synced skills, dependency refresh
+
 ## [0.11.0](changelog/0.11.x/0.11.0.md) — 2026-06-11
 
 Dataframe-query error reclassification and register_as fix (#52, #53, #54); company_search and search_filings whitespace + pagination fixes (#55, #56, #57, #58); get_filing offset paging, section targeting, and extract cache (#59)
