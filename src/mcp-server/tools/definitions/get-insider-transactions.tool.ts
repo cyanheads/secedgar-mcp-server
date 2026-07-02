@@ -19,10 +19,11 @@ const PURCHASE_CODES = new Set(['P']);
 const SALE_CODES = new Set(['S']);
 
 /**
- * When a canvas is available, scan up to this many recent Form 4 filings (one
- * rate-limited fetch each) so the dataframe holds a useful window for aggregation
- * beyond the inline `limit`. Without a canvas, scanning stops as soon as the
- * inline limit is met — no extra latency.
+ * When a canvas is available, scan at least this many recent Form 4 filings —
+ * as many as the submissions window offers (one rate-limited fetch each) — so
+ * the dataframe holds a useful aggregation window even when the inline `limit`
+ * is small (#63). Without a canvas, scanning stops as soon as the inline limit
+ * is met — no extra latency.
  */
 const INSIDER_CANVAS_FILING_SCAN = 40;
 
@@ -219,13 +220,22 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       });
     }
 
-    // Fetch recent Form 4 filing metadata from submissions API
-    // We over-fetch by 5x to account for multi-transaction filings and filter losses.
-    const filingBatch = await api.getRecentFilingsByForm(
-      match.cik,
-      ['4', '4/A'],
-      Math.min(input.limit * 5, 100),
-    );
+    // With a canvas available, scan deeper than the inline `limit` so the dataframe
+    // holds a useful window for aggregation; without one, stop as soon as the inline
+    // limit is met (preserves the fast, low-fetch path).
+    const bridge = getCanvasBridge();
+    const scanFloor = bridge ? INSIDER_CANVAS_FILING_SCAN : 0;
+
+    // Fetch recent Form 4 filing metadata from the submissions API. Over-fetch by 5x
+    // to account for multi-transaction filings and filter losses; with a canvas, also
+    // fetch at least the scan floor so a small inline `limit` doesn't under-scan the
+    // dataframe window (#63). Capped at 100; the +1 sentinel row (metadata only, one
+    // submissions fetch regardless) detects Form 4 filings beyond the scan window so
+    // `dataset.truncated` is truthful.
+    const scanCap = Math.min(bridge ? Math.max(input.limit * 5, scanFloor) : input.limit * 5, 100);
+    const filingBatch = await api.getRecentFilingsByForm(match.cik, ['4', '4/A'], scanCap + 1);
+    const moreBeyondWindow = filingBatch.length > scanCap;
+    const filingsToScan = moreBeyondWindow ? filingBatch.slice(0, scanCap) : filingBatch;
 
     if (filingBatch.length === 0) {
       throw ctx.fail('no_filings_found', `No Form 4 filings found for '${input.ticker_or_cik}'.`, {
@@ -254,15 +264,13 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     }> = [];
 
     let filingsScanned = 0;
+    let scannedWholeWindow = true;
 
-    // With a canvas available, scan deeper than the inline `limit` so the dataframe
-    // holds a useful window for aggregation; without one, stop as soon as the inline
-    // limit is met (preserves the fast, low-fetch path).
-    const bridge = getCanvasBridge();
-    const scanFloor = bridge ? INSIDER_CANVAS_FILING_SCAN : 0;
-
-    for (const filing of filingBatch) {
-      if (transactions.length >= input.limit && filingsScanned >= scanFloor) break;
+    for (const filing of filingsToScan) {
+      if (transactions.length >= input.limit && filingsScanned >= scanFloor) {
+        scannedWholeWindow = false;
+        break;
+      }
 
       // primaryDocument may be prefixed with xslF345X06/ — strip to get the bare filename
       const docName = filing.primaryDocument.replace(/^xsl[^/]+\//, '');
@@ -341,9 +349,10 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       | { name: string; row_count: number; expires_at: string; truncated: boolean }
       | undefined;
     if (bridge && transactions.length > 0) {
-      // The scanned window is a recent sample — more Form 4 filings exist when we
-      // stopped before exhausting the fetched batch.
-      const truncated = filingsScanned < filingBatch.length;
+      // The scanned window is a recent sample — more Form 4 filings exist when the
+      // scan broke before exhausting its window, or the submissions window held
+      // more filings than the scan cap (the +1 sentinel fetch above) (#63).
+      const truncated = !scannedWholeWindow || moreBeyondWindow;
       const registered = await bridge.registerDataframe(ctx, {
         rows: transactions.map((t) => ({
           issuer_cik: match.cik,

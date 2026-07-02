@@ -614,6 +614,73 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
     expect(result.filings_scanned).toBe(40);
   });
 
+  // #63 — a small inline limit must not under-scan the canvas window: the
+  // submissions fetch honors the scan floor independently of `limit`, and
+  // dataset.truncated reflects Form 4 filings beyond the scanned window.
+  it('small inline limit still fetches and scans the canvas floor (#63)', async () => {
+    // Mock honors the requested fetch limit so the floor + sentinel are observable.
+    mockApi.getRecentFilingsByForm.mockImplementation(
+      async (_cik: string, _forms: string[], limit: number) => filings(45).slice(0, limit),
+    );
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+
+    const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
+    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 1 });
+    const result = await getInsiderTransactionsTool.handler(input, ctx);
+
+    // Fetch requested the 40-filing scan floor plus the +1 sentinel, not limit*5=5.
+    expect(mockApi.getRecentFilingsByForm).toHaveBeenCalledWith('0000320193', ['4', '4/A'], 41);
+    // The whole 40-filing window was scanned despite limit=1; inline stays capped.
+    expect(result.filings_scanned).toBe(40);
+    expect(result.transactions).toHaveLength(1);
+    const opts = bridge.registerDataframe.mock.calls[0]![1];
+    expect(opts.rows).toHaveLength(40);
+    // The sentinel row (41st filing) proves more Form 4s exist beyond the window.
+    expect(opts.truncated).toBe(true);
+    expect(result.dataset?.truncated).toBe(true);
+  });
+
+  it('dataset.truncated stays false when the submissions window is exhausted (#63)', async () => {
+    // Only 10 Form 4 filings exist — fewer than the 41 requested. All get scanned,
+    // no sentinel row, so the dataframe genuinely holds the full recent history.
+    mockApi.getRecentFilingsByForm.mockImplementation(
+      async (_cik: string, _forms: string[], limit: number) => filings(10).slice(0, limit),
+    );
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+
+    const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
+    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 1 });
+    const result = await getInsiderTransactionsTool.handler(input, ctx);
+
+    expect(result.filings_scanned).toBe(10);
+    const opts = bridge.registerDataframe.mock.calls[0]![1];
+    expect(opts.rows).toHaveLength(10);
+    expect(opts.truncated).toBe(false);
+    expect(result.dataset?.truncated).toBe(false);
+  });
+
+  it('dataset.truncated is true when the scan breaks before exhausting the window (#63)', async () => {
+    // 60 filings inside the fetch window (no sentinel: 60 < the 101 requested for
+    // limit=20). The scan floor (40 scanned, 20+ transactions collected) stops the
+    // loop with 20 unscanned filings left in the window → truncated.
+    mockApi.getRecentFilingsByForm.mockImplementation(
+      async (_cik: string, _forms: string[], limit: number) => filings(60).slice(0, limit),
+    );
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+
+    const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
+    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 20 });
+    const result = await getInsiderTransactionsTool.handler(input, ctx);
+
+    expect(result.filings_scanned).toBe(40);
+    const opts = bridge.registerDataframe.mock.calls[0]![1];
+    expect(opts.truncated).toBe(true);
+    expect(result.dataset?.truncated).toBe(true);
+  });
+
   it('stops at the inline limit when no canvas is present (no extra fetches)', async () => {
     // No canvas → scanning stops as soon as the inline limit is met, even with
     // many filings available. Guards the "no extra latency without canvas" path.
