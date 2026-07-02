@@ -124,7 +124,8 @@ export const getFilingTool = tool('secedgar_get_filing', {
       reason: 'section_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'The section string did not match any detected heading in the document',
-      recovery: 'Pick a heading from the outline in error data, or use offset paging instead.',
+      recovery:
+        'Pick a heading from the outline in the error message, or use offset paging instead.',
     },
   ],
 
@@ -179,7 +180,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .min(1)
       .optional()
       .describe(
-        "Jump to a named section by case-insensitive substring match against detected headings (e.g. 'risk factors', 'item 7', 'certain relationships'). Takes precedence over offset when both are provided. On a miss, the error data carries the detected outline so you can pick the correct heading.",
+        "Jump to a named section by case-insensitive substring match against detected headings (e.g. 'risk factors', 'item 7', 'certain relationships'). Takes precedence over offset when both are provided. On a miss, the error message includes the detected outline so you can pick the correct heading.",
       ),
   }),
 
@@ -362,13 +363,20 @@ export const getFilingTool = tool('secedgar_get_filing', {
       const needle = input.section.toLowerCase();
       const match = headings.find((h) => h.heading.toLowerCase().includes(needle));
       if (!match) {
+        // Render the outline into the message itself — clients reliably see only
+        // message + recovery hint, not error data (#70).
+        const outlineBlock = headings.length > 0 ? `\n\nOutline:\n${renderOutline(headings)}` : '';
+        const hint =
+          headings.length > 0
+            ? 'Pick a heading from the outline above and pass it as section.'
+            : 'No headings were detected in this document — use offset paging instead.';
         throw ctx.fail(
           'section_not_found',
-          `Section '${input.section}' not found in this document.`,
+          `Section '${input.section}' not found in this document.${outlineBlock}`,
           {
             section: input.section,
             outline: headings,
-            ...ctx.recoveryFor('section_not_found'),
+            recovery: { hint },
           },
         );
       }
@@ -476,7 +484,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
 
     const outlineText =
       result.outline && result.outline.length > 0
-        ? `\n\nOutline:\n${result.outline.map((h) => `  [${h.offset}] ${h.heading}`).join('\n')}`
+        ? `\n\nOutline:\n${renderOutline(result.outline)}`
         : '';
 
     const url = `\nURL: ${result.filing_url}`;
@@ -488,6 +496,15 @@ export const getFilingTool = tool('secedgar_get_filing', {
     ];
   },
 });
+
+/**
+ * Render outline entries as `  [offset] HEADING` lines. Shared by format()
+ * and the section_not_found error message, so both surfaces read identically.
+ * detectHeadings caps entries (50), which bounds the rendered block.
+ */
+function renderOutline(outline: Array<{ heading: string; offset: number }>): string {
+  return outline.map((h) => `  [${h.offset}] ${h.heading}`).join('\n');
+}
 
 /**
  * Normalize a schema-validated accession number to dash format (0000320193-23-000106).

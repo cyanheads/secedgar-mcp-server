@@ -783,6 +783,43 @@ describe('section targeting', () => {
     });
   });
 
+  it('section miss renders the detected outline in the error message text (#70)', async () => {
+    vi.mocked(detectHeadings).mockReturnValue(SYNTHETIC_HEADINGS);
+    vi.mocked(filingToExtract).mockReturnValue(SYNTHETIC_FULL_TEXT);
+
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: ACCN,
+      cik: '320193',
+      section: 'nonexistent heading xyz',
+    });
+
+    const err = (await getFilingTool.handler(input, ctx).catch((e: unknown) => e)) as Error;
+    // The client-visible text is message + recovery hint — the outline must be in the message.
+    expect(err.message).toContain('Outline:');
+    for (const h of SYNTHETIC_HEADINGS) {
+      expect(err.message).toContain(`  [${h.offset}] ${h.heading}`);
+    }
+  });
+
+  it('section miss with no detected headings omits the outline block and points at offset paging (#70)', async () => {
+    vi.mocked(detectHeadings).mockReturnValue([]);
+    vi.mocked(filingToExtract).mockReturnValue('plain text with no headings at all');
+
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: ACCN,
+      cik: '320193',
+      section: 'risk factors',
+    });
+
+    const err = (await getFilingTool.handler(input, ctx).catch((e: unknown) => e)) as Error & {
+      data?: { recovery?: { hint?: string } };
+    };
+    expect(err.message).not.toContain('Outline:');
+    expect(err.data?.recovery?.hint).toContain('offset paging');
+  });
+
   it('section takes precedence over offset when both are provided', async () => {
     vi.mocked(detectHeadings).mockReturnValue(SYNTHETIC_HEADINGS);
     vi.mocked(windowText).mockReturnValue({
