@@ -53,6 +53,13 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       recovery:
         'Check SQL syntax, column names, and table references against secedgar_dataframe_describe.',
     },
+    {
+      reason: 'register_as_clash',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The register_as target name already exists on the canvas',
+      recovery:
+        'Drop the existing dataframe with secedgar_dataframe_drop (when enabled), choose a different df_XXXXX_XXXXX name, or omit register_as.',
+    },
   ],
 
   input: z.object({

@@ -211,11 +211,17 @@ describe('CanvasBridge.query error classification (#47)', () => {
     expect(instance.query).toHaveBeenCalled();
   });
 
-  it('already-structured McpError (system_catalog_access) rethrows as-is (#47)', async () => {
+  // #60 — the framework's system_catalog_access error carries reason + catalog but
+  // no recovery hint (contract hints only attach via ctx.fail). The bridge rebuilds
+  // it with the declared recovery text, preserving message, reason, and catalog.
+  it('framework system_catalog_access → declared recovery hint attached, reason + catalog preserved (#60)', async () => {
     const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
     const structured = Object.assign(
-      new McpError(JsonRpcErrorCode.ValidationError, 'system catalog denied'),
-      { data: { reason: 'system_catalog_access' } },
+      new McpError(
+        JsonRpcErrorCode.ValidationError,
+        'Canvas query references a system catalog: information_schema.',
+      ),
+      { data: { reason: 'system_catalog_access', catalog: 'information_schema' } },
     );
     const instance = {
       canvasId: 'cid_test',
@@ -227,8 +233,69 @@ describe('CanvasBridge.query error classification (#47)', () => {
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
     const err = await bridge.query(ctx, 'SELECT 1').catch((e) => e);
-    expect(err).toBe(structured); // same reference — not re-wrapped
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(err.data.reason).toBe('system_catalog_access');
+    expect(err.data.catalog).toBe('information_schema');
+    expect(err.data.recovery.hint).toMatch(/secedgar_dataframe_describe/);
+    expect(err.message).toContain('information_schema');
+  });
+
+  // #60 — the framework's register_as_clash error carries reason + tableName but no
+  // recovery hint. The bridge rebuilds it with the declared contract recovery text.
+  it('framework register_as_clash → declared recovery hint attached, reason + tableName preserved (#60)', async () => {
+    const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
+    const structured = Object.assign(
+      new McpError(
+        JsonRpcErrorCode.ValidationError,
+        'Canvas table "df_ABCDE_12345" already exists. Drop it before reusing the name.',
+      ),
+      { data: { reason: 'register_as_clash', tableName: 'df_ABCDE_12345' } },
+    );
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockRejectedValue(structured),
+    };
+    const acquire = vi.fn().mockResolvedValue(instance);
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+    const err = await bridge
+      .query(ctx, 'SELECT 1', { registerAs: 'df_ABCDE_12345' })
+      .catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(err.data.reason).toBe('register_as_clash');
+    expect(err.data.tableName).toBe('df_ABCDE_12345');
+    expect(err.data.recovery.hint).toMatch(/secedgar_dataframe_drop/);
+    expect(err.message).toContain('df_ABCDE_12345');
+  });
+
+  // #60 — the pre-check path: DuckdbProvider's catch reclassifies the framework's own
+  // structured clash into a bare databaseError (classifyDuckdbError has no McpError
+  // rethrow guard), so a TRACKED clashing register_as target must be rejected before
+  // the provider ever runs. The rewrap above remains the fallback for untracked tables.
+  it('tracked register_as clash → structured error via pre-check, provider never called (#60)', async () => {
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn(),
+    };
+    const acquire = vi.fn().mockResolvedValue(instance);
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    await ctx.state.set('df-meta/df_TRACK_00001', {
+      tableName: 'df_TRACK_00001',
+      expiresAt: '2999-01-01T00:00:00.000Z',
+    });
+
+    const err = await bridge
+      .query(ctx, 'SELECT 1', { registerAs: 'df_TRACK_00001' })
+      .catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(err.data.reason).toBe('register_as_clash');
+    expect(err.data.tableName).toBe('df_TRACK_00001');
+    expect(err.data.recovery.hint).toMatch(/secedgar_dataframe_drop/);
+    expect(instance.query).not.toHaveBeenCalled();
   });
 
   it('unclassified DuckDB error → generic invalid_sql reason (#47)', async () => {

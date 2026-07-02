@@ -97,6 +97,10 @@ export interface BridgeQueryOptions {
 }
 
 const META_PREFIX = 'df-meta/';
+
+/** Recovery hint for a `register_as` name that collides with an existing dataframe (#60). */
+const REGISTER_AS_CLASH_HINT =
+  'Drop the existing dataframe with secedgar_dataframe_drop (when enabled), choose a different df_XXXXX_XXXXX name, or omit register_as.';
 const CANVAS_ID_KEY = 'canvas-id';
 
 /** Token character set for `df_XXXXX_XXXXX` table names. */
@@ -192,8 +196,10 @@ export class CanvasBridge {
    * A pre-check surfaces a structured `missing_table` for an unregistered or
    * TTL-expired `df_<id>` before the framework gate's generic rejection. Any raw
    * DuckDB execution error that escapes the gate is re-thrown as a structured
-   * `invalid_sql`; already-structured McpErrors (framework gate,
-   * `denySystemCatalogs`) propagate as-is (#47).
+   * `invalid_sql`; framework errors matching a declared tool-contract reason
+   * (`missing_table`, `register_as_clash`, `system_catalog_access`) are rebuilt
+   * with the contract recovery hint (#47, #54, #60); other structured McpErrors
+   * propagate as-is.
    */
   async query(
     ctx: Context,
@@ -205,6 +211,26 @@ export class CanvasBridge {
     const instance = await this.acquireSharedCanvas(ctx);
 
     const registerAs = options.registerAs;
+    // (#60) Reject a clashing register_as target against tracked dataframes before
+    // the provider runs: the framework's own clash rejection is reclassified to a
+    // bare databaseError in DuckdbProvider's catch (classifyDuckdbError has no
+    // McpError rethrow guard), stripping reason/recovery before it reaches the
+    // rewrap below. The rewrap stays as the fallback for untracked tables once the
+    // framework-side fix lands. sweepExpired above already cleared expired metas,
+    // so an expired name never false-clashes.
+    if (registerAs) {
+      const clash = await ctx.state.get<DataframeMeta>(`${META_PREFIX}${registerAs}`);
+      if (clash) {
+        throw validationError(
+          `Canvas table "${registerAs}" already exists — register_as requires an unused name.`,
+          {
+            reason: 'register_as_clash',
+            tableName: registerAs,
+            recovery: { hint: REGISTER_AS_CLASH_HINT },
+          },
+        );
+      }
+    }
     const ttlMs = getServerConfig().datasetTtlSeconds * 1000;
     let result: QueryResult;
     try {
@@ -260,8 +286,35 @@ export class CanvasBridge {
             },
           );
         }
-        // All other structured McpErrors (system_catalog_access, genuine non-SELECT
-        // statements, etc.) propagate as-is.
+        // (#60) Contract recovery hints only attach via ctx.fail/ctx.recoveryFor, so
+        // framework-origin errors reach clients without the declared guidance. Rebuild
+        // both remaining declared reasons with their contract recovery text, mirroring
+        // the missing_table treatment above.
+        if (data?.reason === 'register_as_clash') {
+          const tableName = data.tableName;
+          const subject =
+            typeof tableName === 'string'
+              ? `Canvas table "${tableName}"`
+              : 'The register_as target';
+          throw validationError(
+            `${subject} already exists — register_as requires an unused name.`,
+            {
+              reason: 'register_as_clash',
+              ...(tableName !== undefined && { tableName }),
+              recovery: { hint: REGISTER_AS_CLASH_HINT },
+            },
+          );
+        }
+        if (data?.reason === 'system_catalog_access') {
+          throw validationError(err.message, {
+            ...data,
+            recovery: {
+              hint: 'Query only df_<id> tables. Use secedgar_dataframe_describe to list available dataframes.',
+            },
+          });
+        }
+        // All other structured McpErrors (genuine non-SELECT statements, etc.)
+        // propagate as-is.
         throw err;
       }
       // Any unclassified raw DuckDB execution error that escaped the framework's

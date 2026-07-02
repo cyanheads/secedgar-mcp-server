@@ -53,6 +53,47 @@ describe('dataframeQueryTool', () => {
     expect(entry!.recovery.length).toBeGreaterThan(4);
   });
 
+  it('declares register_as_clash in errors contract (#60)', () => {
+    const entry = dataframeQueryTool.errors?.find((e) => e.reason === 'register_as_clash');
+    expect(entry).toBeDefined();
+    expect(entry!.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(entry!.recovery).toMatch(/secedgar_dataframe_drop/);
+  });
+
+  it('register_as clash from the bridge surfaces reason + recovery hint on the wire (#60)', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+    // Simulate the structured error the bridge rebuilds for a register_as clash.
+    mockBridge.query.mockRejectedValue(
+      Object.assign(
+        new Error(
+          'Canvas table "df_ABCDE_12345" already exists — register_as requires an unused name.',
+        ),
+        {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'register_as_clash',
+            tableName: 'df_ABCDE_12345',
+            recovery: {
+              hint: 'Drop the existing dataframe with secedgar_dataframe_drop (when enabled), choose a different df_XXXXX_XXXXX name, or omit register_as.',
+            },
+          },
+        },
+      ),
+    );
+    const ctx = createMockContext({ errors: dataframeQueryTool.errors });
+    const input = dataframeQueryTool.input.parse({
+      sql: 'SELECT 1',
+      register_as: 'df_ABCDE_12345',
+    });
+
+    await expect(dataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'register_as_clash',
+        recovery: { hint: expect.stringContaining('secedgar_dataframe_drop') },
+      },
+    });
+  });
+
   it('missing-table error from bridge surfaces missing_table reason (#47)', async () => {
     vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
     // Simulate the structured error thrown by canvas-bridge for a missing table
@@ -73,16 +114,19 @@ describe('dataframeQueryTool', () => {
     });
   });
 
-  it('already-structured system_catalog_access error still surfaces its original reason (#47)', async () => {
+  it('system_catalog_access from the bridge surfaces reason + recovery hint on the wire (#47, #60)', async () => {
     vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
-    // The bridge rethrows pre-structured McpErrors as-is
+    // The bridge rebuilds framework system_catalog_access errors with the declared
+    // recovery hint attached (#60); the handler passes them through untouched.
     mockBridge.query.mockRejectedValue(
       Object.assign(new Error('SQL references a denied system catalog: information_schema.'), {
         code: JsonRpcErrorCode.ValidationError,
         data: {
           reason: 'system_catalog_access',
           catalog: 'information_schema',
-          recovery: { hint: 'Query only df_<id> tables.' },
+          recovery: {
+            hint: 'Query only df_<id> tables. Use secedgar_dataframe_describe to list available dataframes.',
+          },
         },
       }),
     );
@@ -92,7 +136,10 @@ describe('dataframeQueryTool', () => {
     });
 
     await expect(dataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
-      data: { reason: 'system_catalog_access' },
+      data: {
+        reason: 'system_catalog_access',
+        recovery: { hint: expect.stringContaining('secedgar_dataframe_describe') },
+      },
     });
   });
 
