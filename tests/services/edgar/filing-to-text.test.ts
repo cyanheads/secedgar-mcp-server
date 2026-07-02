@@ -300,4 +300,63 @@ describe('detectHeadings', () => {
     const headings = detectHeadings(text);
     expect(headings).toHaveLength(0);
   });
+
+  it('returns headings sorted by offset', () => {
+    const text = `Item 7. Management's Discussion\n\nMD&A content.\n\nCONSOLIDATED BALANCE SHEETS\n\nBalance data.\n\nItem 9. Changes in Accountants\n\nContent.`;
+    const headings = detectHeadings(text);
+    const offsets = headings.map((h) => h.offset);
+    expect(offsets).toEqual([...offsets].sort((a, b) => a - b));
+    expect(headings.length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe('detectHeadings — mixed-case Item/Part headings (#71)', () => {
+  const NBSP = '\u00A0';
+
+  it('detects mixed-case Item headings with non-breaking-space separators (styled 10-K)', () => {
+    // Modern styled filings render "Item 1A.<NBSP><NBSP>Risk Factors" mixed-case.
+    const text = `Preamble text.\n\nItem 1.${NBSP}${NBSP}Business\n\nBusiness content.\n\nItem 1A.${NBSP}${NBSP}Risk Factors\n\nRisk content.`;
+    const texts = detectHeadings(text).map((h) => h.heading);
+    expect(texts).toContain(`Item 1.${NBSP}${NBSP}Business`);
+    expect(texts).toContain(`Item 1A.${NBSP}${NBSP}Risk Factors`);
+  });
+
+  it('detects mixed-case Item headings with regular-space separators', () => {
+    const text = `Intro.\n\nItem 7. Management's Discussion and Analysis of Financial Condition and Results of Operations\n\nMD&A content.`;
+    const headings = detectHeadings(text);
+    expect(headings.some((h) => h.heading.startsWith('Item 7.'))).toBe(true);
+  });
+
+  it('detects mixed-case Part headings', () => {
+    const text = `Some intro line.\n\nPart II\n\nContent under part two.`;
+    const texts = detectHeadings(text).map((h) => h.heading);
+    expect(texts).toContain('Part II');
+  });
+
+  it('ignores bare "Item N." TOC marker lines (no title on the line)', () => {
+    // TOC tables render the item number cell as its own line, title on the next.
+    const text = `Item 1.\nBusiness\n1\nItem 1A.\nRisk Factors\n5\n`;
+    expect(detectHeadings(text)).toHaveLength(0);
+  });
+
+  it('ignores unwrapped body paragraphs that start with "Item N."', () => {
+    const text = `Item 5. ${'word '.repeat(60)}end of a long unwrapped paragraph.`;
+    expect(detectHeadings(text)).toHaveLength(0);
+  });
+
+  it('dedups case-insensitively, keeping the later occurrence (TOC "Part I" vs body "PART I")', () => {
+    const text = `Part I\n\nTOC content in between.\n\nPART I\n\nBody content.`;
+    const headings = detectHeadings(text);
+    const partOne = headings.filter((h) => h.heading.toLowerCase() === 'part i');
+    expect(partOne).toHaveLength(1);
+    expect(partOne[0].heading).toBe('PART I');
+    expect(partOne[0].offset).toBe(text.lastIndexOf('PART I'));
+  });
+
+  it('still detects all-caps ITEM headings alongside mixed-case forms', () => {
+    const text = `ITEM 1A. RISK FACTORS\n\nOld-style content.\n\nItem 7.${NBSP}Management's Discussion\n\nNew-style content.`;
+    const texts = detectHeadings(text).map((h) => h.heading);
+    expect(texts).toContain('ITEM 1A. RISK FACTORS');
+    expect(texts).toContain(`Item 7.${NBSP}Management's Discussion`);
+  });
 });

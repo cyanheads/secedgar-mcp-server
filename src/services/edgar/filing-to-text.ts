@@ -98,35 +98,47 @@ export interface FilingHeading {
 }
 
 /**
- * Regex that matches SEC document headings:
- * - "ITEM N" / "ITEM NA" lines (10-K, 10-Q structure)
- * - All-caps lines of 9+ characters (registration statement TOC headings like "RISK FACTORS")
+ * Regexes that match SEC document headings, anchored to start-of-line:
+ * - All-caps forms — "ITEM N" / "ITEM NA" lines (10-K, 10-Q structure) and
+ *   all-caps lines of 9+ characters (registration statement TOC headings like
+ *   "RISK FACTORS"; older filings).
+ * - Mixed-case Item/Part forms — modern styled filings render headings as
+ *   "Item 1A. Risk Factors" / "Part II" spans (#71). The Item arm requires a
+ *   title after the marker (a bare "Item 1A." line is a TOC cell artifact) and
+ *   bounds the tail so unwrapped body paragraphs that begin with "Item ..."
+ *   don't register. `[^\S\n]` = horizontal whitespace — styled filings
+ *   separate marker and title with non-breaking spaces.
  *
- * Anchored to start-of-line, captures the line text up to a natural end.
- * Heuristic — best-effort, not guaranteed to match all or only headings.
+ * Heuristics — best-effort, not guaranteed to match all or only headings.
  */
-const HEADING_RE = /^(ITEM\s+\d+[A-Z]?\b[^\n]*|[A-Z][A-Z\s,()&./]{8,})\s*$/gm;
+const ALL_CAPS_HEADING_RE = /^(ITEM\s+\d+[A-Z]?\b[^\n]*|[A-Z][A-Z\s,()&./]{8,})\s*$/gm;
+const ITEM_PART_HEADING_RE =
+  /^(item[^\S\n]+\d{1,2}[a-c]?\.[^\S\n]+\S[^\n]{0,140}|part[^\S\n]+[ivx]{1,4}\b\.?)\s*$/gim;
 
 /**
- * Detect headings in extracted text and return them with their offsets.
- * Deduplicates by heading text, keeping the later occurrence (handles TOC vs body
- * duplicate headings — body occurrence is the more useful landing spot).
- * Caps output at maxEntries.
+ * Detect headings in extracted text and return them with their offsets,
+ * sorted by offset. Deduplicates case-insensitively by heading text, keeping
+ * the later occurrence (handles TOC vs body duplicate headings — the body
+ * occurrence is the more useful landing spot). Caps output at maxEntries.
  */
 export function detectHeadings(text: string, maxEntries = 50): FilingHeading[] {
-  const byHeading = new Map<string, number>();
-  HEADING_RE.lastIndex = 0;
-  for (let match = HEADING_RE.exec(text); match !== null; match = HEADING_RE.exec(text)) {
-    // For identical heading text, keep the later occurrence (body vs TOC dedup heuristic)
-    const heading = match[1];
-    if (heading !== undefined) byHeading.set(heading.trim(), match.index);
+  const matches: Array<{ heading: string; index: number }> = [];
+  for (const re of [ALL_CAPS_HEADING_RE, ITEM_PART_HEADING_RE]) {
+    re.lastIndex = 0;
+    for (let match = re.exec(text); match !== null; match = re.exec(text)) {
+      const heading = match[1];
+      if (heading !== undefined) matches.push({ heading: heading.trim(), index: match.index });
+    }
   }
-  const results: FilingHeading[] = [];
-  for (const [heading, offset] of byHeading) {
-    results.push({ heading, offset });
-    if (results.length >= maxEntries) break;
+  matches.sort((a, b) => a.index - b.index);
+
+  // For same heading text (case-insensitive), keep the later occurrence
+  // (body vs TOC dedup heuristic — also collapses "Part I" TOC vs "PART I" body).
+  const byHeading = new Map<string, FilingHeading>();
+  for (const { heading, index } of matches) {
+    byHeading.set(heading.toLowerCase(), { heading, offset: index });
   }
-  return results;
+  return [...byHeading.values()].sort((a, b) => a.offset - b.offset).slice(0, maxEntries);
 }
 
 /** Convert filing HTML to plain text, optionally truncating to a character limit. */
