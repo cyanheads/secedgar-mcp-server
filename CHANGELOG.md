@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.11.2](changelog/0.11.x/0.11.2.md) — 2026-07-02 · 🛡️ Security
+
+secedgar_get_filing hardening: accession/CIK validation before network I/O, exhibit filename-fallback classification without headers, sentinel-framed upstream filing text; mcp-ts-core ^0.10.10 + lock re-resolve clears bun audit from 8 vulnerabilities to 0 (hono, js-yaml)
+
 ## [0.11.1](changelog/0.11.x/0.11.1.md) — 2026-06-20
 
 Adopt mcp-ts-core ^0.10.9: dataframe_describe filtered-table binder fix and dataframe_query SELECT-shaped prepare failures now classified invalid_sql with DuckDB binder detail; plugin-manifest devcheck lint, synced skills, dependency refresh
