@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.12.0](changelog/0.12.x/0.12.0.md) — 2026-07-02 · ⚠️ Breaking
+
+Breaking: get_financials dataframe columns fiscal_year/fiscal_period renamed to source_filing_fy/source_filing_fp; heading detection covers mixed-case Item/Part headings on styled filings; section-miss errors render the detected outline in the message
+
 ## [0.11.3](changelog/0.11.x/0.11.3.md) — 2026-07-02
 
 Canvas-bridge register_as clash pre-check with contract recovery hints; EFTS degraded-2xx shape guard and typed ticker:/cik: validation in search_filings; insider-transactions canvas scan floor with truthful dataset.truncated; get_institutional_holdings docs drop the unimplemented issuer-to-holders lookup; .env.example dataframe settings
