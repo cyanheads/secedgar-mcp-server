@@ -14,6 +14,12 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
   initEdgarApiService: vi.fn(),
 }));
 
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+  getCanvasBridge: vi.fn(),
+  toDatasetField: vi.fn(),
+}));
+
+import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
 const mockConceptResponse: CompanyConceptResponse = {
@@ -693,5 +699,47 @@ describe('getFinancialsTool', () => {
     };
     const blocks = getFinancialsTool.format!(output);
     expect(blocks[0].text).toContain('$6.13');
+  });
+});
+
+describe('dataframe registration (#72)', () => {
+  it('registers source-filing fiscal keys as source_filing_fy/source_filing_fp columns', async () => {
+    const registerDataframe = vi.fn().mockResolvedValue({
+      name: 'df_ABCDE_FGHIJ',
+      rowCount: 3,
+      expiresAt: '2026-01-01T00:00:00.000Z',
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+    vi.mocked(toDatasetField).mockReturnValue({
+      name: 'df_ABCDE_FGHIJ',
+      row_count: 3,
+      expires_at: '2026-01-01T00:00:00.000Z',
+    });
+
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({
+      company: 'AAPL',
+      concept: 'revenue',
+      period_type: 'all',
+    });
+    const result = await getFinancialsTool.handler(input, ctx);
+
+    expect(registerDataframe).toHaveBeenCalledTimes(1);
+    const { rows } = registerDataframe.mock.calls[0][1];
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row).toHaveProperty('source_filing_fy');
+      expect(row).toHaveProperty('source_filing_fp');
+      expect(row).not.toHaveProperty('fiscal_year');
+      expect(row).not.toHaveProperty('fiscal_period');
+    }
+    // Source-filing values pass through unchanged under the new names.
+    expect(rows[0].source_filing_fy).toBe(2023);
+    expect(rows[0].source_filing_fp).toBe('FY');
+
+    // The inline data[] keeps the documented field names — out of scope for the rename.
+    expect(result.data[0]).toHaveProperty('fiscal_year');
+    expect(result.data[0]).toHaveProperty('fiscal_period');
+    expect(result.dataset?.name).toBe('df_ABCDE_FGHIJ');
   });
 });

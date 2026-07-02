@@ -116,13 +116,13 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
               .number()
               .nullable()
               .describe(
-                'Fiscal year of the source filing. Null when the source filing did not encode a fiscal year.',
+                "Fiscal year of the source filing, not the data period — every comparative period restated in the same filing carries that filing's fiscal year, so use end (or period) as the time key. Null when the source filing did not encode a fiscal year.",
               ),
             fiscal_period: z
               .string()
               .nullable()
               .describe(
-                'Fiscal period of the source filing (FY, Q1, Q2, Q3, Q4). Null when the source filing did not encode a fiscal period.',
+                'Fiscal period of the source filing (FY, Q1, Q2, Q3, Q4), not the data period. Null when the source filing did not encode a fiscal period.',
               ),
             form: z.string().describe('Source filing type (10-K, 10-Q, etc.).'),
             filed: z.string().describe('Date the source filing was submitted (YYYY-MM-DD).'),
@@ -149,7 +149,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       })
       .optional()
       .describe(
-        'Canvas dataframe handle holding the same time series. Use for cross-company JOINs via secedgar_dataframe_query. Absent when canvas is unavailable.',
+        'Canvas dataframe handle holding the same time series. Use for cross-company JOINs via secedgar_dataframe_query. The source-filing fiscal keys are materialized as source_filing_fy/source_filing_fp — order, group, and window by period_end, not by those columns. Absent when canvas is unavailable.',
       ),
   }),
 
@@ -398,8 +398,11 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
         value: d.value,
         period_start: d.start ?? null,
         period_end: d.end,
-        fiscal_year: d.fiscal_year,
-        fiscal_period: d.fiscal_period,
+        // Named for what they are — the SOURCE FILING's fy/fp, not the data
+        // period. Bare fiscal_year/fiscal_period invited ORDER BY/GROUP BY
+        // against the wrong key; period_end is the time key (#72).
+        source_filing_fy: d.fiscal_year,
+        source_filing_fp: d.fiscal_period,
         form: d.form,
         filed: d.filed,
         accession_number: d.accession_number,
