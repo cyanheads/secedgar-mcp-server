@@ -113,7 +113,7 @@ Surface Form 3/4/5 insider activity for a company by parsing ownership XML.
 
 Surface 13F-HR quarterly institutional holdings by parsing the information table.
 
-- Pass an institution (CIK or name) to see what it holds, or a company CIK to find its own 13F filings
+- Pass the institutional filer (CIK or full legal name, e.g. `0000102909` for Vanguard) to see what it holds — reverse lookup from a portfolio company to its holders is not supported (EDGAR has no issuer→13F index); use `secedgar_search_filings` with `forms=["13F-HR"]` for issuer-side questions
 - Each holding: issuer name, CUSIP, market value (whole USD), shares/principal, and put/call; raw rows also carry investment discretion
 - Sub-lines for the same security (one per manager/account) are consolidated into distinct positions sorted by value by default — pass `consolidate: false` for raw filing rows
 - Resolves the filing-manager name and reporting quarter from the cover page; target a specific quarter with `quarter` (e.g. `"2025-Q4"`)

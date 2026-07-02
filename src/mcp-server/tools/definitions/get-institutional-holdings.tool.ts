@@ -1,7 +1,8 @@
 /**
  * @fileoverview Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR
- * information table XML. Works for both issuer lookup (which institutions hold a stock)
- * and institution lookup (what a specific institution holds).
+ * information table XML. Institution lookup only — `ticker_or_cik` is the 13F filer.
+ * EDGAR has no issuer→13F-holders index, so reverse lookup (which institutions hold a
+ * stock) is out of scope (#62); issuer-side questions route to secedgar_search_filings.
  * @module mcp-server/tools/definitions/get-institutional-holdings
  */
 
@@ -99,7 +100,7 @@ function findInfoTableDocument(items: Array<{ name: string }>): string | undefin
 export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_holdings', {
   title: 'Get Institutional Holdings',
   description:
-    'Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR information table XML. Use ticker_or_cik to look up an institution (e.g., "Vanguard Group" or its CIK) and see what it holds — or pass a company ticker/CIK to find which institutions filed 13Fs covering that period. The 13F information table lists each position: issuer name, CUSIP, shares held, market value (in whole USD), and put/call designation for options. Sub-lines for the same security are consolidated into distinct positions sorted by value by default (set consolidate=false for raw filing rows). The full parsed holdings set is materialized as df_<id> when a canvas is available — the inline holdings list is a preview capped at limit — so query it with secedgar_dataframe_query to aggregate the whole filing or self-join across quarters on cusip + reporting_period. Institutions with less than $100M in 13(f) securities are exempt and may not file. Use secedgar_search_filings with forms=["13F-HR"] for broader search.',
+    'Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR information table XML. ticker_or_cik is the institutional filer (e.g., "Vanguard Group" or its CIK 0000102909) — the tool returns what that institution holds. It does not do reverse lookup from a portfolio company to its institutional holders (EDGAR has no issuer-to-13F index); for issuer-side questions, use secedgar_search_filings with forms=["13F-HR"]. The 13F information table lists each position: issuer name, CUSIP, shares held, market value (in whole USD), and put/call designation for options. Sub-lines for the same security are consolidated into distinct positions sorted by value by default (set consolidate=false for raw filing rows). The full parsed holdings set is materialized as df_<id> when a canvas is available — the inline holdings list is a preview capped at limit — so query it with secedgar_dataframe_query to aggregate the whole filing or self-join across quarters on cusip + reporting_period. Institutions with less than $100M in 13(f) securities are exempt and may not file. Use secedgar_search_filings with forms=["13F-HR"] for broader search.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -130,7 +131,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       .string()
       .min(1)
       .describe(
-        'Ticker symbol or CIK of the institutional filer (e.g., "0000102909" for Vanguard) or a company name. For institution lookups, CIK or the full legal name resolves most reliably — tickers are typically for operating companies, not fund managers.',
+        'The institutional filer whose 13F to fetch — its CIK (e.g., "0000102909" for Vanguard) or full legal name (e.g., "Vanguard Group"). CIK or the full legal name resolves most reliably; tickers usually belong to operating companies, which do not file 13Fs. This is NOT the portfolio company — passing an issuer ticker like "AAPL" finds that entity\'s own filings, not who holds it.',
       ),
     quarter: z
       .string()
