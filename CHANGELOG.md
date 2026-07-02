@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.11.3](changelog/0.11.x/0.11.3.md) — 2026-07-02
+
+Canvas-bridge register_as clash pre-check with contract recovery hints; EFTS degraded-2xx shape guard and typed ticker:/cik: validation in search_filings; insider-transactions canvas scan floor with truthful dataset.truncated; get_institutional_holdings docs drop the unimplemented issuer-to-holders lookup; .env.example dataframe settings
+
 ## [0.11.2](changelog/0.11.x/0.11.2.md) — 2026-07-02 · 🛡️ Security
 
 secedgar_get_filing hardening: accession/CIK validation before network I/O, exhibit filename-fallback classification without headers, sentinel-framed upstream filing text; mcp-ts-core ^0.10.10 + lock re-resolve clears bun audit from 8 vulnerabilities to 0 (hono, js-yaml)
