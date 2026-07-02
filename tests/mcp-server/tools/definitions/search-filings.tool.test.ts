@@ -3,6 +3,7 @@
  * @module tests/mcp-server/tools/definitions/search-filings.tool
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
@@ -560,6 +561,45 @@ describe('searchFilingsTool', () => {
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ query: '', ciks: ['0000320193'] }),
     );
+  });
+
+  // #61 — bad entity-targeting tokens must fail typed instead of stripping the
+  // token and proceeding unscoped (which can leave EFTS a blank query it rejects
+  // with a 2xx error body, previously surfacing as a raw TypeError).
+  it('unresolved ticker: targeting fails with typed unresolved_ticker, no EFTS call (#61)', async () => {
+    (mockApi as any).resolveCik = vi.fn().mockResolvedValue([]);
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({ query: 'ticker:NOTAREALTICKER', limit: 3 });
+
+    await expect(searchFilingsTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'unresolved_ticker',
+        recovery: { hint: expect.stringContaining('secedgar_company_search') },
+      },
+    });
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
+  });
+
+  it('malformed cik: targeting fails with typed invalid_cik, no EFTS call (#61)', async () => {
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({ query: 'cik:ABC123 revenue' });
+
+    await expect(searchFilingsTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'invalid_cik',
+        recovery: { hint: expect.stringContaining('cik:320193') },
+      },
+    });
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
+  });
+
+  it('declares unresolved_ticker and invalid_cik in the errors contract (#61)', () => {
+    const unresolved = searchFilingsTool.errors?.find((e) => e.reason === 'unresolved_ticker');
+    const invalidCik = searchFilingsTool.errors?.find((e) => e.reason === 'invalid_cik');
+    expect(unresolved?.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(invalidCik?.code).toBe(JsonRpcErrorCode.ValidationError);
   });
 
   it('scopes cik: targeting via the server-side ciks param without injecting the company name (#35)', async () => {

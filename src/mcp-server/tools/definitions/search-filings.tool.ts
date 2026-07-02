@@ -3,8 +3,8 @@
  * @module mcp-server/tools/definitions/search-filings
  */
 
-import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import type { EftsHit } from '@/services/edgar/types.js';
@@ -65,20 +65,37 @@ function stripToken(query: string, token: string): string {
  * injected) plus the resolved CIK — the caller applies the CIK to EFTS's
  * server-side `ciks` param, so the scope is independent of the document's name
  * text and filings made under a former company name (same CIK) are matched (#35).
+ *
+ * An unresolved `ticker:` or non-numeric `cik:` token fails with a typed
+ * validation error instead of stripping the token and proceeding unscoped —
+ * a silently-broadened search misleads, and a stripped token can leave EFTS
+ * with a blank query it rejects (#61).
  */
 async function resolveEntityTargeting(
   query: string,
+  ctx: Context,
 ): Promise<{ query: string; entityCik?: string }> {
   const tickerMatch = query.match(/\bticker:(\S+)/i);
   if (tickerMatch?.[1]) {
     const resolved = await getEdgarApiService().resolveCik(tickerMatch[1]);
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
-    const cleaned = stripToken(query, tickerMatch[0]);
-    return match?.cik ? { query: cleaned, entityCik: match.cik } : { query: cleaned };
+    if (!match?.cik) {
+      throw validationError(
+        `Entity targeting token 'ticker:${tickerMatch[1]}' does not resolve to a known company.`,
+        { reason: 'unresolved_ticker', ...ctx.recoveryFor('unresolved_ticker') },
+      );
+    }
+    return { query: stripToken(query, tickerMatch[0]), entityCik: match.cik };
   }
 
   const cikMatch = query.match(/\bcik:(\S+)/i);
   if (cikMatch?.[1]) {
+    if (!/^\d{1,10}$/.test(cikMatch[1])) {
+      throw validationError(
+        `Entity targeting token 'cik:${cikMatch[1]}' is not a valid CIK — expected 1-10 digits.`,
+        { reason: 'invalid_cik', ...ctx.recoveryFor('invalid_cik') },
+      );
+    }
     return { query: stripToken(query, cikMatch[0]), entityCik: cikMatch[1].padStart(10, '0') };
   }
 
@@ -116,6 +133,20 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'Only one of start_date or end_date was provided',
       recovery: 'Provide both start_date and end_date, or omit both to search all dates.',
+    },
+    {
+      reason: 'unresolved_ticker',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A ticker: targeting token in the query does not resolve to a known company',
+      recovery:
+        'Verify the symbol with secedgar_company_search, or target by CIK with cik:<number> instead.',
+    },
+    {
+      reason: 'invalid_cik',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A cik: targeting token in the query is not a 1-10 digit number',
+      recovery:
+        'Pass a numeric CIK such as cik:320193 — find it with secedgar_company_search if unknown.',
     },
   ],
 
@@ -269,8 +300,9 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       );
     }
 
-    // Resolve ticker:/cik: entity targeting → company name in query + CIK for filtering
-    const { query, entityCik } = await resolveEntityTargeting(input.query);
+    // Resolve ticker:/cik: entity targeting → stripped query + CIK for the
+    // server-side ciks param. Throws typed validation errors on bad tokens (#61).
+    const { query, entityCik } = await resolveEntityTargeting(input.query, ctx);
 
     // EFTS scores by relevance and exposes no sort param. When the caller wants
     // a date sort (the default) or entity filtering, we over-fetch the EFTS

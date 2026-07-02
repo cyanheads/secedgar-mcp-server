@@ -260,7 +260,7 @@ class EdgarApiService {
     );
   }
 
-  searchFilings(params: {
+  async searchFilings(params: {
     query: string;
     forms?: string[] | undefined;
     ciks?: string[] | undefined;
@@ -285,7 +285,28 @@ class EdgarApiService {
     url.searchParams.set('from', String(params.from ?? 0));
     url.searchParams.set('size', String(params.size ?? 20));
 
-    return this.fetchJson<EftsResponse>(url.toString());
+    const response = await this.fetchJson<EftsResponse>(url.toString());
+
+    // Shape guard: EFTS can return a 2xx whose body omits `hits.total` (degraded
+    // payload, or a rejected request echoed as `{ error: ... }` with 200). A genuine
+    // zero-hit response is still well-formed (`hits.total.value: 0`, empty
+    // `hits.hits`) and passes. Without this, `response.hits.total.value` throws a
+    // raw TypeError that leaks to the client (#61).
+    if (!Array.isArray(response?.hits?.hits) || typeof response.hits.total?.value !== 'number') {
+      const upstreamError = (response as { error?: unknown } | null)?.error;
+      throw serviceUnavailable(
+        'SEC EDGAR full-text search returned an unexpected response without hits — the service may be degraded.',
+        {
+          reason: 'efts_degraded_response',
+          ...(typeof upstreamError === 'string' && { upstreamError }),
+          recovery: {
+            hint: 'Retry the search in a few minutes — EDGAR full-text search returned an incomplete response.',
+          },
+        },
+      );
+    }
+
+    return response;
   }
 
   /**
