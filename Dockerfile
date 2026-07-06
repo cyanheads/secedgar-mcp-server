@@ -4,7 +4,7 @@
 # This stage installs all dependencies (including dev), builds the TypeScript
 # source code into JavaScript, and prepares the production assets.
 # ==============================================================================
-FROM oven/bun:1.3 AS build
+FROM oven/bun:1.3.14 AS build
 
 WORKDIR /usr/src/app
 
@@ -16,8 +16,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy dependency manifests for optimized layer caching
 COPY package.json bun.lock ./
 
-# Install all dependencies (including dev dependencies for building)
-RUN bun install --frozen-lockfile
+# Install all dependencies (including dev). Lifecycle scripts run intentionally:
+# better-sqlite3's native binding is compiled here and copied into the production
+# stage below, so this stage must NOT use --ignore-scripts (it would ship a
+# missing binding). The BuildKit cache mount persists Bun's package cache.
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    bun install --frozen-lockfile
 
 # Copy the rest of the source code
 COPY . .
@@ -33,7 +37,7 @@ RUN bun run build
 # application. It uses a slim base image and only includes production
 # dependencies and build artifacts.
 # ==============================================================================
-FROM oven/bun:1.3-slim AS production
+FROM oven/bun:1.3.14-slim AS production
 
 WORKDIR /usr/src/app
 
@@ -59,7 +63,8 @@ COPY --from=build /usr/src/app/node_modules ./node_modules
 # These are not bundled by default to keep the base image lean. Enable at build time
 # with: docker build --build-arg OTEL_ENABLED=true
 ARG OTEL_ENABLED=true
-RUN if [ "$OTEL_ENABLED" = "true" ]; then \
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    if [ "$OTEL_ENABLED" = "true" ]; then \
       bun add @hono/otel \
         @opentelemetry/instrumentation-http \
         @opentelemetry/exporter-metrics-otlp-http \

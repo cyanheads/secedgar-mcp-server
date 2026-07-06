@@ -1,6 +1,16 @@
 [install]
 auto = "fallback"
 frozenLockfile = false
+# Supply-chain hold: refuse versions published within the last 3 days (259200s),
+# blunting the window for a compromised release to land. Existing bun.lock pins
+# are unaffected; the framework is excluded so its releases adopt same-day.
+minimumReleaseAge = 259200
+minimumReleaseAgeExcludes = ["@cyanheads/mcp-ts-core"]
+
+# Scan every package for malware, typosquats, and CVEs before install.
+# Configuring a scanner disables Bun's auto-install.
+[install.security]
+scanner = "@socketsecurity/bun-security-scanner"
 
 [run]
 bun = true
