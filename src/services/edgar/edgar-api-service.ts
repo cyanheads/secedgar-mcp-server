@@ -567,12 +567,12 @@ class EdgarApiService {
     return next;
   }
 
-  private async getTickerCache(): Promise<TickerCache> {
+  private getTickerCache(): Promise<TickerCache> {
     const config = getServerConfig();
     const now = Date.now();
 
     if (this.tickerCache && now - this.tickerCache.loadedAt < config.tickerCacheTtl * 1000) {
-      return this.tickerCache;
+      return Promise.resolve(this.tickerCache);
     }
 
     // Singleflight: concurrent first-time callers (e.g. fetch-frames enriching

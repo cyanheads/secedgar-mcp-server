@@ -115,7 +115,7 @@ async function main(): Promise<void> {
 
   // Emit as sorted array of [name, cik] tuples for deterministic diffs.
   const tuples = [...collected.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  writeFileSync(OUT_FILE, JSON.stringify(tuples, null, 2) + '\n', 'utf-8');
+  writeFileSync(OUT_FILE, `${JSON.stringify(tuples, null, 2)}\n`, 'utf-8');
 
   console.log(`\nDone. ${tuples.length} former-name tuples written to ${OUT_FILE}`);
   if (skipped > 0) console.log(`  (${skipped} CIKs skipped due to fetch errors)`);
