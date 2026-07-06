@@ -8,20 +8,17 @@ FROM oven/bun:1.3.14 AS build
 
 WORKDIR /usr/src/app
 
-# Install build tools required for native modules (better-sqlite3 uses node-gyp)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 make g++ && \
-    rm -rf /var/lib/apt/lists/*
-
 # Copy dependency manifests for optimized layer caching
 COPY package.json bun.lock ./
 
-# Install all dependencies (including dev). Lifecycle scripts run intentionally:
-# better-sqlite3's native binding is compiled here and copied into the production
-# stage below, so this stage must NOT use --ignore-scripts (it would ship a
-# missing binding). The BuildKit cache mount persists Bun's package cache.
+# Install all dependencies (including dev). --ignore-scripts skips native
+# postinstalls: better-sqlite3's prebuild-install/node-gyp path is unsupported
+# under Bun and would abort the build. It is unneeded in the image anyway — the
+# SQLite mirror uses the built-in bun:sqlite driver at runtime under Bun
+# (better-sqlite3 is the Node-only fallback). The BuildKit cache mount persists
+# Bun's package cache across builds.
 RUN --mount=type=cache,target=/root/.bun/install/cache \
-    bun install --frozen-lockfile
+    bun install --frozen-lockfile --ignore-scripts
 
 # Copy the rest of the source code
 COPY . .
@@ -54,9 +51,9 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 # Copy dependency manifests
 COPY package.json bun.lock ./
 
-# Copy node_modules from the build stage — avoids reinstalling native modules
-# (better-sqlite3 requires python3/make/g++ to compile; copying the pre-built
-# artifacts from the build stage keeps the production image free of build tools).
+# Copy node_modules from the build stage rather than reinstalling. Deps carry no
+# compiled native artifacts (installed with --ignore-scripts); the SQLite mirror
+# uses bun:sqlite at runtime under Bun, so nothing needs building here.
 COPY --from=build /usr/src/app/node_modules ./node_modules
 
 # Conditionally install OpenTelemetry optional peer dependencies (Tier 3).
