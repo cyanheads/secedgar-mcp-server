@@ -1,8 +1,8 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.12.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.10.10`
+**Version:** 0.12.1
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.10.14`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 
 Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-only, no API keys required. Full design: `docs/sec-edgar-mcp-design.md`.
