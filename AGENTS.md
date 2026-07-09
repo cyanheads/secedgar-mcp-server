@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.12.1
+**Version:** 0.12.2
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.10.14`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 

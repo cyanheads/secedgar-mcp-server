@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-07-06 10:04:19
+Generated on: 2026-07-09 21:06:18
 
 ```text
 secedgar-mcp-server/
@@ -190,6 +190,9 @@ secedgar-mcp-server/
 │   └── index.ts
 ├── tests/
 │   ├── mcp-server/
+│   │   ├── prompts/
+│   │   │   └── definitions/
+│   │   │       └── company-analysis.prompt.test.ts
 │   │   ├── resources/
 │   │   │   └── definitions/
 │   │   │       ├── concepts.resource.test.ts

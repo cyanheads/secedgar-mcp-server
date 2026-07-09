@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.12.2](changelog/0.12.x/0.12.2.md) — 2026-07-09
+
+secedgar_get_institutional_holdings resolves institutional names via EDGAR entity-autocomplete search, reports ambiguous matches instead of guessing, stops leaking the SEC URL on a bare-CIK 404, and routes operating-company CIKs to the right tools; secedgar_company_analysis routes ownership-focused requests through the insider and 13F tools.
+
 ## [0.12.1](changelog/0.12.x/0.12.1.md) — 2026-07-06
 
 Adopts @cyanheads/mcp-ts-core 0.10.14 and refreshes dependencies: a bunfig supply-chain install guard (3-day release-age hold plus the Socket install scanner), an oven/bun:1.3.14 Dockerfile pin with BuildKit install-cache mounts, a SECURITY.md disclosure policy, and .gitattributes normalization.
