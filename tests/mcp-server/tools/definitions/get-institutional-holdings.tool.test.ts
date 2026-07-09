@@ -3,10 +3,11 @@
  * @module tests/mcp-server/tools/definitions/get-institutional-holdings.tool
  */
 
+import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getInstitutionalHoldingsTool } from '@/mcp-server/tools/definitions/get-institutional-holdings.tool.js';
-import type { FilingIndex } from '@/services/edgar/types.js';
+import type { FilingIndex, SubmissionsResponse } from '@/services/edgar/types.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', () => ({
   getEdgarApiService: vi.fn(),
@@ -141,9 +142,49 @@ const mockFilingIndex: FilingIndex = {
   },
 };
 
+/**
+ * Build a SubmissionsResponse from a filing list + identity, for the direct
+ * getSubmissions path the tool now takes (#76/#86). Only the fields the handler reads
+ * (filings.recent, name, tickers) carry meaningful values.
+ */
+function buildSubmissions(opts: {
+  name?: string;
+  tickers?: string[];
+  filings: Array<{
+    form: string;
+    accessionNumber: string;
+    filingDate: string;
+    primaryDocument?: string;
+    reportDate?: string;
+  }>;
+}): SubmissionsResponse {
+  return {
+    cik: '0000102909',
+    entityType: 'other',
+    exchanges: [],
+    filings: {
+      recent: {
+        accessionNumber: opts.filings.map((f) => f.accessionNumber),
+        filingDate: opts.filings.map((f) => f.filingDate),
+        form: opts.filings.map((f) => f.form),
+        primaryDocDescription: opts.filings.map(() => ''),
+        primaryDocument: opts.filings.map((f) => f.primaryDocument ?? 'primary_doc.xml'),
+        reportDate: opts.filings.map((f) => f.reportDate ?? ''),
+      },
+      files: [],
+    },
+    fiscalYearEnd: null,
+    name: opts.name ?? 'VANGUARD GROUP INC',
+    sic: '',
+    sicDescription: '',
+    tickers: opts.tickers ?? [],
+  };
+}
+
 const mockApi = {
   resolveCik: vi.fn(),
-  getRecentFilingsByForm: vi.fn(),
+  resolveEntityByName: vi.fn(),
+  getSubmissions: vi.fn(),
   searchFilings: vi.fn(),
   tryGetFilingIndex: vi.fn(),
   tryGetFilingDocument: vi.fn(),
@@ -159,14 +200,21 @@ beforeEach(() => {
     name: 'Vanguard Group Inc',
     ticker: undefined,
   });
-  mockApi.getRecentFilingsByForm.mockResolvedValue([
-    {
-      accessionNumber: '0000102909-24-000001',
-      filingDate: '2024-02-15',
-      primaryDocument: 'primary_doc.xml',
-      reportDate: '2024-12-31',
-    },
-  ]);
+  // Ticker-cache miss falls back to EFTS entity-autocomplete; default to no hit so tests
+  // opt into name resolution explicitly.
+  mockApi.resolveEntityByName.mockResolvedValue([]);
+  mockApi.getSubmissions.mockResolvedValue(
+    buildSubmissions({
+      filings: [
+        {
+          form: '13F-HR',
+          accessionNumber: '0000102909-24-000001',
+          filingDate: '2024-02-15',
+          reportDate: '2024-12-31',
+        },
+      ],
+    }),
+  );
   mockApi.tryGetFilingIndex.mockResolvedValue(mockFilingIndex);
   mockApi.tryGetFilingDocument.mockImplementation(
     async (_cik: string, _accn: string, docName: string) => {
@@ -256,13 +304,17 @@ describe('getInstitutionalHoldingsTool', () => {
 
   it('normalizes pre-2023 filing values from thousands to whole USD', async () => {
     // Filing date before 2023-01-03 → Information Table Column 4 was reported in thousands.
-    mockApi.getRecentFilingsByForm.mockResolvedValue([
-      {
-        accessionNumber: '0000102909-22-000001',
-        filingDate: '2022-11-14',
-        primaryDocument: 'primary_doc.xml',
-      },
-    ]);
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [
+          {
+            form: '13F-HR',
+            accessionNumber: '0000102909-22-000001',
+            filingDate: '2022-11-14',
+          },
+        ],
+      }),
+    );
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
       ticker_or_cik: '0000102909',
@@ -342,20 +394,24 @@ describe('getInstitutionalHoldingsTool', () => {
 
   it('selects the filing matching the requested quarter by reportDate', async () => {
     // Submissions list several 13F-HRs; the handler picks the one whose reportDate matches.
-    mockApi.getRecentFilingsByForm.mockResolvedValue([
-      {
-        accessionNumber: '0000102909-25-000050',
-        filingDate: '2025-02-14',
-        primaryDocument: 'primary_doc.xml',
-        reportDate: '2024-12-31',
-      },
-      {
-        accessionNumber: '0000102909-24-000999',
-        filingDate: '2024-08-14',
-        primaryDocument: 'primary_doc.xml',
-        reportDate: '2024-06-30',
-      },
-    ]);
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [
+          {
+            form: '13F-HR',
+            accessionNumber: '0000102909-25-000050',
+            filingDate: '2025-02-14',
+            reportDate: '2024-12-31',
+          },
+          {
+            form: '13F-HR',
+            accessionNumber: '0000102909-24-000999',
+            filingDate: '2024-08-14',
+            reportDate: '2024-06-30',
+          },
+        ],
+      }),
+    );
 
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
@@ -370,20 +426,24 @@ describe('getInstitutionalHoldingsTool', () => {
 
   it('throws no_filings_found when no 13F-HR matches the requested quarter', async () => {
     // Filings exist, but none for the requested quarter — must not substitute another (issue #31).
-    mockApi.getRecentFilingsByForm.mockResolvedValue([
-      {
-        accessionNumber: '0000102909-25-000050',
-        filingDate: '2025-02-14',
-        primaryDocument: 'primary_doc.xml',
-        reportDate: '2024-12-31',
-      },
-      {
-        accessionNumber: '0000102909-24-000700',
-        filingDate: '2024-05-10',
-        primaryDocument: 'primary_doc.xml',
-        reportDate: '2024-03-31',
-      },
-    ]);
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [
+          {
+            form: '13F-HR',
+            accessionNumber: '0000102909-25-000050',
+            filingDate: '2025-02-14',
+            reportDate: '2024-12-31',
+          },
+          {
+            form: '13F-HR',
+            accessionNumber: '0000102909-24-000700',
+            filingDate: '2024-05-10',
+            reportDate: '2024-03-31',
+          },
+        ],
+      }),
+    );
 
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
@@ -406,8 +466,17 @@ describe('getInstitutionalHoldingsTool', () => {
     });
   });
 
-  it('throws no_filings_found when no 13F filings exist', async () => {
-    mockApi.getRecentFilingsByForm.mockResolvedValue([]);
+  it('throws no_filings_found when the entity files no 13F and shows no operating-company signal', async () => {
+    // Submissions exist but carry no 13F-HR and no 10-K/10-Q/8-K — a true non-13F,
+    // non-operating filer (e.g. a filing agent). Stays the generic no_filings_found.
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        name: 'SOME FILING AGENT',
+        filings: [
+          { form: 'TA-1', accessionNumber: '0000000000-24-000001', filingDate: '2024-01-01' },
+        ],
+      }),
+    );
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
 
@@ -630,7 +699,7 @@ describe('quarter parameter handling', () => {
 
     // 'badformat' doesn't match YYYY-QN — rejected outright, not silently treated as "latest".
     await expect(getInstitutionalHoldingsTool.handler(input, ctx)).rejects.toThrow(/quarter/i);
-    expect(mockApi.getRecentFilingsByForm).not.toHaveBeenCalled();
+    expect(mockApi.getSubmissions).not.toHaveBeenCalled();
   });
 });
 
@@ -707,5 +776,165 @@ describe('getInstitutionalHoldingsTool — canvas registration (#39)', () => {
 
     expect(bridge.registerDataframe).not.toHaveBeenCalled();
     expect(result.dataset).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// entity resolution & routing (#73 name→CIK, #76 no-submissions 404, #86 operating-company)
+// ---------------------------------------------------------------------------
+
+describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
+  it('resolves a name to one filer via EFTS entity-autocomplete (#73)', async () => {
+    // Ticker cache misses the institutional name; EFTS resolves it to a single CIK.
+    mockApi.resolveCik.mockResolvedValue([]);
+    mockApi.resolveEntityByName.mockResolvedValue([
+      { cik: '0000102909', name: 'VANGUARD GROUP INC' },
+    ]);
+    const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: 'vanguard group inc' });
+    const result = await getInstitutionalHoldingsTool.handler(input, ctx);
+
+    expect(mockApi.resolveEntityByName).toHaveBeenCalledWith('vanguard group inc');
+    expect(result.filer_cik).toBe('0000102909');
+    expect(result.holdings).toHaveLength(2);
+  });
+
+  it('returns ambiguous_entity when a name resolves to multiple filers (#73)', async () => {
+    // "vanguard group" resolves to the transfer agent AND the 13F filer — must list both.
+    mockApi.resolveCik.mockResolvedValue([]);
+    mockApi.resolveEntityByName.mockResolvedValue([
+      { cik: '0000735286', name: 'VANGUARD GROUP INC' },
+      { cik: '0000102909', name: 'VANGUARD GROUP INC' },
+    ]);
+    const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: 'vanguard group' });
+
+    const err = await getInstitutionalHoldingsTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(err.data.reason).toBe('ambiguous_entity');
+    expect(err.data.matches.map((m: { cik: string }) => m.cik)).toEqual([
+      '0000735286',
+      '0000102909',
+    ]);
+    // Both CIKs surface in the message so the caller can disambiguate; never auto-picks.
+    expect(err.message).toContain('0000735286');
+    expect(err.message).toContain('0000102909');
+    expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+  });
+
+  it('returns ambiguous_entity when the ticker cache returns multiple matches (#73)', async () => {
+    // The handler previously took resolved[0] silently — now the >1 branch fires.
+    mockApi.resolveCik.mockResolvedValue([
+      { cik: '0000111111', name: 'CAPITAL GROUP A', ticker: 'CGA' },
+      { cik: '0000222222', name: 'CAPITAL GROUP B', ticker: 'CGB' },
+    ]);
+    const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: 'capital group' });
+
+    const err = await getInstitutionalHoldingsTool.handler(input, ctx).catch((e) => e);
+    expect(err.data.reason).toBe('ambiguous_entity');
+    expect(mockApi.resolveEntityByName).not.toHaveBeenCalled(); // cache already had hits
+    expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+  });
+
+  it('converts a bare-CIK 404 to company_not_found with the SEC URL stripped (#76)', async () => {
+    // A numeric CIK absent from the ticker cache resolves to a bare { cik }; its
+    // submissions feed 404s (a filer/transmitter CIK). Convert to a declared error.
+    mockApi.resolveCik.mockResolvedValue({ cik: '0001193125' });
+    mockApi.getSubmissions.mockRejectedValue(
+      notFound(
+        'SEC EDGAR API returned 404 for https://data.sec.gov/submissions/CIK0001193125.json',
+        { url: 'https://data.sec.gov/submissions/CIK0001193125.json', status: 404 },
+      ),
+    );
+    const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0001193125' });
+
+    const err = await getInstitutionalHoldingsTool.handler(input, ctx).catch((e) => e);
+    expect(err.data.reason).toBe('company_not_found');
+    expect(err.message).toMatch(/accession-number prefix/i);
+    // No raw SEC URL leaked anywhere on the message or the structured data.
+    expect(err.message).not.toContain('data.sec.gov');
+    expect(err.message).not.toContain('https://');
+    expect(JSON.stringify(err.data)).not.toContain('data.sec.gov');
+  });
+
+  it('propagates a 404 unchanged when the match came from the ticker cache (#76)', async () => {
+    // Default resolveCik returns a name-bearing (cache-hit) match. A 404 here is an
+    // EDGAR-side anomaly, not a bad query — propagate raw, never reclassify.
+    mockApi.getSubmissions.mockRejectedValue(
+      notFound(
+        'SEC EDGAR API returned 404 for https://data.sec.gov/submissions/CIK0000102909.json',
+        { url: 'https://data.sec.gov/submissions/CIK0000102909.json', status: 404 },
+      ),
+    );
+    const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+
+    const err = await getInstitutionalHoldingsTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err.data?.reason).toBeUndefined(); // not reclassified to a declared reason
+    expect(err.message).toContain('data.sec.gov'); // raw error propagated unchanged
+  });
+
+  it('classifies an operating-company CIK on no-13F and routes to the right tools (#86)', async () => {
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0000789019',
+      name: 'MICROSOFT CORP',
+      ticker: 'MSFT',
+    });
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        name: 'MICROSOFT CORP',
+        tickers: ['MSFT'],
+        filings: [
+          {
+            form: '10-K',
+            accessionNumber: 'a',
+            filingDate: '2024-07-30',
+            reportDate: '2024-06-30',
+          },
+          {
+            form: '10-Q',
+            accessionNumber: 'b',
+            filingDate: '2024-10-24',
+            reportDate: '2024-09-30',
+          },
+          { form: '8-K', accessionNumber: 'c', filingDate: '2024-11-01' },
+        ],
+      }),
+    );
+    const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000789019' });
+
+    const err = await getInstitutionalHoldingsTool.handler(input, ctx).catch((e) => e);
+    expect(err.data.reason).toBe('no_filings_found');
+    expect(err.message).toContain('MICROSOFT CORP');
+    expect(err.message).toContain('operating company');
+    expect(err.message).toContain('MSFT');
+    expect(err.data.resolved_cik).toBe('0000789019');
+    expect(err.data.suggestions.map((s: { tool: string }) => s.tool)).toEqual([
+      'secedgar_get_financials',
+      'secedgar_search_filings',
+    ]);
+    // Recovery hint mirrors to the text surface and names the routed tool.
+    expect(err.data.recovery.hint).toContain('secedgar_get_financials');
+  });
+
+  it('does not classify a bare-CIK match that has submissions but no operating forms (#86)', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0001193125' });
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        name: 'SOME FILING AGENT',
+        filings: [{ form: 'TA-1', accessionNumber: 'x', filingDate: '2024-01-01' }],
+      }),
+    );
+    const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0001193125' });
+
+    const err = await getInstitutionalHoldingsTool.handler(input, ctx).catch((e) => e);
+    expect(err.data.reason).toBe('no_filings_found');
+    expect(err.data.suggestions).toBeUndefined(); // no operating-company routing
+    expect(err.message).toContain('SOME FILING AGENT');
   });
 });

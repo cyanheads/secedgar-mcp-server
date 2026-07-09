@@ -7,10 +7,11 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { parseInfoTableXml } from '@/services/edgar/ownership-parser.js';
+import type { FilingsRecent } from '@/services/edgar/types.js';
 
 /**
  * Map a quarter string like "2025-Q4" to its calendar quarter-end date (YYYY-MM-DD) — the
@@ -97,10 +98,52 @@ function findInfoTableDocument(items: Array<{ name: string }>): string | undefin
   );
 }
 
+/**
+ * Periodic-report forms that mark an operating company (not an institutional manager).
+ * A filer with any of these and no 13F-HR is misrouted here — the caller wants
+ * secedgar_get_financials / secedgar_search_filings, not a 13F (#86).
+ */
+const OPERATING_COMPANY_FORMS = ['10-K', '10-K/A', '10-Q', '10-Q/A', '8-K', '8-K/A'];
+
+/** One zipped row from `FilingsRecent`'s parallel arrays, filtered by form type. */
+interface RecentFilingRow {
+  accessionNumber: string;
+  filingDate: string;
+  primaryDocument: string;
+  reportDate: string;
+}
+
+/**
+ * Zip the submissions recent-filings parallel arrays into records for the requested
+ * form types, in submission order (newest first), capped at `limit`. Inlined here
+ * rather than via `EdgarApiService.getRecentFilingsByForm` so this tool reads the full
+ * recent-form list off the same submissions fetch for 404 handling (#76) and
+ * operating-company classification (#86) — without a shared-method signature change
+ * that would ripple into the insider-transactions tool.
+ */
+function recentFilingsOfForm(
+  recent: FilingsRecent,
+  formTypes: string[],
+  limit: number,
+): RecentFilingRow[] {
+  const out: RecentFilingRow[] = [];
+  for (let i = 0; i < recent.form.length && out.length < limit; i++) {
+    if (formTypes.includes(recent.form[i] ?? '')) {
+      out.push({
+        accessionNumber: recent.accessionNumber[i] ?? '',
+        filingDate: recent.filingDate[i] ?? '',
+        primaryDocument: recent.primaryDocument[i] ?? '',
+        reportDate: recent.reportDate[i] ?? '',
+      });
+    }
+  }
+  return out;
+}
+
 export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_holdings', {
   title: 'Get Institutional Holdings',
   description:
-    'Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR information table XML. ticker_or_cik is the institutional filer (e.g., "Vanguard Group" or its CIK 0000102909) — the tool returns what that institution holds. It does not do reverse lookup from a portfolio company to its institutional holders (EDGAR has no issuer-to-13F index); for issuer-side questions, use secedgar_search_filings with forms=["13F-HR"]. The 13F information table lists each position: issuer name, CUSIP, shares held, market value (in whole USD), and put/call designation for options. Sub-lines for the same security are consolidated into distinct positions sorted by value by default (set consolidate=false for raw filing rows). The full parsed holdings set is materialized as df_<id> when a canvas is available — the inline holdings list is a preview capped at limit — so query it with secedgar_dataframe_query to aggregate the whole filing or self-join across quarters on cusip + reporting_period. Institutions with less than $100M in 13(f) securities are exempt and may not file. Use secedgar_search_filings with forms=["13F-HR"] for broader search.',
+    'Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR information table XML. ticker_or_cik is the institutional filer — its 10-digit CIK (e.g. 0000102909), or an entity name resolved through EDGAR entity search — and the tool returns what that institution holds. A name that matches several EDGAR filers (some legal names are shared across entities) returns those candidates so you can retry with the exact CIK, rather than guessing. It does not do reverse lookup from a portfolio company to its institutional holders (EDGAR has no issuer-to-13F index); for issuer-side questions, use secedgar_search_filings with forms=["13F-HR"]. The 13F information table lists each position: issuer name, CUSIP, shares held, market value (in whole USD), and put/call designation for options. Sub-lines for the same security are consolidated into distinct positions sorted by value by default (set consolidate=false for raw filing rows). The full parsed holdings set is materialized as df_<id> when a canvas is available — the inline holdings list is a preview capped at limit — so query it with secedgar_dataframe_query to aggregate the whole filing or self-join across quarters on cusip + reporting_period. Institutions with less than $100M in 13(f) securities are exempt and may not file. Use secedgar_search_filings with forms=["13F-HR"] for broader search.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -109,6 +152,12 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       code: JsonRpcErrorCode.NotFound,
       when: 'The ticker or CIK does not resolve to a known company or institution',
       recovery: 'Use secedgar_company_search to find the correct CIK or full entity name.',
+    },
+    {
+      reason: 'ambiguous_entity',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The name resolves to multiple EDGAR entities (e.g. several filers sharing a legal name)',
+      recovery: 'Retry with the exact 10-digit CIK of the intended filer from the matches list.',
     },
     {
       reason: 'no_filings_found',
@@ -131,7 +180,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       .string()
       .min(1)
       .describe(
-        'The institutional filer whose 13F to fetch — its CIK (e.g., "0000102909" for Vanguard) or full legal name (e.g., "Vanguard Group"). CIK or the full legal name resolves most reliably; tickers usually belong to operating companies, which do not file 13Fs. This is NOT the portfolio company — passing an issuer ticker like "AAPL" finds that entity\'s own filings, not who holds it.',
+        'The institutional filer whose 13F to fetch — a 10-digit CIK (e.g. "0000102909" for VANGUARD GROUP INC, the most reliable form) or an entity name. Names resolve through EDGAR entity search, which covers institutional managers absent from the ticker file; a name matching several filers (some legal names are shared across entities) returns those candidates so you can retry with the exact CIK. This is NOT the portfolio company — passing an issuer ticker like "AAPL" finds that operating company\'s own filings (it files no 13F), not who holds it.',
       ),
     quarter: z
       .string()
@@ -263,10 +312,40 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
   async handler(input, ctx) {
     const api = getEdgarApiService();
 
-    // Resolve entity to CIK
+    // Resolve entity to CIK. Ticker/CIK/name go through the ticker cache first; on a
+    // name miss, fall back to EFTS entity-autocomplete, which resolves any EDGAR filer —
+    // institutional managers, trusts, individuals — that company_tickers.json can never
+    // contain (#73). Both paths normalize to a candidate list so ambiguity is handled
+    // uniformly and index 0 is never taken silently.
     const resolved = await api.resolveCik(input.ticker_or_cik);
-    const match = Array.isArray(resolved) ? resolved[0] : resolved;
-    if (!match || (Array.isArray(resolved) && resolved.length === 0)) {
+    const candidates: Array<{ cik: string; name: string | undefined; ticker: string | undefined }> =
+      Array.isArray(resolved)
+        ? resolved.length === 0
+          ? (await api.resolveEntityByName(input.ticker_or_cik)).map((m) => ({
+              cik: m.cik,
+              name: m.name,
+              ticker: undefined,
+            }))
+          : resolved.map((m) => ({ cik: m.cik, name: m.name, ticker: m.ticker }))
+        : [{ cik: resolved.cik, name: resolved.name, ticker: resolved.ticker }];
+
+    // Several filers match this name (the ticker cache returned multiple, or EFTS
+    // returned distinct entities sharing a legal name) — list them for disambiguation
+    // by CIK, never auto-resolve to the top hit (#73).
+    if (candidates.length > 1) {
+      const shown = candidates.slice(0, 10);
+      const list = shown.map((c) => `${c.cik}${c.name ? ` (${c.name})` : ''}`).join(', ');
+      throw ctx.fail(
+        'ambiguous_entity',
+        `'${input.ticker_or_cik}' matches multiple EDGAR entities: ${list}. Retry with the exact 10-digit CIK.`,
+        {
+          ...ctx.recoveryFor('ambiguous_entity'),
+          matches: shown.map((c) => ({ cik: c.cik, name: c.name, ticker: c.ticker })),
+        },
+      );
+    }
+    const [match] = candidates;
+    if (!match) {
       throw ctx.fail('company_not_found', `Entity '${input.ticker_or_cik}' not found.`, {
         ...ctx.recoveryFor('company_not_found'),
       });
@@ -283,20 +362,82 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       }
     }
 
-    // Pull this entity's recent 13F-HR filings from the submissions API. Each carries a
-    // reportDate (the period-end), so a requested quarter is matched exactly — EFTS full-text
-    // is unfit here (its `cik:` query is a doc-text phrase, not a CIK filter). No quarter →
-    // most-recent; with a quarter, a miss is reported, never silently the latest filing.
-    const recentFilings = await api.getRecentFilingsByForm(match.cik, ['13F-HR'], 80);
+    // Bare-CIK fallback: a numeric CIK absent from the ticker cache resolves to { cik }
+    // with no name/ticker. getSubmissions 404s for a CIK with no submissions feed — a
+    // filer/transmitter CIK (e.g. an accession-number prefix), not a registrant.
+    const isBareCikFallback = !match.name && !match.ticker;
+
+    // Fetch submissions directly (not getRecentFilingsByForm) so the same response feeds
+    // both the bare-CIK 404 recovery (#76) and operating-company classification (#86).
+    let submissions: Awaited<ReturnType<typeof api.getSubmissions>>;
+    try {
+      submissions = await api.getSubmissions(match.cik);
+    } catch (err) {
+      if (isBareCikFallback && err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
+        ctx.log.debug('CIK has no submissions feed', { cik: match.cik });
+        throw ctx.fail(
+          'company_not_found',
+          `No 13F filer found for CIK ${match.cik}. If this looks like an accession-number prefix, it's the filer/agent, not the issuer — use secedgar_company_search to find the institution.`,
+          { ...ctx.recoveryFor('company_not_found') },
+        );
+      }
+      // A cache-hit or name-resolved match that 404s signals an EDGAR-side problem, not
+      // a bad query — propagate unchanged, same reasoning as #55.
+      throw err;
+    }
+
+    // Each 13F-HR carries a reportDate (the period-end), so a requested quarter is
+    // matched exactly. No quarter → most-recent; with a quarter, a miss is reported,
+    // never silently the latest filing.
+    const recentFilings = recentFilingsOfForm(submissions.filings.recent, ['13F-HR'], 80);
     const filingMeta = periodEnd
       ? recentFilings.find((f) => f.reportDate === periodEnd)
       : recentFilings[0];
 
     if (!filingMeta) {
-      const quarterNote = input.quarter ? ` for quarter "${input.quarter}"` : '';
+      if (recentFilings.length === 0) {
+        // Entity files no 13F-HR at all. Classify from the recent-form list (#86): an
+        // entity filing 10-K/10-Q/8-K is an operating company, not an institutional
+        // manager — route the caller to the tools that fit. Use the submissions identity
+        // so it works for CIKs absent from the ticker cache too.
+        const recentForms = new Set(submissions.filings.recent.form);
+        const operatingForms = OPERATING_COMPANY_FORMS.filter((f) => recentForms.has(f));
+        if (operatingForms.length > 0) {
+          const tickerSuffix = submissions.tickers[0] ? ` (${submissions.tickers[0]})` : '';
+          throw ctx.fail(
+            'no_filings_found',
+            `No 13F-HR filings found for '${input.ticker_or_cik}' — resolves to ${submissions.name}${tickerSuffix}, an operating company (files ${operatingForms.join(', ')}), not an institutional investment manager. For financials use secedgar_get_financials; for its filings use secedgar_search_filings.`,
+            {
+              recovery: {
+                hint: `${submissions.name} is an operating company, not a 13F filer. Use secedgar_get_financials or secedgar_search_filings with CIK ${match.cik}.`,
+              },
+              resolved_cik: match.cik,
+              resolved_name: submissions.name,
+              suggestions: [
+                {
+                  tool: 'secedgar_get_financials',
+                  description: `Historical XBRL financials for ${submissions.name}`,
+                },
+                {
+                  tool: 'secedgar_search_filings',
+                  description: `Full-text search ${submissions.name}'s SEC filings`,
+                },
+              ],
+            },
+          );
+        }
+        // No operating-company signal (e.g. a filing agent or an unusual filer) — a true
+        // unknown, so keep the generic recovery.
+        throw ctx.fail(
+          'no_filings_found',
+          `No 13F-HR filings found for '${input.ticker_or_cik}' (resolves to ${submissions.name}). This entity is not a 13F institutional filer.`,
+          { ...ctx.recoveryFor('no_filings_found') },
+        );
+      }
+      // 13F filings exist, but none for the requested quarter (#31) — a real 13F filer.
       throw ctx.fail(
         'no_filings_found',
-        `No 13F-HR filings found for '${input.ticker_or_cik}'${quarterNote}.`,
+        `No 13F-HR filings found for '${input.ticker_or_cik}' for quarter "${input.quarter}".`,
         { ...ctx.recoveryFor('no_filings_found') },
       );
     }

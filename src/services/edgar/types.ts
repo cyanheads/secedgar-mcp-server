@@ -86,6 +86,30 @@ export interface EftsHit {
   };
 }
 
+/**
+ * EFTS entity-autocomplete response (`search-index?keysTyped=`). Distinct from
+ * `EftsResponse`: it resolves a typed name to filer ENTITIES (any EDGAR filer, not
+ * just ticker-backed registrants), so each hit's `_id` is the bare CIK and `_source`
+ * carries the entity display name and a prominence `rank` — not a filing document.
+ */
+export interface EftsEntityAutocompleteResponse {
+  hits: {
+    hits: EftsEntityHit[];
+    total?: { value: number; relation: string };
+  };
+}
+
+export interface EftsEntityHit {
+  /** Bare (non-zero-padded) CIK of the matched entity. */
+  _id: string;
+  _source: {
+    /** Entity display name (e.g. "VANGUARD GROUP INC"). */
+    entity: string;
+    /** SEC prominence weight. Deliberately NOT used to auto-select a match — two entities can share a legal name under different CIKs. */
+    rank?: number;
+  };
+}
+
 /** Filing index JSON response. */
 export interface FilingIndex {
   directory: {

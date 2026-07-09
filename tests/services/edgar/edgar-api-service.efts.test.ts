@@ -112,3 +112,98 @@ describe('EdgarApiService.searchFilings — EFTS shape guard (#61)', () => {
     expect(err.data.reason).toBe('efts_degraded_response');
   });
 });
+
+describe('EdgarApiService.resolveEntityByName — EFTS entity-autocomplete (#73)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    initEdgarApiService();
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('resolves a name to a single zero-padded CIK candidate', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          hits: {
+            hits: [{ _id: '1067983', _source: { entity: 'BERKSHIRE HATHAWAY INC', rank: 999 } }],
+          },
+        }),
+      ),
+    );
+
+    const matches = await getEdgarApiService().resolveEntityByName('berkshire hathaway');
+
+    // Bare _id is zero-padded to the 10-digit CIK the submissions API expects.
+    expect(matches).toEqual([{ cik: '0001067983', name: 'BERKSHIRE HATHAWAY INC' }]);
+  });
+
+  it('returns every distinct CIK for a name shared by multiple entities (Vanguard)', async () => {
+    // Live-verified shape: "vanguard group" returns a transfer-agent CIK (735286) ranked
+    // above the 13F filer (102909) under the same legal name — both must surface so the
+    // caller disambiguates by CIK; the tool must never auto-pick the top hit (#73).
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          hits: {
+            hits: [
+              { _id: '735286', _source: { entity: 'VANGUARD GROUP INC', rank: 784474 } },
+              { _id: '102909', _source: { entity: 'VANGUARD GROUP INC', rank: 178869656 } },
+            ],
+          },
+        }),
+      ),
+    );
+
+    const matches = await getEdgarApiService().resolveEntityByName('vanguard group');
+
+    expect(matches).toEqual([
+      { cik: '0000735286', name: 'VANGUARD GROUP INC' },
+      { cik: '0000102909', name: 'VANGUARD GROUP INC' },
+    ]);
+  });
+
+  it('sends the typed name via the keysTyped query param', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ hits: { hits: [] } }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await getEdgarApiService().resolveEntityByName('vanguard group');
+
+    const calledUrl = String(fetchMock.mock.calls[0]?.[0]);
+    expect(calledUrl).toContain('efts.sec.gov/LATEST/search-index');
+    expect(calledUrl).toContain('keysTyped=vanguard+group');
+  });
+
+  it('returns an empty array when EFTS reports no hits', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ hits: { total: { value: 0, relation: 'eq' }, hits: [] } })),
+    );
+
+    const matches = await getEdgarApiService().resolveEntityByName('zzqqxyzzy nonexistent');
+
+    expect(matches).toEqual([]);
+  });
+
+  it('dedups repeated CIKs, keeping first-seen order', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          hits: {
+            hits: [
+              { _id: '102909', _source: { entity: 'VANGUARD GROUP INC', rank: 1 } },
+              { _id: '102909', _source: { entity: 'VANGUARD GROUP INC', rank: 1 } },
+            ],
+          },
+        }),
+      ),
+    );
+
+    const matches = await getEdgarApiService().resolveEntityByName('vanguard');
+
+    expect(matches).toEqual([{ cik: '0000102909', name: 'VANGUARD GROUP INC' }]);
+  });
+});

@@ -14,6 +14,7 @@ import { type FilingDocumentHeader, parseFilingHeaders } from './filing-headers.
 import type {
   CikMatch,
   CompanyConceptResponse,
+  EftsEntityAutocompleteResponse,
   EftsResponse,
   FilingIndex,
   FramesResponse,
@@ -52,6 +53,12 @@ export interface CompanySuggestion {
   cik: string;
   name?: string;
   ticker?: string;
+}
+
+/** A resolved candidate from EFTS entity-autocomplete (`resolveEntityByName`). */
+export interface EntityNameMatch {
+  cik: string;
+  name: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +244,37 @@ class EdgarApiService {
     // that bypassed the early ticker gate above)
     const tickerMatch = cache.byTicker.get(upper);
     return tickerMatch ?? [];
+  }
+
+  /**
+   * Resolve an entity name to CIK candidates via EFTS entity-autocomplete
+   * (`search-index?keysTyped=`). Covers any EDGAR filer — institutional managers,
+   * trusts, individuals — that `company_tickers.json` (ticker-backed registrants only)
+   * can never contain, so it's the name-resolution fallback for a ticker-cache miss.
+   * Returns candidates in SEC relevance order, deduped by CIK. Two entities can share
+   * a legal name under different CIKs (e.g. "VANGUARD GROUP INC" = a transfer agent and
+   * the 13F filer), so callers must disambiguate rather than auto-pick the top hit (#73).
+   * Distinct from `searchFilings`: same URL path, different query param (`keysTyped`)
+   * and response shape (`_source.entity`, not the filing-document `_source`).
+   */
+  async resolveEntityByName(name: string): Promise<EntityNameMatch[]> {
+    const url = new URL('https://efts.sec.gov/LATEST/search-index');
+    url.searchParams.set('keysTyped', name);
+    const response = await this.fetchJson<EftsEntityAutocompleteResponse>(url.toString());
+
+    const hits = response?.hits?.hits;
+    if (!Array.isArray(hits)) return [];
+
+    const seen = new Set<string>();
+    const matches: EntityNameMatch[] = [];
+    for (const hit of hits) {
+      const cik = hit._id?.padStart(10, '0');
+      const entity = hit._source?.entity;
+      if (!cik || !entity || seen.has(cik)) continue;
+      seen.add(cik);
+      matches.push({ cik, name: entity });
+    }
+    return matches;
   }
 
   /** Reverse lookup: CIK → ticker symbol. */
