@@ -313,8 +313,20 @@ export class CanvasBridge {
             },
           });
         }
-        // All other structured McpErrors (genuine non-SELECT statements, etc.)
-        // propagate as-is.
+        // (#74) A genuine non-SELECT (statementType 'DROP', 'INSERT', etc.) skips the
+        // #52 UNKNOWN reclassification above and would otherwise propagate without a
+        // recovery hint. Rewrap it — mirroring the reason-preserving rewraps above —
+        // so the declared contract guidance reaches the wire. The reason stays
+        // 'non_select_statement'; only recovery is added.
+        if (data?.reason === 'non_select_statement') {
+          throw validationError(err.message, {
+            ...data,
+            recovery: {
+              hint: 'Query only SELECT statements against df_<id> tables. Use secedgar_dataframe_describe to inspect available dataframes.',
+            },
+          });
+        }
+        // All other structured McpErrors propagate as-is.
         throw err;
       }
       // Any unclassified raw DuckDB execution error that escaped the framework's

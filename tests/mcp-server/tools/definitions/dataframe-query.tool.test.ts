@@ -60,6 +60,45 @@ describe('dataframeQueryTool', () => {
     expect(entry!.recovery).toMatch(/secedgar_dataframe_drop/);
   });
 
+  it('declares non_select_statement in errors contract (#74)', () => {
+    const entry = dataframeQueryTool.errors?.find((e) => e.reason === 'non_select_statement');
+    expect(entry).toBeDefined();
+    expect(entry!.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(entry!.recovery).toMatch(/secedgar_dataframe_describe/);
+  });
+
+  it('non_select_statement from the bridge surfaces reason + recovery hint on the wire (#74)', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+    // The bridge rewraps a genuine non-SELECT (e.g. DROP) with the declared recovery
+    // hint (#74); the handler passes it through untouched.
+    mockBridge.query.mockRejectedValue(
+      Object.assign(
+        new Error(
+          'Canvas query must be SELECT; got DROP. Mutations must use registerTable, drop, or clear.',
+        ),
+        {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'non_select_statement',
+            statementType: 'DROP',
+            recovery: {
+              hint: 'Query only SELECT statements against df_<id> tables. Use secedgar_dataframe_describe to inspect available dataframes.',
+            },
+          },
+        },
+      ),
+    );
+    const ctx = createMockContext({ errors: dataframeQueryTool.errors });
+    const input = dataframeQueryTool.input.parse({ sql: 'DROP TABLE df_ABCDE_12345' });
+
+    await expect(dataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
+      data: {
+        reason: 'non_select_statement',
+        recovery: { hint: expect.stringContaining('secedgar_dataframe_describe') },
+      },
+    });
+  });
+
   it('register_as clash from the bridge surfaces reason + recovery hint on the wire (#60)', async () => {
     vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
     // Simulate the structured error the bridge rebuilds for a register_as clash.

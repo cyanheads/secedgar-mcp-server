@@ -460,9 +460,11 @@ describe('CanvasBridge.query error classification (#47)', () => {
     expect(err.data.reason).toBe('non_select_statement');
   });
 
-  it('non_select_statement with non-UNKNOWN statementType → stays as-is (#52)', async () => {
-    // A statement that prepares successfully as INSERT carries statementType: 'INSERT'.
-    // The bridge must NOT reclassify it — only UNKNOWN is the column-not-found signal.
+  // #74 — a genuine non-SELECT (non-UNKNOWN statementType) is NOT reclassified to
+  // invalid_sql (#52 only handles UNKNOWN column errors), but it IS rewrapped to
+  // attach a recovery hint, mirroring the system_catalog_access rewrap. The reason
+  // and statementType are preserved; only recovery is added.
+  it('non_select_statement with non-UNKNOWN statementType → rewrapped with recovery hint (#74)', async () => {
     const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
     const gateErr = Object.assign(
       new McpError(JsonRpcErrorCode.ValidationError, 'Canvas query must be SELECT.'),
@@ -478,8 +480,45 @@ describe('CanvasBridge.query error classification (#47)', () => {
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
     const err = await bridge.query(ctx, 'INSERT INTO t VALUES (1)').catch((e) => e);
-    expect(err).toBe(gateErr); // same reference — not re-wrapped
+    expect(err).not.toBe(gateErr); // rewrapped, not the same reference
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(err.data.reason).toBe('non_select_statement');
     expect(err.data.statementType).toBe('INSERT');
+    expect(err.data.recovery.hint).toMatch(/secedgar_dataframe_describe/);
+  });
+
+  // #74 — the reported repro: a DROP against a df_<id> handle. The pre-check does
+  // not intercept it (DROP is a valid statement type, not a missing table), so it
+  // reaches the gate, which rejects it as non_select_statement with statementType
+  // 'DROP'. The bridge rewrap attaches the SELECT-only recovery hint.
+  it('DROP statement → non_select_statement with recovery hint (#74)', async () => {
+    const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
+    const gateErr = Object.assign(
+      new McpError(
+        JsonRpcErrorCode.ValidationError,
+        'Canvas query must be SELECT; got DROP. Mutations must use registerTable, drop, or clear.',
+      ),
+      { data: { reason: 'non_select_statement', statementType: 'DROP' } },
+    );
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockRejectedValue(gateErr),
+    };
+    const acquire = vi.fn().mockResolvedValue(instance);
+    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas);
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+    await ctx.state.set('df-meta/df_AAAAA_BBBBB', {
+      tableName: 'df_AAAAA_BBBBB',
+      expiresAt: '2999-01-01T00:00:00.000Z',
+    });
+
+    const err = await bridge.query(ctx, 'DROP TABLE df_AAAAA_BBBBB').catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(err.data.reason).toBe('non_select_statement');
+    expect(err.data.statementType).toBe('DROP');
+    expect(err.data.recovery.hint).toMatch(/SELECT/);
+    expect(err.data.recovery.hint).toMatch(/secedgar_dataframe_describe/);
   });
 });
 

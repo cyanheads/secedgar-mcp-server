@@ -60,6 +60,13 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       recovery:
         'Drop the existing dataframe with secedgar_dataframe_drop (when enabled), choose a different df_XXXXX_XXXXX name, or omit register_as.',
     },
+    {
+      reason: 'non_select_statement',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The SQL is a non-SELECT statement (DROP, INSERT, UPDATE, DDL, etc.) — only read-only SELECTs run against dataframes',
+      recovery:
+        'Query only SELECT statements against df_<id> tables. Use secedgar_dataframe_describe to inspect available dataframes.',
+    },
   ],
 
   input: z.object({
