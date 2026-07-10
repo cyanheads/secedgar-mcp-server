@@ -19,6 +19,7 @@ import type {
   FilingIndex,
   FilingsRecent,
   FramesResponse,
+  FullIndexEntry,
   SubmissionsResponse,
   TickerEntry,
 } from './types.js';
@@ -142,6 +143,8 @@ class EdgarApiService {
   private submissionsCache = new Map<string, { at: number; data: SubmissionsResponse }>();
   /** Per-page submissions archive cache, keyed by page name (TTL = EDGAR_TICKER_CACHE_TTL). */
   private archivePageCache = new Map<string, { at: number; data: FilingsRecent }>();
+  /** Per-quarter full-index cache, keyed by `${year}Q${quarter}` (TTL = EDGAR_TICKER_CACHE_TTL). */
+  private fullIndexCache = new Map<string, { at: number; data: FullIndexEntry[] }>();
 
   constructor() {
     const config = getServerConfig();
@@ -325,6 +328,27 @@ class EdgarApiService {
     if (cached && this.isFresh(cached.at)) return cached.data;
     const data = await this.fetchJson<FilingsRecent>(`https://data.sec.gov/submissions/${name}`);
     this.archivePageCache.set(name, { at: Date.now(), data });
+    return data;
+  }
+
+  /**
+   * Fetch and parse a quarterly EDGAR full-index (`master.idx`) — the
+   * pipe-delimited manifest of every filing accepted that quarter, available
+   * back to 1993 QTR1. This is the pre-2001 unscoped browse source: EFTS
+   * full-text only reaches 2001, but the quarterly indexes reach 1993. The file
+   * is not form-filterable server-side (a whole-quarter download), so callers
+   * bound how many quarters they scan and filter client-side (#77). Cached per
+   * quarter within the ticker-cache TTL — an archived quarter is immutable.
+   */
+  async fetchFullIndexQuarter(year: number, quarter: number): Promise<FullIndexEntry[]> {
+    const key = `${year}Q${quarter}`;
+    const cached = this.fullIndexCache.get(key);
+    if (cached && this.isFresh(cached.at)) return cached.data;
+    const text = await this.fetchText(
+      `https://www.sec.gov/Archives/edgar/full-index/${year}/QTR${quarter}/master.idx`,
+    );
+    const data = parseMasterIndex(text);
+    this.fullIndexCache.set(key, { at: Date.now(), data });
     return data;
   }
 
@@ -853,6 +877,65 @@ export function selectArchivePages(
       return true;
     })
     .sort((a, b) => b.filingTo.localeCompare(a.filingTo));
+}
+
+/**
+ * Parse a quarterly EDGAR `master.idx` into filing rows. The file is a short
+ * metadata preamble, then a `CIK|Company Name|Form Type|Date Filed|Filename`
+ * header, a dashed separator line, then one pipe-delimited row per filing. Data
+ * parsing begins after the separator; malformed rows (wrong field count,
+ * non-numeric CIK) are skipped. The accession number is the filename basename
+ * with the `.txt` suffix removed (`edgar/data/320193/0000320193-97-000010.txt`
+ * → `0000320193-97-000010`). Exported for direct unit testing.
+ */
+export function parseMasterIndex(text: string): FullIndexEntry[] {
+  const entries: FullIndexEntry[] = [];
+  let inData = false;
+  for (const line of text.split(/\r?\n/)) {
+    if (!inData) {
+      // The dashed separator line marks the boundary between preamble and data.
+      if (line.startsWith('----')) inData = true;
+      continue;
+    }
+    const parts = line.split('|');
+    if (parts.length !== 5) continue;
+    const [cik, companyName, form, filingDate, filename] = parts;
+    if (!cik || !/^\d+$/.test(cik) || !filename) continue;
+    const base = filename.slice(filename.lastIndexOf('/') + 1).replace(/\.txt$/i, '');
+    entries.push({
+      cik: cik.padStart(10, '0'),
+      companyName: companyName ?? '',
+      form: form ?? '',
+      filingDate: filingDate ?? '',
+      accessionNumber: base,
+    });
+  }
+  return entries;
+}
+
+/**
+ * Enumerate the calendar quarters overlapping the inclusive [startDate, endDate]
+ * range (both YYYY-MM-DD), returned NEWEST-first to mirror `selectArchivePages`
+ * — a capped scan then keeps the most recent quarters, consistent with the
+ * default filing-date-descending sort. Routes search_filings' pre-2001
+ * full-index browse to the `master.idx` files it must fetch (#77).
+ */
+export function quartersInRange(
+  startDate: string,
+  endDate: string,
+): Array<{ year: number; quarter: number }> {
+  const quarterOf = (date: string) => Math.floor((Number(date.slice(5, 7)) - 1) / 3) + 1;
+  const startYear = Number(startDate.slice(0, 4));
+  const endYear = Number(endDate.slice(0, 4));
+  const startQuarter = quarterOf(startDate);
+  const endQuarter = quarterOf(endDate);
+  const quarters: Array<{ year: number; quarter: number }> = [];
+  for (let year = endYear; year >= startYear; year--) {
+    const hi = year === endYear ? endQuarter : 4;
+    const lo = year === startYear ? startQuarter : 1;
+    for (let quarter = hi; quarter >= lo; quarter--) quarters.push({ year, quarter });
+  }
+  return quarters;
 }
 
 /**

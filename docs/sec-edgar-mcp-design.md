@@ -9,7 +9,7 @@
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
 | `secedgar_company_search` | Find companies and retrieve entity info with optional recent filings. Entry point for most workflows. | `query`, `include_filings?`, `form_types?`, `filing_limit?` | `readOnlyHint`, `openWorldHint` |
-| `secedgar_search_filings` | Full-text search across all EDGAR filing documents since 1993. | `query`, `forms?`, `start_date?`, `end_date?`, `limit?`, `offset?` | `readOnlyHint`, `openWorldHint` |
+| `secedgar_search_filings` | Search EDGAR filings since 1993 — EFTS full-text for 2001-present, archive-backed browse (submissions history / quarterly full-index) for pre-2001 ranges. | `query`, `forms?`, `start_date?`, `end_date?`, `limit?`, `offset?` | `readOnlyHint`, `openWorldHint` |
 | `secedgar_get_filing` | Fetch a specific filing's metadata and document content by accession number. | `accession_number`, `cik?`, `content_limit?`, `document?` | `readOnlyHint`, `idempotentHint` |
 | `secedgar_get_financials` | Get historical XBRL financial data for a company. Accepts friendly concept names. | `company`, `concept`, `taxonomy?`, `period_type?` | `readOnlyHint`, `idempotentHint` |
 | `secedgar_compare_metric` | Compare a financial metric across all reporting companies for a specific period. | `concept`, `period`, `unit?`, `limit?`, `sort?` | `readOnlyHint`, `openWorldHint` |
@@ -31,7 +31,7 @@
 
 ## Overview
 
-[SEC EDGAR](https://www.sec.gov/edgar) (Electronic Data Gathering, Analysis, and Retrieval) is the SEC's public database of corporate filings. Every public company, fund, and insider is required to file here. The data is entirely free, requires no authentication, and covers filings from 1993 to present.
+[SEC EDGAR](https://www.sec.gov/edgar) (Electronic Data Gathering, Analysis, and Retrieval) is the SEC's public database of corporate filings. Every public company, fund, and insider is required to file here. The data is entirely free, requires no authentication, and covers filings from 1993 to present. Note that EDGAR's EFTS full-text index only reaches back to 2001; `secedgar_search_filings` serves pre-2001 date ranges from the archives (submissions history and quarterly full-index) instead, so full-text matching before 2001 requires entity scope.
 
 The MCP server wraps EDGAR's public REST APIs to give LLM agents structured access to: company lookups, filing search and retrieval, structured financial data (XBRL), and cross-company financial comparison.
 

@@ -68,6 +68,32 @@ export interface FilingsRecent {
   size?: number[];
 }
 
+/**
+ * Provenance of a `secedgar_search_filings` result row — which EDGAR backend
+ * served it. `efts` is the full-text index (2001-present); `submissions` and
+ * `full-index` are the pre-2001 archive paths (#77).
+ */
+export type FilingSource = 'efts' | 'submissions' | 'full-index';
+
+/**
+ * One filing row parsed from a quarterly EDGAR full-index `master.idx`
+ * (`edgar/full-index/{year}/QTR{n}/master.idx`) — the pipe-delimited
+ * `CIK|Company Name|Form Type|Date Filed|Filename` manifest of every filing
+ * accepted that quarter, available back to 1993 QTR1. This is the pre-2001
+ * unscoped browse source: the EFTS full-text index only reaches 2001, but the
+ * quarterly indexes reach 1993.
+ */
+export interface FullIndexEntry {
+  /** Dashed accession number, derived from the manifest filename. */
+  accessionNumber: string;
+  /** Zero-padded 10-digit CIK. */
+  cik: string;
+  companyName: string;
+  /** Filing date, YYYY-MM-DD. */
+  filingDate: string;
+  form: string;
+}
+
 /** EFTS full-text search response. */
 export interface EftsResponse {
   aggregations?: {

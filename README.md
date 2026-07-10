@@ -34,7 +34,7 @@ Eight tools for querying SEC EDGAR data, plus three for SQL analytics over the D
 | Tool | Description |
 |:---|:---|
 | `secedgar_company_search` | Find companies and retrieve entity info with optional recent filings |
-| `secedgar_search_filings` | Full-text search across all EDGAR filing documents since 1993 |
+| `secedgar_search_filings` | Search EDGAR filings since 1993 — full-text (2001+) plus archive-backed browse for pre-2001 ranges |
 | `secedgar_get_filing` | Fetch a specific filing's metadata and document content |
 | `secedgar_get_financials` | Get historical XBRL financial data for a company |
 | `secedgar_get_insider_transactions` | Form 3/4/5 insider transactions (buys, sells, grants, exercises) parsed from ownership XML |
@@ -61,11 +61,12 @@ Entry point for most EDGAR workflows — resolve tickers, names, or CIKs to enti
 
 ### `secedgar_search_filings`
 
-Full-text search across all EDGAR filing documents since 1993.
+Search EDGAR filings since 1993. Full-text search covers 2001-present (the EFTS index floor); pre-2001 date ranges are served from the archives — pre-2001 full-text matching requires entity scope.
 
 - Exact phrases (`"material weakness"`), boolean operators (`revenue OR income`), wildcards (`account*`)
 - Entity targeting within query string (`cik:320193` or `ticker:AAPL`) — scoped server-side by CIK, so filings made under a former company name (same CIK) are included
 - Browse mode: omit `query` to list filings by form type (`forms=["S-1"]`) and/or entity (`ticker:`/`cik:`), optionally narrowed by date — a bare date range is not a valid search and must be paired with forms or entity targeting
+- Pre-2001 date ranges (back to 1993) route to the archives: an entity-scoped range reads the filer's full submissions history; an unscoped forms/date range browses the quarterly full-index. A range straddling 2001-01-01 is rejected with a split instruction, and pre-2001 full-text (no entity scope) is unsupported. Each row carries a `source` field (`efts` / `submissions` / `full-index`), preserved into the `df_<id>` dataframe
 - Date range filtering, form type filtering, pagination up to 10,000 results
 - Returns form distribution for narrowing follow-up searches
 - When the entity-scoped window exceeds the inline limit, the already-fetched EFTS window is materialized as a `df_<id>` dataframe — query it with `secedgar_dataframe_query`

@@ -9,10 +9,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
 import type { EftsResponse } from '@/services/edgar/types.js';
 
-vi.mock('@/services/edgar/edgar-api-service.js', () => ({
-  getEdgarApiService: vi.fn(),
-  initEdgarApiService: vi.fn(),
-}));
+// Preserve the real pure helpers the tool imports (quartersInRange,
+// selectArchivePages); only the service singleton getter is mocked.
+vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
+  const actual = await importActual<typeof import('@/services/edgar/edgar-api-service.js')>();
+  return {
+    ...actual,
+    getEdgarApiService: vi.fn(),
+    initEdgarApiService: vi.fn(),
+  };
+});
 
 vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
   getCanvasBridge: vi.fn(),
@@ -70,7 +76,13 @@ const mockEftsResponse: EftsResponse = {
   },
 };
 
-const mockApi = { searchFilings: vi.fn() };
+const mockApi = {
+  searchFilings: vi.fn(),
+  resolveCik: vi.fn(),
+  getSubmissions: vi.fn(),
+  fetchArchivePage: vi.fn(),
+  fetchFullIndexQuarter: vi.fn(),
+};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -872,5 +884,334 @@ describe('searchFilingsTool', () => {
     };
     const blocks = searchFilingsTool.format!(output);
     expect(blocks[0].text).toContain('capped at 10,000');
+  });
+
+  it('renders the source marker per row (format-parity)', () => {
+    const output = {
+      total: 2,
+      total_is_exact: true,
+      results: [
+        {
+          accession_number: '0000320193-97-000010',
+          form: '10-K',
+          filing_date: '1997-12-05',
+          company_name: 'APPLE COMPUTER INC',
+          cik: '0000320193',
+          source: 'submissions' as const,
+        },
+        {
+          accession_number: '0000320193-23-000106',
+          form: '10-K',
+          filing_date: '2023-11-03',
+          company_name: 'Apple Inc.',
+          cik: '0000320193',
+          source: 'efts' as const,
+        },
+      ],
+    };
+    const text = searchFilingsTool.format!(output)[0].text;
+    expect(text).toContain('source: submissions');
+    expect(text).toContain('source: efts');
+  });
+
+  // --- Pre-2001 date routing to the archives (#77) ---
+
+  it('declares the pre-2001 routing reasons in the errors contract (#77)', () => {
+    const byReason = new Map(searchFilingsTool.errors?.map((e) => [e.reason, e]));
+    for (const reason of [
+      'straddling_date_range',
+      'pre2001_full_text_unscoped',
+      'pre2001_full_text_scoped',
+    ]) {
+      expect(byReason.get(reason)?.code).toBe(JsonRpcErrorCode.ValidationError);
+    }
+  });
+
+  it('routes a pre-2001 entity-scoped range to the submissions archive (source: submissions) (#77)', async () => {
+    mockApi.getSubmissions.mockResolvedValue({
+      cik: '0000320193',
+      name: 'APPLE COMPUTER INC',
+      filings: {
+        recent: {
+          accessionNumber: ['0000320193-99-000001', '0000320193-97-000010'],
+          form: ['10-K', '10-K'],
+          filingDate: ['1999-12-01', '1997-12-05'],
+          reportDate: ['1999-09-25', '1997-09-26'],
+          primaryDocument: ['', ''],
+          primaryDocDescription: ['', ''],
+        },
+        files: [],
+      },
+    });
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      query: 'cik:320193',
+      forms: ['10-K'],
+      start_date: '1996-01-01',
+      end_date: '1999-12-31',
+    });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
+    expect(mockApi.getSubmissions).toHaveBeenCalledWith('0000320193');
+    expect(result.total).toBe(2);
+    expect(result.results.every((r) => r.source === 'submissions')).toBe(true);
+    // Newest-first by default; both recent 10-Ks fall inside the window.
+    expect(result.results[0].filing_date).toBe('1999-12-01');
+    expect(result.results.map((r) => r.accession_number)).toContain('0000320193-97-000010');
+  });
+
+  it('scans submissions archive pages for older pre-2001 filings (#77, reuses #78 paging)', async () => {
+    mockApi.getSubmissions.mockResolvedValue({
+      cik: '0000320193',
+      name: 'APPLE COMPUTER INC',
+      filings: {
+        recent: {
+          accessionNumber: [],
+          form: [],
+          filingDate: [],
+          reportDate: [],
+          primaryDocument: [],
+          primaryDocDescription: [],
+        },
+        files: [
+          {
+            name: 'CIK0000320193-submissions-001.json',
+            filingCount: 1,
+            filingFrom: '1994-01-26',
+            filingTo: '1996-12-31',
+          },
+        ],
+      },
+    });
+    mockApi.fetchArchivePage.mockResolvedValue({
+      accessionNumber: ['0000320193-94-000005'],
+      form: ['10-K'],
+      filingDate: ['1994-12-13'],
+      reportDate: ['1994-09-30'],
+      primaryDocument: [''],
+      primaryDocDescription: [''],
+    });
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      query: 'cik:320193',
+      forms: ['10-K'],
+      start_date: '1993-01-01',
+      end_date: '1996-12-31',
+    });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith('CIK0000320193-submissions-001.json');
+    expect(result.total).toBe(1);
+    expect(result.results[0].accession_number).toBe('0000320193-94-000005');
+    expect(result.results[0].source).toBe('submissions');
+  });
+
+  it('routes a pre-2001 unscoped forms/date browse to the full-index (source: full-index) (#77)', async () => {
+    mockApi.fetchFullIndexQuarter.mockResolvedValue([
+      {
+        cik: '0000320193',
+        companyName: 'APPLE COMPUTER INC',
+        form: '10-K',
+        filingDate: '1998-03-05',
+        accessionNumber: '0000320193-98-000007',
+      },
+      {
+        cik: '0000320193',
+        companyName: 'APPLE COMPUTER INC',
+        form: '10-K/A',
+        filingDate: '1998-03-20',
+        accessionNumber: '0000320193-98-000008',
+      },
+      {
+        cik: '0001000045',
+        companyName: 'NICHOLAS FINANCIAL INC',
+        form: '10-Q',
+        filingDate: '1998-02-13',
+        accessionNumber: '0000914317-98-000107',
+      },
+    ]);
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      query: '',
+      forms: ['10-K'],
+      start_date: '1998-01-01',
+      end_date: '1998-03-31',
+    });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
+    expect(mockApi.fetchFullIndexQuarter).toHaveBeenCalledWith(1998, 1);
+    // 10-K + 10-K/A match forms:['10-K'] (amendment-aware); 10-Q excluded.
+    expect(result.total).toBe(2);
+    expect(result.results.every((r) => r.source === 'full-index')).toBe(true);
+    expect(result.results.map((r) => r.form).sort()).toEqual(['10-K', '10-K/A']);
+  });
+
+  it('caps the full-index quarter scan and discloses truncation with a source-tagged dataframe (#77)', async () => {
+    mockApi.fetchFullIndexQuarter.mockImplementation(async (year: number, quarter: number) =>
+      Array.from({ length: 5 }, (_, i) => ({
+        cik: '0000320193',
+        companyName: 'APPLE COMPUTER INC',
+        form: '10-K',
+        filingDate: `${year}-0${quarter}-1${i}`,
+        accessionNumber: `${year}Q${quarter}-000${i}`,
+      })),
+    );
+    const registerDataframe = vi.fn().mockResolvedValue({
+      tableName: 'df_FULL1_IDX22',
+      rowCount: 40,
+      expiresAt: '2026-05-18T00:00:00.000Z',
+      columnSchema: [],
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      query: '',
+      forms: ['10-K'],
+      start_date: '1993-01-01',
+      end_date: '2000-12-31',
+      limit: 10,
+    });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    // 1993 QTR1..2000 QTR4 = 32 quarters, capped at 8.
+    expect(mockApi.fetchFullIndexQuarter).toHaveBeenCalledTimes(8);
+    expect(result.total_is_exact).toBe(false);
+    expect(result.dataset?.truncated).toBe(true);
+    const rows = registerDataframe.mock.calls[0]![1].rows;
+    expect(rows.every((r: any) => r.source === 'full-index')).toBe(true);
+  });
+
+  it('rejects a straddling range with straddling_date_range and no fetch (#77)', async () => {
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      query: '',
+      forms: ['10-K'],
+      start_date: '1998-01-01',
+      end_date: '2003-01-01',
+    });
+    await expect(searchFilingsTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'straddling_date_range',
+        recovery: { hint: expect.stringContaining('2001-01-01') },
+      },
+    });
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
+    expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+    expect(mockApi.fetchFullIndexQuarter).not.toHaveBeenCalled();
+  });
+
+  it('rejects pre-2001 free-text without entity scope (pre2001_full_text_unscoped) (#77)', async () => {
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      query: 'revenue',
+      start_date: '1998-01-01',
+      end_date: '1998-12-31',
+    });
+    await expect(searchFilingsTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'pre2001_full_text_unscoped' },
+    });
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
+  });
+
+  it('rejects pre-2001 free-text with entity scope (pre2001_full_text_scoped) — no silent term drop (#77)', async () => {
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      query: 'cik:320193 revenue',
+      start_date: '1998-01-01',
+      end_date: '1998-12-31',
+    });
+    await expect(searchFilingsTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'pre2001_full_text_scoped',
+        recovery: { hint: expect.stringContaining('form and date') },
+      },
+    });
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
+    expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+  });
+
+  it('treats end_date 2000-12-31 as pre-2001 → archive full-index, not EFTS (#77)', async () => {
+    mockApi.fetchFullIndexQuarter.mockResolvedValue([]);
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      query: '',
+      forms: ['10-K'],
+      start_date: '2000-10-01',
+      end_date: '2000-12-31',
+    });
+    await searchFilingsTool.handler(input, ctx);
+
+    expect(mockApi.fetchFullIndexQuarter).toHaveBeenCalled();
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
+  });
+
+  it('treats start_date 2001-01-01 as EFTS, not archive — post-2001 unchanged, source: efts (#77)', async () => {
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      query: 'revenue',
+      start_date: '2001-01-01',
+      end_date: '2001-12-31',
+    });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    expect(mockApi.searchFilings).toHaveBeenCalled();
+    expect(mockApi.fetchFullIndexQuarter).not.toHaveBeenCalled();
+    expect(result.results.every((r) => r.source === 'efts')).toBe(true);
+  });
+
+  it('tags post-2001 EFTS canvas rows with source: efts (#77)', async () => {
+    const registerDataframe = vi.fn().mockResolvedValue({
+      tableName: 'df_EFTS1_SRC22',
+      rowCount: 30,
+      expiresAt: '2026-05-18T00:00:00.000Z',
+      columnSchema: [],
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+    const hit = (n: number) => ({
+      _id: `h${n}`,
+      _source: {
+        adsh: `A${n}`,
+        form: '10-K',
+        file_date: `2020-01-${String(n).padStart(2, '0')}`,
+        display_names: ['X'],
+        ciks: ['1'],
+      },
+    });
+    mockApi.searchFilings.mockResolvedValueOnce({
+      ...mockEftsResponse,
+      hits: {
+        total: { value: 60, relation: 'eq' },
+        hits: Array.from({ length: 30 }, (_, i) => hit(i + 1)),
+      },
+    });
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({ query: 'revenue', limit: 5 });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    const rows = registerDataframe.mock.calls[0]![1].rows;
+    expect(rows.every((r: any) => r.source === 'efts')).toBe(true);
+    expect(result.results.every((r) => r.source === 'efts')).toBe(true);
+  });
+
+  it('emits a coverage-boundary notice on a zero-hit pre-2001 browse (#77)', async () => {
+    mockApi.fetchFullIndexQuarter.mockResolvedValue([]);
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      query: '',
+      forms: ['SC 13D'],
+      start_date: '1998-01-01',
+      end_date: '1998-03-31',
+    });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    expect(result.total).toBe(0);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.notice).toContain('full-index');
   });
 });
