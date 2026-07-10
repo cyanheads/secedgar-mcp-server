@@ -649,8 +649,106 @@ describe('searchFilingsTool', () => {
     expect(() => searchFilingsTool.input.parse({ query: '   ' })).toThrow();
   });
 
-  it('rejects an empty query at parse time', () => {
-    expect(() => searchFilingsTool.input.parse({ query: '' })).toThrow();
+  // --- Browse mode: empty query with forms/entity (#79) ---
+
+  it('allows an explicitly-empty or omitted query at parse time (browse sentinel #79)', () => {
+    // Empty string is now the browse sentinel — parse accepts it (the handler guard,
+    // not the schema, enforces that forms or entity targeting accompanies it).
+    expect(() => searchFilingsTool.input.parse({ query: '', forms: ['S-1'] })).not.toThrow();
+    expect(() => searchFilingsTool.input.parse({ forms: ['S-1'] })).not.toThrow();
+  });
+
+  it('declares missing_criteria in the errors contract (#79)', () => {
+    const entry = searchFilingsTool.errors?.find((e) => e.reason === 'missing_criteria');
+    expect(entry).toBeDefined();
+    expect(entry!.code).toBe(JsonRpcErrorCode.ValidationError);
+  });
+
+  it('browses forms-only with no query — sends forms, omits the q term (#79)', async () => {
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: {
+        total: { value: 80, relation: 'eq' },
+        hits: [
+          {
+            _id: 's1a',
+            _source: {
+              adsh: 'S1A',
+              form: 'S-1',
+              file_date: '2026-07-03',
+              display_names: ['Some Issuer Inc.  (CIK 0001234567)'],
+              ciks: ['0001234567'],
+            },
+          },
+        ],
+      },
+    });
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      forms: ['S-1'],
+      start_date: '2026-06-25',
+      end_date: '2026-07-04',
+    });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    // Empty query string reaches the service, which omits `q` from the EFTS request.
+    expect(mockApi.searchFilings).toHaveBeenCalledWith(
+      expect.objectContaining({ query: '', forms: ['S-1'] }),
+    );
+    expect(result.total).toBe(80);
+    expect(result.results[0].form).toBe('S-1');
+  });
+
+  it('rejects a date-range-only browse with no query or forms — missing_criteria (#79)', async () => {
+    // Matches live EFTS: a bare date range with no forms/query/entity is "Blank search
+    // not valid". The guard fires before any EFTS call.
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      start_date: '2026-06-25',
+      end_date: '2026-07-04',
+    });
+
+    await expect(searchFilingsTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'missing_criteria' },
+    });
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
+  });
+
+  it('allows entity-scope-only browse via cik: with no forms/query — regression guard (#79)', async () => {
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: { total: { value: 5, relation: 'eq' }, hits: [] },
+    });
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    // cik: carries raw content, so the both-absent guard does not fire even with no forms.
+    const input = searchFilingsTool.input.parse({ query: 'cik:320193' });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    expect(mockApi.searchFilings).toHaveBeenCalledWith(
+      expect.objectContaining({ query: '', ciks: ['0000320193'] }),
+    );
+    expect(result.total).toBe(5);
+  });
+
+  it('zero-hit forms-only browse notice names the forms, not an empty query (#79)', async () => {
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: { total: { value: 0, relation: 'eq' }, hits: [] },
+    });
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      forms: ['S-1'],
+      start_date: '2026-06-25',
+      end_date: '2026-07-04',
+    });
+    await searchFilingsTool.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(typeof enrichment.notice).toBe('string');
+    expect(enrichment.notice).toContain('forms [S-1]');
+    // No empty-quoted-query artifact from the browse path.
+    expect(enrichment.notice).not.toContain('""');
   });
 
   // --- Zero-total notice echoes all criteria including date range (#58) ---

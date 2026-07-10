@@ -148,15 +148,30 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       recovery:
         'Pass a numeric CIK such as cik:320193 — find it with secedgar_company_search if unknown.',
     },
+    {
+      reason: 'missing_criteria',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Neither a full-text query nor a forms filter was provided (a date range cannot stand alone)',
+      recovery:
+        'Provide search terms, or browse by form type (forms: ["S-1"]) or entity (ticker:AAPL / cik:320193 in the query) — optionally narrowed by date.',
+    },
   ],
 
   input: z.object({
     query: z
-      .string()
-      .trim()
-      .min(1, 'Query cannot be blank')
+      .union([
+        z.literal(''),
+        z
+          .string()
+          .trim()
+          .min(1, 'Query cannot be blank')
+          .describe(
+            'Full-text search query. Supports: exact phrases ("material weakness"), boolean operators (revenue OR income), exclusion (-preliminary), wildcard suffix (account*), entity targeting (ticker:AAPL or cik:320193 in the query). Terms are AND\'d by default.',
+          ),
+      ])
+      .optional()
       .describe(
-        'Full-text search query. Supports: exact phrases ("material weakness"), boolean operators (revenue OR income), exclusion (-preliminary), wildcard suffix (account*), entity targeting (ticker:AAPL or cik:320193 in the query). Terms are AND\'d by default.',
+        'Full-text search query. Optional — omit (or pass "") to browse by form type and/or entity instead, e.g. every S-1 in a date window, or a company\'s filings via ticker:/cik:. A date range alone is not a valid search; pair it with forms or entity targeting. When present, supports exact phrases ("material weakness"), boolean operators (revenue OR income), exclusion (-preliminary), wildcard suffix (account*), and entity targeting (ticker:AAPL or cik:320193 in the query); terms are AND\'d by default.',
       ),
     forms: z
       .array(z.string())
@@ -202,7 +217,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .enum(['filing_date_desc', 'filing_date_asc', 'relevance'])
       .default('filing_date_desc')
       .describe(
-        'Result ordering. "filing_date_desc" (default) returns most recent first. "filing_date_asc" returns oldest first. "relevance" returns SEC\'s native search-score order, which weights term match strength over recency. Date sorts re-order the top 100 hits returned by the search index — for broad queries with more than 100 matches and no entity targeting, date-newest filings may sit outside that window. Entity targeting (ticker:/cik:) or a narrower query keeps matches inside the window when absolute recency matters.',
+        'Result ordering. "filing_date_desc" (default) returns most recent first. "filing_date_asc" returns oldest first. "relevance" returns SEC\'s native search-score order, which weights term match strength over recency. Date sorts re-order the top 100 hits returned by the search index — for broad queries with more than 100 matches and no entity targeting, date-newest filings may sit outside that window. Entity targeting (ticker:/cik:) or a narrower query keeps matches inside the window when absolute recency matters. On the no-query browse path (forms/entity only), EFTS has no relevance signal — every hit scores null — and returns filings in natural date-descending order, so all sort modes effectively yield newest-first.',
       ),
   }),
 
@@ -300,9 +315,23 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       );
     }
 
+    // Browse mode (#79): EFTS accepts a forms-only or entity-scoped request with no
+    // full-text term, but rejects one with neither ("Blank search not valid"). Guard
+    // the both-absent shape here — checked against the RAW query/forms (before the
+    // entity token is stripped), so a bare cik:/ticker: query still passes (it has raw
+    // content even though it strips to blank). A date range does not stand alone.
+    if (!input.query?.trim() && !input.forms?.length) {
+      throw ctx.fail(
+        'missing_criteria',
+        'A full-text query or a forms filter is required — a date range alone is not a valid search.',
+        { ...ctx.recoveryFor('missing_criteria') },
+      );
+    }
+
     // Resolve ticker:/cik: entity targeting → stripped query + CIK for the
     // server-side ciks param. Throws typed validation errors on bad tokens (#61).
-    const { query, entityCik } = await resolveEntityTargeting(input.query, ctx);
+    // Default to '' so a browse request (undefined query) resolves cleanly.
+    const { query, entityCik } = await resolveEntityTargeting(input.query ?? '', ctx);
 
     // EFTS scores by relevance and exposes no sort param. When the caller wants
     // a date sort (the default) or entity filtering, we over-fetch the EFTS
@@ -417,24 +446,35 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
 
     const effectiveQuery = entityCik
       ? `${query ? `${query} ` : ''}(entity scope: CIK ${entityCik})`
-      : query;
+      : query || (input.forms?.length ? `(browse: forms ${input.forms.join(', ')})` : '');
     ctx.enrich.echo(effectiveQuery);
     if (total === 0) {
-      // Genuine no-match — EFTS returned zero hits. Echo all active criteria.
-      const formsPart = input.forms?.length ? ` | Forms: ${input.forms.join(', ')}` : '';
-      const datePart =
-        input.start_date && input.end_date
-          ? ` | Date: ${input.start_date} to ${input.end_date}`
-          : '';
+      // Genuine no-match — EFTS returned zero hits. Echo all active criteria; on the
+      // browse path (no query text) lead with the form/entity criteria instead of an
+      // empty quoted query.
+      const criteria: string[] = [];
+      if (query) criteria.push(`"${query}"`);
+      if (entityCik) criteria.push(`entity CIK ${entityCik}`);
+      if (input.forms?.length) criteria.push(`forms [${input.forms.join(', ')}]`);
+      if (input.start_date && input.end_date) {
+        criteria.push(`dates ${input.start_date} to ${input.end_date}`);
+      }
+      const criteriaText = criteria.length > 0 ? criteria.join(', ') : 'the given criteria';
       ctx.enrich.notice(
-        `No filings matched "${input.query}"${formsPart}${datePart}. Try broader search terms, remove form filters, or widen the date range.`,
+        `No filings matched ${criteriaText}. Broaden the query, remove the form filter, or widen the date range.`,
       );
     } else if (results.length === 0 && wideFetch && input.offset >= hits.length) {
       // The offset exceeded the client-side window (wideFetch fetches 100 rows max).
       // There are results — the caller just paged past the available window. The
       // materialized dataframe holds the same window, so SQL paging reaches no further.
+      // Entity targeting forces wideFetch regardless of sort (see `wideFetch` above),
+      // so switching to sort=relevance does NOT unlock deeper EDGAR-side pagination on
+      // that path — only the non-entity path pages server-side via relevance.
+      const deeperPaging = entityCik
+        ? 'narrow the search with forms or dates, or query the full window via secedgar_dataframe_query'
+        : 'switch to sort=relevance for EDGAR-side pagination up to 10,000 results, or narrow the search with forms, dates, or entity targeting';
       ctx.enrich.notice(
-        `Offset (${input.offset}) exceeds the fetched window (${hits.length} rows — date sorts and entity targeting fetch a single window). ${total} filings matched: switch to sort=relevance for EDGAR-side pagination up to 10,000 results, or narrow the search with forms, dates, or entity targeting.`,
+        `Offset (${input.offset}) exceeds the fetched window (${hits.length} rows — date sorts and entity targeting fetch a single window). ${total} filings matched: ${deeperPaging}.`,
       );
     } else if (total > results.length) {
       ctx.enrich.truncated({ shown: results.length, cap: input.limit });

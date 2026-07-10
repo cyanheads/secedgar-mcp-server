@@ -157,8 +157,12 @@ describe('companySearchTool — input validation', () => {
 // ---------------------------------------------------------------------------
 
 describe('searchFilingsTool — input validation', () => {
-  it('rejects empty query string', () => {
-    expect(() => searchFilingsTool.input.parse({ query: '' })).toThrow();
+  it('accepts an empty query as the browse sentinel, rejects whitespace-only (#79)', () => {
+    // Empty string is the browse sentinel — parse accepts it (the handler guard, not
+    // the schema, enforces that a forms filter or entity targeting accompanies it).
+    // Whitespace-only is still malformed and rejected at parse.
+    expect(() => searchFilingsTool.input.parse({ query: '' })).not.toThrow();
+    expect(() => searchFilingsTool.input.parse({ query: '   ' })).toThrow();
   });
 
   it('rejects limit above 100', () => {
