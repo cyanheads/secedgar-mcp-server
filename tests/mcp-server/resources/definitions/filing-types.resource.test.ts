@@ -37,6 +37,26 @@ describe('filingTypesResource', () => {
     expect(text).toContain('Financial analysis');
   });
 
+  // #83 — beneficial-ownership filings use the structured SCHEDULE 13D/13G form
+  // names since December 2024; the legacy SC 13D/SC 13G names match zero current
+  // filings, so the resource must list the current names plus the transition note.
+  it('uses the current SCHEDULE 13D/13G form names, not the legacy SC 13D/SC 13G', () => {
+    const ctx = createMockContext();
+    const text = filingTypesResource.handler({}, ctx) as string;
+    expect(text).toContain('SCHEDULE 13D');
+    expect(text).toContain('SCHEDULE 13G');
+    // The legacy names must not appear as the table's form label.
+    expect(text).not.toContain('**SC 13D**');
+    expect(text).not.toContain('**SC 13G**');
+  });
+
+  it('notes the December 2024 structured-form transition', () => {
+    const ctx = createMockContext();
+    const text = filingTypesResource.handler({}, ctx) as string;
+    expect(text).toContain('December 2024');
+    expect(text).toContain('primary_doc.xml');
+  });
+
   it('lists resources correctly', async () => {
     const listing = await filingTypesResource.list!();
     expect(listing.resources).toHaveLength(1);

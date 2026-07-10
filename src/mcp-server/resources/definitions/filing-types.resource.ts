@@ -46,13 +46,13 @@ const FILING_TYPES = [
     use_cases: 'Insider trading activity, management confidence signals',
   },
   {
-    form: 'SC 13D',
+    form: 'SCHEDULE 13D',
     cadence: 'Threshold',
     description: 'Beneficial ownership report for 5%+ activist investors.',
     use_cases: 'Activist investor tracking, ownership changes',
   },
   {
-    form: 'SC 13G',
+    form: 'SCHEDULE 13G',
     cadence: 'Threshold',
     description: 'Beneficial ownership report for 5%+ passive investors.',
     use_cases: 'Passive institutional ownership tracking',
@@ -88,6 +88,10 @@ export const filingTypesResource = resource('secedgar://filing-types', {
     for (const ft of FILING_TYPES) {
       lines.push(`| **${ft.form}** | ${ft.cadence} | ${ft.description} | ${ft.use_cases} |`);
     }
+    lines.push(
+      '',
+      '> **Beneficial-ownership form names (December 2024 transition):** 5%+ ownership filings now use the structured form names `SCHEDULE 13D` / `SCHEDULE 13G` (with a `primary_doc.xml`). The legacy `SC 13D` / `SC 13G` names stopped appearing on new filings, so filter EFTS (`secedgar_search_filings` forms) on the current names to reach recent filings.',
+    );
     return lines.join('\n');
   },
 
