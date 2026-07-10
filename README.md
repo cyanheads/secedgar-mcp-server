@@ -54,6 +54,7 @@ Entry point for most EDGAR workflows — resolve tickers, names, or CIKs to enti
 - Current and former company names both resolve (`Facebook` → Meta Platforms, `Square` → Block)
 - Near-match suggestions on zero-result name search (e.g. `Microsfot` → `MICROSOFT CORP / MSFT`)
 - Optionally includes recent filings with form type filtering
+- Date filtering (`filed_after` / `filed_before`) and under-filled form filters page into the older submissions archive, reaching filings that predate the ~1000-entry recent window (e.g. a 2005 10-K); `history_scanned_through` discloses the scan depth, and the full filtered history materializes as a `df_<id>` dataframe when it exceeds the inline `filing_limit`
 - Returns entity metadata: SIC code, exchanges, fiscal year end, state of incorporation
 
 ---
@@ -64,6 +65,7 @@ Full-text search across all EDGAR filing documents since 1993.
 
 - Exact phrases (`"material weakness"`), boolean operators (`revenue OR income`), wildcards (`account*`)
 - Entity targeting within query string (`cik:320193` or `ticker:AAPL`) — scoped server-side by CIK, so filings made under a former company name (same CIK) are included
+- Browse mode: omit `query` to list filings by form type (`forms=["S-1"]`) and/or entity (`ticker:`/`cik:`), optionally narrowed by date — a bare date range is not a valid search and must be paired with forms or entity targeting
 - Date range filtering, form type filtering, pagination up to 10,000 results
 - Returns form distribution for narrowing follow-up searches
 - When the entity-scoped window exceeds the inline limit, the already-fetched EFTS window is materialized as a `df_<id>` dataframe — query it with `secedgar_dataframe_query`

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.12.3](changelog/0.12.x/0.12.3.md) — 2026-07-09
+
+secedgar_company_search pages into the older submissions archive for date-filtered or under-filled form scans and discloses scan depth; secedgar_search_filings adds a query-optional browse mode; secedgar_dataframe_query's non-SELECT rejection now carries a recovery hint; and secedgar://filing-types lists the current SCHEDULE 13D/13G form names.
+
 ## [0.12.2](changelog/0.12.x/0.12.2.md) — 2026-07-09
 
 secedgar_get_institutional_holdings resolves institutional names via EDGAR entity-autocomplete search, reports ambiguous matches instead of guessing, stops leaking the SEC URL on a bare-CIK 404, and routes operating-company CIKs to the right tools; secedgar_company_analysis routes ownership-focused requests through the insider and 13F tools.
