@@ -1,7 +1,7 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.12.3
+**Version:** 0.12.4
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.10.14`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 
@@ -45,7 +45,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 | Name | Description | Key Inputs |
 |:-----|:------------|:-----------|
 | `secedgar_company_search` | Find companies and retrieve entity info with optional recent filings | `query`, `include_filings?`, `form_types?`, `filing_limit?`, `filed_after?`, `filed_before?` |
-| `secedgar_search_filings` | Full-text search across all EDGAR filing documents since 1993 | `query?`, `forms?`, `start_date?`, `end_date?`, `limit?` |
+| `secedgar_search_filings` | Search EDGAR filings since 1993 — full-text (2001+) plus archive-backed browse for pre-2001 ranges | `query?`, `forms?`, `start_date?`, `end_date?`, `limit?` |
 | `secedgar_get_filing` | Fetch a specific filing's metadata and document content | `accession_number`, `cik?`, `content_limit?`, `document?` |
 | `secedgar_get_financials` | Get historical XBRL financial data for a company | `company`, `concept`, `taxonomy?`, `period_type?`, `limit?` |
 | `secedgar_get_insider_transactions` | Form 3/4/5 insider transactions parsed from ownership XML | `ticker_or_cik`, `transaction_type?`, `limit?` |

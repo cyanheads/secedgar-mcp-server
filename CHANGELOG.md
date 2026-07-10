@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.12.4](changelog/0.12.x/0.12.4.md) — 2026-07-09
+
+secedgar_search_filings now serves pre-2001 date ranges (back to 1993) from the SEC archives — entity-scoped submissions history or a quarterly full-index browse — tagging every result row with its source (efts/submissions/full-index); straddling or unscoped pre-2001 full-text ranges are rejected with a recovery hint.
+
 ## [0.12.3](changelog/0.12.x/0.12.3.md) — 2026-07-09
 
 secedgar_company_search pages into the older submissions archive for date-filtered or under-filled form scans and discloses scan depth; secedgar_search_filings adds a query-optional browse mode; secedgar_dataframe_query's non-SELECT rejection now carries a recovery hint; and secedgar://filing-types lists the current SCHEDULE 13D/13G form names.
