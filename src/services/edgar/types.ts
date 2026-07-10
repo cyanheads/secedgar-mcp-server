@@ -41,14 +41,31 @@ export interface SubmissionsResponse {
   tickers: string[];
 }
 
-/** Parallel arrays from the submissions API recent filings. */
+/**
+ * Parallel arrays from the submissions API filings — both the inline `recent`
+ * window and the older archive pages (`filings.files[].name`, e.g.
+ * `CIK0000320193-submissions-001.json`). An archive page is a flat parallel-array
+ * object at the JSON root, field-compatible with `recent` plus the extra columns
+ * below (present on archive pages, absent from `recent`). Only the first six arrays
+ * are consumed; the rest document the real archive-page shape.
+ */
 export interface FilingsRecent {
+  acceptanceDateTime?: string[];
   accessionNumber: string[];
+  act?: string[];
+  core_type?: string[];
+  fileNumber?: string[];
   filingDate: string[];
+  filmNumber?: string[];
   form: string[];
+  isInlineXBRL?: number[];
+  isXBRL?: number[];
+  isXBRLNumeric?: number[];
+  items?: string[];
   primaryDocDescription: string[];
   primaryDocument: string[];
   reportDate: string[];
+  size?: number[];
 }
 
 /** EFTS full-text search response. */

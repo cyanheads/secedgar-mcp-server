@@ -6,7 +6,13 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { getEdgarApiService, suggestCompanies } from '@/services/edgar/edgar-api-service.js';
+import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  getEdgarApiService,
+  selectArchivePages,
+  suggestCompanies,
+} from '@/services/edgar/edgar-api-service.js';
+import type { FilingsRecent } from '@/services/edgar/types.js';
 
 interface FilingEntry {
   accession_number: string;
@@ -17,12 +23,36 @@ interface FilingEntry {
   report_date?: string | undefined;
 }
 
+/**
+ * Cap on submissions archive pages fetched in one call — bounds latency and the
+ * rate-limited request budget for prolific multi-decade filers. Hitting the cap
+ * sets the dataframe's `truncated` flag (#78). Most filers have 0–3 archive pages,
+ * so the cap rarely binds.
+ */
+const ARCHIVE_PAGE_SCAN_CAP = 10;
+
 /** Format SEC's MMDD fiscal year end string as MM-DD (e.g., "0926" → "09-26"). */
 function formatFiscalYearEnd(raw: string): string {
   if (/^\d{4}$/.test(raw)) {
     return `${raw.slice(0, 2)}-${raw.slice(2)}`;
   }
   return raw;
+}
+
+/** Zip a submissions parallel-array block (recent window or archive page) into filing rows. */
+function zipFilings(block: FilingsRecent): FilingEntry[] {
+  const rows: FilingEntry[] = [];
+  for (let i = 0; i < block.accessionNumber.length; i++) {
+    rows.push({
+      accession_number: block.accessionNumber[i] ?? '',
+      form: block.form[i] ?? '',
+      filing_date: block.filingDate[i] ?? '',
+      report_date: block.reportDate[i] || undefined,
+      primary_document: block.primaryDocument[i] ?? '',
+      description: block.primaryDocDescription[i] || undefined,
+    });
+  }
+  return rows;
 }
 
 export const companySearchTool = tool('secedgar_company_search', {
@@ -82,7 +112,31 @@ export const companySearchTool = tool('secedgar_company_search', {
       .min(1)
       .max(50)
       .default(10)
-      .describe('Maximum number of filings to return.'),
+      .describe('Maximum number of filings to return in the inline list.'),
+    filed_after: z
+      .union([
+        z.literal(''),
+        z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD')
+          .describe('YYYY-MM-DD'),
+      ])
+      .optional()
+      .describe(
+        "Only include filings filed on or after this date (YYYY-MM-DD). A date filter routes the scan into the older submissions archive pages, so it reaches filings that predate the ~1000-filing recent window (e.g. a company's 2005 10-K).",
+      ),
+    filed_before: z
+      .union([
+        z.literal(''),
+        z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD')
+          .describe('YYYY-MM-DD'),
+      ])
+      .optional()
+      .describe(
+        'Only include filings filed on or before this date (YYYY-MM-DD). Use alone or with filed_after; together they bound the archive-page scan.',
+      ),
   }),
 
   output: z.object({
@@ -146,7 +200,32 @@ export const companySearchTool = tool('secedgar_company_search', {
     total_filings: z
       .number()
       .optional()
-      .describe('Total filings matching the filter (may exceed filing_limit).'),
+      .describe(
+        'Total filings matching the filter across everything scanned (recent window + any archive pages), which may exceed filing_limit and the inline list.',
+      ),
+    history_scanned_through: z
+      .string()
+      .optional()
+      .describe(
+        'Oldest filing date reached by the scan (YYYY-MM-DD). Filings older than this were not examined: the recent window caps at ~1000 filings, and older filings live in archive pages fetched only when a date filter or an under-filled form filter requires them. Absent when no filings were scanned.',
+      ),
+    dataset: z
+      .object({
+        name: z
+          .string()
+          .describe('Dataframe handle (df_XXXXX_XXXXX) — pass to secedgar_dataframe_query.'),
+        row_count: z.number().describe('Rows materialized in the dataframe.'),
+        expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
+        truncated: z
+          .boolean()
+          .describe(
+            'True when the archive scan hit its page cap before exhausting the manifest — older matching filings exist beyond the dataframe.',
+          ),
+      })
+      .optional()
+      .describe(
+        'Canvas dataframe holding the full filtered filing history (recent + archive pages), registered only when the scan reached beyond the recent window and the history exceeds filing_limit. Query the complete history — filings by form by year — with secedgar_dataframe_query; the inline `filings` list stays capped at filing_limit.',
+      ),
   }),
 
   async handler(input, ctx) {
@@ -215,32 +294,95 @@ export const companySearchTool = tool('secedgar_company_search', {
 
     let filings: FilingEntry[] | undefined;
     let totalFilings: number | undefined;
+    let historyScannedThrough: string | undefined;
+    let dataset:
+      | { name: string; row_count: number; expires_at: string; truncated: boolean }
+      | undefined;
 
     if (input.include_filings) {
-      const recent = submissions.filings.recent;
-      const count = recent.accessionNumber.length;
+      const filedAfter = input.filed_after || undefined;
+      const filedBefore = input.filed_before || undefined;
+      const hasDateFilter = Boolean(filedAfter || filedBefore);
+      const formTypes = input.form_types?.length ? input.form_types : undefined;
 
-      // Zip parallel arrays into objects
-      const all: FilingEntry[] = [];
-      for (let i = 0; i < count; i++) {
-        all.push({
-          accession_number: recent.accessionNumber[i] ?? '',
-          form: recent.form[i] ?? '',
-          filing_date: recent.filingDate[i] ?? '',
-          report_date: recent.reportDate[i] || undefined,
-          primary_document: recent.primaryDocument[i] ?? '',
-          description: recent.primaryDocDescription[i] || undefined,
-        });
+      const matches = (f: FilingEntry) =>
+        (!formTypes || formTypes.some((ft) => f.form.toUpperCase() === ft.toUpperCase())) &&
+        (!filedAfter || f.filing_date >= filedAfter) &&
+        (!filedBefore || f.filing_date <= filedBefore);
+
+      const recentRows = zipFilings(submissions.filings.recent);
+      const recentMatched = recentRows.filter(matches);
+      // Oldest date scanned so far — the recent window's tail (newest-first, so last).
+      historyScannedThrough = recentRows.at(-1)?.filing_date;
+
+      // Walk the older archive pages when the caller targets a date range (which may
+      // predate the recent window) or when a form filter under-fills that window (#78).
+      const files = submissions.filings.files;
+      const underFill = Boolean(formTypes) && recentMatched.length < input.filing_limit;
+      const bridge = getCanvasBridge();
+
+      const archiveMatched: FilingEntry[] = [];
+      let scannedBeyondRecent = false;
+      let archiveTruncated = false;
+
+      if (files.length > 0 && (hasDateFilter || underFill)) {
+        const pages = selectArchivePages(files, filedAfter, filedBefore);
+        const pageLimit = Math.min(pages.length, ARCHIVE_PAGE_SCAN_CAP);
+        archiveTruncated = pages.length > pageLimit;
+
+        for (let i = 0; i < pageLimit; i++) {
+          const page = pages[i];
+          if (!page) break;
+          const block = await api.fetchArchivePage(page.name);
+          scannedBeyondRecent = true;
+          historyScannedThrough = page.filingFrom;
+          archiveMatched.push(...zipFilings(block).filter(matches));
+
+          // Under-fill fallback with no canvas: stop once the inline limit is filled —
+          // there is no dataframe to complete, so deeper pages aren't worth fetching.
+          // (With a canvas, the loop scans on to register the full filtered history.)
+          if (
+            !hasDateFilter &&
+            !bridge &&
+            recentMatched.length + archiveMatched.length >= input.filing_limit
+          ) {
+            break;
+          }
+        }
       }
 
-      const filtered = input.form_types
-        ? all.filter((f) =>
-            input.form_types?.some((ft) => f.form.toUpperCase() === ft.toUpperCase()),
-          )
-        : all;
+      const fullMatched = [...recentMatched, ...archiveMatched].sort((a, b) =>
+        b.filing_date.localeCompare(a.filing_date),
+      );
 
-      totalFilings = filtered.length;
-      filings = filtered.slice(0, input.filing_limit);
+      totalFilings = fullMatched.length;
+      filings = fullMatched.slice(0, input.filing_limit);
+
+      // Register the full filtered history to the canvas when the scan reached beyond
+      // the recent window and there is more than fits inline — a multi-decade history is
+      // SQL shape (filings by form by year). Mirror the ownership tools' preview +
+      // full-set pattern; the inline `filings` list stays capped at filing_limit.
+      if (bridge && scannedBeyondRecent && fullMatched.length > input.filing_limit) {
+        const registered = await bridge.registerDataframe(ctx, {
+          rows: fullMatched.map((f) => ({
+            accession_number: f.accession_number,
+            form: f.form,
+            filing_date: f.filing_date,
+            report_date: f.report_date ?? null,
+            primary_document: f.primary_document,
+            description: f.description ?? null,
+          })),
+          sourceTool: 'secedgar_company_search',
+          queryParams: {
+            cik: match.cik,
+            form_types: input.form_types,
+            filed_after: filedAfter,
+            filed_before: filedBefore,
+          },
+          truncated: archiveTruncated,
+        });
+        if (registered) dataset = { ...toDatasetField(registered), truncated: archiveTruncated };
+      }
     }
 
     if (input.include_filings && input.form_types?.length && totalFilings === 0) {
@@ -264,6 +406,8 @@ export const companySearchTool = tool('secedgar_company_search', {
       class_id: match.classId,
       filings,
       total_filings: totalFilings,
+      history_scanned_through: historyScannedThrough,
+      dataset,
     };
   },
 
@@ -283,7 +427,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       );
     }
     if (result.filings?.length) {
-      lines.push(`\nRecent filings (${result.filings.length} of ${result.total_filings}):`);
+      lines.push(`\nFilings (${result.filings.length} of ${result.total_filings}):`);
       for (const f of result.filings) {
         const reportDate = f.report_date ? ` (period: ${f.report_date})` : '';
         const desc = f.description ? ` — ${f.description}` : '';
@@ -291,6 +435,19 @@ export const companySearchTool = tool('secedgar_company_search', {
           `- ${f.form} ${f.filing_date}${reportDate}${desc} — ${f.primary_document} [${f.accession_number}]`,
         );
       }
+    }
+    if (result.history_scanned_through) {
+      lines.push(
+        `\nHistory scanned through: ${result.history_scanned_through} (older filings not examined).`,
+      );
+    }
+    if (result.dataset) {
+      const truncatedNote = result.dataset.truncated
+        ? ' (truncated — older filings exist beyond the scanned pages)'
+        : '';
+      lines.push(
+        `Dataset: ${result.dataset.name} (${result.dataset.row_count} rows, expires ${result.dataset.expires_at})${truncatedNote} — full filtered history, query with secedgar_dataframe_query.`,
+      );
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

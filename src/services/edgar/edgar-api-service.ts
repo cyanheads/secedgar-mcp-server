@@ -17,6 +17,7 @@ import type {
   EftsEntityAutocompleteResponse,
   EftsResponse,
   FilingIndex,
+  FilingsRecent,
   FramesResponse,
   SubmissionsResponse,
   TickerEntry,
@@ -137,6 +138,10 @@ class EdgarApiService {
   private tickerCache: TickerCache | undefined;
   private tickerCacheLoad: Promise<TickerCache> | undefined;
   private throttleQueue: Promise<void> = Promise.resolve();
+  /** Per-CIK submissions doc cache, keyed by padded CIK (TTL = EDGAR_TICKER_CACHE_TTL). */
+  private submissionsCache = new Map<string, { at: number; data: SubmissionsResponse }>();
+  /** Per-page submissions archive cache, keyed by page name (TTL = EDGAR_TICKER_CACHE_TTL). */
+  private archivePageCache = new Map<string, { at: number; data: FilingsRecent }>();
 
   constructor() {
     const config = getServerConfig();
@@ -291,11 +296,41 @@ class EdgarApiService {
 
   // --- SEC API Methods ---
 
-  getSubmissions(cik: string): Promise<SubmissionsResponse> {
+  /**
+   * Fetch a filer's submissions document (entity metadata + the ~1000-filing
+   * `recent` window + the `files[]` archive-page manifest). Cached per CIK within
+   * the ticker-cache TTL — the doc is large and re-read on every archive-paging
+   * scan (#78). A 404 throws (uncached) so a bad CIK still surfaces.
+   */
+  async getSubmissions(cik: string): Promise<SubmissionsResponse> {
     const padded = cik.padStart(10, '0');
-    return this.fetchJson<SubmissionsResponse>(
+    const cached = this.submissionsCache.get(padded);
+    if (cached && this.isFresh(cached.at)) return cached.data;
+    const data = await this.fetchJson<SubmissionsResponse>(
       `https://data.sec.gov/submissions/CIK${padded}.json`,
     );
+    this.submissionsCache.set(padded, { at: Date.now(), data });
+    return data;
+  }
+
+  /**
+   * Fetch a submissions archive page (`filings.files[].name`, e.g.
+   * `CIK0000320193-submissions-001.json`) — the older filings that don't fit the
+   * ~1000-entry `recent` window. The page body is a flat parallel-array object
+   * field-compatible with `FilingsRecent`. Cached per page within the ticker-cache
+   * TTL (pages are large and effectively immutable once archived).
+   */
+  async fetchArchivePage(name: string): Promise<FilingsRecent> {
+    const cached = this.archivePageCache.get(name);
+    if (cached && this.isFresh(cached.at)) return cached.data;
+    const data = await this.fetchJson<FilingsRecent>(`https://data.sec.gov/submissions/${name}`);
+    this.archivePageCache.set(name, { at: Date.now(), data });
+    return data;
+  }
+
+  /** True when a cache entry loaded at `at` is still within the ticker-cache TTL. */
+  private isFresh(at: number): boolean {
+    return Date.now() - at < getServerConfig().tickerCacheTtl * 1000;
   }
 
   async searchFilings(params: {
@@ -796,6 +831,28 @@ class EdgarApiService {
  */
 function buildFormerNameEntries(): Array<{ cik: string; name: string }> {
   return (formerNamesData as Array<[string, string]>).map(([name, cik]) => ({ cik, name }));
+}
+
+/**
+ * Range-based selection of submissions archive-page manifest entries (`filings.files[]`),
+ * returned newest-first (by `filingTo` descending). A page's [filingFrom, filingTo]
+ * window is kept unless it lies entirely before `filedAfter` or entirely after
+ * `filedBefore`; with no bounds, every page is returned. Routes company_search's
+ * older-filings scan directly to the pages covering a requested date range, or walks
+ * all pages newest-first when a form filter under-fills the recent window (#78).
+ */
+export function selectArchivePages(
+  files: SubmissionsResponse['filings']['files'],
+  filedAfter?: string,
+  filedBefore?: string,
+): SubmissionsResponse['filings']['files'] {
+  return files
+    .filter((page) => {
+      if (filedAfter && page.filingTo < filedAfter) return false;
+      if (filedBefore && page.filingFrom > filedBefore) return false;
+      return true;
+    })
+    .sort((a, b) => b.filingTo.localeCompare(a.filingTo));
 }
 
 /**

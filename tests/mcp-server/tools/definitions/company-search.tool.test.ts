@@ -9,16 +9,30 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { companySearchTool } from '@/mcp-server/tools/definitions/company-search.tool.js';
-import type { CikMatch, SubmissionsResponse } from '@/services/edgar/types.js';
+import type { CikMatch, FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
 
-vi.mock('@/services/edgar/edgar-api-service.js', () => ({
-  getEdgarApiService: vi.fn(),
-  initEdgarApiService: vi.fn(),
-  suggestCompanies: vi.fn(),
-  pickPreferredTicker: vi.fn(),
-  trigramSimilarity: vi.fn(),
+// Keep the real module (so the pure `selectArchivePages` used by the archive-paging
+// path runs for real) and override only the service accessor + suggestions.
+vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
+  const actual = await importActual<typeof import('@/services/edgar/edgar-api-service.js')>();
+  return {
+    ...actual,
+    getEdgarApiService: vi.fn(),
+    initEdgarApiService: vi.fn(),
+    suggestCompanies: vi.fn(),
+  };
+});
+
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+  getCanvasBridge: vi.fn(),
+  toDatasetField: (r: { tableName: string; rowCount: number; expiresAt: string }) => ({
+    name: r.tableName,
+    row_count: r.rowCount,
+    expires_at: r.expiresAt,
+  }),
 }));
 
+import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService, suggestCompanies } from '@/services/edgar/edgar-api-service.js';
 
 const mockSubmissions: SubmissionsResponse = {
@@ -88,18 +102,68 @@ const mockMetaSubmissions: SubmissionsResponse = {
   tickers: ['META'],
 };
 
+// Submissions with an older-filings archive page manifest (#78). The recent window
+// holds 2023–2024 filings; the archive page covers 2005–2010.
+const mockPagedSubmissions: SubmissionsResponse = {
+  cik: '0000320193',
+  entityType: 'operating',
+  exchanges: ['Nasdaq'],
+  filings: {
+    recent: {
+      accessionNumber: ['0000320193-24-000001', '0000320193-23-000106'],
+      filingDate: ['2024-11-01', '2023-11-03'],
+      form: ['10-K', '10-Q'],
+      primaryDocDescription: ['10-K', '10-Q'],
+      primaryDocument: ['aapl-2024.htm', 'aapl-2023.htm'],
+      reportDate: ['2024-09-28', '2023-09-30'],
+    },
+    files: [
+      {
+        name: 'CIK0000320193-submissions-001.json',
+        filingCount: 4,
+        filingFrom: '2005-01-03',
+        filingTo: '2010-12-20',
+      },
+    ],
+  },
+  fiscalYearEnd: '0930',
+  name: 'Apple Inc.',
+  sic: '3571',
+  sicDescription: 'ELECTRONIC COMPUTERS',
+  stateOfIncorporation: 'CA',
+  tickers: ['AAPL'],
+};
+
+// One archive page's parallel-array content (2005–2010), newest-first.
+const mockArchivePage: FilingsRecent = {
+  accessionNumber: [
+    '0000320193-10-000001',
+    '0000320193-08-000002',
+    '0000320193-06-000003',
+    '0000320193-05-000004',
+  ],
+  filingDate: ['2010-10-27', '2008-11-05', '2006-12-29', '2005-12-01'],
+  form: ['10-K', '10-Q', '10-K', '8-K'],
+  primaryDocDescription: ['10-K', '10-Q', '10-K', '8-K'],
+  primaryDocument: ['a10.htm', 'a08.htm', 'a06.htm', 'a05.htm'],
+  reportDate: ['2010-09-25', '2008-09-27', '2006-09-30', '2005-11-30'],
+};
+
 const mockApi = {
   resolveCik: vi.fn(),
   getSubmissions: vi.fn(),
   getAllEntries: vi.fn(),
+  fetchArchivePage: vi.fn(),
 };
 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(getEdgarApiService).mockReturnValue(mockApi as any);
   vi.mocked(suggestCompanies).mockReturnValue([]);
+  vi.mocked(getCanvasBridge).mockReturnValue(undefined);
   mockApi.getSubmissions.mockResolvedValue(mockSubmissions);
   mockApi.getAllEntries.mockResolvedValue([]);
+  mockApi.fetchArchivePage.mockResolvedValue(mockArchivePage);
 });
 
 describe('companySearchTool', () => {
@@ -467,5 +531,135 @@ describe('companySearchTool', () => {
     // The framework validates handler output against the declared schema at runtime —
     // a null element here previously threw -32007. Parsing must now succeed.
     expect(() => companySearchTool.output.parse(result)).not.toThrow();
+  });
+
+  // --- Archive-page paging beyond the recent window (#78) ---
+
+  it('routes a filed_before date filter into the older archive pages', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+    mockApi.getSubmissions.mockResolvedValue(mockPagedSubmissions);
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({ query: 'AAPL', filed_before: '2010-12-31' });
+    const result = await companySearchTool.handler(input, ctx);
+
+    // Recent filings (2023–2024) all post-date the filter → excluded; the archive
+    // page (2005–2010) is fetched and its rows fill the result.
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith('CIK0000320193-submissions-001.json');
+    expect(result.total_filings).toBe(4);
+    expect(result.filings!.every((f) => f.filing_date <= '2010-12-31')).toBe(true);
+    // Newest-first ordering across the archive page.
+    expect(result.filings![0].filing_date).toBe('2010-10-27');
+  });
+
+  it('discloses history_scanned_through as the oldest archive page reached', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+    mockApi.getSubmissions.mockResolvedValue(mockPagedSubmissions);
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({ query: 'AAPL', filed_before: '2010-12-31' });
+    const result = await companySearchTool.handler(input, ctx);
+
+    // The fetched page's filingFrom is the deepest date scanned.
+    expect(result.history_scanned_through).toBe('2005-01-03');
+  });
+
+  it('discloses history_scanned_through as the recent tail when no archive is scanned', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+    mockApi.getSubmissions.mockResolvedValue(mockPagedSubmissions);
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({ query: 'AAPL' });
+    const result = await companySearchTool.handler(input, ctx);
+
+    expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+    expect(result.history_scanned_through).toBe('2023-11-03');
+  });
+
+  it('pages into the archive when a form filter under-fills the recent window', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+    mockApi.getSubmissions.mockResolvedValue(mockPagedSubmissions);
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    // Recent holds 1 10-K; asking for 3 under-fills → walk the archive for older 10-Ks.
+    const input = companySearchTool.input.parse({
+      query: 'AAPL',
+      form_types: ['10-K'],
+      filing_limit: 3,
+    });
+    const result = await companySearchTool.handler(input, ctx);
+
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledOnce();
+    // recent 10-K (2024) + archive 10-Ks (2010, 2006) = 3.
+    expect(result.total_filings).toBe(3);
+    expect(result.filings!.every((f) => f.form === '10-K')).toBe(true);
+    expect(result.filings!.map((f) => f.filing_date)).toEqual([
+      '2024-11-01',
+      '2010-10-27',
+      '2006-12-29',
+    ]);
+  });
+
+  it('does not page the archive when the recent window already fills the form filter', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+    mockApi.getSubmissions.mockResolvedValue(mockPagedSubmissions);
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    // Recent holds 1 10-K and filing_limit is 1 → filled from recent, no archive walk.
+    const input = companySearchTool.input.parse({
+      query: 'AAPL',
+      form_types: ['10-K'],
+      filing_limit: 1,
+    });
+    const result = await companySearchTool.handler(input, ctx);
+
+    expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+    expect(result.total_filings).toBe(1);
+  });
+
+  it('registers the full filtered history to the canvas when the scan reaches beyond recent', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+    mockApi.getSubmissions.mockResolvedValue(mockPagedSubmissions);
+    const registerDataframe = vi.fn().mockResolvedValue({
+      tableName: 'df_HIST1_HIST2',
+      rowCount: 4,
+      expiresAt: '2026-08-01T00:00:00.000Z',
+      columnSchema: [],
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({
+      query: 'AAPL',
+      filed_before: '2010-12-31',
+      filing_limit: 2,
+    });
+    const result = await companySearchTool.handler(input, ctx);
+
+    expect(registerDataframe).toHaveBeenCalledOnce();
+    const call = registerDataframe.mock.calls[0]![1];
+    expect(call.sourceTool).toBe('secedgar_company_search');
+    expect(call.rows).toHaveLength(4); // full filtered archive history
+    expect(call.rows[0].accession_number).toBe('0000320193-10-000001');
+    expect(result.dataset?.name).toBe('df_HIST1_HIST2');
+    expect(result.dataset?.truncated).toBe(false); // the single page was fully scanned
+    expect(result.filings).toHaveLength(2); // inline stays capped at filing_limit
+    expect(result.total_filings).toBe(4);
+  });
+
+  it('skips canvas registration for a plain lookup that stays in the recent window', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+    mockApi.getSubmissions.mockResolvedValue(mockPagedSubmissions);
+    const registerDataframe = vi.fn();
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({ query: 'AAPL' });
+    const result = await companySearchTool.handler(input, ctx);
+
+    expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+    expect(registerDataframe).not.toHaveBeenCalled();
+    expect(result.dataset).toBeUndefined();
+    expect(result.total_filings).toBe(2);
   });
 });
