@@ -324,6 +324,94 @@ describe('back-compat (no new params)', () => {
     });
   });
 
+  it('document_not_found renders the categorized candidates in the message, not just error data (#88)', async () => {
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: ACCN,
+      cik: '320193',
+      document: 'nonexistent.htm',
+    });
+
+    const err = await getFilingTool.handler(input, ctx).catch((e) => e);
+    // Candidate filenames reach the text surface — a content-only client can pick
+    // an exhibit, not just the primary named in the recovery hint. Each category
+    // carries its true total so a bounded sample never reads as the whole catalog.
+    expect(err.message).toContain('Available documents');
+    expect(err.message).toContain('Primary (1 total)');
+    expect(err.message).toContain('aapl-20230930.htm');
+    expect(err.message).toContain('Exhibits (1 total)');
+    expect(err.message).toContain('ex-21.htm');
+    expect(err.data.recovery.hint).toContain('aapl-20230930.htm');
+    // The route to the uncapped catalog: the success path renders it in full.
+    expect(err.data.recovery.hint).toContain('no document argument');
+  });
+
+  it('no_documents renders the categorized candidates in the message (#88)', async () => {
+    // Index resolves but the primary document body cannot be fetched.
+    mockApi.tryGetFilingDocument.mockResolvedValue(null);
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({ accession_number: ACCN, cik: '320193' });
+
+    const err = await getFilingTool.handler(input, ctx).catch((e) => e);
+    expect(err.data.reason).toBe('no_documents');
+    expect(err.message).toContain('Available documents');
+    expect(err.message).toContain('Primary (1 total)');
+    expect(err.message).toContain('aapl-20230930.htm');
+    expect(err.data.recovery.hint).toMatch(/listed above/i);
+    // no_documents is already the no-document call, so it must not advertise
+    // omitting `document` as a recovery route — that is the call that just failed.
+    expect(err.data.recovery.hint).not.toContain('no document argument');
+  });
+
+  it('bounds the document_not_found message on a large filing index and reports per-category totals (#88)', async () => {
+    // Shape of a real large-bank 10-K: State Street's FY2024 filing
+    // (0000093751-25-000111) indexes 624 entries, ~450 of them per-page .jpg
+    // scans of signed exhibits — a routine filing, not a hunted outlier. Rendering
+    // that catalog in full produced a ~15.7 KB error message.
+    const scans = Array.from({ length: 450 }, (_, i) => ({
+      name: `g${String(i + 1).padStart(6, '0')}ex99_1.jpg`,
+      type: 'image/jpeg',
+      size: '48000',
+      'last-modified': '2025-02-14',
+    }));
+    mockApi.tryGetFilingIndex.mockResolvedValue({
+      directory: {
+        name: '000009375125000111',
+        item: [
+          {
+            name: 'stt-20241231.htm',
+            type: 'text/html',
+            size: '7985617',
+            'last-modified': '2025-02-14',
+          },
+          ...scans,
+        ],
+      },
+    });
+
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: ACCN,
+      cik: '93751',
+      document: 'not-a-real-document.xml',
+    });
+    const err = await getFilingTool.handler(input, ctx).catch((e) => e);
+
+    expect(err.data.reason).toBe('document_not_found');
+    // An error has to stay actionable. Unbounded, this message was ~15.7 KB.
+    expect(err.message.length).toBeLessThan(2000);
+    // The caller is told what was withheld, so the sample never reads as the catalog.
+    expect(err.message).toContain('Exhibits (450 total)');
+    expect(err.message).toContain('+440 more');
+    // Only the bound's worth of scans is rendered.
+    expect(err.message).toContain('g000001ex99_1.jpg');
+    expect(err.message).not.toContain('g000011ex99_1.jpg');
+    // Structured data stays complete — the bound is a message-rendering policy.
+    expect(err.data.documents.exhibits).toHaveLength(450);
+    // And the route to the complete list is named.
+    expect(err.data.recovery.hint).toContain('no document argument');
+  });
+
   it('document_not_found does not surface XBRL viewer artifacts in documents.primary or exhibits', async () => {
     const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({
@@ -529,15 +617,12 @@ describe('input validation (#64)', () => {
     );
   });
 
-  it.each([
-    '0000320193-25-79',
-    '12345',
-    '0000320193 25 000079',
-    '0000320193-25-000079x',
-    '',
-  ])('rejects accession number %j', (accession_number) => {
-    expect(getFilingTool.input.safeParse({ accession_number }).success).toBe(false);
-  });
+  it.each(['0000320193-25-79', '12345', '0000320193 25 000079', '0000320193-25-000079x', ''])(
+    'rejects accession number %j',
+    (accession_number) => {
+      expect(getFilingTool.input.safeParse({ accession_number }).success).toBe(false);
+    },
+  );
 
   it('accepts both dash and 18-digit no-dash accession formats', () => {
     expect(getFilingTool.input.safeParse({ accession_number: ACCN }).success).toBe(true);
@@ -1048,6 +1133,70 @@ describe('format()', () => {
     // Server-authored metadata stays outside the sentinels.
     expect(text.indexOf('URL: https://example.com')).toBeLessThan(text.indexOf(begin));
     expect(text.endsWith(end)).toBe(true);
+  });
+
+  it('renders every document filename past the metadata cap (#88)', () => {
+    // Worst case the issue cites: a 100-entry XBRL catalog on a large 10-K. Names
+    // are the selectable keys for the `document` input, so all of them must reach
+    // content[] — structuredContent.documents is uncapped.
+    const xbrl = Array.from({ length: 100 }, (_, i) => ({
+      name: `R${i + 1}.htm`,
+      type: 'XBRL-VIEWER',
+      size: 5000,
+    }));
+    const output = {
+      accession_number: ACCN,
+      cik: CIK,
+      primary_document: 'nvda-20260125.htm',
+      documents: {
+        primary: [{ name: 'nvda-20260125.htm', type: '10-K' }],
+        exhibits: [],
+        auxiliary: [],
+        xbrl,
+      },
+      content: 'page content',
+      content_truncated: false,
+      content_total_length: 12,
+      filing_url: 'https://example.com',
+    };
+    const text = getFilingTool.format!(output)[0].text as string;
+
+    expect(text).toContain('XBRL (100)');
+    for (const doc of xbrl) expect(text).toContain(doc.name);
+    // Entries past the cap carry the name only — the metadata on 90 near-identical
+    // viewer fragments is what would make an always-complete render expensive.
+    expect(text).toContain('+90 more: R11.htm,');
+    expect(text).not.toContain('R11.htm [XBRL-VIEWER');
+  });
+
+  it('keeps the success-path catalog complete at the size that bounds the error path (#88)', () => {
+    // The error path caps each category at 10 entries; format() must not inherit
+    // that bound — the complete render is the reachability contract, and
+    // structuredContent.documents already ships the same entries with full metadata.
+    const scans = Array.from({ length: 450 }, (_, i) => ({
+      name: `g${String(i + 1).padStart(6, '0')}ex99_1.jpg`,
+      type: 'GRAPHIC',
+      size: 48000,
+    }));
+    const output = {
+      accession_number: ACCN,
+      cik: CIK,
+      primary_document: 'stt-20241231.htm',
+      documents: {
+        primary: [{ name: 'stt-20241231.htm', type: '10-K' }],
+        exhibits: [],
+        auxiliary: scans,
+      },
+      content: 'page content',
+      content_truncated: false,
+      content_total_length: 12,
+      filing_url: 'https://example.com',
+    };
+    const text = getFilingTool.format!(output)[0].text as string;
+
+    expect(text).toContain('Auxiliary (450)');
+    for (const doc of scans) expect(text).toContain(doc.name);
+    expect(text).not.toContain('more of 450');
   });
 
   it('format omits outline section when outline is absent', () => {

@@ -17,6 +17,14 @@ import {
 import type { FilingIndex } from '@/services/edgar/types.js';
 
 const MAX_DOCUMENTS_IN_FORMAT = 10;
+/**
+ * Per-category cap on the catalog rendered into an error message. Distinct from
+ * {@link MAX_DOCUMENTS_IN_FORMAT}: the success path renders every filename (see
+ * {@link formatDocList}), while an error stays a short, actionable sample plus
+ * the true per-category total. Ten holds a real filing's error message under
+ * ~1 KB against ~15.7 KB for the same filing rendered in full.
+ */
+const MAX_DOCUMENTS_IN_ERROR = 10;
 
 /**
  * Sentinel lines framing upstream filing text in format() output, so document
@@ -100,13 +108,13 @@ export const getFilingTool = tool('secedgar_get_filing', {
       reason: 'document_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'A specific document was requested but not present in the filing archive',
-      recovery: 'Pick a filename from documents.primary (or exhibits) in error data.',
+      recovery: 'Pick a filename from the categorized document list in the error message.',
     },
     {
       reason: 'no_documents',
       code: JsonRpcErrorCode.NotFound,
       when: 'Filing index lists items but no fetchable primary document was found',
-      recovery: 'Specify a document filename from documents.primary in error data.',
+      recovery: 'Set document to one of the filenames listed in the error message.',
     },
     {
       reason: 'filing_not_found',
@@ -294,13 +302,24 @@ export const getFilingTool = tool('secedgar_get_filing', {
       const resolved = await resolveFilingArchive(api, accn, input.cik, input.document);
       if (!resolved.ok) {
         if (resolved.kind === 'document_not_found') {
+          // Render candidates into the message itself — clients reliably see only
+          // message + recovery hint, not error data (#88), so a content-only client
+          // otherwise cannot discover any filename but the primary. Same shape
+          // section_not_found already uses for its outline, bounded per category.
+          const catalogBlock = renderDocumentCatalog(resolved.documents);
           const primaryName = resolved.documents.primary[0]?.name;
+          // A non-empty primary bucket is exactly the condition under which the
+          // no-document call succeeds — the loop only reaches this branch past
+          // findPrimaryDocument. Without one, that call fails the same way, so
+          // don't advertise a route that dead-ends.
           const hint = primaryName
-            ? `Use document="${primaryName}" (the primary) or pick from documents.primary/exhibits in error data.`
-            : 'Pick a filename from documents.primary or exhibits in error data.';
+            ? `Use document="${primaryName}" (the primary), or pick another filename from the list above. Call secedgar_get_filing again with the same accession_number and no document argument for the complete catalog.`
+            : catalogBlock
+              ? 'Pick a filename from the list above.'
+              : 'Pick a filename from documents.primary or exhibits in error data.';
           throw ctx.fail(
             'document_not_found',
-            `Document '${resolved.requestedDocument}' not found in this filing.`,
+            `Document '${resolved.requestedDocument}' not found in this filing.${catalogBlock}`,
             {
               requested_document: resolved.requestedDocument,
               documents: resolved.documents,
@@ -309,13 +328,24 @@ export const getFilingTool = tool('secedgar_get_filing', {
           );
         }
         if (resolved.kind === 'no_documents') {
-          throw ctx.fail('no_documents', `No primary document found in filing ${accn}.`, {
-            accession_number: accn,
-            documents: resolved.documents,
-            recovery: {
-              hint: 'Specify the document input using a filename from documents.primary in error data.',
+          const catalogBlock = renderDocumentCatalog(resolved.documents);
+          throw ctx.fail(
+            'no_documents',
+            `No primary document found in filing ${accn}.${catalogBlock}`,
+            {
+              accession_number: accn,
+              documents: resolved.documents,
+              recovery: {
+                // No `document` was requested here — that is what this branch means —
+                // so omitting it is the call that just failed and is not a route out.
+                // Naming a fetchable document is, and a successful response carries
+                // the complete catalog.
+                hint: catalogBlock
+                  ? 'Set the document input to one of the filenames listed above; a successful response lists the complete document catalog.'
+                  : 'Specify the document input using a filename from documents.primary in error data.',
+              },
             },
-          });
+          );
         }
         const cikSuffix = resolved.providedCik
           ? ` (CIK ${resolved.providedCik.padStart(10, '0')})`
@@ -504,6 +534,36 @@ export const getFilingTool = tool('secedgar_get_filing', {
  */
 function renderOutline(outline: Array<{ heading: string; offset: number }>): string {
   return outline.map((h) => `  [${h.offset}] ${h.heading}`).join('\n');
+}
+
+/**
+ * Render the categorized document catalog as a labeled block for an error message,
+ * capped at {@link MAX_DOCUMENTS_IN_ERROR} per category. Shared by the
+ * `document_not_found` and `no_documents` paths so the recoverable filenames read
+ * identically on both. Each line carries the category's true total and how many
+ * entries were withheld, so a sample never reads as the complete catalog; the
+ * complete catalog is what the success path renders through
+ * {@link formatDocumentSection}, and the recovery hints point there. Empty string
+ * when the filing index yielded no entries at all.
+ */
+function renderDocumentCatalog(documents: CategorizedDocuments): string {
+  const sections: string[] = [];
+  const addCategory = (label: string, entries: DocumentEntry[]): void => {
+    if (entries.length === 0) return;
+    const shown = entries.slice(0, MAX_DOCUMENTS_IN_ERROR);
+    const names = shown.map((d) => `${d.name} [${d.type}]`).join(', ');
+    const omitted = entries.length - shown.length;
+    const tail = omitted > 0 ? ` (+${omitted} more)` : '';
+    sections.push(`${label} (${entries.length} total): ${names}${tail}`);
+  };
+
+  addCategory('Primary', documents.primary);
+  addCategory('Exhibits', documents.exhibits);
+  addCategory('Auxiliary', documents.auxiliary);
+  if (documents.xbrl) addCategory('XBRL', documents.xbrl);
+
+  if (sections.length === 0) return '';
+  return `\n\nAvailable documents (up to ${MAX_DOCUMENTS_IN_ERROR} shown per category):\n${sections.join('\n')}`;
 }
 
 /**
@@ -753,10 +813,28 @@ function formatDocumentSection(docs: CategorizedDocuments): string {
   return sections.length ? `\n${sections.join('\n')}` : '';
 }
 
+/**
+ * Render one document category: the first {@link MAX_DOCUMENTS_IN_FORMAT} entries
+ * with type/size/description, then every remaining filename bare. Filenames are the
+ * selectable keys for the `document` input, so all of them must reach `content[]` —
+ * `structuredContent.documents` is uncapped and the two surfaces have to carry the
+ * same catalog (#88). The tail drops metadata to hold that cost down but is
+ * deliberately unbounded, and a filing index can be large: State Street's FY2024
+ * 10-K (0000093751-25-000111) indexes 624 entries — 451 auxiliary, 448 of them
+ * per-page `.jpg` scans of signed exhibits — and renders a 15.8 KB catalog by
+ * default (17.8 KB with `include_xbrl=true`) against 1.2 KB / 1.7 KB for the same
+ * filing under a metadata-capped list. The overflow is scan images at least as
+ * often as it is XBRL viewer fragments, and `include_xbrl` gates only the `xbrl`
+ * bucket, so the auxiliary bulk lands on every plain call. That cost is
+ * proportionate here: `structuredContent.documents` already ships the same entries
+ * with full metadata, so this render is the smaller half of a response that
+ * carries the catalog either way. Error messages take the opposite tradeoff —
+ * see {@link renderDocumentCatalog}.
+ */
 function formatDocList(entries: DocumentEntry[]): string {
-  const shown = entries.slice(0, MAX_DOCUMENTS_IN_FORMAT);
-  const extra = entries.length - shown.length;
-  const list = shown
+  const detailed = entries.slice(0, MAX_DOCUMENTS_IN_FORMAT);
+  const rest = entries.slice(MAX_DOCUMENTS_IN_FORMAT);
+  const list = detailed
     .map((d) => {
       const tail = [
         d.type,
@@ -768,5 +846,6 @@ function formatDocList(entries: DocumentEntry[]): string {
       return `${d.name} [${tail}]`;
     })
     .join(', ');
-  return `${list}${extra > 0 ? `, +${extra} more` : ''}`;
+  if (rest.length === 0) return list;
+  return `${list}, +${rest.length} more: ${rest.map((d) => d.name).join(', ')}`;
 }
