@@ -83,6 +83,7 @@ Fetch a specific filing's metadata and document content by accession number.
 - Converts HTML filings to readable plain text
 - Configurable content limit (1K–200K characters, default 50K)
 - Can fetch specific exhibits by document name
+- Binary entries — scanned pages, PDF exhibits, packaged archives and spreadsheets — are marked `binary` in the document catalog and rejected with a `binary_document` error instead of being returned as decoded bytes
 - **Offset paging** for large documents (10-K, S-1/A can exceed 1M chars): pass `next_offset` from a truncated response as `offset` on the next call to continue reading; first-page truncated responses include a detected `outline` (headings with offsets) for targeted navigation
 - **Section targeting** via the `section` param: jumps directly to a named heading by case-insensitive substring match (e.g. `"risk factors"`, `"item 7"`, `"certain relationships"`); on a miss, the error carries the detected outline so you can pick the correct heading
 - Extracted text is cached per `accession + document` (bounded LRU, 8 entries), making subsequent paged calls cheap
@@ -98,7 +99,8 @@ Get historical XBRL financial data for a company with friendly concept name reso
 - Automatic deduplication to one value per standard calendar period
 - Filter by annual, quarterly, or all periods
 - Optional `limit` caps the inline series to the most-recent N periods; the full series stays queryable via the `df_<id>` dataframe
-- Quarterly results carry a `caveats` entry when a calendar quarter is absent from the frame-tagged series — SEC reports fiscal Q4 as the 10-K residual, so the calendar quarter that fiscal Q4 spans has no discrete quarterly value (calendar-year filers included)
+- Quarterly results carry a `caveats` entry naming every calendar quarter absent from the frame-tagged series — SEC reports fiscal Q4 as the 10-K residual, so the calendar quarter that fiscal Q4 spans has no discrete quarterly value (calendar-year filers included), and a filer whose other fiscal quarters span non-calendar durations loses a second quarter the same way
+- A further `caveats` entry when the concept resolved to an XBRL tag SEC has retired from the taxonomy — that only happens when no current tag reports for the filer, and the series can stop years short
 - See `secedgar://concepts` resource for the full mapping
 
 ---
@@ -111,7 +113,7 @@ Build a company financial profile in one call instead of a run of `secedgar_get_
 - Same frame dedup and tag priority as `secedgar_get_financials`, so the two agree for any concept they both cover
 - Duration concepts (income statement, cash flow, per-share) report their latest full year and latest single quarter; balance-sheet and entity-info concepts report their latest point-in-time value
 - Concepts the filer does not report are listed under `gaps` with the XBRL tags that were tried — never zero-filled or interpolated
-- IFRS filers resolve through the mapped IFRS tag variants via `taxonomy: "ifrs-full"`; each line reports the taxonomy its value came from
+- IFRS filers resolve through the mapped IFRS tag variants via `taxonomy: "ifrs-full"`, which covers the income statement, balance sheet, cash flow, and per-share concepts; each line reports the taxonomy its value came from
 - Compact single-record profile — no dataframe; reach for `secedgar_get_financials` when you need a time series
 
 ---
@@ -164,7 +166,7 @@ Compare 2-10 named companies across 1-8 concepts, aligned on calendar periods �
 - `periods` bounds the inline matrix (1-12, default 4) and the window shrinks further when companies x concepts x periods is too large to return in one response; the full aligned series is always materialized as a `df_<id>` dataframe for growth rates and spreads via `secedgar_dataframe_query`
 - A company that fails to resolve is reported in `failed_companies` with a machine-readable reason and the comparison proceeds with the rest
 - A company that does not report a concept is reported in `gaps` with the tags that were tried — never interpolated
-- `caveats` surface a filer missing a calendar quarter, period ends that differ inside one aligned period, and concepts whose unit differs across companies
+- `caveats` surface a filer missing one or two calendar quarters, a concept that resolved to a retired XBRL tag for one company, period ends that differ inside one aligned period, and concepts whose unit differs across companies
 
 ---
 
@@ -176,6 +178,7 @@ Discover supported XBRL concept names before querying financials or cross-compan
 - Filter by statement group (`income_statement`, `balance_sheet`, `cash_flow`, `per_share`, `entity_info`) or taxonomy
 - Reverse-lookup raw tags like `NetIncomeLoss` to the supported friendly names
 - Surfaces `related_tags` for concepts with a high-coverage alternate-definition tag (e.g. restricted-cash-inclusive cash) so callers can discover them before screening
+- Filtering by `taxonomy: "ifrs-full"` narrows the catalog to concepts with an IFRS tag confirmed against live 20-F filings; a concept with no IFRS equivalent is left out rather than mapped to a guess
 - Returns the same catalog used by `secedgar_get_financials`, `secedgar_fetch_frames`, and `secedgar://concepts`
 
 ---

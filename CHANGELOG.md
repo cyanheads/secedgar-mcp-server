@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.1](changelog/0.13.x/0.13.1.md) — 2026-07-26
+
+revenue no longer resolves through a tag SEC retired in 2018, and any concept falling through to a retired tag says so in caveats. The missing-quarter detector names every absent quarter instead of at most one, binary filing documents are rejected rather than decoded, and ifrs-full coverage goes 3 to 31 of 33 concepts.
+
 ## [0.13.0](changelog/0.13.x/0.13.0.md) — 2026-07-26
 
 Two new tools — secedgar_get_snapshot (one-call company profile) and secedgar_compare_companies (2-10 companies aligned on calendar periods). Frame dedup and fiscal-period caveats move into shared modules, the local mirror now serves companyfacts, and the fiscal-Q4 caveat is corrected and extended to per-filer series.
