@@ -14,6 +14,7 @@ import { type FilingDocumentHeader, parseFilingHeaders } from './filing-headers.
 import type {
   CikMatch,
   CompanyConceptResponse,
+  CompanyFactsResponse,
   EftsEntityAutocompleteResponse,
   EftsResponse,
   FilingIndex,
@@ -521,15 +522,22 @@ class EdgarApiService {
   }
 
   /**
-   * Fetch all XBRL facts for a company. Returns `null` on 404.
-   * Used on the no-data error path to surface which namespaces and tags a filer actually uses.
+   * Fetch every XBRL fact a company has reported. Returns `null` on 404.
+   * Backs the whole-company reads (`get_snapshot`, `compare_companies`) and the
+   * no-data error path, which surfaces the namespaces and tags a filer uses.
+   * Served from the local mirror when enabled and synced — the mirror stores one
+   * row per (cik, taxonomy, tag) and reassembles the API shape off a `cik` point
+   * lookup; the live API is the fallback.
    */
-  tryGetCompanyFacts(
-    cik: string,
-  ): Promise<{ facts: Record<string, Record<string, unknown>> } | null> {
+  tryGetCompanyFacts(cik: string): Promise<CompanyFactsResponse | null> {
     const padded = cik.padStart(10, '0');
-    return this.tryFetchJson<{ facts: Record<string, Record<string, unknown>> }>(
-      `https://data.sec.gov/api/xbrl/companyfacts/CIK${padded}.json`,
+    return this.mirrorOrLive(
+      (m) => m.companyFactsReady(),
+      (m) => m.getCompanyFacts(cik),
+      () =>
+        this.tryFetchJson<CompanyFactsResponse>(
+          `https://data.sec.gov/api/xbrl/companyfacts/CIK${padded}.json`,
+        ),
     );
   }
 

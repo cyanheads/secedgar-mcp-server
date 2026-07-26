@@ -169,6 +169,29 @@ describe('EdgarMirror — init + read helpers', () => {
     expect(await mirror.getCompanyConcept('000000', 'us-gaap', 'Revenues')).toBeNull();
   });
 
+  it("reassembles one filer's whole fact set in companyfacts shape", async () => {
+    const facts = await mirror.getCompanyFacts('320193');
+    expect(facts?.cik).toBe(320193);
+    expect(facts?.entityName).toBe('Apple Inc.');
+    // Only this filer's rows — the cik index scopes the read.
+    expect(Object.keys(facts?.facts['us-gaap'] ?? {}).sort()).toEqual([
+      'EarningsPerShareDiluted',
+      'Revenues',
+    ]);
+    const revenues = facts?.facts['us-gaap']?.Revenues;
+    expect(revenues?.label).toBe('Revenues');
+    expect(revenues?.description).toBe('Total revenue');
+    expect(revenues?.units.USD).toHaveLength(2);
+    expect(revenues?.units.USD?.[0]?.frame).toBe('CY2023');
+    expect(revenues?.units.USD?.[0]?.val).toBe(383285000000);
+  });
+
+  it('accepts an unpadded cik and returns null for an unmirrored one', async () => {
+    expect(await mirror.getCompanyFacts('789019')).not.toBeNull();
+    expect(await mirror.getCompanyFacts('0000789019')).not.toBeNull();
+    expect(await mirror.getCompanyFacts('999999')).toBeNull();
+  });
+
   it('assembles a cross-company frame for one concept × period', async () => {
     const frame = await mirror.getFrames('us-gaap', 'Revenues', 'USD', 'CY2023');
     expect(frame?.pts).toBe(2);

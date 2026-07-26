@@ -30,6 +30,7 @@ function makeMirrorStub() {
     companyFactsComplete: vi.fn(),
     tickersReady: vi.fn(),
     getCompanyConcept: vi.fn(),
+    getCompanyFacts: vi.fn(),
     getFrames: vi.fn(),
     getTickerRows: vi.fn(),
   };
@@ -82,6 +83,39 @@ describe('EdgarApiService — mirror routing', () => {
     const result = await getEdgarApiService().tryGetCompanyConcept('320193', 'us-gaap', 'Revenues');
 
     expect((result as { entityName?: string } | null)?.entityName).toBe('Live');
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('serves company facts from the mirror when ready, without a live call', async () => {
+    const mirror = makeMirrorStub();
+    mirror.companyFactsReady.mockResolvedValue(true);
+    mirror.getCompanyFacts.mockResolvedValue({
+      cik: 320193,
+      entityName: 'Apple Inc.',
+      facts: { 'us-gaap': { Revenues: { label: 'Revenues', units: {} } } },
+    });
+    mirrorRef.current = mirror;
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await getEdgarApiService().tryGetCompanyFacts('320193');
+
+    expect(result?.entityName).toBe('Apple Inc.');
+    expect(mirror.getCompanyFacts).toHaveBeenCalledWith('320193');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('falls company facts back to the live API on a mirror miss', async () => {
+    const mirror = makeMirrorStub();
+    mirror.companyFactsReady.mockResolvedValue(true);
+    mirror.getCompanyFacts.mockResolvedValue(null);
+    mirrorRef.current = mirror;
+    const fetchMock = vi.fn(async () => jsonResponse({ entityName: 'Live', facts: {} }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await getEdgarApiService().tryGetCompanyFacts('320193');
+
+    expect(result?.entityName).toBe('Live');
     expect(fetchMock).toHaveBeenCalledOnce();
   });
 

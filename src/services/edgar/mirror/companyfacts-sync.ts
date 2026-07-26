@@ -17,6 +17,7 @@ import type {
   SyncPage,
 } from '@cyanheads/mcp-ts-core/mirror';
 import { Unzip, UnzipInflate } from 'fflate';
+import type { CompanyFactsResponse } from '../types.js';
 import { COMPANY_FACTS_ZIP_URL, lastModifiedToIso } from './types.js';
 
 /** Rows drained to the framework per page (one transaction each). */
@@ -24,15 +25,12 @@ const BATCH_ROWS = 2000;
 
 const EMPTY = new Uint8Array(0);
 
-/** Shape of one `CIK*.json` entry inside companyfacts.zip. */
-export interface CompanyFactsFile {
-  cik?: number;
-  entityName?: string;
-  facts?: Record<
-    string,
-    Record<string, { label?: string; description?: string; units?: Record<string, unknown[]> }>
-  >;
-}
+/**
+ * Shape of one `CIK*.json` entry inside companyfacts.zip — the same payload the
+ * live companyfacts API serves. Every field is optional here because the archive
+ * is parsed from untrusted JSON, so `fileToRows` guards each level before use.
+ */
+export type CompanyFactsFile = Partial<CompanyFactsResponse>;
 
 /** Expand one company's `facts` into per-(taxonomy, tag) rows. Exported for tests. */
 export function fileToRows(json: CompanyFactsFile): MirrorRow[] {

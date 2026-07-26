@@ -20,6 +20,8 @@ import {
 import type {
   CompanyConceptResponse,
   CompanyConceptUnit,
+  CompanyFactsConcept,
+  CompanyFactsResponse,
   FrameEntry,
   FramesResponse,
 } from '../types.js';
@@ -58,6 +60,16 @@ interface FrameScanRow {
   units_json: string;
 }
 
+/** A subset of `company_concepts` columns selected for the per-filer companyfacts read. */
+interface CompanyFactsScanRow {
+  description: string | null;
+  entity_name: string;
+  label: string;
+  tag: string;
+  taxonomy: string;
+  units_json: string;
+}
+
 export class EdgarMirror {
   readonly tickers: Mirror;
   readonly companyFacts: Mirror;
@@ -93,7 +105,10 @@ export class EdgarMirror {
           description: 'TEXT',
           units_json: 'TEXT',
         },
-        indexes: [{ columns: ['taxonomy', 'tag'] }],
+        // `(taxonomy, tag)` backs the cross-company frames scan; `cik` backs the
+        // per-filer companyfacts read. Both are created idempotently on open, so
+        // an already-synced store picks the second one up on next start.
+        indexes: [{ columns: ['taxonomy', 'tag'] }, { columns: ['cik'] }],
       }),
       sync: makeCompanyFactsSync({
         userAgent: opts.userAgent,
@@ -156,6 +171,40 @@ export class EdgarMirror {
       units: JSON.parse(String(row.units_json ?? '{}')) as Record<string, CompanyConceptUnit[]>,
       ...(description !== undefined ? { description } : {}),
     };
+  }
+
+  /**
+   * One company's complete fact set in `companyfacts` API shape, reassembled from
+   * every `(cik, taxonomy, tag)` row this filer has. Returns null when the mirror
+   * holds no row for the CIK. Assumes the layer is ready.
+   *
+   * Reads through the `cik` index — a point lookup per filer, not a scan of the
+   * whole store.
+   */
+  async getCompanyFacts(cik: string): Promise<CompanyFactsResponse | null> {
+    const padded = cik.padStart(10, '0');
+    const handle = await this.companyFacts.raw();
+    const rows = handle
+      .prepare<CompanyFactsScanRow>(
+        `SELECT taxonomy, tag, entity_name, label, description, units_json FROM ${COMPANY_CONCEPTS_TABLE} WHERE cik = ?`,
+      )
+      .all(padded);
+    if (rows.length === 0) return null;
+
+    const facts: Record<string, Record<string, CompanyFactsConcept>> = {};
+    for (const row of rows) {
+      let namespace = facts[row.taxonomy];
+      if (!namespace) {
+        namespace = {};
+        facts[row.taxonomy] = namespace;
+      }
+      namespace[row.tag] = {
+        label: row.label ?? row.tag,
+        units: JSON.parse(row.units_json) as Record<string, CompanyConceptUnit[]>,
+        ...(row.description == null ? {} : { description: row.description }),
+      };
+    }
+    return { cik: Number(padded), entityName: rows[0]?.entity_name ?? '', facts };
   }
 
   /**
