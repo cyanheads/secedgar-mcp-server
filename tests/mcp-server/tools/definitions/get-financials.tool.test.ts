@@ -508,6 +508,41 @@ describe('getFinancialsTool', () => {
     expect(err.data.matches.length).toBeLessThanOrEqual(10);
   });
 
+  it('renders the ambiguous_company candidates in the message, not just error data (#90)', async () => {
+    mockApi.resolveCik.mockResolvedValue([
+      { cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' },
+      { cik: '0001418121', name: 'Apple Hospitality REIT, Inc.', ticker: 'APLE' },
+      { cik: '0006084276', name: 'Apple Bank for Savings', ticker: undefined },
+    ]);
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({ company: 'Apple', concept: 'revenue' });
+
+    const err = await getFinancialsTool.handler(input, ctx).catch((e) => e);
+    // CIK, name, and ticker (when present) all reach the text surface, so a
+    // content-only client can act on the "retry with a ticker or CIK" recovery.
+    expect(err.message).toContain('0000320193 Apple Inc. (AAPL)');
+    expect(err.message).toContain('0001418121 Apple Hospitality REIT, Inc. (APLE)');
+    expect(err.message).toContain('0006084276 Apple Bank for Savings');
+    // Text and structured data are built from one capped list, so they cannot drift.
+    for (const m of err.data.matches) expect(err.message).toContain(m.cik);
+  });
+
+  it('caps the rendered ambiguous_company candidate list at 10 (#90)', async () => {
+    const manyMatches = Array.from({ length: 15 }, (_, i) => ({
+      cik: `000000001${i}`,
+      name: `Company ${i}`,
+      ticker: undefined,
+    }));
+    mockApi.resolveCik.mockResolvedValue(manyMatches);
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({ company: 'Company', concept: 'revenue' });
+
+    const err = await getFinancialsTool.handler(input, ctx).catch((e) => e);
+    expect(err.message).toContain('0000000010 Company 0');
+    expect(err.message).toContain('0000000019 Company 9');
+    expect(err.message).not.toContain('Company 10');
+  });
+
   it('uses ifrsTags when taxonomy is ifrs-full for a friendly name (#19)', async () => {
     const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({

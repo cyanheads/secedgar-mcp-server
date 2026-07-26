@@ -164,14 +164,26 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       });
     }
     if (Array.isArray(resolved) && resolved.length > 1) {
-      throw ctx.fail('ambiguous_company', `'${input.company}' matches multiple companies.`, {
-        ...ctx.recoveryFor('ambiguous_company'),
-        matches: resolved.slice(0, 10).map((m) => ({
-          cik: m.cik,
-          name: m.name,
-          ticker: m.ticker,
-        })),
-      });
+      // Render the candidates into the message itself, not just structured data —
+      // clients that read only content[] otherwise get a "pick from the matches
+      // list" instruction with no list to pick from (#90). Same shape the
+      // company_search and get_institutional_holdings ambiguity paths already ship.
+      const shown = resolved.slice(0, 10);
+      const list = shown
+        .map((m) => `${m.cik} ${m.name ?? 'Unknown'}${m.ticker ? ` (${m.ticker})` : ''}`)
+        .join(', ');
+      throw ctx.fail(
+        'ambiguous_company',
+        `'${input.company}' matches multiple companies: ${list}. Retry with one of these tickers or 10-digit CIKs.`,
+        {
+          ...ctx.recoveryFor('ambiguous_company'),
+          matches: shown.map((m) => ({
+            cik: m.cik,
+            name: m.name,
+            ticker: m.ticker,
+          })),
+        },
+      );
     }
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
     if (!match) {
