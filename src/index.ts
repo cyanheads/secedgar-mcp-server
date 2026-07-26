@@ -11,6 +11,7 @@ import { companyAnalysisPrompt } from '@/mcp-server/prompts/definitions/company-
 import { conceptsResource } from '@/mcp-server/resources/definitions/concepts.resource.js';
 import { filingTypesResource } from '@/mcp-server/resources/definitions/filing-types.resource.js';
 import { companySearchTool } from '@/mcp-server/tools/definitions/company-search.tool.js';
+import { compareCompaniesTool } from '@/mcp-server/tools/definitions/compare-companies.tool.js';
 import { dataframeDescribeTool } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
 import { dataframeDropTool } from '@/mcp-server/tools/definitions/dataframe-drop.tool.js';
 import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
@@ -19,6 +20,7 @@ import { getFilingTool } from '@/mcp-server/tools/definitions/get-filing.tool.js
 import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials.tool.js';
 import { getInsiderTransactionsTool } from '@/mcp-server/tools/definitions/get-insider-transactions.tool.js';
 import { getInstitutionalHoldingsTool } from '@/mcp-server/tools/definitions/get-institutional-holdings.tool.js';
+import { getSnapshotTool } from '@/mcp-server/tools/definitions/get-snapshot.tool.js';
 import { searchConceptsTool } from '@/mcp-server/tools/definitions/search-concepts.tool.js';
 import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
 import { initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
@@ -44,9 +46,11 @@ await createApp({
     searchFilingsTool,
     getFilingTool,
     getFinancialsTool,
+    getSnapshotTool,
     getInsiderTransactionsTool,
     getInstitutionalHoldingsTool,
     fetchFramesTool,
+    compareCompaniesTool,
     searchConceptsTool,
     dataframeDescribeTool,
     dataframeQueryTool,
@@ -55,7 +59,7 @@ await createApp({
   resources: [conceptsResource, filingTypesResource],
   prompts: [companyAnalysisPrompt],
   instructions:
-    'Use the secedgar_* tools to query SEC EDGAR — US public-company filings since 1993 plus historical XBRL financials. Resolve companies with secedgar_company_search (accepts ticker, name, or CIK), fetch document text with secedgar_get_filing by accession number, and search filings with secedgar_search_filings (full-text covers 2001-present; pre-2001 date ranges browse the archives by form and entity/date, so pre-2001 full-text matching requires ticker:/cik: entity scope; supports boolean operators and inline ticker:AAPL / cik:320193 targeting). For financials, secedgar_get_financials and secedgar_fetch_frames accept friendly names like "revenue" or "eps_diluted" (discover them with secedgar_search_concepts) or raw XBRL tags. Data-returning tools also materialize their full upstream response as a df_<id> handle for downstream SQL via secedgar_dataframe_query — list dataframes with secedgar_dataframe_describe.',
+    'Use the secedgar_* tools to query SEC EDGAR — US public-company filings since 1993 plus historical XBRL financials. Resolve companies with secedgar_company_search (accepts ticker, name, or CIK), fetch document text with secedgar_get_filing by accession number, and search filings with secedgar_search_filings (full-text covers 2001-present; pre-2001 date ranges browse the archives by form and entity/date, so pre-2001 full-text matching requires ticker:/cik: entity scope; supports boolean operators and inline ticker:AAPL / cik:320193 targeting). For financials, secedgar_get_financials and secedgar_fetch_frames accept friendly names like "revenue" or "eps_diluted" (discover them with secedgar_search_concepts) or raw XBRL tags; secedgar_get_snapshot profiles one company across every supported concept in a single call, and secedgar_compare_companies puts 2-10 named companies side by side on aligned calendar periods. Data-returning tools also materialize their full upstream response as a df_<id> handle for downstream SQL via secedgar_dataframe_query — list dataframes with secedgar_dataframe_describe.',
   async setup(core) {
     initEdgarApiService();
     initCanvasBridge(core.canvas);
