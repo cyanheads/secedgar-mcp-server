@@ -41,6 +41,8 @@ const PRIMARY_SENTINEL = '\x00primary';
 type FilingIndexItem = FilingIndex['directory']['item'][number];
 
 interface DocumentEntry {
+  /** True when the entry holds binary bytes and cannot be read as text. */
+  binary?: boolean | undefined;
   description?: string | undefined;
   name: string;
   size?: number | undefined;
@@ -78,6 +80,15 @@ type ResolveOutcome =
       /** Filing documents grouped by category (headers inferred from filename patterns). */
       documents: CategorizedDocuments;
     }
+  | {
+      ok: false;
+      kind: 'binary_document';
+      requestedDocument: string;
+      /** Inferred type of the rejected entry — GRAPHIC, PDF, or BINARY. */
+      documentType: string;
+      /** Filing documents grouped by category (headers inferred from filename patterns). */
+      documents: CategorizedDocuments;
+    }
   | { ok: false; kind: 'filing_not_found'; providedCik: string | undefined };
 
 const documentEntrySchema = z
@@ -86,7 +97,7 @@ const documentEntrySchema = z
     type: z
       .string()
       .describe(
-        'SEC document type from the submission header (e.g., "10-K", "EX-21.1", "GRAPHIC", "XML"). When the submission header is unavailable, falls back to a label inferred from the filename: known XBRL artifacts ("XBRL-LINKBASE", "XBRL-INSTANCE", etc.), "exhibit" for common exhibit filename patterns (ex-21.htm, exhibit21, dex991), and "unknown" for everything else.',
+        'SEC document type from the submission header (e.g., "10-K", "EX-21.1", "GRAPHIC", "XML"). When the submission header is unavailable, falls back to a label inferred from the filename: known XBRL artifacts ("XBRL-LINKBASE", "XBRL-INSTANCE", etc.), "exhibit" for common exhibit filename patterns (ex-21.htm, exhibit21, dex991), "GRAPHIC"/"PDF"/"BINARY" for known binary file extensions, and "unknown" for everything else.',
       ),
     description: z
       .string()
@@ -95,6 +106,12 @@ const documentEntrySchema = z
         'Human-readable description (e.g., "Annual Report", "Subsidiaries of the Registrant"). Absent when SEC published none for this entry.',
       ),
     size: z.number().optional().describe('File size in bytes.'),
+    binary: z
+      .boolean()
+      .optional()
+      .describe(
+        'Present and true when the entry holds binary bytes — a scanned page or logo, a PDF exhibit, a packaged archive or spreadsheet. These cannot be converted to text and are rejected by the document input. Absent for readable entries.',
+      ),
   })
   .describe('One document entry from the filing.');
 
@@ -115,6 +132,12 @@ export const getFilingTool = tool('secedgar_get_filing', {
       code: JsonRpcErrorCode.NotFound,
       when: 'Filing index lists items but no fetchable primary document was found',
       recovery: 'Set document to one of the filenames listed in the error message.',
+    },
+    {
+      reason: 'binary_document',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The requested document is a binary entry (scanned image, PDF, archive) with no text to return',
+      recovery: 'Pick a text document (.htm, .txt, .xml) from the list in the error message.',
     },
     {
       reason: 'filing_not_found',
@@ -167,7 +190,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .string()
       .optional()
       .describe(
-        'Specific document filename within the filing (e.g., "ex-21.htm" for subsidiaries list). Default: the primary document. Available documents listed in the response metadata.',
+        'Specific document filename within the filing (e.g., "ex-21.htm" for subsidiaries list). Default: the primary document. Available documents are listed in the response metadata under documents; entries marked binary hold no text and are rejected.',
       ),
     include_xbrl: z
       .boolean()
@@ -251,7 +274,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
           ),
       })
       .describe(
-        'Filing documents grouped by category. Names from any list are valid values for the document input. XBRL viewer artifacts are suppressed by default; setting include_xbrl=true surfaces them under the xbrl bucket.',
+        'Filing documents grouped by category. Every name is a valid document input EXCEPT entries carrying binary: true — scanned pages, PDFs, packaged archives and spreadsheets, which hold no text and are rejected with a binary_document error. Scans can outnumber readable documents in a filing, so read the flag before picking a name. XBRL viewer artifacts are suppressed by default; setting include_xbrl=true surfaces them under the xbrl bucket.',
       ),
     content: z.string().describe('Document text content for this page window.'),
     content_truncated: z.boolean().describe('True if content was truncated at content_limit.'),
@@ -322,6 +345,23 @@ export const getFilingTool = tool('secedgar_get_filing', {
             `Document '${resolved.requestedDocument}' not found in this filing.${catalogBlock}`,
             {
               requested_document: resolved.requestedDocument,
+              documents: resolved.documents,
+              recovery: { hint },
+            },
+          );
+        }
+        if (resolved.kind === 'binary_document') {
+          const catalogBlock = renderDocumentCatalog(resolved.documents);
+          const primaryName = resolved.documents.primary[0]?.name;
+          const hint = primaryName
+            ? `Use document="${primaryName}" (the primary) or another entry not marked binary. Binary entries hold image, PDF, or archive bytes and have no text to return.`
+            : 'Pick an entry not marked binary from the list above — binary entries hold image, PDF, or archive bytes and have no text to return.';
+          throw ctx.fail(
+            'binary_document',
+            `Document '${resolved.requestedDocument}' is a ${resolved.documentType} entry and holds no readable text.${catalogBlock}`,
+            {
+              requested_document: resolved.requestedDocument,
+              document_type: resolved.documentType,
               documents: resolved.documents,
               recovery: { hint },
             },
@@ -550,8 +590,16 @@ function renderDocumentCatalog(documents: CategorizedDocuments): string {
   const sections: string[] = [];
   const addCategory = (label: string, entries: DocumentEntry[]): void => {
     if (entries.length === 0) return;
-    const shown = entries.slice(0, MAX_DOCUMENTS_IN_ERROR);
-    const names = shown.map((d) => `${d.name} [${d.type}]`).join(', ');
+    /**
+     * Readable entries first. A sample this small is otherwise consumed by scan
+     * images on filings that carry hundreds of them, leaving the caller with a
+     * recovery list of names it cannot actually pass back. Stable sort, so order
+     * within each half is the filing index's own.
+     */
+    const shown = [...entries]
+      .sort((a, b) => Number(a.binary ?? false) - Number(b.binary ?? false))
+      .slice(0, MAX_DOCUMENTS_IN_ERROR);
+    const names = shown.map((d) => `${d.name} [${d.type}${d.binary ? ', binary' : ''}]`).join(', ');
     const omitted = entries.length - shown.length;
     const tail = omitted > 0 ? ` (+${omitted} more)` : '';
     sections.push(`${label} (${entries.length} total): ${names}${tail}`);
@@ -601,6 +649,27 @@ async function resolveFilingArchive(
 
     const targetName = requestedDocument ?? filingPrimaryName;
     if (!items.some((item) => item.name === targetName)) continue;
+
+    /**
+     * Reject a binary target BEFORE the body is fetched. `filingToExtract` runs
+     * `html-to-text` over whatever bytes arrive and never inspects a content
+     * type, so a `.jpg` would come back as its own decoded payload with a
+     * plausible length and no error (#96). The check is filename-only — the
+     * canonical GRAPHIC type lives in the submission header, which this path
+     * has not fetched yet, and requiring it here would trade the parallel
+     * header/submissions fetch for a sequential one on every call.
+     */
+    const binaryType = binaryTypeFromName(targetName);
+    if (binaryType) {
+      const documents = categorizeDocuments(items, filingPrimaryName, null, false);
+      return {
+        ok: false,
+        kind: 'binary_document',
+        requestedDocument: targetName,
+        documentType: binaryType,
+        documents,
+      };
+    }
 
     const html = await api.tryGetFilingDocument(cik, accessionNumber, targetName);
     if (!html) continue;
@@ -739,6 +808,7 @@ function categorizeDocuments(
       type,
       description: header?.description,
       size: item.size ? Number.parseInt(item.size, 10) || undefined : undefined,
+      ...(isBinaryDocument(item.name, type) ? { binary: true } : {}),
     };
 
     if (item.name === primaryName) {
@@ -781,6 +851,37 @@ function isXbrlArtifact(name: string, type: string): boolean {
  */
 const EXHIBIT_NAME_PATTERN = /(?:^|[^a-z])ex[-_.]?\d|exhibit[-_.]?\d|\d[dx]ex[-_.]?\d/i;
 
+/**
+ * Binary file extensions EDGAR filings carry, mapped to the type label reported
+ * for them. Images use SEC's own canonical TYPE (`GRAPHIC`) so header-derived and
+ * inferred types read identically. The set is deliberately extension-driven: it
+ * is the only signal available before the document body is fetched, and it works
+ * for a binary entry in any bucket — a PDF exhibit is typed `EX-99.*` in the
+ * submission header and lands under exhibits, not among the graphics.
+ */
+const BINARY_EXTENSIONS: Array<[RegExp, string]> = [
+  [/\.(?:jpe?g|gif|png|bmp|tiff?)$/i, 'GRAPHIC'],
+  [/\.pdf$/i, 'PDF'],
+  [/\.(?:zip|xlsx?)$/i, 'BINARY'],
+];
+
+/** Type label for a binary filename, or undefined when the name reads as text. */
+function binaryTypeFromName(name: string): string | undefined {
+  for (const [pattern, label] of BINARY_EXTENSIONS) {
+    if (pattern.test(name)) return label;
+  }
+  return;
+}
+
+/**
+ * Whether an entry holds bytes rather than text. The filename is authoritative
+ * for the fetch guard; the header type adds the cases a filer named oddly, since
+ * SEC types every scanned page `GRAPHIC` regardless of extension.
+ */
+function isBinaryDocument(name: string, type: string): boolean {
+  return binaryTypeFromName(name) !== undefined || type.toUpperCase() === 'GRAPHIC';
+}
+
 /** Fallback type label when the submission header is unavailable. */
 function inferTypeFromName(name: string): string {
   if (/^R\d+\.htm$/i.test(name)) return 'XBRL-VIEWER';
@@ -793,7 +894,10 @@ function inferTypeFromName(name: string): string {
   if (name === 'Show.js' || name === 'report.css') return 'XBRL-VIEWER-ASSET';
   if (name === 'Financial_Report.xlsx') return 'FINANCIAL-REPORT';
   if (EXHIBIT_NAME_PATTERN.test(name)) return 'exhibit';
-  return 'unknown';
+  // Last, so the named XBRL artifacts and exhibit filename patterns above keep
+  // their more specific labels. An entry's `binary` flag is derived separately,
+  // so a PDF exhibit is still marked unreadable while reading as an exhibit.
+  return binaryTypeFromName(name) ?? 'unknown';
 }
 
 function formatDocumentSection(docs: CategorizedDocuments): string {
@@ -838,6 +942,7 @@ function formatDocList(entries: DocumentEntry[]): string {
     .map((d) => {
       const tail = [
         d.type,
+        d.binary ? 'binary' : null,
         d.size !== undefined ? `${d.size}B` : null,
         d.description ? `"${d.description}"` : null,
       ]

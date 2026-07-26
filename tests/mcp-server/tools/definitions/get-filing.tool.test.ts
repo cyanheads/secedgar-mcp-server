@@ -608,6 +608,219 @@ describe('back-compat (no new params)', () => {
   });
 });
 
+// ── Binary documents (#96) ───────────────────────────────────────────────────
+
+describe('binary documents (#96)', () => {
+  /**
+   * A filing whose index mixes scans and PDF exhibits with its readable
+   * documents — the shape a large 10-K takes when signed exhibits are filed as
+   * per-page images. Every one of those filenames is rendered as a named,
+   * selectable key.
+   */
+  const scanHeavyIndex: FilingIndex = {
+    directory: {
+      name: '000009375125000111',
+      item: [
+        {
+          name: 'stt-20241231.htm',
+          type: 'text/html',
+          size: '900000',
+          'last-modified': '2025-02-14',
+        },
+        {
+          name: 'stt-20241231_g1.jpg',
+          type: 'image/jpeg',
+          size: '73161',
+          'last-modified': '2025-02-14',
+        },
+        {
+          name: 'ex-99pdf.pdf',
+          type: 'application/pdf',
+          size: '40000',
+          'last-modified': '2025-02-14',
+        },
+        {
+          name: 'Financial_Report.xlsx',
+          type: 'application/xlsx',
+          size: '120000',
+          'last-modified': '2025-02-14',
+        },
+        { name: 'ex-21.htm', type: 'text/html', size: '9000', 'last-modified': '2025-02-14' },
+      ],
+    },
+  };
+
+  beforeEach(() => {
+    mockApi.tryGetFilingIndex.mockResolvedValue(scanHeavyIndex);
+    mockApi.tryGetFilingHeaders.mockResolvedValue(
+      new Map([
+        ['stt-20241231.htm', { type: '10-K', sequence: '1', description: '10-K' }],
+        ['stt-20241231_g1.jpg', { type: 'GRAPHIC', sequence: '2' }],
+        ['ex-99pdf.pdf', { type: 'EX-99.6', sequence: '3' }],
+        ['ex-21.htm', { type: 'EX-21', sequence: '4' }],
+      ]),
+    );
+  });
+
+  it('rejects a scanned image instead of returning its decoded bytes as content', async () => {
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: ACCN,
+      cik: '93751',
+      document: 'stt-20241231_g1.jpg',
+    });
+
+    await expect(getFilingTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'binary_document', requested_document: 'stt-20241231_g1.jpg' },
+    });
+  });
+
+  it('never fetches the binary body — the guard runs before the document request', async () => {
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: ACCN,
+      cik: '93751',
+      document: 'stt-20241231_g1.jpg',
+    });
+    await expect(getFilingTool.handler(input, ctx)).rejects.toThrow();
+
+    // Rejecting after the fetch would still burn the request and run
+    // html-to-text over the JPEG payload.
+    expect(mockApi.tryGetFilingDocument).not.toHaveBeenCalled();
+    expect(filingToExtract).not.toHaveBeenCalled();
+  });
+
+  it('rejects a PDF exhibit, which SEC types EX-* and files under exhibits, not graphics', async () => {
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: ACCN,
+      cik: '93751',
+      document: 'ex-99pdf.pdf',
+    });
+
+    await expect(getFilingTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'binary_document', document_type: 'PDF' },
+    });
+  });
+
+  it('rejects the packaged spreadsheet the XBRL bucket carries', async () => {
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: ACCN,
+      cik: '93751',
+      document: 'Financial_Report.xlsx',
+    });
+
+    await expect(getFilingTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'binary_document', document_type: 'BINARY' },
+    });
+  });
+
+  it('points the error at a readable filename', async () => {
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: ACCN,
+      cik: '93751',
+      document: 'stt-20241231_g1.jpg',
+    });
+
+    await expect(getFilingTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { recovery: { hint: expect.stringContaining('stt-20241231.htm') } },
+    });
+  });
+
+  it('marks binary entries in the catalog and leaves text entries unmarked', async () => {
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: ACCN,
+      cik: '93751',
+      include_xbrl: true,
+    });
+    const result = await getFilingTool.handler(input, ctx);
+
+    const byName = new Map(
+      [
+        ...result.documents.primary,
+        ...result.documents.exhibits,
+        ...result.documents.auxiliary,
+        ...(result.documents.xbrl ?? []),
+      ].map((d) => [d.name, d]),
+    );
+    expect(byName.get('stt-20241231_g1.jpg')?.binary).toBe(true);
+    expect(byName.get('ex-99pdf.pdf')?.binary).toBe(true);
+    expect(byName.get('Financial_Report.xlsx')?.binary).toBe(true);
+    expect(byName.get('stt-20241231.htm')?.binary).toBeUndefined();
+    expect(byName.get('ex-21.htm')?.binary).toBeUndefined();
+    // The PDF exhibit stays in the exhibits bucket — the flag is what makes it
+    // unselectable, not its category.
+    expect(result.documents.exhibits.map((d) => d.name)).toContain('ex-99pdf.pdf');
+  });
+
+  it('infers GRAPHIC from the extension when the submission header is unavailable', async () => {
+    mockApi.tryGetFilingHeaders.mockResolvedValue(null);
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({ accession_number: ACCN, cik: '93751' });
+    const result = await getFilingTool.handler(input, ctx);
+
+    const jpg = result.documents.auxiliary.find((d) => d.name === 'stt-20241231_g1.jpg');
+    expect(jpg).toMatchObject({ type: 'GRAPHIC', binary: true });
+    // The exhibit filename pattern still wins the type label; the binary flag is
+    // derived from the extension either way.
+    expect(result.documents.exhibits.find((d) => d.name === 'ex-99pdf.pdf')?.binary).toBe(true);
+  });
+
+  it('lists readable entries ahead of scans in the error catalog sample', async () => {
+    // A category sample capped at ten is useless if scans consume it — the
+    // caller needs a name it can actually pass back.
+    const manyScans = Array.from({ length: 30 }, (_, i) => ({
+      name: `scan${i}.jpg`,
+      type: 'image/jpeg',
+      size: '5000',
+      'last-modified': '2025-02-14',
+    }));
+    mockApi.tryGetFilingIndex.mockResolvedValue({
+      directory: {
+        name: '000009375125000111',
+        item: [
+          {
+            name: 'stt-20241231.htm',
+            type: 'text/html',
+            size: '900000',
+            'last-modified': '2025-02-14',
+          },
+          ...manyScans,
+          { name: 'consent.htm', type: 'text/html', size: '3000', 'last-modified': '2025-02-14' },
+        ],
+      },
+    });
+    mockApi.tryGetFilingHeaders.mockResolvedValue(null);
+
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: ACCN,
+      cik: '93751',
+      document: 'nope.htm',
+    });
+
+    await expect(getFilingTool.handler(input, ctx)).rejects.toMatchObject({
+      message: expect.stringContaining('consent.htm'),
+    });
+  });
+
+  it('still serves a text document from a scan-heavy filing', async () => {
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: ACCN,
+      cik: '93751',
+      document: 'ex-21.htm',
+    });
+    const result = await getFilingTool.handler(input, ctx);
+
+    expect(result.content).toBe('Filing content');
+    expect(result.requested_document).toBe('ex-21.htm');
+  });
+});
+
 // ── Input validation (#64) ───────────────────────────────────────────────────
 
 describe('input validation (#64)', () => {
