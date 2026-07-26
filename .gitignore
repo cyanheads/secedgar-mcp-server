@@ -69,10 +69,7 @@ worker-configuration.d.ts
 # =============================================================================
 .storage/
 repomix-output*
-data/
-# Exception: committed static asset for former-name resolution
-!src/services/edgar/data/
-!src/services/edgar/data/former-names.json
+/data/
 docs/api/
 docs/devdocs.md
 .mcp.json
