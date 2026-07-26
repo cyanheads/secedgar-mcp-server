@@ -67,6 +67,46 @@ describe('resolveConcept', () => {
     ]);
   });
 
+  it('covers both ASC 606 assessed-tax variants, net first (#98)', () => {
+    // A filer presenting revenue gross of excise/sales tax reports only the
+    // Including variant. Without it the walk fell through to tags SEC retired in
+    // 2018 and returned a series that stops there. Excluding stays at index 0 so
+    // a filer reporting both still resolves to the net total (#44 tag priority).
+    const tags = resolveConcept('revenue')!.tags;
+    expect(tags).toEqual([
+      'RevenueFromContractWithCustomerExcludingAssessedTax',
+      'Revenues',
+      'RevenueFromContractWithCustomerIncludingAssessedTax',
+      'SalesRevenueNet',
+      'SalesRevenueGoodsNet',
+    ]);
+  });
+
+  it('keeps the Including variant behind Revenues (#98)', () => {
+    // The two disagree for filers that present gross sales and net-of-excise
+    // sales under separate elements. Ahead of `Revenues` the Including variant
+    // takes over the frames `Revenues` already covered and switches the series
+    // definition partway through its history; behind it, it only fills frames no
+    // current tag reports, which is the fall-through this concept exists to stop.
+    const tags = resolveConcept('revenue')!.tags;
+    expect(tags.indexOf('Revenues')).toBeLessThan(
+      tags.indexOf('RevenueFromContractWithCustomerIncludingAssessedTax'),
+    );
+  });
+
+  it('keeps every retired tag behind every current one (#98)', () => {
+    // A retired tag is a last-resort fallback for filers whose history predates
+    // its replacement. If one ever preceded a current tag it would win the
+    // priority walk outright and pin the series to a dead element.
+    const retired = new Set(['SalesRevenueNet', 'SalesRevenueGoodsNet', 'CostOfGoodsSold']);
+    for (const [name, mapping] of Object.entries(getAllConcepts())) {
+      const firstRetired = mapping.tags.findIndex((t) => retired.has(t));
+      if (firstRetired === -1) continue;
+      const currentAfter = mapping.tags.slice(firstRetired + 1).filter((t) => !retired.has(t));
+      expect(currentAfter, `${name} lists a current tag after a retired one`).toEqual([]);
+    }
+  });
+
   it('resolves notes_payable with notes-specific then debt-fallback tags', () => {
     const mapping = resolveConcept('notes_payable');
     expect(mapping).toBeDefined();
@@ -94,10 +134,91 @@ describe('resolveConcept — IFRS tag variants', () => {
     expect(mapping!.ifrsTags).toContain('Assets');
   });
 
-  it('concepts without IFRS variants have no ifrsTags', () => {
-    // equity has no confirmed universal IFRS tag
-    const mapping = resolveConcept('equity');
-    expect(mapping?.ifrsTags).toBeUndefined();
+  it('maps every statement group, not just the income statement (#99)', () => {
+    // The IFRS roster used to be revenue/net_income/assets, so a caller asking
+    // for a balance-sheet, cash-flow, or per-share line under ifrs-full got a
+    // gap for a concept the filer does in fact report.
+    const expected: Record<string, string> = {
+      // balance sheet
+      liabilities: 'Liabilities',
+      cash: 'CashAndCashEquivalents',
+      debt: 'LongtermBorrowings',
+      current_assets: 'CurrentAssets',
+      current_liabilities: 'CurrentLiabilities',
+      inventory: 'Inventories',
+      accounts_receivable: 'CurrentTradeReceivables',
+      accounts_payable: 'TradeAndOtherCurrentPayables',
+      goodwill: 'Goodwill',
+      intangible_assets: 'IntangibleAssetsOtherThanGoodwill',
+      // income statement
+      operating_income: 'ProfitLossFromOperatingActivities',
+      gross_profit: 'GrossProfit',
+      cogs: 'CostOfSales',
+      rd_expense: 'ResearchAndDevelopmentExpense',
+      sga_expense: 'SellingGeneralAndAdministrativeExpense',
+      stock_based_compensation: 'ExpenseFromSharebasedPaymentTransactionsWithEmployees',
+      // cash flow
+      operating_cash_flow: 'CashFlowsFromUsedInOperatingActivities',
+      investing_cash_flow: 'CashFlowsFromUsedInInvestingActivities',
+      financing_cash_flow: 'CashFlowsFromUsedInFinancingActivities',
+      capex: 'PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities',
+      dividends_paid: 'DividendsPaid',
+      share_repurchases: 'PaymentsToAcquireOrRedeemEntitysShares',
+      depreciation_amortization: 'DepreciationAndAmortisationExpense',
+      // per share
+      eps_basic: 'BasicEarningsLossPerShare',
+      eps_diluted: 'DilutedEarningsLossPerShare',
+    };
+    for (const [concept, tag] of Object.entries(expected)) {
+      expect(resolveConcept(concept)?.ifrsTags?.[0], `${concept} ifrsTags[0]`).toBe(tag);
+    }
+  });
+
+  it('equity prefers the parent-attributable line, mirroring its us-gaap ordering (#99)', () => {
+    // us-gaap tags[0] is StockholdersEquity (parent only) with the
+    // NCI-inclusive total as a relatedTag; the IFRS ordering has to match or the
+    // two taxonomies would answer the same question with different quantities.
+    expect(resolveConcept('equity')?.ifrsTags).toEqual([
+      'EquityAttributableToOwnersOfParent',
+      'Equity',
+    ]);
+  });
+
+  it('interest_expense prefers the exact tag over the broader IFRS caption (#99)', () => {
+    // FinanceCosts also carries discount unwinding and other financing charges,
+    // so it is a fallback for filers with no separate interest line — never the
+    // winner when the filer reports both.
+    expect(resolveConcept('interest_expense')?.ifrsTags).toEqual([
+      'InterestExpense',
+      'FinanceCosts',
+    ]);
+  });
+
+  it('accounts_receivable prefers the trade-only caption (#99)', () => {
+    // us-gaap tags[0] is AccountsReceivableNetCurrent (trade only). The combined
+    // IFRS caption also carries prepayments, deposits, and tax receivables and
+    // runs roughly half again as large for a filer reporting both, so it belongs
+    // behind the trade-only element, not ahead of it.
+    expect(resolveConcept('accounts_receivable')?.ifrsTags).toEqual([
+      'CurrentTradeReceivables',
+      'TradeAndOtherCurrentReceivables',
+    ]);
+  });
+
+  it('share_repurchases prefers the financing outflow over the treasury-only line (#99)', () => {
+    // A filer that cancels repurchased shares rather than holding them tags
+    // PurchaseOfTreasuryShares zero while running a buyback, so leading with it
+    // would report zero repurchases for a real one.
+    expect(resolveConcept('share_repurchases')?.ifrsTags).toEqual([
+      'PaymentsToAcquireOrRedeemEntitysShares',
+      'PurchaseOfTreasuryShares',
+    ]);
+  });
+
+  it('leaves notes_payable unmapped rather than pointing it at a borrowings total (#99)', () => {
+    // IFRS presents borrowings as one caption and has no element for the
+    // notes/debt split, so the concept is a gap under ifrs-full by design.
+    expect(resolveConcept('notes_payable')?.ifrsTags).toBeUndefined();
   });
 });
 
@@ -169,10 +290,19 @@ describe('searchConcepts — taxonomy filtering', () => {
     expect(names).toContain('assets');
   });
 
-  it('does not include equity when taxonomy is ifrs-full (no confirmed IFRS tag)', () => {
-    const results = searchConcepts('', 'ifrs-full');
-    const names = results.map((r) => r.name);
-    expect(names).not.toContain('equity');
+  it('includes the balance-sheet and cash-flow concepts under ifrs-full (#99)', () => {
+    const names = searchConcepts('', 'ifrs-full').map((r) => r.name);
+    for (const concept of ['equity', 'cash', 'inventory', 'operating_cash_flow', 'eps_diluted']) {
+      expect(names, `${concept} missing from the ifrs-full roster`).toContain(concept);
+    }
+  });
+
+  it('excludes concepts with no confirmed IFRS tag when taxonomy is ifrs-full', () => {
+    const names = searchConcepts('', 'ifrs-full').map((r) => r.name);
+    // notes_payable: no IFRS element for the notes/debt split.
+    // shares_outstanding: a dei concept, outside the financial taxonomies.
+    expect(names).not.toContain('notes_payable');
+    expect(names).not.toContain('shares_outstanding');
   });
 
   it('matches IFRS tag names in search when taxonomy is ifrs-full', () => {

@@ -10,7 +10,11 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { listConcepts, resolveConceptTarget } from '@/services/edgar/concept-map.js';
-import { type FramedUnit, seriesFromCompanyFacts } from '@/services/edgar/concept-series.js';
+import {
+  deprecatedTagCaveats,
+  type FramedUnit,
+  seriesFromCompanyFacts,
+} from '@/services/edgar/concept-series.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { missingQuarterCaveats } from '@/services/edgar/fiscal-periods.js';
 
@@ -153,7 +157,7 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
     caveats: z
       .array(z.string())
       .describe(
-        "Data-completeness warnings about the quarterly values. Populated when one calendar quarter is absent from every recent fully-reported year, because SEC reports a filer's fiscal Q4 as the 10-K residual rather than a discrete quarterly fact — this applies to calendar-year filers (no discrete Q4) as much as to off-calendar ones. Empty when nothing needs flagging.",
+        "Data-completeness warnings. One entry when one or two calendar quarters are absent from every recent qualifying year, because SEC reports a filer's fiscal Q4 as the 10-K residual rather than a discrete quarterly fact — this applies to calendar-year filers (no discrete Q4) as much as to off-calendar ones, and a filer whose other fiscal quarters span non-calendar durations loses a second quarter the same way. One further entry per line that resolved to an XBRL tag SEC has retired from the taxonomy, whose values may stop years short of the filer's latest report. Empty when nothing needs flagging.",
       ),
   }),
 
@@ -211,6 +215,8 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
     }> = [];
     const gaps: Array<{ concept: string; label: string; group: string; tags_tried: string[] }> = [];
     const quarterFrames: string[] = [];
+    /** One entry per line whose winning tag is retired from the taxonomy (#98). */
+    const staleTagCaveats: string[] = [];
 
     for (const entry of listConcepts()) {
       const target = resolveConceptTarget(entry.name, input.taxonomy);
@@ -242,6 +248,9 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
       for (const unit of series.series) {
         if (QUARTER.test(unit.frame)) quarterFrames.push(unit.frame);
       }
+      for (const caveat of deprecatedTagCaveats(series.tag, series.label)) {
+        staleTagCaveats.push(`${entry.name}: ${caveat}`);
+      }
 
       lines.push({
         concept: entry.name,
@@ -256,7 +265,10 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
       });
     }
 
-    const caveats = wantQuarterly ? missingQuarterCaveats(quarterFrames) : [];
+    const caveats = [
+      ...(wantQuarterly ? missingQuarterCaveats(quarterFrames) : []),
+      ...staleTagCaveats,
+    ];
 
     ctx.log.info('Snapshot built', {
       company: match.cik,

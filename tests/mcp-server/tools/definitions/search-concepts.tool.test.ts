@@ -105,4 +105,31 @@ describe('searchConceptsTool', () => {
       'CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents',
     );
   });
+  it('surfaces the IFRS element set, which differs from tags (#99)', () => {
+    const ctx = createMockContext();
+    const input = searchConceptsTool.input.parse({ search: 'inventory' });
+    const result = searchConceptsTool.handler(input, ctx);
+
+    const inventory = result.concepts.find((c) => c.name === 'inventory');
+    expect(inventory?.tags).toContain('InventoryNet');
+    // Without this, an ifrs-full caller reads the us-gaap tags as the whole story.
+    expect(inventory?.ifrs_tags).toEqual(['Inventories']);
+  });
+
+  it('omits ifrs_tags for a concept with no IFRS equivalent (#99)', () => {
+    const ctx = createMockContext();
+    const input = searchConceptsTool.input.parse({ search: 'notes_payable' });
+    const result = searchConceptsTool.handler(input, ctx);
+
+    expect(result.concepts.find((c) => c.name === 'notes_payable')?.ifrs_tags).toBeUndefined();
+  });
+
+  it('renders the ifrs-full line in format text (#99)', () => {
+    const ctx = createMockContext();
+    const input = searchConceptsTool.input.parse({ search: 'inventory' });
+    const result = searchConceptsTool.handler(input, ctx);
+    const blocks = searchConceptsTool.format!(result);
+
+    expect(blocks[0].text).toContain('ifrs-full: `Inventories`');
+  });
 });

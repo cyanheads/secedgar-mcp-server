@@ -12,7 +12,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { resolveConceptTarget } from '@/services/edgar/concept-map.js';
-import { seriesFromCompanyFacts } from '@/services/edgar/concept-series.js';
+import { deprecatedTagCaveats, seriesFromCompanyFacts } from '@/services/edgar/concept-series.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { missingQuarterCaveats } from '@/services/edgar/fiscal-periods.js';
 import type { CikMatch } from '@/services/edgar/types.js';
@@ -127,7 +127,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       .enum(['annual', 'quarterly'])
       .default('annual')
       .describe(
-        'Align on full calendar years (annual) or calendar quarters (quarterly). Quarterly comparisons of off-calendar filers are missing one calendar quarter per year — see caveats.',
+        'Align on full calendar years (annual) or calendar quarters (quarterly). Quarterly comparisons of off-calendar filers are missing at least one calendar quarter per year — see caveats.',
       ),
     periods: z
       .number()
@@ -241,7 +241,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     caveats: z
       .array(z.string())
       .describe(
-        'Comparability warnings: a filer missing a calendar quarter from the frame-tagged series, period ends that differ inside one aligned period, and concepts whose unit differs across companies. Empty when nothing needs flagging.',
+        "Comparability warnings: a filer missing one or two calendar quarters from the frame-tagged series, a concept that resolved to an XBRL tag SEC has retired (so that company's values may stop years short of the others'), period ends that differ inside one aligned period, and concepts whose unit differs across companies. Company-specific warnings are prefixed with the company name. Empty when nothing needs flagging.",
       ),
     dataset: z
       .object({
@@ -383,6 +383,16 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
         const units = unitsByConcept.get(concept) ?? new Set<string>();
         units.add(series.unit || target.unit || '');
         unitsByConcept.set(concept, units);
+
+        /**
+         * A concept that fell through to a retired tag for this filer alone puts
+         * a series that stops at the tag's retirement next to current values from
+         * the other companies — the spread reads as a business fact unless the
+         * stale tag is named (#98).
+         */
+        for (const caveat of deprecatedTagCaveats(series.tag, series.label)) {
+          caveatSet.add(`${name} / ${concept}: ${caveat}`);
+        }
       }
 
       /**

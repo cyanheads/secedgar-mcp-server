@@ -9,6 +9,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { resolveConceptTarget } from '@/services/edgar/concept-map.js';
 import {
+  deprecatedTagCaveats,
   matchesPeriodType,
   resolveFrameSeries,
   type TagPrioritizedUnit,
@@ -161,7 +162,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       .array(z.string())
       .optional()
       .describe(
-        "Data-completeness warnings about the returned series. Populated on quarterly results when one calendar quarter is absent from every recent fully-reported year — SEC reports a filer's fiscal Q4 as the 10-K residual rather than a discrete quarterly fact, so the calendar quarter that fiscal Q4 spans has no frame-tagged value. Applies to calendar-year filers (no discrete Q4) as much as to off-calendar ones. Absent when the series has nothing to flag.",
+        "Data-completeness warnings about the returned series. Two kinds. On quarterly results, one entry when one or two calendar quarters are absent from every recent qualifying year — SEC reports a filer's fiscal Q4 as the 10-K residual rather than a discrete quarterly fact, so the calendar quarter fiscal Q4 spans has no frame-tagged value, and a filer whose other fiscal quarters span non-calendar durations loses a second quarter the same way. Applies to calendar-year filers (no discrete Q4) as much as to off-calendar ones. On any result, one entry when the concept resolved to an XBRL tag SEC has retired from the taxonomy, which means the current tags reported nothing and the series may stop years short. Absent when the series has nothing to flag.",
       ),
   }),
 
@@ -363,8 +364,15 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
      * quarter for this filer (#95). Detection reads the resolved frames, so it
      * runs over the full deduped set rather than the period-filtered slice.
      */
-    const caveats =
-      resolvedPeriodType === 'annual' ? [] : missingQuarterCaveats(byFrameClean.keys());
+    const caveats = [
+      ...(resolvedPeriodType === 'annual' ? [] : missingQuarterCaveats(byFrameClean.keys())),
+      /**
+       * The tag that won the priority walk can be one SEC retired years ago,
+       * which happens exactly when no current tag reports for this filer. The
+       * values look ordinary; the taxonomy label is the only tell (#98).
+       */
+      ...deprecatedTagCaveats(conceptResponse.tag, conceptResponse.label),
+    ];
 
     // Determine unit string
     const unitKey = Object.keys(conceptResponse.units)[0] ?? mappedUnit ?? 'USD';

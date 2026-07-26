@@ -202,6 +202,41 @@ describe('getSnapshotTool', () => {
     expect(result.caveats[0]).toContain('Calendar Q2');
   });
 
+  it('names the concept whose line resolved to a retired XBRL tag (#98)', async () => {
+    const retiredTagFiler: CompanyFactsResponse = {
+      cik: 91419,
+      entityName: 'J M SMUCKER Co',
+      facts: {
+        'us-gaap': {
+          SalesRevenueGoodsNet: {
+            label: 'Sales Revenue, Goods, Net (Deprecated 2018-01-31)',
+            units: { USD: [fact({ frame: 'CY2017', end: '2018-04-30', val: 7_357_100_000 })] },
+          },
+        },
+      },
+    };
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000091419', name: 'J M SMUCKER Co' });
+    mockApi.tryGetCompanyFacts.mockResolvedValue(retiredTagFiler);
+
+    const ctx = createMockContext({ errors: getSnapshotTool.errors });
+    const input = getSnapshotTool.input.parse({ company: 'SJM' });
+    const result = await getSnapshotTool.handler(input, ctx);
+
+    const stale = result.caveats.find((c) => c.includes('SalesRevenueGoodsNet'));
+    expect(stale).toBeDefined();
+    // A snapshot resolves the whole catalog at once, so the caveat has to say
+    // which line it is about.
+    expect(stale).toMatch(/^revenue: /);
+  });
+
+  it('raises no staleness caveat for a filer on current tags (#98)', async () => {
+    const ctx = createMockContext({ errors: getSnapshotTool.errors });
+    const input = getSnapshotTool.input.parse({ company: 'AAPL' });
+    const result = await getSnapshotTool.handler(input, ctx);
+
+    expect(result.caveats.some((c) => c.includes('retired from the taxonomy'))).toBe(false);
+  });
+
   it('throws company_not_found for an unresolvable input', async () => {
     mockApi.resolveCik.mockResolvedValue([]);
     const ctx = createMockContext({ errors: getSnapshotTool.errors });

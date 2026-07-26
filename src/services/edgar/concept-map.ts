@@ -5,13 +5,40 @@
 
 import type { ConceptMapping, ConceptTaxonomy } from './types.js';
 
-/** Friendly name → XBRL tag mapping. Tags are tried in order for companyconcept lookups. */
+/**
+ * Friendly name → XBRL tag mapping. Tags are tried in order for companyconcept
+ * lookups, and index 0 is the preferred total when two tags report the same
+ * frame (#44).
+ *
+ * `ifrsTags` is the `ifrs-full` counterpart, used when a caller asks for that
+ * taxonomy. Every entry is confirmed present in the live companyfacts of at
+ * least one 20-F IFRS filer — an IFRS element existing in the taxonomy is not
+ * evidence that filers tag it. A concept with no confirmed IFRS element carries
+ * no `ifrsTags` and is reported as a gap rather than mapped to a guess.
+ */
 const CONCEPT_MAP: Record<string, ConceptMapping> = {
   revenue: {
     group: 'income_statement',
+    /**
+     * ASC 606 splits the top line by whether assessed sales/excise tax is included.
+     * The Including variant is the reported total for food, beverage, and tobacco
+     * filers, whose ASC 606 election presents revenue gross of tax; without it those
+     * filers fall through to the deprecated tags at the end of the array and return
+     * a series that stops in 2018 (#98).
+     *
+     * It sits behind `Revenues`, not ahead of it, because the two do not agree for
+     * every filer and `Revenues` was already winning those frames: a brewer tags
+     * gross sales under one element and net-of-excise sales under the other, so
+     * promoting the Including variant over `Revenues` swaps the definition partway
+     * back through the history and prints a year-over-year step that is a tag
+     * change, not a business fact. Behind `Revenues` it only fills frames no
+     * current tag covers, which is the case #98 is about. Excluding stays at index
+     * 0 so a filer reporting both variants still resolves to the net total (#44).
+     */
     tags: [
       'RevenueFromContractWithCustomerExcludingAssessedTax',
       'Revenues',
+      'RevenueFromContractWithCustomerIncludingAssessedTax',
       'SalesRevenueNet',
       'SalesRevenueGoodsNet',
     ],
@@ -40,6 +67,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   operating_income: {
     group: 'income_statement',
     tags: ['OperatingIncomeLoss'],
+    ifrsTags: ['ProfitLossFromOperatingActivities'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Operating Income (Loss)',
@@ -47,6 +75,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   gross_profit: {
     group: 'income_statement',
     tags: ['GrossProfit'],
+    ifrsTags: ['GrossProfit'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Gross Profit',
@@ -54,6 +83,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   eps_basic: {
     group: 'per_share',
     tags: ['EarningsPerShareBasic'],
+    ifrsTags: ['BasicEarningsLossPerShare'],
     taxonomy: 'us-gaap',
     unit: 'USD/shares',
     label: 'Earnings Per Share (Basic)',
@@ -61,6 +91,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   eps_diluted: {
     group: 'per_share',
     tags: ['EarningsPerShareDiluted'],
+    ifrsTags: ['DilutedEarningsLossPerShare'],
     taxonomy: 'us-gaap',
     unit: 'USD/shares',
     label: 'Earnings Per Share (Diluted)',
@@ -77,6 +108,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   liabilities: {
     group: 'balance_sheet',
     tags: ['Liabilities'],
+    ifrsTags: ['Liabilities'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Total Liabilities',
@@ -90,6 +122,13 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
         note: 'Total equity including noncontrolling interests; the primary line for filers with material minority interests.',
       },
     ],
+    /**
+     * Mirrors the us-gaap split: `EquityAttributableToOwnersOfParent` is the IFRS
+     * counterpart of `StockholdersEquity` (parent-attributable) and leads, with the
+     * `Equity` roll-up — which includes noncontrolling interests, the counterpart of
+     * the relatedTag above — as the fallback for filers that tag only the total.
+     */
+    ifrsTags: ['EquityAttributableToOwnersOfParent', 'Equity'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: "Stockholders' Equity",
@@ -103,6 +142,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
         note: 'Total including restricted cash (the ASU 2016-18 cash-flow reconciliation total); the primary line for many banks and filers with restricted cash.',
       },
     ],
+    ifrsTags: ['CashAndCashEquivalents'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Cash and Cash Equivalents',
@@ -110,6 +150,12 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   debt: {
     group: 'balance_sheet',
     tags: ['LongTermDebt', 'LongTermDebtNoncurrent'],
+    /**
+     * `LongtermBorrowings` only — the IFRS `Borrowings` element is total borrowings
+     * including the current portion, a different quantity from the long-term line
+     * this concept means, so it is not used as a fallback.
+     */
+    ifrsTags: ['LongtermBorrowings'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Long-Term Debt',
@@ -130,6 +176,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
         note: 'Continuing operations only — excludes discontinued operations; some filers report only this variant.',
       },
     ],
+    ifrsTags: ['CashFlowsFromUsedInOperatingActivities'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Operating Cash Flow',
@@ -137,6 +184,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   capex: {
     group: 'cash_flow',
     tags: ['PaymentsToAcquirePropertyPlantAndEquipment'],
+    ifrsTags: ['PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Capital Expenditures',
@@ -144,6 +192,20 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   depreciation_amortization: {
     group: 'cash_flow',
     tags: ['DepreciationDepletionAndAmortization', 'DepreciationAndAmortization', 'Depreciation'],
+    /**
+     * Exact counterpart first, approximations behind it: the combined D&A line
+     * matching `DepreciationDepletionAndAmortization` at index 0 above, then the
+     * variant that folds impairment in with it, then depreciation alone. The
+     * middle one runs wider than both its neighbours — it is a fallback for filers
+     * that report no separate D&A line, not a widest-first lead. IFRS filers split
+     * across all three rather than converging on one, so all three are needed for
+     * cross-filer coverage.
+     */
+    ifrsTags: [
+      'DepreciationAndAmortisationExpense',
+      'DepreciationAmortisationAndImpairmentLossReversalOfImpairmentLossRecognisedInProfitOrLoss',
+      'DepreciationExpense',
+    ],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Depreciation & Amortization',
@@ -151,6 +213,11 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   // Distinct from `debt` (which targets long-term debt directly). `notes_payable` prefers
   // the notes-specific tags and only falls back to LongTermDebt for filers that report it
   // there exclusively.
+  //
+  // No `ifrsTags`: IFRS presents borrowings as one caption and has no balance-sheet
+  // element for the notes/debt split this concept expresses. Left unmapped rather than
+  // pointed at a borrowings total that would silently answer a different question — the
+  // concept comes back as a gap under `ifrs-full`, which is the honest result.
   notes_payable: {
     group: 'balance_sheet',
     tags: ['LongTermNotesPayable', 'NotesPayable', 'LongTermDebt'],
@@ -162,7 +229,14 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   // Income statement
   cogs: {
     group: 'income_statement',
+    /**
+     * `CostOfGoodsSold` was deprecated in the 2018 taxonomy and survives only as
+     * the last fallback, for filers whose history predates the replacement tags.
+     * When it wins, the resolved series carries SEC's `(Deprecated …)` label and
+     * the reading tools raise a staleness caveat off it (#98).
+     */
     tags: ['CostOfGoodsAndServicesSold', 'CostOfRevenue', 'CostOfGoodsSold'],
+    ifrsTags: ['CostOfSales'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Cost of Goods Sold',
@@ -170,6 +244,9 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   rd_expense: {
     group: 'income_statement',
     tags: ['ResearchAndDevelopmentExpense'],
+    // The element name is identical in both taxonomies, but the lookup is
+    // namespace-scoped, so ifrs-full needs its own entry to resolve.
+    ifrsTags: ['ResearchAndDevelopmentExpense'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Research & Development Expense',
@@ -177,6 +254,10 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   sga_expense: {
     group: 'income_statement',
     tags: ['SellingGeneralAndAdministrativeExpense'],
+    // Same element name in ifrs-full, and IFRS filers do report the combined
+    // caption. The narrower `AdministrativeExpense` is deliberately not a
+    // fallback — it excludes selling costs and would understate the line.
+    ifrsTags: ['SellingGeneralAndAdministrativeExpense'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Selling, General & Administrative Expense',
@@ -184,6 +265,14 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   interest_expense: {
     group: 'income_statement',
     tags: ['InterestExpense', 'InterestExpenseDebt'],
+    /**
+     * `InterestExpense` leads because it is the exact counterpart of the us-gaap
+     * tag. `FinanceCosts` is the IAS 1 income-statement caption and is broader —
+     * it also carries discount unwinding and other financing charges — so it is
+     * the fallback for filers that report no separate interest line, not the
+     * preferred total. A filer reporting both resolves to the narrower, exact one.
+     */
+    ifrsTags: ['InterestExpense', 'FinanceCosts'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Interest Expense',
@@ -191,6 +280,13 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   tax_expense: {
     group: 'income_statement',
     tags: ['IncomeTaxExpenseBenefit'],
+    /**
+     * IFRS names its income-statement tax caption for continuing operations
+     * because IAS 1 presents discontinued operations net of tax on a separate
+     * line — so this element is the whole tax expense shown on the face of the
+     * statement, not a partial one. It is the only tax element IFRS filers tag.
+     */
+    ifrsTags: ['IncomeTaxExpenseContinuingOperations'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Income Tax Expense (Benefit)',
@@ -198,6 +294,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   stock_based_compensation: {
     group: 'income_statement',
     tags: ['ShareBasedCompensation', 'AllocatedShareBasedCompensationExpense'],
+    ifrsTags: ['ExpenseFromSharebasedPaymentTransactionsWithEmployees'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Stock-Based Compensation',
@@ -207,6 +304,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   current_assets: {
     group: 'balance_sheet',
     tags: ['AssetsCurrent'],
+    ifrsTags: ['CurrentAssets'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Current Assets',
@@ -214,6 +312,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   current_liabilities: {
     group: 'balance_sheet',
     tags: ['LiabilitiesCurrent'],
+    ifrsTags: ['CurrentLiabilities'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Current Liabilities',
@@ -221,6 +320,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   inventory: {
     group: 'balance_sheet',
     tags: ['InventoryNet', 'InventoryGross'],
+    ifrsTags: ['Inventories'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Inventory',
@@ -232,6 +332,16 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
       'ReceivablesNetCurrent',
       'AccountsReceivableGrossCurrent',
     ],
+    /**
+     * IFRS filers split between a trade-only caption and the combined
+     * trade-and-other one; both are needed for cross-filer coverage.
+     * `CurrentTradeReceivables` leads because it is the counterpart of
+     * `AccountsReceivableNetCurrent` at index 0 above — the combined caption also
+     * carries prepayments, deposits, and tax receivables, and for a filer
+     * reporting both it runs roughly half again as large, so leading with it
+     * would answer the same concept with a different quantity under each taxonomy.
+     */
+    ifrsTags: ['CurrentTradeReceivables', 'TradeAndOtherCurrentReceivables'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Accounts Receivable (Net)',
@@ -239,6 +349,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   accounts_payable: {
     group: 'balance_sheet',
     tags: ['AccountsPayableCurrent'],
+    ifrsTags: ['TradeAndOtherCurrentPayables'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Accounts Payable',
@@ -246,6 +357,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   goodwill: {
     group: 'balance_sheet',
     tags: ['Goodwill'],
+    ifrsTags: ['Goodwill'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Goodwill',
@@ -253,6 +365,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   intangible_assets: {
     group: 'balance_sheet',
     tags: ['FiniteLivedIntangibleAssetsNet', 'IntangibleAssetsNetExcludingGoodwill'],
+    ifrsTags: ['IntangibleAssetsOtherThanGoodwill'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Intangible Assets (Net)',
@@ -262,6 +375,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   dividends_paid: {
     group: 'cash_flow',
     tags: ['PaymentsOfDividends', 'PaymentsOfDividendsCommonStock'],
+    ifrsTags: ['DividendsPaid', 'DividendsPaidClassifiedAsFinancingActivities'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Dividends Paid',
@@ -273,6 +387,16 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
       'PaymentsForRepurchaseOfEquity',
       'StockRepurchasedAndRetiredDuringPeriodValue',
     ],
+    /**
+     * `PaymentsToAcquireOrRedeemEntitysShares` leads: it is the IAS 7 financing
+     * outflow for buying back own shares however they are then treated, the
+     * counterpart of `PaymentsForRepurchaseOfCommonStock` at index 0 above.
+     * `PurchaseOfTreasuryShares` counts only the shares a filer holds in treasury,
+     * so a filer that cancels repurchased shares tags it zero — or at the value of
+     * an employee-scheme purchase — while running a buyback of a wholly different
+     * size, and leading with it would report that zero as the buyback.
+     */
+    ifrsTags: ['PaymentsToAcquireOrRedeemEntitysShares', 'PurchaseOfTreasuryShares'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Share Repurchases',
@@ -286,6 +410,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
         note: 'Continuing operations only — excludes discontinued operations; some filers report only this variant.',
       },
     ],
+    ifrsTags: ['CashFlowsFromUsedInInvestingActivities'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Investing Cash Flow',
@@ -299,6 +424,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
         note: 'Continuing operations only — excludes discontinued operations; some filers report only this variant.',
       },
     ],
+    ifrsTags: ['CashFlowsFromUsedInFinancingActivities'],
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Financing Cash Flow',

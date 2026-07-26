@@ -240,7 +240,12 @@ describe('fetchFramesTool', () => {
     const input = fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2023' });
     const result = await fetchFramesTool.handler(input, ctx);
 
-    expect(result.unqueried_tags).toEqual(['Revenues', 'SalesRevenueNet', 'SalesRevenueGoodsNet']);
+    expect(result.unqueried_tags).toEqual([
+      'Revenues',
+      'RevenueFromContractWithCustomerIncludingAssessedTax',
+      'SalesRevenueNet',
+      'SalesRevenueGoodsNet',
+    ]);
   });
 
   it('returns empty unqueried_tags for raw XBRL tags', async () => {

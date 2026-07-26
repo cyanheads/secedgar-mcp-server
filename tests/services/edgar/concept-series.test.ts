@@ -7,6 +7,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  deprecatedTagCaveats,
   matchesPeriodType,
   resolveFrameSeries,
   seriesFromCompanyFacts,
@@ -147,5 +148,40 @@ describe('seriesFromCompanyFacts', () => {
 
   it('returns undefined when no candidate tag is reported', () => {
     expect(seriesFromCompanyFacts(facts, 'us-gaap', ['Goodwill'])).toBeUndefined();
+  });
+});
+
+describe('deprecatedTagCaveats (#98)', () => {
+  it('flags a tag whose taxonomy label carries SEC’s retirement stamp', () => {
+    const caveats = deprecatedTagCaveats(
+      'SalesRevenueGoodsNet',
+      'Sales Revenue, Goods, Net (Deprecated 2018-01-31)',
+    );
+    expect(caveats).toHaveLength(1);
+    expect(caveats[0]).toContain('SalesRevenueGoodsNet');
+    expect(caveats[0]).toContain('2018-01-31');
+    expect(caveats[0]).toContain('secedgar_search_concepts');
+  });
+
+  it('generalizes past the revenue pair to any retired tag', () => {
+    // cogs carries the same shape: CostOfGoodsSold is its lowest-priority
+    // fallback and was retired on the same date.
+    expect(
+      deprecatedTagCaveats('CostOfGoodsSold', 'Cost of Goods Sold (Deprecated 2018-01-31)'),
+    ).toHaveLength(1);
+  });
+
+  it('stays silent for a current tag', () => {
+    expect(
+      deprecatedTagCaveats(
+        'RevenueFromContractWithCustomerIncludingAssessedTax',
+        'Revenue from Contract with Customer, Including Assessed Tax',
+      ),
+    ).toEqual([]);
+  });
+
+  it('does not fire on an unrelated mention of the word', () => {
+    // The signal is SEC's parenthesized stamp with a date, not the bare word.
+    expect(deprecatedTagCaveats('SomeTag', 'Deprecated Plan Obligations, Net')).toEqual([]);
   });
 });

@@ -25,6 +25,14 @@ export interface FramedUnit extends CompanyConceptUnit {
 /** Period filter applied to a resolved series. */
 export type PeriodType = 'annual' | 'quarterly' | 'all';
 
+/**
+ * SEC stamps a retired element's retirement date into the taxonomy label it
+ * serves with every companyconcept and companyfacts payload — e.g.
+ * `"Sales Revenue, Goods, Net (Deprecated 2018-01-31)"`. Matching it is the whole
+ * staleness signal; no extra upstream call is involved.
+ */
+const DEPRECATED_LABEL = /\(Deprecated\s+(\d{4}-\d{2}-\d{2})\)/i;
+
 /** Annual duration frame — `CY2023`. */
 const ANNUAL_FRAME = /^CY\d{4}$/;
 
@@ -62,6 +70,28 @@ export function resolveFrameSeries(units: readonly TagPrioritizedUnit[]): Map<st
     resolved.set(frame, unit);
   }
   return resolved;
+}
+
+/**
+ * Caveat for a concept that resolved to a tag SEC has retired from the taxonomy.
+ *
+ * A friendly name is a priority-ordered list of tags, and the lookup walks it
+ * until one returns data. When every current tag comes back empty for a filer,
+ * a deprecated tag at the end of the list can still match and produce a series
+ * that looks complete but stops around the tag's retirement — the failure is
+ * otherwise silent, since nothing in the values themselves says the tag is dead.
+ * The signal is the taxonomy label SEC already ships with the payload, so this
+ * generalizes to any concept whose fallback chain reaches a retired tag rather
+ * than to one hard-coded pair.
+ *
+ * Returns an empty array for a current tag, which is the common case.
+ */
+export function deprecatedTagCaveats(tag: string, label: string): string[] {
+  const match = DEPRECATED_LABEL.exec(label);
+  if (!match?.[1]) return [];
+  return [
+    `XBRL tag ${tag} was retired from the taxonomy on ${match[1]} — SEC labels it "${label}". It matched only because every current tag ahead of it in this concept's priority list reports nothing for this filer, so the series can end years before the filer's latest report. Check secedgar_search_concepts for the concept's full tag list, or pass the tag this filer reports today.`,
+  ];
 }
 
 /**

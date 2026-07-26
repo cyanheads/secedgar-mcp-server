@@ -48,13 +48,18 @@ export const conceptsResource = resource('secedgar://concepts', {
       lines.push('|:------|:------|:----------|:---------|:-----|');
       for (const item of items) {
         const tagCell = item.tags.map((t) => `\`${t}\``).join(', ');
+        // A concept resolves to a different element set under ifrs-full, so a
+        // menu listing only the us-gaap tags reads as the whole story.
+        const ifrsCell = item.ifrsTags?.length
+          ? `<br>_ifrs-full:_ ${item.ifrsTags.map((t) => `\`${t}\``).join(', ')}`
+          : '';
         const altCell = item.relatedTags?.length
           ? `<br>_alt (different definition, query separately):_ ${item.relatedTags
               .map((r) => `\`${r.tag}\` (${r.note})`)
               .join('; ')}`
           : '';
         lines.push(
-          `| \`${item.name}\` | ${item.label} | ${tagCell}${altCell} | ${item.taxonomy} | ${item.unit} |`,
+          `| \`${item.name}\` | ${item.label} | ${tagCell}${ifrsCell}${altCell} | ${item.taxonomy} | ${item.unit} |`,
         );
       }
       lines.push('');

@@ -569,11 +569,12 @@ describe('getFinancialsTool', () => {
   });
 
   it('falls back to standard tags for ifrs-full when concept has no ifrsTags (#19)', async () => {
-    // equity has no ifrsTags — standard tags should be used
+    // notes_payable has no ifrsTags — IFRS has no element for the notes/debt
+    // split — so the standard tags are used under the requested taxonomy.
     const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({
       company: 'SPOT',
-      concept: 'equity',
+      concept: 'notes_payable',
       taxonomy: 'ifrs-full',
     });
     await getFinancialsTool.handler(input, ctx);
@@ -581,7 +582,7 @@ describe('getFinancialsTool', () => {
     expect(mockApi.tryGetCompanyConcept).toHaveBeenCalledWith(
       '0000320193',
       'ifrs-full',
-      'StockholdersEquity',
+      'LongTermNotesPayable',
     );
   });
 
@@ -868,6 +869,167 @@ describe('off-calendar fiscal-period caveat (#95)', () => {
       period_type: 'quarterly',
     });
     const result = await getFinancialsTool.handler(input, ctx);
+    expect(result.caveats).toBeUndefined();
+  });
+});
+
+describe('deprecated-tag staleness caveat (#98)', () => {
+  /**
+   * A filer that presents revenue gross of assessed tax reports none of the
+   * current tags, so the priority walk reaches `SalesRevenueGoodsNet` — retired
+   * from the taxonomy in 2018. The values look ordinary and the series simply
+   * stops years ago; SEC's own label is the only thing that says the tag is dead.
+   */
+  const retiredRevenueTag: CompanyConceptResponse = {
+    cik: 91419,
+    entityName: 'J M SMUCKER Co',
+    label: 'Sales Revenue, Goods, Net (Deprecated 2018-01-31)',
+    tag: 'SalesRevenueGoodsNet',
+    taxonomy: 'us-gaap',
+    units: {
+      USD: [
+        {
+          accn: '0000091419-18-000030',
+          end: '2018-04-30',
+          filed: '2018-06-14',
+          form: '10-K',
+          fp: 'FY',
+          frame: 'CY2017',
+          fy: 2018,
+          val: 7_357_100_000,
+        },
+        {
+          accn: '0000091419-17-000024',
+          end: '2017-04-30',
+          filed: '2017-06-15',
+          form: '10-K',
+          fp: 'FY',
+          frame: 'CY2016',
+          fy: 2017,
+          val: 7_392_300_000,
+        },
+      ],
+    },
+  };
+
+  beforeEach(() => {
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0000091419',
+      name: 'J M SMUCKER Co',
+      ticker: 'SJM',
+    });
+  });
+
+  it('flags a series that fell through to a tag SEC retired', async () => {
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _tax: string, tag: string) =>
+        tag === 'SalesRevenueGoodsNet' ? retiredRevenueTag : null,
+    );
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({ company: 'SJM', concept: 'revenue' });
+    const result = await getFinancialsTool.handler(input, ctx);
+
+    expect(result.concept).toBe('SalesRevenueGoodsNet');
+    expect(result.caveats).toHaveLength(1);
+    expect(result.caveats?.[0]).toContain('SalesRevenueGoodsNet');
+    expect(result.caveats?.[0]).toContain('2018-01-31');
+  });
+
+  it('renders the staleness caveat into the text surface', async () => {
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _tax: string, tag: string) =>
+        tag === 'SalesRevenueGoodsNet' ? retiredRevenueTag : null,
+    );
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({ company: 'SJM', concept: 'revenue' });
+    const result = await getFinancialsTool.handler(input, ctx);
+    const blocks = getFinancialsTool.format!(result);
+
+    expect(blocks[0].text).toContain('Caveat:');
+    expect(blocks[0].text).toContain('SalesRevenueGoodsNet');
+  });
+
+  it('stays silent once the Including-assessed-tax tag resolves the filer (#98)', async () => {
+    // The tag-coverage half of the fix: the filer's real current tag now sits in
+    // the priority list, so the walk never reaches a retired one.
+    const includingAssessedTax: CompanyConceptResponse = {
+      cik: 91419,
+      entityName: 'J M SMUCKER Co',
+      label: 'Revenue from Contract with Customer, Including Assessed Tax',
+      tag: 'RevenueFromContractWithCustomerIncludingAssessedTax',
+      taxonomy: 'us-gaap',
+      units: {
+        USD: [
+          {
+            accn: '0000091419-26-000030',
+            end: '2026-04-30',
+            filed: '2026-06-12',
+            form: '10-K',
+            fp: 'FY',
+            frame: 'CY2025',
+            fy: 2026,
+            val: 9_050_900_000,
+          },
+        ],
+      },
+    };
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _tax: string, tag: string) => {
+        if (tag === 'RevenueFromContractWithCustomerIncludingAssessedTax') {
+          return includingAssessedTax;
+        }
+        return tag === 'SalesRevenueGoodsNet' ? retiredRevenueTag : null;
+      },
+    );
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({ company: 'SJM', concept: 'revenue' });
+    const result = await getFinancialsTool.handler(input, ctx);
+
+    expect(result.concept).toBe('RevenueFromContractWithCustomerIncludingAssessedTax');
+    expect(result.data[0]?.value).toBe(9_050_900_000);
+    expect(result.caveats).toBeUndefined();
+  });
+
+  it('flags cogs falling through to its retired fallback, not just revenue (#98)', async () => {
+    const retiredCogsTag: CompanyConceptResponse = {
+      cik: 91419,
+      entityName: 'J M SMUCKER Co',
+      label: 'Cost of Goods Sold (Deprecated 2018-01-31)',
+      tag: 'CostOfGoodsSold',
+      taxonomy: 'us-gaap',
+      units: {
+        USD: [
+          {
+            accn: '0000091419-18-000030',
+            end: '2018-04-30',
+            filed: '2018-06-14',
+            form: '10-K',
+            fp: 'FY',
+            frame: 'CY2017',
+            fy: 2018,
+            val: 4_355_200_000,
+          },
+        ],
+      },
+    };
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _tax: string, tag: string) =>
+        tag === 'CostOfGoodsSold' ? retiredCogsTag : null,
+    );
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({ company: 'SJM', concept: 'cogs' });
+    const result = await getFinancialsTool.handler(input, ctx);
+
+    expect(result.caveats?.[0]).toContain('CostOfGoodsSold');
+  });
+
+  it('leaves a current tag uncaveated', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({ company: 'AAPL', concept: 'revenue' });
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+    mockApi.tryGetCompanyConcept.mockResolvedValue(mockConceptResponse);
+    const result = await getFinancialsTool.handler(input, ctx);
+
     expect(result.caveats).toBeUndefined();
   });
 });

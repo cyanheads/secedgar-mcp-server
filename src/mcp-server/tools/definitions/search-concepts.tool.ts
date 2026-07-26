@@ -75,7 +75,13 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
             tags: z
               .array(z.string())
               .describe(
-                'XBRL tags this friendly name resolves to, tried in order. Multiple tags cover historical naming changes (e.g., pre- vs post-ASC 606 revenue).',
+                'XBRL tags this friendly name resolves to under us-gaap, tried in order. Multiple tags cover historical naming changes (e.g., pre- vs post-ASC 606 revenue) and can include a tag SEC has since retired, kept as a last-resort fallback for filers whose history predates its replacement.',
+              ),
+            ifrs_tags: z
+              .array(z.string())
+              .optional()
+              .describe(
+                'XBRL tags this friendly name resolves to under taxonomy "ifrs-full", tried in order — a different element set from tags, not a synonym list. Each one is confirmed present in a live 20-F filing. Absent when the concept has no IFRS equivalent, in which case taxonomy "ifrs-full" does not resolve it.',
               ),
             related_tags: z
               .array(
@@ -155,6 +161,7 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
         name: c.name,
         label: c.label,
         tags: c.tags,
+        ...(c.ifrsTags?.length ? { ifrs_tags: c.ifrsTags } : {}),
         ...(c.relatedTags?.length ? { related_tags: c.relatedTags } : {}),
         taxonomy: c.taxonomy,
         unit: c.unit,
@@ -179,6 +186,9 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
       }
       const tagList = c.tags.map((t) => `\`${t}\``).join(', ');
       lines.push(`- \`${c.name}\` — ${c.label} (${c.taxonomy}, ${c.unit}) → ${tagList}`);
+      if (c.ifrs_tags?.length) {
+        lines.push(`    ifrs-full: ${c.ifrs_tags.map((t) => `\`${t}\``).join(', ')}`);
+      }
       if (c.related_tags?.length) {
         const rel = c.related_tags.map((r) => `\`${r.tag}\` (${r.note})`).join('; ');
         lines.push(`    related (alternate definition): ${rel}`);
