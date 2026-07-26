@@ -70,4 +70,18 @@ describe('companyAnalysisPrompt', () => {
     const text = generatedText({ company: 'AAPL', focus_areas: 'insider activity' });
     expect(text).toContain('secedgar_search_filings');
   });
+
+  it('scopes the insider step to the tool’s real Form 4 / 4-A contract (#92)', () => {
+    const text = generatedText({ company: 'AAPL', focus_areas: 'insider selling' });
+    // The tool fetches only ['4', '4/A'] — claiming Forms 3/4/5 would let an agent
+    // believe it reviewed initial and annual statements it never queried.
+    expect(text).not.toContain('Form 3/4/5');
+    expect(text).toContain('Form 4 / 4-A');
+  });
+
+  it('routes Forms 3 and 5 to the filing tools rather than the Form 4 parser (#92)', () => {
+    const text = generatedText({ company: 'AAPL', focus_areas: 'insider selling' });
+    expect(text).toContain('does not cover Form 3');
+    expect(text).toContain('secedgar_search_filings');
+  });
 });

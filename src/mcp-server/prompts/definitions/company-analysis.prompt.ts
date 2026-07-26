@@ -35,7 +35,7 @@ export const companyAnalysisPrompt = prompt('secedgar_company_analysis', {
     ];
     if (wantsInsider) {
       steps.push(
-        '**Insider Activity** — Use `secedgar_get_insider_transactions` to review Form 3/4/5 buying and selling by officers, directors, and 10% owners.',
+        '**Insider Activity** — Use `secedgar_get_insider_transactions` to review Form 4 / 4-A transactions by officers, directors, and 10% owners (buys, sells, grants, exercises). It does not cover Form 3 initial statements or Form 5 annual statements — reach those with `secedgar_search_filings` (`forms: ["3", "5"]`) plus `secedgar_get_filing`.',
       );
     }
     if (wantsInstitutional) {
