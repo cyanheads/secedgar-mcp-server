@@ -184,6 +184,28 @@ export interface CompanyConceptUnit {
   val: number;
 }
 
+/**
+ * One concept inside a companyfacts payload — the per-tag entry under
+ * `facts[taxonomy][tag]`, carrying the same `units` map the companyconcept API
+ * returns for that tag on its own.
+ */
+export interface CompanyFactsConcept {
+  description?: string;
+  label?: string;
+  units: Record<string, CompanyConceptUnit[]>;
+}
+
+/**
+ * XBRL companyfacts API response — every fact a filer has reported, keyed by
+ * taxonomy then tag. The same payload shape appears as one `CIK*.json` entry
+ * inside SEC's `companyfacts.zip` bulk archive, which the mirror ingests.
+ */
+export interface CompanyFactsResponse {
+  cik?: number;
+  entityName?: string;
+  facts: Record<string, Record<string, CompanyFactsConcept>>;
+}
+
 /** XBRL frames API response. */
 export interface FramesResponse {
   ccp: string;

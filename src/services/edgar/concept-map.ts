@@ -3,7 +3,7 @@
  * @module services/edgar/concept-map
  */
 
-import type { ConceptMapping } from './types.js';
+import type { ConceptMapping, ConceptTaxonomy } from './types.js';
 
 /** Friendly name → XBRL tag mapping. Tags are tried in order for companyconcept lookups. */
 const CONCEPT_MAP: Record<string, ConceptMapping> = {
@@ -312,6 +312,39 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
 export function resolveConcept(input: string): ConceptMapping | undefined {
   const normalized = input.toLowerCase().replace(/[- ]/g, '_');
   return CONCEPT_MAP[normalized];
+}
+
+/** What a caller-supplied concept resolves to before any lookup runs. */
+export interface ConceptTarget {
+  /** Human-readable label — the mapping's label, or the raw tag itself. */
+  label: string;
+  /** Tags to try in priority order. Index 0 is the preferred total. */
+  tags: string[];
+  /** Taxonomy to look the tags up under. */
+  taxonomy: ConceptTaxonomy;
+  /** Expected unit of measure. Absent for raw XBRL tags. */
+  unit?: string;
+}
+
+/**
+ * Resolve a concept input plus a requested taxonomy into the taxonomy and tag
+ * list to query. A friendly name that prefers its own taxonomy (`dei` for
+ * shares_outstanding) keeps it unless the caller asked for something other than
+ * the `us-gaap` default; `ifrs-full` uses the mapping's confirmed IFRS variants
+ * when it has them and falls back to the standard tags otherwise. Unknown input
+ * passes through as a raw XBRL tag under the requested taxonomy.
+ */
+export function resolveConceptTarget(
+  input: string,
+  requestedTaxonomy: ConceptTaxonomy,
+): ConceptTarget {
+  const mapping = resolveConcept(input);
+  if (!mapping) return { label: input, tags: [input], taxonomy: requestedTaxonomy };
+
+  const taxonomy = requestedTaxonomy === 'us-gaap' ? mapping.taxonomy : requestedTaxonomy;
+  const tags =
+    taxonomy === 'ifrs-full' && mapping.ifrsTags?.length ? mapping.ifrsTags : mapping.tags;
+  return { label: mapping.label, tags, taxonomy, unit: mapping.unit };
 }
 
 /** Get all concept mappings for reference resource generation. */

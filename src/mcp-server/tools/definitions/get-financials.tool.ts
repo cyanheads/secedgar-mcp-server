@@ -7,8 +7,14 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
-import { resolveConcept } from '@/services/edgar/concept-map.js';
+import { resolveConceptTarget } from '@/services/edgar/concept-map.js';
+import {
+  matchesPeriodType,
+  resolveFrameSeries,
+  type TagPrioritizedUnit,
+} from '@/services/edgar/concept-series.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+import { missingQuarterCaveats } from '@/services/edgar/fiscal-periods.js';
 import type { CompanyConceptUnit } from '@/services/edgar/types.js';
 
 export const getFinancialsTool = tool('secedgar_get_financials', {
@@ -151,6 +157,12 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       .describe(
         'Canvas dataframe handle holding the same time series. Use for cross-company JOINs via secedgar_dataframe_query. The source-filing fiscal keys are materialized as source_filing_fy/source_filing_fp — order, group, and window by period_end, not by those columns. Absent when canvas is unavailable.',
       ),
+    caveats: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Data-completeness warnings about the returned series. Populated on quarterly results when one calendar quarter is absent from every recent fully-reported year — SEC reports a filer's fiscal Q4 as the 10-K residual rather than a discrete quarterly fact, so the calendar quarter that fiscal Q4 spans has no frame-tagged value. Applies to calendar-year filers (no discrete Q4) as much as to off-calendar ones. Absent when the series has nothing to flag.",
+      ),
   }),
 
   async handler(input, ctx) {
@@ -192,24 +204,15 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       });
     }
 
-    // Resolve concept to XBRL tag(s)
-    const mapping = resolveConcept(input.concept);
-
-    // When the user overrides the default taxonomy, honor their choice;
-    // otherwise fall back to the mapping's preferred taxonomy (e.g. `dei` for shares_outstanding).
-    let taxonomy = input.taxonomy;
-    if (mapping && input.taxonomy === 'us-gaap') {
-      taxonomy = mapping.taxonomy as typeof input.taxonomy;
-    }
-
-    // Use IFRS-specific tags when the effective taxonomy is ifrs-full and the mapping
-    // has confirmed IFRS variants; fall back to the standard tags otherwise.
-    const tags = mapping
-      ? taxonomy === 'ifrs-full' && mapping.ifrsTags?.length
-        ? mapping.ifrsTags
-        : mapping.tags
-      : [input.concept];
-    const label = mapping?.label ?? input.concept;
+    // Resolve concept to taxonomy + XBRL tag(s). The mapping's own taxonomy wins
+    // over the `us-gaap` default (e.g. `dei` for shares_outstanding); ifrs-full
+    // uses the confirmed IFRS variants when the mapping has them.
+    const {
+      label,
+      tags,
+      taxonomy,
+      unit: mappedUnit,
+    } = resolveConceptTarget(input.concept, input.taxonomy);
 
     // Default to "annual" for unset period_type; post-fetch fallback handles instant concepts (#48).
     const effectivePeriodType = input.period_type ?? 'annual';
@@ -229,9 +232,9 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
      * Each unit is augmented with its source-tag index so the frame dedup can
      * resolve collisions by tag priority (#44). Index 0 = preferred total.
      */
-    const allUnits: Array<CompanyConceptUnit & { _tagIdx: number }> = [];
+    const allUnits: TagPrioritizedUnit[] = [];
 
-    for (const [tagIdx, tag] of tags.entries()) {
+    for (const [tagIndex, tag] of tags.entries()) {
       tagsTried.push(tag);
       const resp = await api.tryGetCompanyConcept(match.cik, taxonomy, tag);
       if (!resp) continue;
@@ -245,7 +248,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       }
       for (const units of Object.values(resp.units)) {
         for (const u of units) {
-          allUnits.push({ ...u, _tagIdx: tagIdx });
+          allUnits.push({ ...u, tagIndex });
         }
       }
     }
@@ -292,13 +295,13 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       );
     }
 
-    // Deduplicate: keep only entries with frame field (one per standard calendar period)
-    const deduped = allUnits.filter(
-      (u): u is CompanyConceptUnit & { frame: string; _tagIdx: number } => !!u.frame,
-    );
-
-    // If deduplication removed everything, the concept exists but has no frame-aligned entries
-    if (deduped.length === 0) {
+    /**
+     * Collapse to one value per standard calendar period — frame-bearing entries
+     * only, same-frame collisions resolved by tag priority then latest `filed`
+     * (#44). An empty map means the concept exists but has no frame-aligned entries.
+     */
+    const byFrameClean = resolveFrameSeries(allUnits);
+    if (byFrameClean.size === 0) {
       throw ctx.fail(
         'no_frame_data',
         `'${conceptResponse.tag}' exists for this company but has no standard-period data.`,
@@ -309,43 +312,12 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       );
     }
 
-    /**
-     * Remove duplicates by frame value using tag-priority-aware selection (#44).
-     *
-     * When two facts share a frame, the one with the lower `_tagIdx` wins
-     * (index 0 = preferred total, e.g. IFRS `Revenue` > `RevenueFromContractsWithCustomers`).
-     * Ties within the same tag index are broken by latest `filed` to preserve
-     * restatement handling (amended filing replaces the original).
-     */
-    const byFrame = new Map<string, CompanyConceptUnit & { frame: string; _tagIdx: number }>();
-    for (const unit of deduped) {
-      const existing = byFrame.get(unit.frame);
-      if (!existing) {
-        byFrame.set(unit.frame, unit);
-      } else if (
-        unit._tagIdx < existing._tagIdx ||
-        (unit._tagIdx === existing._tagIdx && unit.filed > existing.filed)
-      ) {
-        byFrame.set(unit.frame, unit);
-      }
-    }
-
-    // Strip the internal _tagIdx from results before further use
-    const byFrameClean = new Map<string, CompanyConceptUnit & { frame: string }>();
-    for (const [k, v] of byFrame) {
-      const { _tagIdx: _, ...rest } = v;
-      byFrameClean.set(k, rest as CompanyConceptUnit & { frame: string });
-    }
-
     // Filter by period type using frame pattern (fp reflects the filing, not the data point)
     // resolvedPeriodType tracks the actual period type after the instant fallback (#48).
     let resolvedPeriodType = effectivePeriodType;
-    let filtered = Array.from(byFrameClean.values());
-    if (effectivePeriodType === 'annual') {
-      filtered = filtered.filter((u) => /^CY\d{4}$/.test(u.frame));
-    } else if (effectivePeriodType === 'quarterly') {
-      filtered = filtered.filter((u) => /^CY\d{4}Q\d/.test(u.frame));
-    }
+    let filtered = Array.from(byFrameClean.values()).filter((u) =>
+      matchesPeriodType(u.frame, effectivePeriodType),
+    );
 
     // If period_type filter removed everything, check for instant-concept fallback (#48)
     if (filtered.length === 0 && byFrameClean.size > 0) {
@@ -382,8 +354,20 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     // Sort newest first
     filtered.sort((a, b) => b.end.localeCompare(a.end));
 
+    /**
+     * Off-calendar filers lose a whole calendar quarter from the frame-tagged
+     * series — SEC reports fiscal Q4 as the 10-K residual, never as a discrete
+     * quarterly fact — so a caller sees a gap with no way to tell "did not
+     * report" from "frame tagging does not expose it". `fetch_frames` already
+     * flags the same hazard from the period side; this names the specific
+     * quarter for this filer (#95). Detection reads the resolved frames, so it
+     * runs over the full deduped set rather than the period-filtered slice.
+     */
+    const caveats =
+      resolvedPeriodType === 'annual' ? [] : missingQuarterCaveats(byFrameClean.keys());
+
     // Determine unit string
-    const unitKey = Object.keys(conceptResponse.units)[0] ?? mapping?.unit ?? 'USD';
+    const unitKey = Object.keys(conceptResponse.units)[0] ?? mappedUnit ?? 'USD';
 
     const data = filtered.map((u) => ({
       period: u.frame,
@@ -457,6 +441,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       data: inlineData,
       tags_tried: tagsTried.length > 1 ? tagsTried : undefined,
       dataset,
+      caveats: caveats.length > 0 ? caveats : undefined,
     };
   },
 
@@ -492,6 +477,9 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       lines.push(
         `\nDataset: ${result.dataset.name} (${result.dataset.row_count} rows, expires ${result.dataset.expires_at})${sliceNote} — query with secedgar_dataframe_query.`,
       );
+    }
+    for (const caveat of result.caveats ?? []) {
+      lines.push(`\nCaveat: ${caveat}`);
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

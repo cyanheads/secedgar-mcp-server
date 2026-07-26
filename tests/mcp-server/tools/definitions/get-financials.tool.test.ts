@@ -737,6 +737,141 @@ describe('getFinancialsTool', () => {
   });
 });
 
+describe('off-calendar fiscal-period caveat (#95)', () => {
+  /**
+   * A June-fiscal-year-end filer: SEC frame-tags only three of its four fiscal
+   * quarters, so calendar Q2 never appears in the quarterly series. The gap must
+   * be attributable to frame tagging rather than looking like non-reporting.
+   */
+  const juneFiscalYearEnd: CompanyConceptResponse = {
+    cik: 789019,
+    entityName: 'MICROSOFT CORP',
+    label: 'Revenues',
+    tag: 'Revenues',
+    taxonomy: 'us-gaap',
+    units: {
+      USD: [2024, 2025].flatMap((year) =>
+        [1, 3, 4].map((q) => ({
+          accn: `0000789019-${String(year).slice(2)}-0000${q}`,
+          end: `${year}-0${q === 4 ? 9 : q * 3}-30`,
+          filed: `${year}-1${q === 4 ? 0 : 1}-01`,
+          form: '10-Q',
+          fp: `Q${q}`,
+          frame: `CY${year}Q${q}`,
+          fy: year,
+          val: 60_000_000_000 + q,
+        })),
+      ),
+    },
+  };
+
+  beforeEach(() => {
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0000789019',
+      name: 'MICROSOFT CORP',
+      ticker: 'MSFT',
+    });
+    mockApi.tryGetCompanyConcept.mockResolvedValue(juneFiscalYearEnd);
+  });
+
+  it('names the absent calendar quarter on a quarterly series', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({
+      company: 'MSFT',
+      concept: 'Revenues',
+      period_type: 'quarterly',
+    });
+    const result = await getFinancialsTool.handler(input, ctx);
+
+    // The series itself has no CY####Q2 row — that is the gap being explained.
+    expect(result.data.some((d) => /Q2$/.test(d.period))).toBe(false);
+    expect(result.caveats).toHaveLength(1);
+    expect(result.caveats?.[0]).toContain('Calendar Q2');
+    expect(result.caveats?.[0]).toContain('10-K residual');
+  });
+
+  it('also surfaces the caveat under period_type all', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({
+      company: 'MSFT',
+      concept: 'Revenues',
+      period_type: 'all',
+    });
+    const result = await getFinancialsTool.handler(input, ctx);
+    expect(result.caveats?.[0]).toContain('Calendar Q2');
+  });
+
+  it('renders the caveat into the text surface', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({
+      company: 'MSFT',
+      concept: 'Revenues',
+      period_type: 'quarterly',
+    });
+    const result = await getFinancialsTool.handler(input, ctx);
+    const blocks = getFinancialsTool.format!(result);
+    expect(blocks[0].text).toContain('Caveat: Calendar Q2');
+  });
+
+  it('omits caveats on an annual series', async () => {
+    const annual: CompanyConceptResponse = {
+      ...juneFiscalYearEnd,
+      units: {
+        USD: [
+          {
+            accn: '0000789019-25-000001',
+            end: '2025-06-30',
+            filed: '2025-07-30',
+            form: '10-K',
+            fp: 'FY',
+            frame: 'CY2025',
+            fy: 2025,
+            val: 245_000_000_000,
+          },
+        ],
+      },
+    };
+    mockApi.tryGetCompanyConcept.mockResolvedValue(annual);
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({
+      company: 'MSFT',
+      concept: 'Revenues',
+      period_type: 'annual',
+    });
+    const result = await getFinancialsTool.handler(input, ctx);
+    expect(result.caveats).toBeUndefined();
+  });
+
+  it('omits caveats for a filer whose quarterly series has no systematic gap', async () => {
+    const everyQuarter: CompanyConceptResponse = {
+      ...juneFiscalYearEnd,
+      units: {
+        USD: [2023, 2024].flatMap((year) =>
+          [1, 2, 3, 4].map((q) => ({
+            accn: `acc-${year}-${q}`,
+            end: `${year}-0${q}-28`,
+            filed: `${year}-0${q}-30`,
+            form: '10-Q',
+            fp: `Q${q}`,
+            frame: `CY${year}Q${q}`,
+            fy: year,
+            val: 1000 + q,
+          })),
+        ),
+      },
+    };
+    mockApi.tryGetCompanyConcept.mockResolvedValue(everyQuarter);
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({
+      company: 'MSFT',
+      concept: 'Revenues',
+      period_type: 'quarterly',
+    });
+    const result = await getFinancialsTool.handler(input, ctx);
+    expect(result.caveats).toBeUndefined();
+  });
+});
+
 describe('dataframe registration (#72)', () => {
   it('registers source-filing fiscal keys as source_filing_fy/source_filing_fp columns', async () => {
     const registerDataframe = vi.fn().mockResolvedValue({

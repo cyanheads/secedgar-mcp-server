@@ -13,30 +13,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { resolveConcept } from '@/services/edgar/concept-map.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-
-/**
- * SEC XBRL reports fiscal Q4 as the 10-K residual, never as a discrete
- * quarterly fact, so any company whose fiscal year ends inside the queried
- * calendar quarter is silently absent from a `CY####Q[1-4]` frame. The
- * omission is invisible without domain knowledge — flag it so the caller knows
- * to cross-reference `secedgar_get_financials` with `period_type='annual'` for
- * those filers. Annual (`CY####`) and instant (`CY####Q#I`) periods are
- * unaffected.
- */
-function fiscalQ4Caveats(period: string): string[] {
-  const match = period.match(/^CY\d{4}Q([1-4])$/);
-  if (!match) return [];
-  const examples: Record<string, string> = {
-    '1': 'WMT Jan-end, HD/TGT Feb-end',
-    '2': 'MSFT Jun-end, ORCL May-end',
-    '3': 'AAPL Sep-end, ACN Aug-end, CSCO Jul-end, COST early Sep',
-    '4': 'most US filers (calendar fiscal year)',
-  };
-  const q = match[1] as keyof typeof examples;
-  return [
-    `Filers whose fiscal Q4 closes in calendar Q${q} are absent from this frame — SEC XBRL reports their fiscal Q4 as the 10-K residual rather than a discrete quarterly fact (e.g. ${examples[q]}). Use secedgar_get_financials with period_type='annual' for those filers.`,
-  ];
-}
+import { fiscalQ4Caveats } from '@/services/edgar/fiscal-periods.js';
 
 export const fetchFramesTool = tool('secedgar_fetch_frames', {
   description:

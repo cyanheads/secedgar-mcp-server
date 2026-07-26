@@ -511,15 +511,18 @@ describe('fetchFramesTool', () => {
     const result = await fetchFramesTool.handler(input, ctx);
 
     expect(result.caveats).toHaveLength(1);
-    expect(result.caveats[0]).toMatch(/fiscal Q4 closes in calendar Q3/);
+    expect(result.caveats[0]).toMatch(/fiscal Q4 spans calendar Q3/);
     expect(result.caveats[0]).toContain('AAPL Sep-end');
   });
 
+  // Examples key off the calendar quarter a filer's fiscal Q4 SPANS, not the one
+  // its fiscal year ends in — a January year-end closes a Nov-Jan fiscal Q4, which
+  // SEC frames as calendar Q4, so Jan-end retailers belong under Q4 not Q1.
   it.each([
-    ['CY2024Q1', 'calendar Q1', 'WMT Jan-end'],
+    ['CY2024Q1', 'calendar Q1', 'SJM Apr-end'],
     ['CY2024Q2', 'calendar Q2', 'MSFT Jun-end'],
     ['CY2024Q3', 'calendar Q3', 'AAPL Sep-end'],
-    ['CY2024Q4', 'calendar Q4', 'most US filers'],
+    ['CY2024Q4', 'calendar Q4', 'WMT/TGT Jan-end'],
   ])(
     'caveat for %s names the right calendar quarter and examples',
     async (period, label, example) => {
@@ -610,7 +613,7 @@ describe('fetchFramesTool', () => {
       related_tags: [],
       value_distribution: { median: 0, p95: 0, max: 0, max_to_p95_ratio: 0 },
       period_end_range: { min: '', max: '' },
-      caveats: ['Filers whose fiscal Q4 closes in calendar Q3 are absent — AAPL Sep-end.'],
+      caveats: ['Filers whose fiscal Q4 spans calendar Q3 are absent — AAPL Sep-end.'],
     };
     const blocks = fetchFramesTool.format!(output);
     expect(blocks[0].text).toContain('Caveat:');
