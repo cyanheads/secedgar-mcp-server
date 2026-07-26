@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.12.5](changelog/0.12.x/0.12.5.md) — 2026-07-26
+
+secedgar_get_filing now renders every document filename into content[] and embeds a categorized catalog in its not-found errors; fetch_frames and get_institutional_holdings gain offset paging; bare-CIK 404s return declared errors instead of a raw SEC URL; the insider tool's Form 3/5 coverage claim is corrected to Form 4 / 4-A.
+
 ## [0.12.4](changelog/0.12.x/0.12.4.md) — 2026-07-09
 
 secedgar_search_filings now serves pre-2001 date ranges (back to 1993) from the SEC archives — entity-scoped submissions history or a quarterly full-index browse — tagging every result row with its source (efts/submissions/full-index); straddling or unscoped pre-2001 full-text ranges are rejected with a recovery hint.

@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/secedgar-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/secedgar-mcp-server) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/secedgar-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/secedgar-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/secedgar-mcp-server) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/secedgar-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -37,7 +37,7 @@ Eight tools for querying SEC EDGAR data, plus three for SQL analytics over the D
 | `secedgar_search_filings` | Search EDGAR filings since 1993 — full-text (2001+) plus archive-backed browse for pre-2001 ranges |
 | `secedgar_get_filing` | Fetch a specific filing's metadata and document content |
 | `secedgar_get_financials` | Get historical XBRL financial data for a company |
-| `secedgar_get_insider_transactions` | Form 3/4/5 insider transactions (buys, sells, grants, exercises) parsed from ownership XML |
+| `secedgar_get_insider_transactions` | Form 4 / 4-A insider transactions (buys, sells, grants, exercises) parsed from ownership XML |
 | `secedgar_get_institutional_holdings` | 13F-HR quarterly institutional holdings parsed from the information table |
 | `secedgar_fetch_frames` | Fetch SEC XBRL frames for one concept × one period across all reporting companies |
 | `secedgar_search_concepts` | Discover supported XBRL concept names or reverse-lookup a raw tag |
@@ -102,7 +102,7 @@ Get historical XBRL financial data for a company with friendly concept name reso
 
 ### `secedgar_get_insider_transactions`
 
-Surface Form 3/4/5 insider activity for a company by parsing ownership XML.
+Surface Form 4 / 4-A insider activity for a company by parsing ownership XML. Form 3 initial statements and Form 5 annual statements are not covered — reach those with `secedgar_search_filings` (`forms: ["3", "5"]`) plus `secedgar_get_filing`.
 
 - Reporting person, relationship to issuer (director, officer + title, 10% owner), and transaction date
 - Transaction code mapped to a readable type (purchase, sale, gift, award, exercise, …); shares signed by acquired/disposed
@@ -121,7 +121,8 @@ Surface 13F-HR quarterly institutional holdings by parsing the information table
 - Sub-lines for the same security (one per manager/account) are consolidated into distinct positions sorted by value by default — pass `consolidate: false` for raw filing rows
 - Resolves the filing-manager name and reporting quarter from the cover page; target a specific quarter with `quarter` (e.g. `"2025-Q4"`)
 - `total_holdings_in_filing` counts raw info-table rows; `total_positions` counts distinct positions after consolidation (both before `limit`)
-- The full parsed holdings set is materialized as a `df_<id>` dataframe (the inline list is a preview capped at `limit`) — query it with `secedgar_dataframe_query` for full-filing aggregation or cross-quarter joins on `cusip` + `reporting_period`
+- Page through a large information table with `offset` — the response echoes the effective `offset` and returns `next_offset` while rows remain, so every position stays reachable even when the canvas is disabled
+- The full parsed holdings set is materialized as a `df_<id>` dataframe (the inline list is one page of `limit` rows) — query it with `secedgar_dataframe_query` for full-filing aggregation or cross-quarter joins on `cusip` + `reporting_period`
 
 ---
 
@@ -131,7 +132,8 @@ Fetch SEC XBRL frames for one concept × one period across all reporting compani
 
 - Same friendly concept names as `secedgar_get_financials`
 - Supports annual (`CY2023`), quarterly (`CY2024Q2`), and instant (`CY2023Q4I`) periods
-- Inline response returns the top N ranked companies (sort + limit), with ticker enrichment
+- Inline response returns one page of the ranked companies (sort + limit), with ticker enrichment
+- Walk further down the ranking with `offset` — the response echoes the effective `offset` and returns `next_offset` while companies remain, so ranks past the first page stay reachable even when the canvas is disabled
 - The full frames response (all reporters, typically 2k–10k rows) is materialized as a `df_<id>` dataframe — query it with `secedgar_dataframe_query`
 - `related_tags` flags alternate-definition tags some filers use as their primary line (e.g. `cash` → restricted-cash-inclusive total, `equity` → NCI-inclusive total), so a whole-universe screen on the base tag isn't silently under-inclusive — query those separately
 

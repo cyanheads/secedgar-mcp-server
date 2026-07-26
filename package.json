@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/secedgar-mcp-server",
-  "version": "0.12.4",
+  "version": "0.12.5",
   "description": "Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.",
   "mcpName": "io.github.cyanheads/secedgar-mcp-server",
   "type": "module",
@@ -91,9 +91,9 @@
     "access": "public"
   },
   "dependencies": {
-    "@cyanheads/mcp-ts-core": "^0.10.14",
-    "@duckdb/node-api": "^1.5.4-r.1",
-    "better-sqlite3": "^12.11.1",
+    "@cyanheads/mcp-ts-core": "^0.11.0",
+    "@duckdb/node-api": "^1.5.5-r.1",
+    "better-sqlite3": "^13.0.1",
     "domhandler": "^6.0.1",
     "domutils": "^4.0.2",
     "fflate": "^0.8.3",
@@ -104,14 +104,14 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.2",
+    "@biomejs/biome": "^2.5.5",
     "@socketsecurity/bun-security-scanner": "^1.1.2",
     "@types/html-to-text": "^9.0.4",
-    "@types/node": "^26.1.0",
+    "@types/node": "^26.1.1",
     "depcheck": "^1.4.7",
-    "ignore": "^7.0.5",
-    "tsc-alias": "^1.9.0",
-    "typescript": "^6.0.3",
+    "ignore": "^7.0.6",
+    "tsc-alias": "^1.9.1",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   },
   "trustedDependencies": ["@socketsecurity/bun-security-scanner", "better-sqlite3"]

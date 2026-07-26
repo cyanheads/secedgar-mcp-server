@@ -1,8 +1,8 @@
 # Agent Protocol
 
 **Server:** secedgar-mcp-server
-**Version:** 0.12.4
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.10.14`
+**Version:** 0.12.5
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.11.0`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 
 Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-only, no API keys required. Full design: `docs/sec-edgar-mcp-design.md`.
@@ -48,9 +48,9 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 | `secedgar_search_filings` | Search EDGAR filings since 1993 — full-text (2001+) plus archive-backed browse for pre-2001 ranges | `query?`, `forms?`, `start_date?`, `end_date?`, `limit?` |
 | `secedgar_get_filing` | Fetch a specific filing's metadata and document content | `accession_number`, `cik?`, `content_limit?`, `document?` |
 | `secedgar_get_financials` | Get historical XBRL financial data for a company | `company`, `concept`, `taxonomy?`, `period_type?`, `limit?` |
-| `secedgar_get_insider_transactions` | Form 3/4/5 insider transactions parsed from ownership XML | `ticker_or_cik`, `transaction_type?`, `limit?` |
-| `secedgar_get_institutional_holdings` | 13F-HR quarterly institutional holdings parsed from the information table | `ticker_or_cik`, `quarter?`, `limit?`, `consolidate?` |
-| `secedgar_fetch_frames` | Fetch SEC XBRL frames for one concept × one period across all reporting companies | `concept`, `period`, `unit?`, `limit?`, `sort?` |
+| `secedgar_get_insider_transactions` | Form 4 / 4-A insider transactions parsed from ownership XML | `ticker_or_cik`, `transaction_type?`, `limit?` |
+| `secedgar_get_institutional_holdings` | 13F-HR quarterly institutional holdings parsed from the information table | `ticker_or_cik`, `quarter?`, `limit?`, `offset?`, `consolidate?` |
+| `secedgar_fetch_frames` | Fetch SEC XBRL frames for one concept × one period across all reporting companies | `concept`, `period`, `unit?`, `limit?`, `offset?`, `sort?` |
 | `secedgar_search_concepts` | Discover supported XBRL concept names or reverse-lookup a raw tag | `search?`, `group?`, `taxonomy?` |
 | `secedgar_dataframe_describe` | List canvas dataframes with provenance, TTL, and schema | `name?` |
 | `secedgar_dataframe_query` | Run a single-statement SELECT across dataframes (DuckDB SQL) | `sql`, `preview?`, `register_as?` |
@@ -126,12 +126,14 @@ Handlers receive a unified `ctx` object. Key properties:
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
-| `ctx.elicit` | Ask user for structured input. **Check for presence first:** `if (ctx.elicit) { ... }` |
+| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
+| `ctx.elicit` | Ask user for structured input — form call `(message, schema)` or `.url(message, url)` for an external link. **Check for presence first:** `if (ctx.elicit) { ... }` |
+| `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). |
+| `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
 | `ctx.signal` | `AbortSignal` for cancellation. |
 | `ctx.progress` | Task progress (present when `task: true`) — `.setTotal(n)`, `.increment()`, `.update(message)`. |
 | `ctx.requestId` | Unique request ID. |
-| `ctx.tenantId` | Tenant ID from JWT or `'default'` for stdio. |
+| `ctx.tenantId` | Tenant ID from JWT; `'default'` for stdio or HTTP with auth off. |
 
 ---
 
@@ -245,12 +247,12 @@ Available skills:
 | `tool-defs-analysis` | Read-only audit of MCP definition language across the surface — voice, leaks, defaults, recovery hints, output descriptions |
 | `security-pass` | Audit server for MCP-flavored security gaps: output injection, scope blast radius, input sinks, tenant isolation |
 | `code-simplifier` | Post-session cleanup against `git diff` — modernize syntax, consolidate duplication, align with the codebase |
-| `devcheck` | Lint, format, typecheck, audit |
 | `polish-docs-meta` | Finalize docs, README, metadata, and agent protocol for shipping |
 | `git-wrapup` | Land working-tree changes as a versioned commit + annotated tag — version bump, changelog, verify, tag. Local only. |
 | `release-and-publish` | Push + npm + MCP Registry + GH Release + Docker. Picks up from `git-wrapup` |
 | `report-issue-local` | File a bug or feature request against this server's own repo via `gh` CLI |
 | `report-issue-framework` | File a bug or feature request against `@cyanheads/mcp-ts-core` via `gh` CLI |
+| `techniques` | Catalog of response/data-shaping techniques — overflow handling, payload shaping, retrieval patterns |
 | `maintenance` | Investigate changelogs, adopt upstream changes, sync skills to agent dirs |
 | `orchestrations` | Chain task skills into a gated multi-phase pipeline — build-out, QA-fix, update-ship — when you can spawn sub-agents |
 | `api-auth` | Auth modes, scopes, JWT/OAuth |
