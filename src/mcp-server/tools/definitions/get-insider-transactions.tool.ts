@@ -5,7 +5,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import {
@@ -233,7 +233,28 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     // submissions fetch regardless) detects Form 4 filings beyond the scan window so
     // `dataset.truncated` is truthful.
     const scanCap = Math.min(bridge ? Math.max(input.limit * 5, scanFloor) : input.limit * 5, 100);
-    const filingBatch = await api.getRecentFilingsByForm(match.cik, ['4', '4/A'], scanCap + 1);
+
+    // Bare-CIK fallback: a numeric CIK absent from the ticker cache resolves to { cik }
+    // with no name/ticker. The submissions feed 404s for such a CIK — it's a
+    // filer/transmitter (e.g. an accession-number prefix), not a registrant. Convert
+    // that to the declared contract error instead of leaking the raw SEC URL (#91).
+    // A cache-hit or ticker-resolved match that 404s signals an EDGAR-side problem,
+    // not a bad query — propagate unchanged, same reasoning as #55 and #76.
+    const isBareCikFallback = !match.name && !match.ticker;
+    let filingBatch: Awaited<ReturnType<typeof api.getRecentFilingsByForm>>;
+    try {
+      filingBatch = await api.getRecentFilingsByForm(match.cik, ['4', '4/A'], scanCap + 1);
+    } catch (err) {
+      if (isBareCikFallback && err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
+        ctx.log.debug('CIK has no submissions feed', { cik: match.cik });
+        throw ctx.fail(
+          'company_not_found',
+          `No issuer found for CIK ${match.cik}. If this looks like an accession-number prefix, it's the filing agent, not the issuer — use secedgar_company_search to find the company.`,
+          { ...ctx.recoveryFor('company_not_found') },
+        );
+      }
+      throw err;
+    }
     const moreBeyondWindow = filingBatch.length > scanCap;
     const filingsToScan = moreBeyondWindow ? filingBatch.slice(0, scanCap) : filingBatch;
 

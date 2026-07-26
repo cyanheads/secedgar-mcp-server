@@ -3,7 +3,7 @@
  * @module tests/mcp-server/tools/definitions/search-filings.tool
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
@@ -1213,5 +1213,67 @@ describe('searchFilingsTool', () => {
     expect(result.total).toBe(0);
     const enrichment = getEnrichment(ctx);
     expect(enrichment.notice).toContain('full-index');
+  });
+
+  // --- Bare-CIK 404 recovery on the pre-2001 submissions arm (#93) ---
+
+  it('declares entity_not_found in the errors contract (#93)', () => {
+    const entry = searchFilingsTool.errors?.find((e) => e.reason === 'entity_not_found');
+    expect(entry?.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(entry?.recovery).toContain('secedgar_company_search');
+  });
+
+  it('converts a bare-CIK 404 on the pre-2001 arm to entity_not_found, URL stripped (#93)', async () => {
+    // cik: tokens are only shape-validated, so a filing-agent CIK reaches the
+    // submissions feed and 404s. Convert it to the declared contract error.
+    mockApi.resolveCik.mockResolvedValue({ cik: '0001193125' });
+    mockApi.getSubmissions.mockRejectedValue(
+      notFound(
+        'SEC EDGAR API returned 404 for https://data.sec.gov/submissions/CIK0001193125.json',
+        { url: 'https://data.sec.gov/submissions/CIK0001193125.json', status: 404 },
+      ),
+    );
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      query: 'cik:0001193125',
+      start_date: '1997-01-01',
+      end_date: '1999-12-31',
+    });
+
+    const err = await searchFilingsTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err.data.reason).toBe('entity_not_found');
+    expect(err.message).toMatch(/accession-number prefix/i);
+    expect(err.data.recovery.hint).toContain('secedgar_company_search');
+    expect(err.message).not.toContain('data.sec.gov');
+    expect(err.message).not.toContain('https://');
+    expect(JSON.stringify(err.data)).not.toContain('data.sec.gov');
+  });
+
+  it('propagates a pre-2001 404 unchanged for a ticker-cache registrant (#93)', async () => {
+    // A CIK the ticker cache knows is a real registrant — a 404 there is an
+    // EDGAR-side anomaly, not a bad query.
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0000320193',
+      name: 'Apple Inc.',
+      ticker: 'AAPL',
+    });
+    mockApi.getSubmissions.mockRejectedValue(
+      notFound(
+        'SEC EDGAR API returned 404 for https://data.sec.gov/submissions/CIK0000320193.json',
+        { url: 'https://data.sec.gov/submissions/CIK0000320193.json', status: 404 },
+      ),
+    );
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      query: 'cik:320193',
+      start_date: '1997-01-01',
+      end_date: '1999-12-31',
+    });
+
+    const err = await searchFilingsTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err.data?.reason).toBeUndefined();
+    expect(err.message).toContain('data.sec.gov');
   });
 });

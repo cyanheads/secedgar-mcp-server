@@ -3,6 +3,7 @@
  * @module tests/mcp-server/tools/definitions/get-insider-transactions.tool
  */
 
+import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getInsiderTransactionsTool } from '@/mcp-server/tools/definitions/get-insider-transactions.tool.js';
@@ -693,5 +694,49 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
     expect(result.dataset).toBeUndefined();
     // Each SALE_XML yields one transaction, so 2 filings suffice for limit=2.
     expect(result.filings_scanned).toBe(2);
+  });
+
+  // --- Bare-CIK 404 recovery (#91) ---
+
+  it('converts a bare-CIK 404 to company_not_found with the SEC URL stripped (#91)', async () => {
+    // A numeric CIK absent from the ticker cache resolves to a bare { cik }; the
+    // submissions feed behind getRecentFilingsByForm 404s (a filing-agent CIK).
+    mockApi.resolveCik.mockResolvedValue({ cik: '0001193125' });
+    mockApi.getRecentFilingsByForm.mockRejectedValue(
+      notFound(
+        'SEC EDGAR API returned 404 for https://data.sec.gov/submissions/CIK0001193125.json',
+        { url: 'https://data.sec.gov/submissions/CIK0001193125.json', status: 404 },
+      ),
+    );
+    const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
+    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: '0001193125' });
+
+    const err = await getInsiderTransactionsTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err.data.reason).toBe('company_not_found');
+    expect(err.message).toMatch(/accession-number prefix/i);
+    expect(err.data.recovery.hint).toContain('secedgar_company_search');
+    // No raw SEC URL on the message or the structured data.
+    expect(err.message).not.toContain('data.sec.gov');
+    expect(err.message).not.toContain('https://');
+    expect(JSON.stringify(err.data)).not.toContain('data.sec.gov');
+  });
+
+  it('propagates a 404 unchanged when the match came from the ticker cache (#91)', async () => {
+    // Default resolveCik returns a name/ticker-bearing match. A 404 there is an
+    // EDGAR-side anomaly, not a bad query — never reclassify it.
+    mockApi.getRecentFilingsByForm.mockRejectedValue(
+      notFound(
+        'SEC EDGAR API returned 404 for https://data.sec.gov/submissions/CIK0000320193.json',
+        { url: 'https://data.sec.gov/submissions/CIK0000320193.json', status: 404 },
+      ),
+    );
+    const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
+    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+
+    const err = await getInsiderTransactionsTool.handler(input, ctx).catch((e) => e);
+    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err.data?.reason).toBeUndefined();
+    expect(err.message).toContain('data.sec.gov');
   });
 });

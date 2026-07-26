@@ -6,7 +6,12 @@
  */
 
 import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode, validationError } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  McpError,
+  notFound,
+  validationError,
+} from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import {
   getEdgarApiService,
@@ -317,7 +322,32 @@ async function serveSubmissionsArchive(
   },
 ): Promise<SearchFilingsResult> {
   const api = getEdgarApiService();
-  const submissions = await api.getSubmissions(args.entityCik);
+
+  // A `cik:` targeting token is only shape-validated (1-10 digits), never checked
+  // against the ticker cache, so a well-formed filing-agent/transmitter CIK reaches
+  // the submissions feed and 404s. Resolve it here to tell a cache-hit registrant
+  // from a bare CIK, then convert only the bare-CIK 404 into the declared contract
+  // error — no raw SEC URL (#93). A registrant that 404s is an EDGAR-side problem
+  // and propagates unchanged, same reasoning as #55 and #76. The lookup is confined
+  // to this pre-2001 arm (already multi-fetch) so the EFTS path stays untouched.
+  const resolved = await api.resolveCik(args.entityCik);
+  const cacheMatch = Array.isArray(resolved) ? resolved[0] : resolved;
+  const isBareCikFallback = !cacheMatch?.name && !cacheMatch?.ticker;
+
+  let submissions: Awaited<ReturnType<typeof api.getSubmissions>>;
+  try {
+    submissions = await api.getSubmissions(args.entityCik);
+  } catch (err) {
+    if (isBareCikFallback && err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
+      ctx.log.debug('CIK has no submissions feed', { cik: args.entityCik });
+      throw notFound(
+        `No EDGAR filer found for CIK ${args.entityCik}. If this looks like an accession-number prefix, it's the filing agent, not the issuer — use secedgar_company_search to find the company.`,
+        { reason: 'entity_not_found', ...ctx.recoveryFor('entity_not_found') },
+        { cause: err },
+      );
+    }
+    throw err;
+  }
   const companyName = submissions.name;
   const forms = args.forms?.length ? args.forms : undefined;
 
@@ -487,6 +517,13 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       when: 'A cik: targeting token in the query is not a 1-10 digit number',
       recovery:
         'Pass a numeric CIK such as cik:320193 — find it with secedgar_company_search if unknown.',
+    },
+    {
+      reason: 'entity_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'A cik: targeting token on a pre-2001 date range names a CIK with no EDGAR submissions history',
+      recovery:
+        'Confirm the CIK with secedgar_company_search — an accession-number prefix names the filing agent, not the issuer.',
     },
     {
       reason: 'missing_criteria',
