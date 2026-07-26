@@ -87,22 +87,63 @@ describe('missingQuarterCaveats (#95)', () => {
     expect(missingQuarterCaveats(frames([2015, 2016, 2017, 2018], [1, 2, 3, 4]))).toEqual([]);
   });
 
-  it('stays silent when the recent window is too sparse to reach the quorum', () => {
+  it('names both quarters a two-per-year filer never frame-tags (#100)', () => {
     // Costco's real shape: three tagged quarters a year until ~CY2020, two after.
-    // The recent years cannot carry a caveat, and the window must not reach back
-    // to the older regime and name a gap that no longer describes the series.
+    // Its fiscal Q2 and fiscal Q4 durations both fall outside the quarters SEC
+    // frames, so half the grid is absent — the detector must report the pair
+    // rather than treat two tagged quarters as a year too sparse to count. The
+    // window must still not reach back to the older three-quarter regime and
+    // name a gap that no longer describes the series.
     const costco = [
       ...frames([2017, 2018, 2019, 2020], [1, 3, 4]),
       ...frames([2021, 2022, 2023, 2024, 2025], [1, 4]),
     ];
-    expect(missingQuarterCaveats(costco)).toEqual([]);
+    const caveats = missingQuarterCaveats(costco);
+    expect(caveats).toHaveLength(1);
+    expect(caveats[0]).toContain('Calendar Q2 and Q3');
+    expect(caveats[0]).toContain('10-K residual');
+    // The single-quarter derivation advice does not hold for two gaps.
+    expect(caveats[0]).not.toContain('minus the three reported quarters');
+    expect(caveats[0]).toContain('never one at a time');
   });
 
-  it('ignores sparse years that report fewer than three quarters', () => {
-    // The 2022 stub is too thin to carry signal; 2023-2024 still agree on Q2.
-    expect(
-      missingQuarterCaveats([...frames([2022], [3]), ...frames([2023, 2024], [1, 3, 4])])[0],
-    ).toContain('Calendar Q2');
+  it('reports exactly two absent quarters as a pair, not one of them (#100)', () => {
+    const caveats = missingQuarterCaveats(frames([2023, 2024, 2025], [2, 4]));
+    expect(caveats).toHaveLength(1);
+    expect(caveats[0]).toContain('Calendar Q1 and Q3');
+    expect(caveats[0]).not.toContain('Calendar Q1 carries');
+  });
+
+  it('keeps the singular wording and derivation advice for a single gap (#100)', () => {
+    const caveats = missingQuarterCaveats(frames([2023, 2024], [1, 2, 3]));
+    expect(caveats[0]).toContain('Calendar Q4 carries');
+    expect(caveats[0]).toContain('minus the three reported quarters');
+    expect(caveats[0]).not.toContain(' and Q');
+  });
+
+  it('stays silent when two-quarter years disagree about which pair is absent (#100)', () => {
+    // Together these years cover all four quarters, so nothing is absent from
+    // every year — a filer changing its tagging must not produce a caveat.
+    expect(missingQuarterCaveats([...frames([2024], [1, 4]), ...frames([2025], [2, 3])])).toEqual(
+      [],
+    );
+  });
+
+  it('ignores a year too sparse to carry signal (a single tagged quarter)', () => {
+    // The 2022 stub is one quarter — below the per-year quorum, so it cannot
+    // drag a third quarter into the absent set; 2023-2024 still agree on Q2.
+    const caveats = missingQuarterCaveats([
+      ...frames([2022], [3]),
+      ...frames([2023, 2024], [1, 3, 4]),
+    ]);
+    expect(caveats[0]).toContain('Calendar Q2 carries');
+    expect(caveats[0]).not.toContain('and Q4');
+  });
+
+  it('never names more than two absent quarters (#100)', () => {
+    // Two years reporting one quarter each would leave three absent; the per-year
+    // quorum excludes both, so the window falls below MIN_YEARS and stays silent.
+    expect(missingQuarterCaveats([...frames([2024], [1]), ...frames([2025], [1])])).toEqual([]);
   });
 
   it('ignores annual and instant frames entirely', () => {

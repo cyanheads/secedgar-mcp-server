@@ -26,8 +26,17 @@ const FISCAL_Q4_EXAMPLES: Record<string, string> = {
 /** Duration quarterly frame (`CY2024Q2`). Instant frames (`CY2024Q2I`) are excluded. */
 const DURATION_QUARTER_FRAME = /^CY(\d{4})Q([1-4])$/;
 
-/** A year needs at least this many reported quarters before its gaps carry signal. */
-const MIN_QUARTERS_PER_YEAR = 3;
+/**
+ * A year needs at least this many reported quarters before its gaps carry
+ * signal. Two, not three: a filer can lose more than one calendar quarter to
+ * frame tagging — Costco's fiscal Q2 and fiscal Q4 durations both fall outside
+ * the quarters SEC frames, leaving a steady two per year — and a three-of-four
+ * quorum reads that as a sparse year and suppresses the caveat entirely. Two is
+ * also the floor at which a year still carries signal: it bounds the absent set
+ * at two quarters, so a year reporting a single quarter (a stub, a first year of
+ * filings) cannot drag three quarters into the caveat.
+ */
+const MIN_QUARTERS_PER_YEAR = 2;
 
 /** At least this many qualifying years must agree before a gap is called systematic. */
 const MIN_YEARS = 2;
@@ -63,7 +72,7 @@ export function fiscalQ4Caveats(period: string): string[] {
 }
 
 /**
- * Caveat for one filer's frame-tagged quarterly series: name the calendar
+ * Caveat for one filer's frame-tagged quarterly series: name every calendar
  * quarter that never appears, so a caller can tell "the company did not report"
  * apart from "the frame tagging does not expose it".
  *
@@ -72,10 +81,15 @@ export function fiscalQ4Caveats(period: string): string[] {
  * inside it a year counts only when it reports at least
  * {@link MIN_QUARTERS_PER_YEAR} of the four calendar quarters (partial first/last
  * years carry no signal), and a caveat is emitted only when at least
- * {@link MIN_YEARS} of the counting years all omit the same single quarter. A
- * year inside the window that reports all four quarters, two that disagree about
- * which quarter is missing, or a window too sparse to reach the quorum all
- * suppress the caveat.
+ * {@link MIN_YEARS} of the counting years agree on a non-empty set of absent
+ * quarters. A year inside the window that reports all four quarters, years that
+ * disagree so no quarter is absent from all of them, or a window too sparse to
+ * reach the quorum all suppress the caveat.
+ *
+ * One or two quarters can be absent — the per-year quorum bounds it there. A
+ * single absent quarter is the fiscal-Q4 residual; a second one means the
+ * filer's fiscal quarters do not line up with calendar quarters at all, so
+ * further durations match no `CY####Q#` frame.
  */
 export function missingQuarterCaveats(frames: Iterable<string>): string[] {
   const quartersByYear = new Map<string, Set<string>>();
@@ -101,10 +115,23 @@ export function missingQuarterCaveats(frames: Iterable<string>): string[] {
   for (const quarters of reportedYears) {
     for (const quarter of quarters) absent.delete(quarter);
   }
-  const [missing] = absent;
-  if (absent.size !== 1 || !missing) return [];
+  if (absent.size === 0) return [];
+
+  const missing = [...absent].sort();
+  const subject =
+    missing.length === 1
+      ? `Calendar Q${missing[0]} carries`
+      : `Calendar ${missing.map((q) => `Q${q}`).join(' and ')} carry`;
+  const cause =
+    missing.length === 1
+      ? 'SEC XBRL reports fiscal Q4 as the 10-K residual rather than a discrete quarterly fact, so the calendar quarter that fiscal Q4 spans drops out of the quarterly series — the period was reported, the frame tagging does not expose it.'
+      : "SEC XBRL reports fiscal Q4 as the 10-K residual rather than a discrete quarterly fact, and this filer's remaining fiscal quarters span durations that no standard calendar quarter matches, so both drop out of the quarterly series — the periods were reported, the frame tagging does not expose them.";
+  const recovery =
+    missing.length === 1
+      ? "Use period_type='annual' for the full-year figure, or derive the missing quarter as the annual total minus the three reported quarters."
+      : "Use period_type='annual' for the full-year figure; the absent quarters can only be derived together, as the annual total minus the reported quarters, never one at a time.";
 
   return [
-    `Calendar Q${missing} carries no frame-tagged value in any of this filer's recent fully-reported years. SEC XBRL reports fiscal Q4 as the 10-K residual rather than a discrete quarterly fact, so the calendar quarter that fiscal Q4 spans drops out of the quarterly series — the period was reported, the frame tagging does not expose it. Use period_type='annual' for the full-year figure, or derive the missing quarter as the annual total minus the three reported quarters.`,
+    `${subject} no frame-tagged value in any of this filer's recent qualifying years. ${cause} ${recovery}`,
   ];
 }
