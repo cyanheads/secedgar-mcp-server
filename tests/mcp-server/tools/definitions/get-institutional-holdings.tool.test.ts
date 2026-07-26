@@ -602,6 +602,7 @@ describe('getInstitutionalHoldingsTool', () => {
       filing_date: '2025-02-14',
       accession_number: '0000102909-25-000001',
       total_holdings_in_filing: 2,
+      offset: 0,
       holdings: [
         {
           issuer_name: 'APPLE INC',
@@ -649,6 +650,7 @@ describe('getInstitutionalHoldingsTool', () => {
       filing_date: '2024-01-01',
       accession_number: 'X-1',
       total_holdings_in_filing: 0,
+      offset: 0,
       holdings: [],
     };
     const blocks = getInstitutionalHoldingsTool.format!(output);
@@ -936,5 +938,125 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
     expect(err.data.reason).toBe('no_filings_found');
     expect(err.data.suggestions).toBeUndefined(); // no operating-company routing
     expect(err.message).toContain('SOME FILING AGENT');
+  });
+});
+
+// --- Offset pagination fallback when no canvas is available (#94) ---
+
+/** An information table of `n` distinct positions with strictly descending values. */
+function infoTableWith(n: number): string {
+  const rows = Array.from(
+    { length: n },
+    (_, i) => `  <infoTable>
+    <nameOfIssuer>ISSUER ${String(i).padStart(3, '0')}</nameOfIssuer>
+    <titleOfClass>COM</titleOfClass>
+    <cusip>${String(100000000 + i)}</cusip>
+    <value>${(n - i) * 1000}</value>
+    <shrsOrPrnAmt>
+      <sshPrnamt>${(n - i) * 10}</sshPrnamt>
+      <sshPrnamtType>SH</sshPrnamtType>
+    </shrsOrPrnAmt>
+    <investmentDiscretion>SOLE</investmentDiscretion>
+  </infoTable>`,
+  ).join('\n');
+  return `<?xml version="1.0" ?>
+<informationTable xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable">
+${rows}
+</informationTable>`;
+}
+
+/** Identity of one returned holding — CUSIP + market value, independent of page position. */
+const holdingIds = (result: {
+  holdings: Array<{ cusip?: string | undefined; market_value_usd?: number | undefined }>;
+}) => result.holdings.map((h) => `${h.cusip}:${h.market_value_usd}`);
+
+describe('getInstitutionalHoldingsTool offset pagination (#94)', () => {
+  beforeEach(() => {
+    mockApi.tryGetFilingDocument.mockImplementation(
+      async (_cik: string, _accn: string, docName: string) => {
+        if (docName === 'primary_doc.xml') return PRIMARY_DOC_XML;
+        if (docName === 'infotable.xml') return infoTableWith(12);
+        return null;
+      },
+    );
+  });
+
+  it('pages contiguously — two half pages reconstruct the double page exactly', async () => {
+    const run = async (offset: number, limit: number) => {
+      const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+      const input = getInstitutionalHoldingsTool.input.parse({
+        ticker_or_cik: '0000102909',
+        limit,
+        offset,
+      });
+      return await getInstitutionalHoldingsTool.handler(input, ctx);
+    };
+
+    const first = await run(0, 5);
+    const second = await run(5, 5);
+    const combined = await run(0, 10);
+
+    expect([...holdingIds(first), ...holdingIds(second)]).toEqual(holdingIds(combined));
+    expect(first.offset).toBe(0);
+    expect(first.next_offset).toBe(5);
+    expect(second.offset).toBe(5);
+    expect(second.next_offset).toBe(10);
+  });
+
+  it('omits next_offset on the last page', async () => {
+    const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+    const input = getInstitutionalHoldingsTool.input.parse({
+      ticker_or_cik: '0000102909',
+      limit: 5,
+      offset: 10,
+    });
+    const result = await getInstitutionalHoldingsTool.handler(input, ctx);
+
+    expect(result.holdings).toHaveLength(2);
+    expect(result.next_offset).toBeUndefined();
+  });
+
+  it('explains an offset past the end instead of claiming an empty information table', async () => {
+    const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+    const input = getInstitutionalHoldingsTool.input.parse({
+      ticker_or_cik: '0000102909',
+      limit: 5,
+      offset: 50,
+    });
+    const result = await getInstitutionalHoldingsTool.handler(input, ctx);
+
+    expect(result.holdings).toHaveLength(0);
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain('50');
+    expect(notice).not.toContain('13F-NT');
+  });
+
+  it('renders both paging controls in format() so content[] matches structuredContent', async () => {
+    const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+    const input = getInstitutionalHoldingsTool.input.parse({
+      ticker_or_cik: '0000102909',
+      limit: 5,
+      offset: 5,
+    });
+    const result = await getInstitutionalHoldingsTool.handler(input, ctx);
+    const text = getInstitutionalHoldingsTool.format!(result)[0].text;
+
+    expect(text).toContain('Page offset: 5');
+    expect(text).toContain('Next offset: 10');
+  });
+
+  it('leaves the dataframe holding every position regardless of the page window', async () => {
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+    const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+    const input = getInstitutionalHoldingsTool.input.parse({
+      ticker_or_cik: '0000102909',
+      limit: 5,
+      offset: 5,
+    });
+    const result = await getInstitutionalHoldingsTool.handler(input, ctx);
+
+    expect(bridge.registerDataframe.mock.calls[0]![1].rows).toHaveLength(12);
+    expect(result.dataset?.row_count).toBe(12);
   });
 });

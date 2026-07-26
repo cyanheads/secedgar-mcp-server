@@ -143,7 +143,7 @@ function recentFilingsOfForm(
 export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_holdings', {
   title: 'Get Institutional Holdings',
   description:
-    'Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR information table XML. ticker_or_cik is the institutional filer — its 10-digit CIK (e.g. 0000102909), or an entity name resolved through EDGAR entity search — and the tool returns what that institution holds. A name that matches several EDGAR filers (some legal names are shared across entities) returns those candidates so you can retry with the exact CIK, rather than guessing. It does not do reverse lookup from a portfolio company to its institutional holders (EDGAR has no issuer-to-13F index); for issuer-side questions, use secedgar_search_filings with forms=["13F-HR"]. The 13F information table lists each position: issuer name, CUSIP, shares held, market value (in whole USD), and put/call designation for options. Sub-lines for the same security are consolidated into distinct positions sorted by value by default (set consolidate=false for raw filing rows). The full parsed holdings set is materialized as df_<id> when a canvas is available — the inline holdings list is a preview capped at limit — so query it with secedgar_dataframe_query to aggregate the whole filing or self-join across quarters on cusip + reporting_period. Institutions with less than $100M in 13(f) securities are exempt and may not file. Use secedgar_search_filings with forms=["13F-HR"] for broader search.',
+    'Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR information table XML. ticker_or_cik is the institutional filer — its 10-digit CIK (e.g. 0000102909), or an entity name resolved through EDGAR entity search — and the tool returns what that institution holds. A name that matches several EDGAR filers (some legal names are shared across entities) returns those candidates so you can retry with the exact CIK, rather than guessing. It does not do reverse lookup from a portfolio company to its institutional holders (EDGAR has no issuer-to-13F index); for issuer-side questions, use secedgar_search_filings with forms=["13F-HR"]. The 13F information table lists each position: issuer name, CUSIP, shares held, market value (in whole USD), and put/call designation for options. Sub-lines for the same security are consolidated into distinct positions sorted by value by default (set consolidate=false for raw filing rows). The inline holdings list is one page of limit rows starting at offset — pass the returned next_offset to walk further down a large information table. The full parsed holdings set is also materialized as df_<id> when a canvas is available — so query it with secedgar_dataframe_query to aggregate the whole filing or self-join across quarters on cusip + reporting_period. Institutions with less than $100M in 13(f) securities are exempt and may not file. Use secedgar_search_filings with forms=["13F-HR"] for broader search.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -197,6 +197,14 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       .describe(
         'Maximum number of holdings rows to return. 13F filings from large institutions can contain thousands of positions. Default 20.',
       ),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        'Row to start the page at, 0-based, over the ordered position list. Pass the next_offset from the previous response to read the next page — the filing is parsed whole and sliced, so paging is stable and gap-free. An offset at or past the position count returns an empty page.',
+      ),
     consolidate: z
       .boolean()
       .default(true)
@@ -230,6 +238,15 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       .optional()
       .describe(
         'Number of distinct positions after consolidating info-table sub-lines, before the limit. Present only when consolidate=true.',
+      ),
+    offset: z
+      .number()
+      .describe('Row the returned page starts at, 0-based — the effective offset applied.'),
+    next_offset: z
+      .number()
+      .optional()
+      .describe(
+        'Offset to pass on the next call to continue through the positions. Absent on the last page (no rows remain past this one).',
       ),
     holdings: z
       .array(
@@ -278,7 +295,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
           .describe('One row from the 13F information table.'),
       )
       .describe(
-        'Holdings truncated to limit — consolidated positions sorted by market value when consolidate=true, else raw information-table rows in filing order.',
+        'One page of holdings, `limit` rows starting at `offset` — consolidated positions sorted by market value when consolidate=true, else raw information-table rows in filing order.',
       ),
     dataset: z
       .object({
@@ -572,12 +589,22 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       if (registered) dataset = toDatasetField(registered);
     }
 
-    const holdings = positions.slice(0, input.limit);
-    if (positions.length > input.limit) {
+    // Offset paging over the whole ordered position list — the retrieval path for
+    // rows past `limit` when no canvas is available to hold the full set (#94). The
+    // information table is parsed whole, so slicing it is contiguous and stable.
+    const pageEnd = input.offset + input.limit;
+    const holdings = positions.slice(input.offset, pageEnd);
+    const nextOffset = pageEnd < positions.length ? pageEnd : undefined;
+    if (nextOffset !== undefined) {
       ctx.enrich.truncated({ shown: holdings.length, cap: input.limit });
     }
 
-    if (holdings.length === 0) {
+    if (holdings.length === 0 && input.offset > 0) {
+      ctx.enrich.notice(
+        `Offset (${input.offset}) is at or past the ${positions.length} positions in this filing. ` +
+          `Lower the offset to page back into the holdings.`,
+      );
+    } else if (holdings.length === 0) {
       ctx.enrich.notice(
         `The information table for this filing contained no holdings rows. ` +
           `This may be a 13F-NT (notice-only) filing or an amendment. ` +
@@ -602,6 +629,8 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       accession_number: filingMeta.accessionNumber,
       total_holdings_in_filing: parsed.holdings.length,
       total_positions: input.consolidate ? positions.length : undefined,
+      offset: input.offset,
+      next_offset: nextOffset,
       holdings,
       dataset,
     };
@@ -618,6 +647,10 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       `Filed: ${result.filing_date}${period} | Accession: ${result.accession_number}`,
       countLine,
     ];
+    lines.push(`Page offset: ${result.offset} (${result.holdings.length} shown)`);
+    if (result.next_offset !== undefined) {
+      lines.push(`Next offset: ${result.next_offset} — pass as offset to read the next page.`);
+    }
 
     for (const h of result.holdings) {
       lines.push('');

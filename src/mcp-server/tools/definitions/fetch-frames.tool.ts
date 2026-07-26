@@ -40,10 +40,14 @@ function fiscalQ4Caveats(period: string): string[] {
 
 export const fetchFramesTool = tool('secedgar_fetch_frames', {
   description:
-    'Fetch SEC XBRL frames for one concept × one period across all reporting companies. Inline response returns the top N ranked companies; the full frames response (all reporters) is materialized as df_<id> when a canvas is available, queryable via secedgar_dataframe_query. Accepts friendly names like "revenue" or "assets" (discover via secedgar_search_concepts) or raw XBRL tags. One call hits one XBRL tag — when a friendly name maps to multiple same-meaning tags, the response\'s `unqueried_tags` lists the others; call again per tag and UNION/COALESCE in SQL with an analysis-specific priority (e.g. SalesRevenueGoodsNet is goods-only). The response\'s `related_tags` separately flags alternate-DEFINITION tags a meaningful share of filers use as their primary line (e.g. cash incl. restricted cash, equity incl. noncontrolling interest) — a whole-universe screen on the base tag silently omits those filers; query them separately, but do not blindly union (the semantics differ). Response includes `value_distribution` and `period_end_range` to flag XBRL scale-factor anomalies and fiscal-year mixing.',
+    'Fetch SEC XBRL frames for one concept × one period across all reporting companies. Inline response returns a page of the ranked companies — start at the top or pass offset/next_offset to walk further down the ranking; the full frames response (all reporters) is materialized as df_<id> when a canvas is available, queryable via secedgar_dataframe_query. Accepts friendly names like "revenue" or "assets" (discover via secedgar_search_concepts) or raw XBRL tags. One call hits one XBRL tag — when a friendly name maps to multiple same-meaning tags, the response\'s `unqueried_tags` lists the others; call again per tag and UNION/COALESCE in SQL with an analysis-specific priority (e.g. SalesRevenueGoodsNet is goods-only). The response\'s `related_tags` separately flags alternate-DEFINITION tags a meaningful share of filers use as their primary line (e.g. cash incl. restricted cash, equity incl. noncontrolling interest) — a whole-universe screen on the base tag silently omits those filers; query them separately, but do not blindly union (the semantics differ). Response includes `value_distribution` and `period_end_range` to flag XBRL scale-factor anomalies and fiscal-year mixing.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe('Guidance when the requested offset lands past the end of the ranked list.'),
     truncated: z.boolean().optional().describe('True when the inline data[] was capped by limit.'),
     shown: z.number().optional().describe('Number of companies shown inline.'),
     cap: z.number().optional().describe('The limit cap applied.'),
@@ -85,6 +89,14 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
         'Unit of measure. Use "USD-per-shares" (or equivalently "USD/shares") for EPS, "shares" for share counts, "pure" for ratios. Ignored when concept resolves to a friendly name with a known unit.',
       ),
     limit: z.number().int().min(1).max(100).default(25).describe('Number of companies to return.'),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        'Rank to start the page at, 0-based, over the sorted frame. Pass the next_offset from the previous response to read the next page — the ranked list is fetched whole and sliced, so paging is stable and gap-free. An offset at or past total_companies returns an empty page.',
+      ),
     sort: z
       .enum(['desc', 'asc'])
       .default('desc')
@@ -107,6 +119,15 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       ),
     label: z.string().describe('Human-readable concept label.'),
     total_companies: z.number().describe('Total companies reporting this metric for this period.'),
+    offset: z
+      .number()
+      .describe('Rank the returned page starts at, 0-based — the effective offset applied.'),
+    next_offset: z
+      .number()
+      .optional()
+      .describe(
+        'Offset to pass on the next call to continue down the ranking. Absent on the last page (no companies remain past this one).',
+      ),
     data: z
       .array(
         z
@@ -237,12 +258,21 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       input.sort === 'desc' ? b.entry.val - a.entry.val : a.entry.val - b.entry.val,
     );
 
-    const sliced = sorted.slice(0, input.limit);
-    if (sorted.length > input.limit) {
-      ctx.enrich.truncated({ shown: input.limit, cap: input.limit });
+    // Offset paging over the whole sorted frame — the retrieval path for ranks past
+    // `limit` when no canvas is available to hold the full set (#89). The frame is
+    // fetched whole, so slicing it is contiguous and stable across pages.
+    const pageEnd = input.offset + input.limit;
+    const sliced = sorted.slice(input.offset, pageEnd);
+    const nextOffset = pageEnd < sorted.length ? pageEnd : undefined;
+    if (sliced.length === 0 && input.offset > 0) {
+      ctx.enrich.notice(
+        `Offset (${input.offset}) is at or past the ${sorted.length} companies reporting this concept for this period. Lower the offset to page back into the ranking.`,
+      );
+    } else if (nextOffset !== undefined) {
+      ctx.enrich.truncated({ shown: sliced.length, cap: input.limit });
     }
     const data = sliced.map(({ entry, cik, ticker }, i) => ({
-      rank: i + 1,
+      rank: input.offset + i + 1,
       company_name: entry.entityName,
       cik,
       ticker: ticker || undefined,
@@ -329,6 +359,8 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       unit,
       label: framesResponse.label || label,
       total_companies: framesResponse.pts,
+      offset: input.offset,
+      next_offset: nextOffset,
       data,
       dataset,
       unqueried_tags: unqueriedTags,
@@ -343,6 +375,10 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     const lines = [
       `**${result.label}** [XBRL: ${result.concept}] — ${result.period} (${result.unit}, ${result.total_companies} companies)`,
     ];
+    lines.push(`Page offset: ${result.offset} (${result.data.length} shown)`);
+    if (result.next_offset !== undefined) {
+      lines.push(`Next offset: ${result.next_offset} — pass as offset to read the next page.`);
+    }
     for (const d of result.data) {
       const ticker = d.ticker ? ` (${d.ticker})` : '';
       const formatted =

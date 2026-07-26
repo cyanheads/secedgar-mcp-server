@@ -3,7 +3,7 @@
  * @module tests/mcp-server/tools/definitions/fetch-frames.tool
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetchFramesTool } from '@/mcp-server/tools/definitions/fetch-frames.tool.js';
 import type { FramesResponse } from '@/services/edgar/types.js';
@@ -371,6 +371,7 @@ describe('fetchFramesTool', () => {
       unit: 'USD',
       label: 'Revenue',
       total_companies: 5000,
+      offset: 0,
       data: [
         {
           rank: 1,
@@ -403,6 +404,7 @@ describe('fetchFramesTool', () => {
       unit: 'USD-per-shares',
       label: 'EPS (Diluted)',
       total_companies: 100,
+      offset: 0,
       data: [
         {
           rank: 1,
@@ -430,6 +432,7 @@ describe('fetchFramesTool', () => {
       unit: 'USD',
       label: 'Revenue',
       total_companies: 5000,
+      offset: 0,
       data: [],
       dataset: {
         name: 'df_ABCDE_FGHIJ',
@@ -455,6 +458,7 @@ describe('fetchFramesTool', () => {
       unit: 'USD',
       label: 'Revenue',
       total_companies: 3131,
+      offset: 0,
       data: [],
       unqueried_tags: ['Revenues', 'SalesRevenueNet'],
       related_tags: [],
@@ -481,6 +485,7 @@ describe('fetchFramesTool', () => {
       unit: 'USD',
       label: 'Cash and Cash Equivalents',
       total_companies: 4118,
+      offset: 0,
       data: [],
       unqueried_tags: [],
       related_tags: [
@@ -515,14 +520,17 @@ describe('fetchFramesTool', () => {
     ['CY2024Q2', 'calendar Q2', 'MSFT Jun-end'],
     ['CY2024Q3', 'calendar Q3', 'AAPL Sep-end'],
     ['CY2024Q4', 'calendar Q4', 'most US filers'],
-  ])('caveat for %s names the right calendar quarter and examples', async (period, label, example) => {
-    const ctx = createMockContext({ errors: fetchFramesTool.errors });
-    const input = fetchFramesTool.input.parse({ concept: 'revenue', period });
-    const result = await fetchFramesTool.handler(input, ctx);
+  ])(
+    'caveat for %s names the right calendar quarter and examples',
+    async (period, label, example) => {
+      const ctx = createMockContext({ errors: fetchFramesTool.errors });
+      const input = fetchFramesTool.input.parse({ concept: 'revenue', period });
+      const result = await fetchFramesTool.handler(input, ctx);
 
-    expect(result.caveats[0]).toContain(label);
-    expect(result.caveats[0]).toContain(example);
-  });
+      expect(result.caveats[0]).toContain(label);
+      expect(result.caveats[0]).toContain(example);
+    },
+  );
 
   it('emits no caveats for annual CY#### periods', async () => {
     const ctx = createMockContext({ errors: fetchFramesTool.errors });
@@ -596,6 +604,7 @@ describe('fetchFramesTool', () => {
       unit: 'USD',
       label: 'Revenue',
       total_companies: 3000,
+      offset: 0,
       data: [],
       unqueried_tags: [],
       related_tags: [],
@@ -606,5 +615,114 @@ describe('fetchFramesTool', () => {
     const blocks = fetchFramesTool.format!(output);
     expect(blocks[0].text).toContain('Caveat:');
     expect(blocks[0].text).toContain('AAPL Sep-end');
+  });
+});
+
+// --- Offset pagination fallback when no canvas is available (#89) ---
+
+/** A frame of `n` reporters with strictly descending values, so ranking is deterministic. */
+function framesWith(n: number): FramesResponse {
+  return {
+    ...mockFramesResponse,
+    pts: n,
+    data: Array.from({ length: n }, (_, i) => ({
+      accn: `000000000${i}-24-000001`,
+      cik: 1000 + i,
+      end: '2023-12-31',
+      entityName: `Reporter ${i}`,
+      loc: 'CA',
+      val: (n - i) * 1_000_000,
+    })),
+  };
+}
+
+/** Identity of one returned row — cik + value, independent of page position. */
+const rowIds = (result: { data: Array<{ cik: string; value: number }> }) =>
+  result.data.map((d) => `${d.cik}:${d.value}`);
+
+describe('fetchFramesTool offset pagination (#89)', () => {
+  beforeEach(() => {
+    mockApi.tryGetFrames.mockResolvedValue(framesWith(12));
+    mockApi.cikToTicker.mockResolvedValue(undefined);
+  });
+
+  it('pages contiguously — two half pages reconstruct the double page exactly', async () => {
+    const run = async (offset: number, limit: number) => {
+      const ctx = createMockContext({ errors: fetchFramesTool.errors });
+      const input = fetchFramesTool.input.parse({
+        concept: 'revenue',
+        period: 'CY2023',
+        limit,
+        offset,
+      });
+      return await fetchFramesTool.handler(input, ctx);
+    };
+
+    const first = await run(0, 5);
+    const second = await run(5, 5);
+    const combined = await run(0, 10);
+
+    expect([...rowIds(first), ...rowIds(second)]).toEqual(rowIds(combined));
+    expect(first.offset).toBe(0);
+    expect(first.next_offset).toBe(5);
+    expect(second.offset).toBe(5);
+    expect(second.next_offset).toBe(10);
+  });
+
+  it('continues the global ranking across pages', async () => {
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({
+      concept: 'revenue',
+      period: 'CY2023',
+      limit: 5,
+      offset: 5,
+    });
+    const result = await fetchFramesTool.handler(input, ctx);
+
+    expect(result.data.map((d) => d.rank)).toEqual([6, 7, 8, 9, 10]);
+  });
+
+  it('omits next_offset on the last page', async () => {
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({
+      concept: 'revenue',
+      period: 'CY2023',
+      limit: 5,
+      offset: 10,
+    });
+    const result = await fetchFramesTool.handler(input, ctx);
+
+    expect(result.data).toHaveLength(2);
+    expect(result.next_offset).toBeUndefined();
+  });
+
+  it('explains an offset past the end instead of returning a bare empty page', async () => {
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({
+      concept: 'revenue',
+      period: 'CY2023',
+      limit: 5,
+      offset: 50,
+    });
+    const result = await fetchFramesTool.handler(input, ctx);
+
+    expect(result.data).toHaveLength(0);
+    expect(result.next_offset).toBeUndefined();
+    expect(getEnrichment(ctx).notice).toContain('50');
+  });
+
+  it('renders both paging controls in format() so content[] matches structuredContent', async () => {
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({
+      concept: 'revenue',
+      period: 'CY2023',
+      limit: 5,
+      offset: 5,
+    });
+    const result = await fetchFramesTool.handler(input, ctx);
+    const text = fetchFramesTool.format!(result)[0].text;
+
+    expect(text).toContain('Page offset: 5');
+    expect(text).toContain('Next offset: 10');
   });
 });
