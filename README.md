@@ -1,7 +1,7 @@
 <div align="center">
   <h1>@cyanheads/secedgar-mcp-server</h1>
   <p><b>Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.</b>
-  <div>10 Tools (+1 opt-in) • 2 Resources • 1 Prompt</div>
+  <div>12 Tools (+1 opt-in) • 2 Resources • 1 Prompt</div>
   </p>
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Tools
 
-Eight tools for querying SEC EDGAR data, plus three for SQL analytics over the DuckDB-backed canvas dataframes those tools materialize:
+Ten tools for querying SEC EDGAR data, plus three for SQL analytics over the DuckDB-backed canvas dataframes those tools materialize:
 
 | Tool | Description |
 |:---|:---|
@@ -37,9 +37,11 @@ Eight tools for querying SEC EDGAR data, plus three for SQL analytics over the D
 | `secedgar_search_filings` | Search EDGAR filings since 1993 — full-text (2001+) plus archive-backed browse for pre-2001 ranges |
 | `secedgar_get_filing` | Fetch a specific filing's metadata and document content |
 | `secedgar_get_financials` | Get historical XBRL financial data for a company |
+| `secedgar_get_snapshot` | One-call financial profile — the latest value of every supported concept, grouped by statement |
 | `secedgar_get_insider_transactions` | Form 4 / 4-A insider transactions (buys, sells, grants, exercises) parsed from ownership XML |
 | `secedgar_get_institutional_holdings` | 13F-HR quarterly institutional holdings parsed from the information table |
 | `secedgar_fetch_frames` | Fetch SEC XBRL frames for one concept × one period across all reporting companies |
+| `secedgar_compare_companies` | Compare named companies across several concepts, aligned on calendar periods |
 | `secedgar_search_concepts` | Discover supported XBRL concept names or reverse-lookup a raw tag |
 | `secedgar_dataframe_describe` | List canvas dataframes with provenance, TTL, and schema |
 | `secedgar_dataframe_query` | Run a single-statement SELECT across dataframes |
@@ -96,7 +98,21 @@ Get historical XBRL financial data for a company with friendly concept name reso
 - Automatic deduplication to one value per standard calendar period
 - Filter by annual, quarterly, or all periods
 - Optional `limit` caps the inline series to the most-recent N periods; the full series stays queryable via the `df_<id>` dataframe
+- Quarterly results carry a `caveats` entry when a calendar quarter is absent from the frame-tagged series — SEC reports fiscal Q4 as the 10-K residual, so the calendar quarter that fiscal Q4 spans has no discrete quarterly value (calendar-year filers included)
 - See `secedgar://concepts` resource for the full mapping
+
+---
+
+### `secedgar_get_snapshot`
+
+Build a company financial profile in one call instead of a run of `secedgar_get_financials` calls.
+
+- Reads the filer's complete companyfacts payload once, then resolves every supported concept against it
+- Same frame dedup and tag priority as `secedgar_get_financials`, so the two agree for any concept they both cover
+- Duration concepts (income statement, cash flow, per-share) report their latest full year and latest single quarter; balance-sheet and entity-info concepts report their latest point-in-time value
+- Concepts the filer does not report are listed under `gaps` with the XBRL tags that were tried — never zero-filled or interpolated
+- IFRS filers resolve through the mapped IFRS tag variants via `taxonomy: "ifrs-full"`; each line reports the taxonomy its value came from
+- Compact single-record profile — no dataframe; reach for `secedgar_get_financials` when you need a time series
 
 ---
 
@@ -139,6 +155,19 @@ Fetch SEC XBRL frames for one concept × one period across all reporting compani
 
 ---
 
+### `secedgar_compare_companies`
+
+Compare 2-10 named companies across 1-8 concepts, aligned on calendar periods — the middle shape between `secedgar_get_financials` (one company over time) and `secedgar_fetch_frames` (one period across the market).
+
+- One companyfacts read per company, resolved through the same frame dedup and tag priority as `secedgar_get_financials`
+- Balance-sheet and entity-info concepts align on the calendar year or quarter their point-in-time snapshot falls in, so they sit in the same matrix as income-statement lines; each cell keeps its underlying XBRL frame
+- `periods` bounds the inline matrix (1-12, default 4) and the window shrinks further when companies x concepts x periods is too large to return in one response; the full aligned series is always materialized as a `df_<id>` dataframe for growth rates and spreads via `secedgar_dataframe_query`
+- A company that fails to resolve is reported in `failed_companies` with a machine-readable reason and the comparison proceeds with the rest
+- A company that does not report a concept is reported in `gaps` with the tags that were tried — never interpolated
+- `caveats` surface a filer missing a calendar quarter, period ends that differ inside one aligned period, and concepts whose unit differs across companies
+
+---
+
 ### `secedgar_search_concepts`
 
 Discover supported XBRL concept names before querying financials or cross-company comparisons.
@@ -153,7 +182,7 @@ Discover supported XBRL concept names before querying financials or cross-compan
 
 ### `secedgar_dataframe_describe` / `secedgar_dataframe_query` / `secedgar_dataframe_drop`
 
-In-conversation SQL analytics over the dataframes that `secedgar_fetch_frames`, `secedgar_search_filings`, `secedgar_get_financials`, `secedgar_get_insider_transactions`, and `secedgar_get_institutional_holdings` materialize on a shared DuckDB-backed canvas. Each data-returning call adds a `dataset` field with a `df_XXXXX_XXXXX` handle; pass that handle to `secedgar_dataframe_query` for joins, aggregates, window functions, percentiles — standard DuckDB SQL.
+In-conversation SQL analytics over the dataframes that `secedgar_fetch_frames`, `secedgar_compare_companies`, `secedgar_search_filings`, `secedgar_get_financials`, `secedgar_get_insider_transactions`, and `secedgar_get_institutional_holdings` materialize on a shared DuckDB-backed canvas. Each data-returning call adds a `dataset` field with a `df_XXXXX_XXXXX` handle; pass that handle to `secedgar_dataframe_query` for joins, aggregates, window functions, percentiles — standard DuckDB SQL.
 
 - **Read-only by default.** Writes, DDL, DROP, COPY, PRAGMA, ATTACH, and external-file table functions are rejected by the framework SQL gate. System catalogs (`information_schema`, `pg_catalog`, `sqlite_master`, `duckdb_*`) are denied at the bridge layer so callers can't enumerate dataframes they don't already hold a handle for. `secedgar_dataframe_drop` is the only destructive tool and is opt-in (`EDGAR_DATAFRAME_DROP_ENABLED=true`); TTL handles cleanup otherwise.
 - **Per-table TTL.** Each dataframe ages on its own clock (default 24h, override with `EDGAR_DATASET_TTL_SECONDS`). The canvas itself uses the framework's sliding TTL.
@@ -190,7 +219,7 @@ SEC EDGAR–specific:
 - Friendly XBRL concept name mapping with historical tag change handling
 - Searchable concept catalog with statement-group metadata and reverse XBRL tag lookup
 - HTML-to-text conversion for filing documents via `html-to-text`
-- In-conversation SQL analytics: `secedgar_fetch_frames`, `secedgar_search_filings`, `secedgar_get_financials`, `secedgar_get_insider_transactions`, and `secedgar_get_institutional_holdings` materialize their full result as a DuckDB-backed canvas dataframe queryable via `secedgar_dataframe_query`
+- In-conversation SQL analytics: `secedgar_fetch_frames`, `secedgar_compare_companies`, `secedgar_search_filings`, `secedgar_get_financials`, `secedgar_get_insider_transactions`, and `secedgar_get_institutional_holdings` materialize their full result as a DuckDB-backed canvas dataframe queryable via `secedgar_dataframe_query`
 - No API keys required — SEC EDGAR is a free, public API
 
 ## Getting started
@@ -343,7 +372,7 @@ docker exec <container> bun run mirror:refresh   # re-ingest when the archive ha
 
 | Directory | Purpose |
 |:---|:---|
-| `src/mcp-server/tools/definitions/` | Tool definitions (`*.tool.ts`). Eight SEC EDGAR tools plus three `dataframe_*` tools for SQL analytics. |
+| `src/mcp-server/tools/definitions/` | Tool definitions (`*.tool.ts`). Ten SEC EDGAR tools plus three `dataframe_*` tools for SQL analytics. |
 | `src/mcp-server/resources/definitions/` | Resource definitions. XBRL concepts and filing types. |
 | `src/mcp-server/prompts/definitions/` | Prompt definitions. Company analysis prompt. |
 | `src/services/edgar/` | SEC EDGAR API client, XBRL concept mapping, HTML-to-text conversion. |

@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-07-26 18:48:15
+Generated on: 2026-07-26 20:19:53
 
 ```text
 secedgar-mcp-server/
@@ -26,6 +26,7 @@ secedgar-mcp-server/
 │   ├── 0.10.x/
 │   ├── 0.11.x/
 │   ├── 0.12.x/
+│   ├── 0.13.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
@@ -159,6 +160,7 @@ secedgar-mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── company-search.tool.ts
+│   │           ├── compare-companies.tool.ts
 │   │           ├── dataframe-describe.tool.ts
 │   │           ├── dataframe-drop.tool.ts
 │   │           ├── dataframe-query.tool.ts
@@ -167,6 +169,7 @@ secedgar-mcp-server/
 │   │           ├── get-financials.tool.ts
 │   │           ├── get-insider-transactions.tool.ts
 │   │           ├── get-institutional-holdings.tool.ts
+│   │           ├── get-snapshot.tool.ts
 │   │           ├── search-concepts.tool.ts
 │   │           └── search-filings.tool.ts
 │   ├── services/
@@ -183,9 +186,11 @@ secedgar-mcp-server/
 │   │       │   ├── tickers-sync.ts
 │   │       │   └── types.ts
 │   │       ├── concept-map.ts
+│   │       ├── concept-series.ts
 │   │       ├── edgar-api-service.ts
 │   │       ├── filing-headers.ts
 │   │       ├── filing-to-text.ts
+│   │       ├── fiscal-periods.ts
 │   │       ├── ownership-parser.ts
 │   │       └── types.ts
 │   └── index.ts
@@ -201,6 +206,7 @@ secedgar-mcp-server/
 │   │   └── tools/
 │   │       └── definitions/
 │   │           ├── company-search.tool.test.ts
+│   │           ├── compare-companies.tool.test.ts
 │   │           ├── dataframe-describe.tool.test.ts
 │   │           ├── dataframe-drop.tool.test.ts
 │   │           ├── dataframe-query.tool.test.ts
@@ -209,9 +215,12 @@ secedgar-mcp-server/
 │   │           ├── get-financials.tool.test.ts
 │   │           ├── get-insider-transactions.tool.test.ts
 │   │           ├── get-institutional-holdings.tool.test.ts
+│   │           ├── get-snapshot.tool.test.ts
 │   │           ├── search-concepts.tool.test.ts
 │   │           ├── search-filings.tool.test.ts
 │   │           └── security.test.ts
+│   ├── scripts/
+│   │   └── bundle-entry-patterns.test.ts
 │   └── services/
 │       ├── canvas-bridge/
 │       │   ├── canvas-bridge.test.ts
@@ -222,11 +231,13 @@ secedgar-mcp-server/
 │           │   ├── edgar-mirror.test.ts
 │           │   └── tickers-sync.test.ts
 │           ├── concept-map.test.ts
+│           ├── concept-series.test.ts
 │           ├── edgar-api-service.efts.test.ts
 │           ├── edgar-api-service.full-index.test.ts
 │           ├── edgar-api-service.mirror.test.ts
 │           ├── edgar-api-service.test.ts
 │           ├── filing-to-text.test.ts
+│           ├── fiscal-periods.test.ts
 │           └── ownership-parser.test.ts
 ├── .dockerignore
 ├── .env.example

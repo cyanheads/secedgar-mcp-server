@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.0](changelog/0.13.x/0.13.0.md) — 2026-07-26
+
+Two new tools — secedgar_get_snapshot (one-call company profile) and secedgar_compare_companies (2-10 companies aligned on calendar periods). Frame dedup and fiscal-period caveats move into shared modules, the local mirror now serves companyfacts, and the fiscal-Q4 caveat is corrected and extended to per-filer series.
+
 ## [0.12.5](changelog/0.12.x/0.12.5.md) — 2026-07-26
 
 secedgar_get_filing now renders every document filename into content[] and embeds a categorized catalog in its not-found errors; fetch_frames and get_institutional_holdings gain offset paging; bare-CIK 404s return declared errors instead of a raw SEC URL; the insider tool's Form 3/5 coverage claim is corrected to Form 4 / 4-A.
