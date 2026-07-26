@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-07-10 02:07:48
+Generated on: 2026-07-26 18:48:15
 
 ```text
 secedgar-mcp-server/
@@ -16,6 +16,7 @@ secedgar-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/
 │   ├── extensions.json
