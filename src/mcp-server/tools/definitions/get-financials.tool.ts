@@ -9,9 +9,11 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { resolveConceptTarget } from '@/services/edgar/concept-map.js';
 import {
-  deprecatedTagCaveats,
+  type FramedUnit,
   matchesPeriodType,
+  preferredTagIndex,
   resolveFrameSeries,
+  seriesStalenessCaveats,
   type TagPrioritizedUnit,
 } from '@/services/edgar/concept-series.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
@@ -162,7 +164,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       .array(z.string())
       .optional()
       .describe(
-        "Data-completeness warnings about the returned series. Two kinds. On quarterly results, one entry when one or two calendar quarters are absent from every recent qualifying year — SEC reports a filer's fiscal Q4 as the 10-K residual rather than a discrete quarterly fact, so the calendar quarter fiscal Q4 spans has no frame-tagged value, and a filer whose other fiscal quarters span non-calendar durations loses a second quarter the same way. Applies to calendar-year filers (no discrete Q4) as much as to off-calendar ones. On any result, one entry when the concept resolved to an XBRL tag SEC has retired from the taxonomy, which means the current tags reported nothing and the series may stop years short. Absent when the series has nothing to flag.",
+        "Data-completeness warnings about the returned series. Two kinds. On quarterly results, one entry when one or two calendar quarters are absent from every recent qualifying year — SEC reports a filer's fiscal Q4 as the 10-K residual rather than a discrete quarterly fact, so the calendar quarter fiscal Q4 spans has no frame-tagged value, and a filer whose other fiscal quarters span non-calendar durations loses a second quarter the same way. Applies to calendar-year filers (no discrete Q4) as much as to off-calendar ones. On any result, one entry when the series stops well short of today — either because the concept resolved to an XBRL tag SEC has retired from the taxonomy (the current tags reported nothing), or because a current tag's series ends more than two years plus a filing window back, which is what a filer migrating to a different element or dropping the disclosure looks like. Absent when the series has nothing to flag.",
       ),
   }),
 
@@ -210,6 +212,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     // uses the confirmed IFRS variants when the mapping has them.
     const {
       label,
+      tagSelection,
       tags,
       taxonomy,
       unit: mappedUnit,
@@ -220,14 +223,16 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
 
     // Try each tag until we get data. `tryGetCompanyConcept` returns null for 404
     // (tag not reported by this company); other errors propagate.
-    let conceptResponse:
-      | {
-          units: Record<string, CompanyConceptUnit[]>;
-          label: string;
-          description: string | undefined;
-          tag: string;
-        }
-      | undefined;
+    /** Responding tags keyed by array position, in declared order. */
+    const responses = new Map<
+      number,
+      {
+        units: Record<string, CompanyConceptUnit[]>;
+        label: string;
+        description: string | undefined;
+        tag: string;
+      }
+    >();
     const tagsTried: string[] = [];
     /**
      * Each unit is augmented with its source-tag index so the frame dedup can
@@ -239,20 +244,26 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       tagsTried.push(tag);
       const resp = await api.tryGetCompanyConcept(match.cik, taxonomy, tag);
       if (!resp) continue;
-      if (!conceptResponse) {
-        conceptResponse = {
-          units: resp.units,
-          label: resp.label,
-          description: resp.description ?? undefined,
-          tag: resp.tag,
-        };
-      }
+      responses.set(tagIndex, {
+        units: resp.units,
+        label: resp.label,
+        description: resp.description ?? undefined,
+        tag: resp.tag,
+      });
       for (const units of Object.values(resp.units)) {
         for (const u of units) {
           allUnits.push({ ...u, tagIndex });
         }
       }
     }
+
+    /**
+     * The concept is described by the tag that won for this filer, which under a
+     * `coverage` selection is not the first one to respond (#101).
+     */
+    const winningTagIndex = preferredTagIndex(allUnits, tagSelection);
+    const conceptResponse =
+      winningTagIndex !== undefined ? responses.get(winningTagIndex) : undefined;
 
     if (!conceptResponse || allUnits.length === 0) {
       // Probe companyfacts to discover what namespaces and tags this filer actually reports.
@@ -301,7 +312,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
      * only, same-frame collisions resolved by tag priority then latest `filed`
      * (#44). An empty map means the concept exists but has no frame-aligned entries.
      */
-    const byFrameClean = resolveFrameSeries(allUnits);
+    const byFrameClean = resolveFrameSeries(allUnits, tagSelection);
     if (byFrameClean.size === 0) {
       throw ctx.fail(
         'no_frame_data',
@@ -356,6 +367,16 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     filtered.sort((a, b) => b.end.localeCompare(a.end));
 
     /**
+     * Read from the full deduped set, not the period-filtered slice: an annual
+     * view that stops a year behind a still-current quarterly series is a
+     * property of the filter, not of the concept.
+     */
+    const newestFramed = [...byFrameClean.values()].reduce<FramedUnit | undefined>(
+      (newest, unit) => (!newest || unit.end > newest.end ? unit : newest),
+      undefined,
+    );
+
+    /**
      * Off-calendar filers lose a whole calendar quarter from the frame-tagged
      * series — SEC reports fiscal Q4 as the 10-K residual, never as a discrete
      * quarterly fact — so a caller sees a gap with no way to tell "did not
@@ -367,11 +388,17 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     const caveats = [
       ...(resolvedPeriodType === 'annual' ? [] : missingQuarterCaveats(byFrameClean.keys())),
       /**
-       * The tag that won the priority walk can be one SEC retired years ago,
-       * which happens exactly when no current tag reports for this filer. The
-       * values look ordinary; the taxonomy label is the only tell (#98).
+       * The tag that won the walk can be one SEC retired years ago, which
+       * happens exactly when no current tag reports for this filer; the values
+       * look ordinary and the taxonomy label is the only tell (#98). A current
+       * tag whose series simply stops carries no tell at all, so the gap to
+       * today is the signal — one companyconcept payload is all this tool reads,
+       * and it holds no filer-wide period to compare against (#102).
        */
-      ...deprecatedTagCaveats(conceptResponse.tag, conceptResponse.label),
+      ...seriesStalenessCaveats(conceptResponse.tag, conceptResponse.label, newestFramed, {
+        date: new Date().toISOString().slice(0, 10),
+        kind: 'current-date',
+      }),
     ];
 
     // Determine unit string

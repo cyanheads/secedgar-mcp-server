@@ -248,9 +248,49 @@ export interface RelatedTag {
   tag: string;
 }
 
+/**
+ * How a concept's tag array is walked when a filer reports more than one of its
+ * tags.
+ *
+ * `priority` — the declared order is semantic: index 0 is the preferred
+ * definition and wins every frame it reports, lower tags only filling frames it
+ * does not cover. Correct whenever the tags mean different things and one of
+ * them is the answer to the concept (revenue's gross/net variants, the
+ * trade-only vs trade-and-other receivable captions).
+ *
+ * `coverage` — the tags are interchangeable alternates that filers choose
+ * between rather than a ladder, so the one this filer actually maintains wins:
+ * whichever covers the most standard calendar periods, with the declared order
+ * breaking a tie. The losers then drop out rather than filling the winner's
+ * gaps: alternates are not interchangeable value by value, and the filers
+ * reporting both disagree on the years they overlap. Only correct when no fixed
+ * order can be right, because filers split in both directions (#101).
+ *
+ * `priority` stays the default and coverage is opt-in per concept, because
+ * coverage is wrong as a general rule and SEC's own data says so. Molson Coors
+ * (TAP) tags eleven calendar years under `SalesRevenueGoodsNet`, which SEC
+ * retired in 2018, and ten under the assessed-tax-inclusive element against five
+ * under `Revenues` — so ranking `revenue` by coverage hands that filer either an
+ * eight-year-dead tag or its gross-of-excise line, replacing the continuous net
+ * series (CY2016-CY2019 at 6,597 / 13,472 / 13,338 / 13,009 million) with values
+ * roughly a fifth lower. Smucker (SJM) and Spotify (SPOT) survive it only on a
+ * coincidental tie in period count. Coverage answers "which element does this
+ * filer maintain", which is the question only when the elements mean the same
+ * thing; where they mean different things, the array order is the answer and
+ * period count is noise.
+ */
+export type TagSelection = 'coverage' | 'priority';
+
 /** Friendly concept name mapping. */
 export interface ConceptMapping {
   group: ConceptGroup;
+  /**
+   * How to pick among `ifrsTags` for a filer reporting several of them. Defaults
+   * to `priority`. Scoped to the IFRS array on purpose — the us-gaap `tags` of
+   * the same concept can be a genuine priority ladder even when its IFRS
+   * counterparts are alternates.
+   */
+  ifrsTagSelection?: TagSelection;
   /**
    * IFRS tag variants for this concept (used when taxonomy === 'ifrs-full').
    * When present, these replace `tags` for IFRS lookups so friendly names resolve

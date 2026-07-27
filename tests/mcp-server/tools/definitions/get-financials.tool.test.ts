@@ -4,7 +4,7 @@
  */
 
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials.tool.js';
 import { resolveConcept } from '@/services/edgar/concept-map.js';
 import type { CompanyConceptResponse } from '@/services/edgar/types.js';
@@ -80,6 +80,23 @@ const mockApi = {
   tryGetCompanyConcept: vi.fn(),
   tryGetCompanyFacts: vi.fn(),
 };
+
+/**
+ * The staleness caveat measures a single-concept series against the current
+ * date (#102), so every fixture here would drift in and out of the two-year
+ * floor as real time passes. Pinned just past the base fixture's newest period;
+ * the staleness cases below set their own gaps against this instant.
+ */
+const NOW = '2024-06-30T00:00:00.000Z';
+
+beforeAll(() => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(NOW));
+});
+
+afterAll(() => {
+  vi.useRealTimers();
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -1030,6 +1047,293 @@ describe('deprecated-tag staleness caveat (#98)', () => {
     mockApi.tryGetCompanyConcept.mockResolvedValue(mockConceptResponse);
     const result = await getFinancialsTool.handler(input, ctx);
 
+    expect(result.caveats).toBeUndefined();
+  });
+});
+
+/** Build a companyconcept response from `[frame, periodEnd, value]` triples. */
+function conceptOf(
+  tag: string,
+  label: string,
+  unitKey: string,
+  rows: Array<[string, string, number]>,
+): CompanyConceptResponse {
+  return {
+    cik: 1000184,
+    entityName: 'Fixture Co',
+    label,
+    tag,
+    taxonomy: 'ifrs-full',
+    units: {
+      [unitKey]: rows.map(([frame, end, val]) => ({
+        accn: `0001000184-${end.slice(2, 4)}-000001`,
+        end,
+        filed: `${Number(end.slice(0, 4)) + 1}-02-26`,
+        form: '20-F',
+        fp: 'FY',
+        frame,
+        fy: Number(end.slice(0, 4)) + 1,
+        val,
+      })),
+    },
+  };
+}
+
+const EMPLOYEE_TAG = 'ExpenseFromSharebasedPaymentTransactionsWithEmployees';
+const BROAD_TAG =
+  'ExpenseFromSharebasedPaymentTransactionsInWhichGoodsOrServicesReceivedDidNotQualifyForRecognitionAsAssets';
+
+describe('IFRS share-based payment alternates (#101)', () => {
+  /** Real SEC values; the clock has to sit past them for the series to read as current. */
+  beforeEach(() => {
+    vi.setSystemTime(new Date('2026-07-26T00:00:00.000Z'));
+    mockApi.resolveCik.mockResolvedValue({ cik: '0001000184', name: 'SAP SE', ticker: 'SAP' });
+  });
+  afterAll(() => {
+    vi.setSystemTime(new Date(NOW));
+  });
+
+  /** SAP: the employee element is a two-period fringe, the IFRS 2.51(a) total is the real line. */
+  const sapEmployee = conceptOf(EMPLOYEE_TAG, 'Employee scheme expense', 'EUR', [
+    ['CY2019', '2019-12-31', 79_000_000],
+    ['CY2020', '2020-12-31', 46_000_000],
+  ]);
+  const sapBroad = conceptOf(BROAD_TAG, 'Share-based payment expense', 'EUR', [
+    ['CY2019', '2019-12-31', 1_835_000_000],
+    ['CY2020', '2020-12-31', 1_084_000_000],
+    ['CY2023', '2023-12-31', 2_220_000_000],
+    ['CY2024', '2024-12-31', 2_385_000_000],
+    ['CY2025', '2025-12-31', 1_695_000_000],
+  ]);
+
+  async function run(company: string, byTag: Record<string, CompanyConceptResponse>) {
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _tax: string, tag: string) => byTag[tag] ?? null,
+    );
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({
+      company,
+      concept: 'stock_based_compensation',
+      taxonomy: 'ifrs-full',
+      period_type: 'annual',
+    });
+    return getFinancialsTool.handler(input, ctx);
+  }
+
+  it('resolves the filer’s reported expense, not the fringe disclosure ahead of it', async () => {
+    const result = await run('SAP', { [EMPLOYEE_TAG]: sapEmployee, [BROAD_TAG]: sapBroad });
+
+    expect(result.concept).toBe(BROAD_TAG);
+    expect(result.data[0]?.period).toBe('CY2025');
+    expect(result.data[0]?.value).toBe(1_695_000_000);
+  });
+
+  it('does not switch definition mid-history on the frames the fringe also covers', async () => {
+    // The failure a plain index-1 fallback produces: 46M sitting inside a series
+    // that runs above a billion on either side.
+    const result = await run('SAP', { [EMPLOYEE_TAG]: sapEmployee, [BROAD_TAG]: sapBroad });
+
+    expect(result.data.find((d) => d.period === 'CY2020')?.value).toBe(1_084_000_000);
+    expect(result.data.find((d) => d.period === 'CY2019')?.value).toBe(1_835_000_000);
+    expect(result.data.map((d) => d.value)).not.toContain(46_000_000);
+  });
+
+  it('reports the concept under the tag that won, not the first one to answer', async () => {
+    const result = await run('SAP', { [EMPLOYEE_TAG]: sapEmployee, [BROAD_TAG]: sapBroad });
+
+    expect(result.label).toBe('Share-based payment expense');
+    expect(result.unit).toBe('EUR');
+    expect(result.tags_tried).toEqual([EMPLOYEE_TAG, BROAD_TAG]);
+  });
+
+  it('resolves the inverse filer the other way from the same rule', async () => {
+    // Sanofi: the employee element is the real line and the total is the fringe.
+    const result = await run('SNY', {
+      [EMPLOYEE_TAG]: conceptOf(EMPLOYEE_TAG, 'Employee scheme expense', 'EUR', [
+        ['CY2019', '2019-12-31', 252_000_000],
+        ['CY2020', '2020-12-31', 274_000_000],
+        ['CY2021', '2021-12-31', 244_000_000],
+        ['CY2022', '2022-12-31', 245_000_000],
+      ]),
+      [BROAD_TAG]: conceptOf(BROAD_TAG, 'Share-based payment expense', 'EUR', [
+        ['CY2019', '2019-12-31', 1_700_000],
+      ]),
+    });
+
+    expect(result.concept).toBe(EMPLOYEE_TAG);
+    expect(result.data[0]?.value).toBe(245_000_000);
+    expect(result.data.find((d) => d.period === 'CY2019')?.value).toBe(252_000_000);
+  });
+
+  it('resolves a filer that never tags the employee element at all', async () => {
+    // TSM and HSBC returned no_concept_data under a single-tag mapping.
+    const result = await run('TSM', {
+      [BROAD_TAG]: conceptOf(BROAD_TAG, 'Share-based payment expense', 'TWD', [
+        ['CY2023', '2023-12-31', 544_400_000],
+        ['CY2024', '2024-12-31', 1_646_200_000],
+      ]),
+    });
+
+    expect(result.concept).toBe(BROAD_TAG);
+    expect(result.data[0]?.value).toBe(1_646_200_000);
+  });
+
+  it('leaves revenue on declared priority, where coverage would pick the wrong element', async () => {
+    // Molson Coors reports gross sales and net-of-excise sales under separate
+    // elements and keeps eleven years under a 2018-retired one. Ranking by
+    // coverage hands it either the dead tag or the gross line; declared order
+    // keeps the net series definitionally continuous.
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0000024545',
+      name: 'Molson Coors Beverage Co',
+      ticker: 'TAP',
+    });
+    const usGaap = (r: CompanyConceptResponse) => ({ ...r, taxonomy: 'us-gaap' });
+    mockApi.tryGetCompanyConcept.mockImplementation(async (_c: string, _t: string, tag: string) => {
+      const byTag: Record<string, CompanyConceptResponse> = {
+        RevenueFromContractWithCustomerExcludingAssessedTax: usGaap(
+          conceptOf('RevenueFromContractWithCustomerExcludingAssessedTax', 'Excluding', 'USD', [
+            ['CY2019', '2019-12-31', 13_009_100_000],
+            ['CY2020', '2020-12-31', 11_723_800_000],
+            ['CY2025', '2025-12-31', 13_040_300_000],
+          ]),
+        ),
+        Revenues: usGaap(
+          conceptOf('Revenues', 'Revenues', 'USD', [
+            ['CY2016', '2016-12-31', 6_597_400_000],
+            ['CY2017', '2017-12-31', 13_471_500_000],
+            ['CY2018', '2018-12-31', 13_338_000_000],
+            ['CY2019', '2019-12-31', 13_009_100_000],
+            ['CY2020', '2020-12-31', 11_723_800_000],
+          ]),
+        ),
+        RevenueFromContractWithCustomerIncludingAssessedTax: usGaap(
+          conceptOf('RevenueFromContractWithCustomerIncludingAssessedTax', 'Including', 'USD', [
+            ['CY2016', '2016-12-31', 4_885_000_000],
+            ['CY2017', '2017-12-31', 11_002_800_000],
+            ['CY2018', '2018-12-31', 10_769_600_000],
+            ['CY2019', '2019-12-31', 10_579_400_000],
+            ['CY2020', '2020-12-31', 9_654_000_000],
+            ['CY2021', '2021-12-31', 10_279_700_000],
+            ['CY2022', '2022-12-31', 10_701_000_000],
+            ['CY2023', '2023-12-31', 11_702_100_000],
+            ['CY2024', '2024-12-31', 11_627_000_000],
+            ['CY2025', '2025-12-31', 11_140_800_000],
+          ]),
+        ),
+        SalesRevenueGoodsNet: usGaap(
+          conceptOf(
+            'SalesRevenueGoodsNet',
+            'Sales Revenue, Goods, Net (Deprecated 2018-01-31)',
+            'USD',
+            [
+              ['CY2013', '2013-12-31', 5_999_600_000],
+              ['CY2014', '2014-12-31', 5_927_500_000],
+              ['CY2015', '2015-12-31', 3_567_500_000],
+              ['CY2016', '2016-12-31', 4_885_000_000],
+              ['CY2017', '2017-12-31', 11_002_800_000],
+            ],
+          ),
+        ),
+      };
+      return byTag[tag] ?? null;
+    });
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({
+      company: 'TAP',
+      concept: 'revenue',
+      period_type: 'annual',
+    });
+    const result = await getFinancialsTool.handler(input, ctx);
+
+    const at = (period: string) => result.data.find((d) => d.period === period)?.value;
+    expect(result.concept).toBe('RevenueFromContractWithCustomerExcludingAssessedTax');
+    expect(at('CY2016')).toBe(6_597_400_000);
+    expect(at('CY2017')).toBe(13_471_500_000);
+    expect(at('CY2018')).toBe(13_338_000_000);
+    expect(at('CY2019')).toBe(13_009_100_000);
+    expect(result.caveats).toBeUndefined();
+  });
+});
+
+describe('stopped-series staleness caveat (#102)', () => {
+  beforeEach(() => {
+    vi.setSystemTime(new Date('2026-07-26T00:00:00.000Z'));
+    mockApi.resolveCik.mockResolvedValue({ cik: '0001121404', name: 'Sanofi', ticker: 'SNY' });
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _tax: string, tag: string) =>
+        tag === EMPLOYEE_TAG
+          ? conceptOf(EMPLOYEE_TAG, 'Employee scheme expense', 'EUR', [
+              ['CY2021', '2021-12-31', 244_000_000],
+              ['CY2022', '2022-12-31', 245_000_000],
+            ])
+          : null,
+    );
+  });
+  afterAll(() => {
+    vi.setSystemTime(new Date(NOW));
+  });
+
+  const input = () =>
+    getFinancialsTool.input.parse({
+      company: 'SNY',
+      concept: 'stock_based_compensation',
+      taxonomy: 'ifrs-full',
+      period_type: 'annual',
+    });
+
+  it('flags a current tag whose series stops years before today', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const result = await getFinancialsTool.handler(input(), ctx);
+
+    expect(result.caveats).toHaveLength(1);
+    expect(result.caveats?.[0]).toContain('CY2022');
+    expect(result.caveats?.[0]).toContain('3.6 years');
+    expect(result.caveats?.[0]).toContain('today (2026-07-26)');
+    expect(result.caveats?.[0]).toContain('is a current tag');
+  });
+
+  it('renders the caveat into the text surface', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const result = await getFinancialsTool.handler(input(), ctx);
+    const blocks = getFinancialsTool.format!(result);
+
+    expect(blocks[0].text).toContain('Caveat:');
+    expect(blocks[0].text).toContain('is a current tag');
+  });
+
+  it('stays silent for a filer one fiscal year plus a filing window behind', async () => {
+    // A 20-F filer's newest annual period sits a year back until the next report
+    // lands, four months after year end — the floor has to clear that.
+    vi.setSystemTime(new Date('2026-04-29T00:00:00.000Z'));
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _tax: string, tag: string) =>
+        tag === EMPLOYEE_TAG
+          ? conceptOf(EMPLOYEE_TAG, 'Employee scheme expense', 'EUR', [
+              ['CY2024', '2024-12-31', 244_000_000],
+            ])
+          : null,
+    );
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const result = await getFinancialsTool.handler(input(), ctx);
+
+    expect(result.caveats).toBeUndefined();
+  });
+
+  it('measures the full deduped set, so a live quarterly series clears an old annual one', async () => {
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _tax: string, tag: string) =>
+        tag === EMPLOYEE_TAG
+          ? conceptOf(EMPLOYEE_TAG, 'Employee scheme expense', 'EUR', [
+              ['CY2022', '2022-12-31', 245_000_000],
+              ['CY2026Q1', '2026-03-31', 60_000_000],
+            ])
+          : null,
+    );
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const result = await getFinancialsTool.handler(input(), ctx);
+
+    expect(result.data.map((d) => d.period)).toEqual(['CY2022']);
     expect(result.caveats).toBeUndefined();
   });
 });

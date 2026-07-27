@@ -11,9 +11,10 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { listConcepts, resolveConceptTarget } from '@/services/edgar/concept-map.js';
 import {
-  deprecatedTagCaveats,
   type FramedUnit,
+  newestReportedPeriod,
   seriesFromCompanyFacts,
+  seriesStalenessCaveats,
 } from '@/services/edgar/concept-series.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { missingQuarterCaveats } from '@/services/edgar/fiscal-periods.js';
@@ -157,7 +158,7 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
     caveats: z
       .array(z.string())
       .describe(
-        "Data-completeness warnings. One entry when one or two calendar quarters are absent from every recent qualifying year, because SEC reports a filer's fiscal Q4 as the 10-K residual rather than a discrete quarterly fact — this applies to calendar-year filers (no discrete Q4) as much as to off-calendar ones, and a filer whose other fiscal quarters span non-calendar durations loses a second quarter the same way. One further entry per line that resolved to an XBRL tag SEC has retired from the taxonomy, whose values may stop years short of the filer's latest report. Empty when nothing needs flagging.",
+        "Data-completeness warnings. One entry when one or two calendar quarters are absent from every recent qualifying year, because SEC reports a filer's fiscal Q4 as the 10-K residual rather than a discrete quarterly fact — this applies to calendar-year filers (no discrete Q4) as much as to off-calendar ones, and a filer whose other fiscal quarters span non-calendar durations loses a second quarter the same way. One further entry, prefixed with the concept name, per line whose values stop at least two full years behind the newest period this filer reports anywhere in the profile — either because the line resolved to an XBRL tag SEC has retired from the taxonomy, or because a current tag's series simply ends, which is what a migration to a different element or a dropped disclosure looks like. Empty when nothing needs flagging.",
       ),
   }),
 
@@ -215,12 +216,27 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
     }> = [];
     const gaps: Array<{ concept: string; label: string; group: string; tags_tried: string[] }> = [];
     const quarterFrames: string[] = [];
-    /** One entry per line whose winning tag is retired from the taxonomy (#98). */
-    const staleTagCaveats: string[] = [];
+    /**
+     * One entry per resolved line, held until every concept is read: a line's
+     * staleness is measured against the newest period this filer reports
+     * anywhere in the same payload, which is only known once the loop ends
+     * (#102).
+     */
+    const resolvedLines: Array<{
+      concept: string;
+      tag: string;
+      label: string;
+      newest: FramedUnit;
+    }> = [];
 
     for (const entry of listConcepts()) {
       const target = resolveConceptTarget(entry.name, input.taxonomy);
-      const series = seriesFromCompanyFacts(facts, target.taxonomy, target.tags);
+      const series = seriesFromCompanyFacts(
+        facts,
+        target.taxonomy,
+        target.tags,
+        target.tagSelection,
+      );
 
       if (!series) {
         gaps.push({
@@ -248,8 +264,15 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
       for (const unit of series.series) {
         if (QUARTER.test(unit.frame)) quarterFrames.push(unit.frame);
       }
-      for (const caveat of deprecatedTagCaveats(series.tag, series.label)) {
-        staleTagCaveats.push(`${entry.name}: ${caveat}`);
+      // series[] is sorted newest-first by period end.
+      const newest = series.series[0];
+      if (newest) {
+        resolvedLines.push({
+          concept: entry.name,
+          tag: series.tag,
+          label: series.label,
+          newest,
+        });
       }
 
       lines.push({
@@ -265,9 +288,22 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
       });
     }
 
+    /**
+     * The filer's own newest reported period, not today: it isolates the lines
+     * that lag the rest of this profile, and it collapses to silence for a filer
+     * that stopped filing altogether — whose every line is equally old and would
+     * otherwise repeat the same warning two dozen times (#102).
+     */
+    const reference = newestReportedPeriod(facts, input.taxonomy);
+
     const caveats = [
       ...(wantQuarterly ? missingQuarterCaveats(quarterFrames) : []),
-      ...staleTagCaveats,
+      ...resolvedLines.flatMap((line) =>
+        seriesStalenessCaveats(line.tag, line.label, line.newest, {
+          date: reference,
+          kind: 'reported-period',
+        }).map((caveat) => `${line.concept}: ${caveat}`),
+      ),
     ];
 
     ctx.log.info('Snapshot built', {

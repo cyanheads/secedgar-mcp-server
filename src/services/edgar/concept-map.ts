@@ -3,7 +3,7 @@
  * @module services/edgar/concept-map
  */
 
-import type { ConceptMapping, ConceptTaxonomy } from './types.js';
+import type { ConceptMapping, ConceptTaxonomy, TagSelection } from './types.js';
 
 /**
  * Friendly name → XBRL tag mapping. Tags are tried in order for companyconcept
@@ -294,7 +294,39 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   stock_based_compensation: {
     group: 'income_statement',
     tags: ['ShareBasedCompensation', 'AllocatedShareBasedCompensationExpense'],
-    ifrsTags: ['ExpenseFromSharebasedPaymentTransactionsWithEmployees'],
+    /**
+     * The only concept whose IFRS tags are alternates rather than a priority
+     * ladder, so it is the only one carrying `ifrsTagSelection: 'coverage'`.
+     *
+     * IFRS 2 filers split between the employee-scheme element and the IFRS 2.51(a)
+     * expense total, and the two invert between filers: SAP reports the total as
+     * its real line (an 11-period series reaching EUR 1,695M) and the employee
+     * element as a two-period fringe worth EUR 46M, while Sanofi reports the exact
+     * opposite (employee element EUR 245M across CY2015-CY2022, total a fringe
+     * under EUR 2M across CY2016-CY2019). No fixed order is right for both: with
+     * the employee element leading, SAP's series switches definition mid-history;
+     * with the total leading, four of Sanofi's years collapse to a hundredth of
+     * the reported expense. TSM and HSBC never tag the employee element and had no
+     * value at all under a single-tag mapping (#101).
+     *
+     * The equity-settled split of the total is deliberately absent. Every filer
+     * checked that tags it also tags the total, at or below it, so it would only
+     * ever contend for a frame the total already covers — and the map's rule is
+     * that an element earns a place by being some filer's real line, not by
+     * existing (#99).
+     *
+     * Coverage picks the right one in both directions here because the fringe
+     * disclosures are short: 2 periods against 11 for SAP, 4 against 8 for
+     * Sanofi. It stays scoped to `ifrsTags` because the us-gaap pair is not
+     * alternates — `AllocatedShareBasedCompensationExpense` is the disaggregated
+     * line and out-covers `ShareBasedCompensation` for filers including Alphabet,
+     * IBM, Tesla, and P&G, so coverage there would demote the total.
+     */
+    ifrsTags: [
+      'ExpenseFromSharebasedPaymentTransactionsWithEmployees',
+      'ExpenseFromSharebasedPaymentTransactionsInWhichGoodsOrServicesReceivedDidNotQualifyForRecognitionAsAssets',
+    ],
+    ifrsTagSelection: 'coverage',
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Stock-Based Compensation',
@@ -444,6 +476,8 @@ export function resolveConcept(input: string): ConceptMapping | undefined {
 export interface ConceptTarget {
   /** Human-readable label — the mapping's label, or the raw tag itself. */
   label: string;
+  /** How a filer reporting several of these tags resolves to one of them. */
+  tagSelection: TagSelection;
   /** Tags to try in priority order. Index 0 is the preferred total. */
   tags: string[];
   /** Taxonomy to look the tags up under. */
@@ -465,12 +499,21 @@ export function resolveConceptTarget(
   requestedTaxonomy: ConceptTaxonomy,
 ): ConceptTarget {
   const mapping = resolveConcept(input);
-  if (!mapping) return { label: input, tags: [input], taxonomy: requestedTaxonomy };
+  if (!mapping) {
+    return { label: input, tagSelection: 'priority', tags: [input], taxonomy: requestedTaxonomy };
+  }
 
   const taxonomy = requestedTaxonomy === 'us-gaap' ? mapping.taxonomy : requestedTaxonomy;
-  const tags =
-    taxonomy === 'ifrs-full' && mapping.ifrsTags?.length ? mapping.ifrsTags : mapping.tags;
-  return { label: mapping.label, tags, taxonomy, unit: mapping.unit };
+  /** Defined only when IFRS was asked for and the mapping has confirmed variants — they carry their own selection. */
+  const ifrsTags =
+    taxonomy === 'ifrs-full' && mapping.ifrsTags?.length ? mapping.ifrsTags : undefined;
+  return {
+    label: mapping.label,
+    tagSelection: (ifrsTags ? mapping.ifrsTagSelection : undefined) ?? 'priority',
+    tags: ifrsTags ?? mapping.tags,
+    taxonomy,
+    unit: mapping.unit,
+  };
 }
 
 /** Get all concept mappings for reference resource generation. */

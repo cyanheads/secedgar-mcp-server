@@ -4,7 +4,13 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { getAllConcepts, resolveConcept, searchConcepts } from '@/services/edgar/concept-map.js';
+import {
+  getAllConcepts,
+  listConcepts,
+  resolveConcept,
+  resolveConceptTarget,
+  searchConcepts,
+} from '@/services/edgar/concept-map.js';
 
 describe('resolveConcept', () => {
   it('resolves a known friendly name', () => {
@@ -219,6 +225,56 @@ describe('resolveConcept — IFRS tag variants', () => {
     // IFRS presents borrowings as one caption and has no element for the
     // notes/debt split, so the concept is a gap under ifrs-full by design.
     expect(resolveConcept('notes_payable')?.ifrsTags).toBeUndefined();
+  });
+});
+
+describe('resolveConceptTarget — tag selection (#101)', () => {
+  it('gives stock_based_compensation both IFRS elements, employee first', () => {
+    // Seven of twelve sampled 20-F filers report the employee element as their
+    // real line, so it keeps index 0; TSM and HSBC never tag it and had no value
+    // at all until the IFRS 2.51(a) total joined the array.
+    expect(resolveConceptTarget('stock_based_compensation', 'ifrs-full').tags).toEqual([
+      'ExpenseFromSharebasedPaymentTransactionsWithEmployees',
+      'ExpenseFromSharebasedPaymentTransactionsInWhichGoodsOrServicesReceivedDidNotQualifyForRecognitionAsAssets',
+    ]);
+  });
+
+  it('selects that concept’s IFRS tags by coverage, since the two invert between filers', () => {
+    expect(resolveConceptTarget('stock_based_compensation', 'ifrs-full').tagSelection).toBe(
+      'coverage',
+    );
+  });
+
+  it('keeps the us-gaap side of the same concept on declared priority', () => {
+    // AllocatedShareBasedCompensationExpense is the disaggregated line and
+    // out-covers the total for filers including Alphabet, IBM, Tesla, and P&G,
+    // so coverage there would demote ShareBasedCompensation.
+    const target = resolveConceptTarget('stock_based_compensation', 'us-gaap');
+    expect(target.tags[0]).toBe('ShareBasedCompensation');
+    expect(target.tagSelection).toBe('priority');
+  });
+
+  it('leaves every other concept on declared priority, under both taxonomies', () => {
+    // Coverage ranks a retired tag or a differently-defined sibling ahead of the
+    // preferred total whenever the filer maintained it longer — Molson Coors
+    // tags eleven years under a 2018-retired revenue element — so it must stay
+    // opt-in per concept rather than spreading.
+    for (const entry of listConcepts()) {
+      if (entry.name === 'stock_based_compensation') continue;
+      for (const taxonomy of ['us-gaap', 'ifrs-full'] as const) {
+        expect(
+          resolveConceptTarget(entry.name, taxonomy).tagSelection,
+          `${entry.name} / ${taxonomy}`,
+        ).toBe('priority');
+      }
+    }
+  });
+
+  it('treats a raw XBRL tag as a single-tag priority lookup', () => {
+    expect(resolveConceptTarget('AccountsPayableCurrent', 'ifrs-full')).toMatchObject({
+      tags: ['AccountsPayableCurrent'],
+      tagSelection: 'priority',
+    });
   });
 });
 

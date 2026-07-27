@@ -12,7 +12,12 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { resolveConceptTarget } from '@/services/edgar/concept-map.js';
-import { deprecatedTagCaveats, seriesFromCompanyFacts } from '@/services/edgar/concept-series.js';
+import {
+  type FramedUnit,
+  newestReportedPeriod,
+  seriesFromCompanyFacts,
+  seriesStalenessCaveats,
+} from '@/services/edgar/concept-series.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { missingQuarterCaveats } from '@/services/edgar/fiscal-periods.js';
 import type { CikMatch } from '@/services/edgar/types.js';
@@ -241,7 +246,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     caveats: z
       .array(z.string())
       .describe(
-        "Comparability warnings: a filer missing one or two calendar quarters from the frame-tagged series, a concept that resolved to an XBRL tag SEC has retired (so that company's values may stop years short of the others'), period ends that differ inside one aligned period, and concepts whose unit differs across companies. Company-specific warnings are prefixed with the company name. Empty when nothing needs flagging.",
+        "Comparability warnings: a filer missing one or two calendar quarters from the frame-tagged series, a concept whose values stop at least two full years behind the rest of that company's reporting (either an XBRL tag SEC has retired, or a current tag the filer stopped using), period ends that differ inside one aligned period, and concepts whose unit differs across companies. Company-specific warnings are prefixed with the company name. Empty when nothing needs flagging.",
       ),
     dataset: z
       .object({
@@ -332,8 +337,20 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       });
 
       const quarterFrames: string[] = [];
+      /** Held until this company's concepts are all read — see the reference below. */
+      const resolvedLines: Array<{
+        concept: string;
+        tag: string;
+        label: string;
+        newest: FramedUnit;
+      }> = [];
       for (const { concept, target } of targets) {
-        const series = seriesFromCompanyFacts(facts, target.taxonomy, target.tags);
+        const series = seriesFromCompanyFacts(
+          facts,
+          target.taxonomy,
+          target.tags,
+          target.tagSelection,
+        );
         if (!series || series.series.length === 0) {
           gaps.push({
             cik: company.cik,
@@ -384,14 +401,26 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
         units.add(series.unit || target.unit || '');
         unitsByConcept.set(concept, units);
 
-        /**
-         * A concept that fell through to a retired tag for this filer alone puts
-         * a series that stops at the tag's retirement next to current values from
-         * the other companies — the spread reads as a business fact unless the
-         * stale tag is named (#98).
-         */
-        for (const caveat of deprecatedTagCaveats(series.tag, series.label)) {
-          caveatSet.add(`${name} / ${concept}: ${caveat}`);
+        // series[] is sorted newest-first by period end.
+        const newest = series.series[0];
+        if (newest) resolvedLines.push({ concept, tag: series.tag, label: series.label, newest });
+      }
+
+      /**
+       * A concept whose series stops years back for this filer alone sits next to
+       * current values from the other companies, and the spread reads as a
+       * business fact unless the gap is named — whether the cause is a retired tag
+       * (#98) or a current one the filer stopped tagging (#102). Measured against
+       * this company's own newest reported period, so a filer that is simply
+       * behind on everything is not flagged concept by concept.
+       */
+      const reference = newestReportedPeriod(facts, input.taxonomy);
+      for (const line of resolvedLines) {
+        for (const caveat of seriesStalenessCaveats(line.tag, line.label, line.newest, {
+          date: reference,
+          kind: 'reported-period',
+        })) {
+          caveatSet.add(`${name} / ${line.concept}: ${caveat}`);
         }
       }
 

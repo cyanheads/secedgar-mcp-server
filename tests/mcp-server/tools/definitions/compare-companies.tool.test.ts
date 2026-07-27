@@ -328,6 +328,76 @@ describe('compareCompaniesTool', () => {
     expect(result.caveats.some((c) => c.includes('Period ends differ'))).toBe(false);
   });
 
+  /**
+   * One company's series stopping years back sits next to current values from
+   * the others, and the spread reads as a business fact unless the gap is named.
+   */
+  describe('stopped-series staleness caveat (#102)', () => {
+    /** Reports revenue through CY2025 but stopped tagging assets after CY2021. */
+    const laggingFiler: CompanyFactsResponse = {
+      cik: 111111,
+      entityName: 'LAGGING CO',
+      facts: {
+        'us-gaap': {
+          Revenues: {
+            label: 'Revenues',
+            units: {
+              USD: [2024, 2025].map((year) =>
+                fact({ frame: `CY${year}`, end: `${year}-12-31`, val: year }),
+              ),
+            },
+          },
+          Assets: {
+            label: 'Total Assets',
+            units: { USD: [fact({ frame: 'CY2021Q4I', end: '2021-12-31', val: 42 })] },
+          },
+        },
+      },
+    };
+
+    beforeEach(() => {
+      mockApi.tryGetCompanyFacts.mockImplementation(async (cik: string) =>
+        cik === '0000111111' ? laggingFiler : calendarFiler,
+      );
+      mockApi.resolveCik.mockImplementation(async (input: string) =>
+        input === 'LAG'
+          ? { cik: '0000111111', name: 'LAGGING CO' }
+          : { cik: '0000789019', name: 'CALENDAR CO' },
+      );
+    });
+
+    it('names the company and concept whose series stopped', async () => {
+      const ctx = createMockContext({ errors: compareCompaniesTool.errors });
+      const input = compareCompaniesTool.input.parse({
+        companies: ['CAL', 'LAG'],
+        concepts: ['assets'],
+      });
+      const result = await compareCompaniesTool.handler(input, ctx);
+
+      const stale = result.caveats.find((c) => c.startsWith('LAGGING CO / assets: '));
+      expect(stale).toBeDefined();
+      expect(stale).toContain('4.0 years');
+      expect(result.caveats.some((c) => c.startsWith('CALENDAR CO / assets: '))).toBe(false);
+    });
+
+    it('measures against the filer’s whole catalog, not just the requested concepts', async () => {
+      // With only `assets` requested, a reference drawn from the request would
+      // compare that series against itself and never report it.
+      const ctx = createMockContext({ errors: compareCompaniesTool.errors });
+      const input = compareCompaniesTool.input.parse({
+        companies: ['CAL', 'LAG'],
+        concepts: ['assets'],
+      });
+      const result = await compareCompaniesTool.handler(input, ctx);
+
+      expect(
+        result.caveats.some((c) =>
+          c.includes('the newest period this filer reports (ending 2025-12-31)'),
+        ),
+      ).toBe(true);
+    });
+  });
+
   it('shrinks the inline window when the cell count would overflow the response', async () => {
     // 10 companies x 2 concepts x 12 periods is 240 cells — past what one response
     // can usefully carry, so the window drops older periods and discloses the drop.

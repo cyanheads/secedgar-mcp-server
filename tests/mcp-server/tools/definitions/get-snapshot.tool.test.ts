@@ -237,6 +237,135 @@ describe('getSnapshotTool', () => {
     expect(result.caveats.some((c) => c.includes('retired from the taxonomy'))).toBe(false);
   });
 
+  it('resolves the IFRS share-based-payment alternates by coverage (#101)', async () => {
+    const sapFacts: CompanyFactsResponse = {
+      cik: 1000184,
+      entityName: 'SAP SE',
+      facts: {
+        'ifrs-full': {
+          ExpenseFromSharebasedPaymentTransactionsWithEmployees: {
+            label: 'Employee scheme expense',
+            units: {
+              EUR: [
+                fact({ frame: 'CY2019', end: '2019-12-31', val: 79_000_000 }),
+                fact({ frame: 'CY2020', end: '2020-12-31', val: 46_000_000 }),
+              ],
+            },
+          },
+          ExpenseFromSharebasedPaymentTransactionsInWhichGoodsOrServicesReceivedDidNotQualifyForRecognitionAsAssets:
+            {
+              label: 'Share-based payment expense',
+              units: {
+                EUR: [
+                  fact({ frame: 'CY2019', end: '2019-12-31', val: 1_835_000_000 }),
+                  fact({ frame: 'CY2020', end: '2020-12-31', val: 1_084_000_000 }),
+                  fact({ frame: 'CY2025', end: '2025-12-31', val: 1_695_000_000 }),
+                ],
+              },
+            },
+        },
+      },
+    };
+    mockApi.resolveCik.mockResolvedValue({ cik: '0001000184', name: 'SAP SE' });
+    mockApi.tryGetCompanyFacts.mockResolvedValue(sapFacts);
+
+    const ctx = createMockContext({ errors: getSnapshotTool.errors });
+    const input = getSnapshotTool.input.parse({ company: 'SAP', taxonomy: 'ifrs-full' });
+    const result = await getSnapshotTool.handler(input, ctx);
+
+    const sbc = result.lines.find((l) => l.concept === 'stock_based_compensation');
+    expect(sbc?.tag).toBe(
+      'ExpenseFromSharebasedPaymentTransactionsInWhichGoodsOrServicesReceivedDidNotQualifyForRecognitionAsAssets',
+    );
+    expect(sbc?.annual?.value).toBe(1_695_000_000);
+  });
+
+  /**
+   * A current tag carries no retirement stamp, so a line that simply stops has
+   * no tell at all — the gap to the rest of the profile is the only signal.
+   */
+  describe('stopped-series staleness caveat (#102)', () => {
+    const sanofiFacts: CompanyFactsResponse = {
+      cik: 1121404,
+      entityName: 'Sanofi',
+      facts: {
+        'ifrs-full': {
+          Revenue: {
+            label: 'Revenue',
+            units: {
+              EUR: [
+                fact({ frame: 'CY2024', end: '2024-12-31', val: 41_080_000_000 }),
+                fact({ frame: 'CY2025', end: '2025-12-31', val: 43_000_000_000 }),
+              ],
+            },
+          },
+          ExpenseFromSharebasedPaymentTransactionsWithEmployees: {
+            label: 'Employee scheme expense',
+            units: {
+              EUR: [
+                fact({ frame: 'CY2021', end: '2021-12-31', val: 244_000_000 }),
+                fact({ frame: 'CY2022', end: '2022-12-31', val: 245_000_000 }),
+              ],
+            },
+          },
+        },
+      },
+    };
+
+    beforeEach(() => {
+      mockApi.resolveCik.mockResolvedValue({ cik: '0001121404', name: 'Sanofi' });
+      mockApi.tryGetCompanyFacts.mockResolvedValue(sanofiFacts);
+    });
+
+    it('names the line that lags the rest of the filer’s reporting', async () => {
+      const ctx = createMockContext({ errors: getSnapshotTool.errors });
+      const input = getSnapshotTool.input.parse({ company: 'SNY', taxonomy: 'ifrs-full' });
+      const result = await getSnapshotTool.handler(input, ctx);
+
+      expect(result.caveats).toHaveLength(1);
+      expect(result.caveats[0]).toMatch(/^stock_based_compensation: /);
+      expect(result.caveats[0]).toContain('3.0 years');
+      expect(result.caveats[0]).toContain(
+        'the newest period this filer reports (ending 2025-12-31)',
+      );
+    });
+
+    it('leaves the line that is current alone', async () => {
+      const ctx = createMockContext({ errors: getSnapshotTool.errors });
+      const input = getSnapshotTool.input.parse({ company: 'SNY', taxonomy: 'ifrs-full' });
+      const result = await getSnapshotTool.handler(input, ctx);
+
+      expect(result.caveats.some((c) => c.startsWith('revenue: '))).toBe(false);
+    });
+
+    it('stays silent for a filer that stopped filing altogether', async () => {
+      // Every line is equally old, so nothing lags anything — repeating one
+      // warning per concept would bury the profile it is attached to.
+      mockApi.tryGetCompanyFacts.mockResolvedValue({
+        cik: 1121404,
+        entityName: 'Dormant Co',
+        facts: {
+          'ifrs-full': {
+            Revenue: {
+              label: 'Revenue',
+              units: { EUR: [fact({ frame: 'CY2015', end: '2015-12-31', val: 100 })] },
+            },
+            ExpenseFromSharebasedPaymentTransactionsWithEmployees: {
+              label: 'Employee scheme expense',
+              units: { EUR: [fact({ frame: 'CY2015', end: '2015-12-31', val: 5 })] },
+            },
+          },
+        },
+      } satisfies CompanyFactsResponse);
+
+      const ctx = createMockContext({ errors: getSnapshotTool.errors });
+      const input = getSnapshotTool.input.parse({ company: 'SNY', taxonomy: 'ifrs-full' });
+      const result = await getSnapshotTool.handler(input, ctx);
+
+      expect(result.caveats).toEqual([]);
+    });
+  });
+
   it('throws company_not_found for an unresolvable input', async () => {
     mockApi.resolveCik.mockResolvedValue([]);
     const ctx = createMockContext({ errors: getSnapshotTool.errors });
