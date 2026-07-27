@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.14.0](changelog/0.14.x/0.14.0.md) — 2026-07-26
+
+Two new tools — secedgar_find_holders (reverse 13F lookup, issuer to the managers reporting it) and secedgar_get_material_events (8-K filings filtered by decoded item code). Series-staleness caveats now cover a current tag whose series simply ends, and ifrs-full stock_based_compensation picks its element per filer by coverage.
+
 ## [0.13.1](changelog/0.13.x/0.13.1.md) — 2026-07-26
 
 revenue no longer resolves through a tag SEC retired in 2018, and any concept falling through to a retired tag says so in caveats. The missing-quarter detector names every absent quarter instead of at most one, binary filing documents are rejected rather than decoded, and ifrs-full coverage goes 3 to 31 of 33 concepts.

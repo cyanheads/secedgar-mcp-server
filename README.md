@@ -1,7 +1,7 @@
 <div align="center">
   <h1>@cyanheads/secedgar-mcp-server</h1>
   <p><b>Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.</b>
-  <div>12 Tools (+1 opt-in) • 2 Resources • 1 Prompt</div>
+  <div>14 Tools (+1 opt-in) • 2 Resources • 1 Prompt</div>
   </p>
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Tools
 
-Ten tools for querying SEC EDGAR data, plus three for SQL analytics over the DuckDB-backed canvas dataframes those tools materialize:
+Twelve tools for querying SEC EDGAR data, plus three for SQL analytics over the DuckDB-backed canvas dataframes those tools materialize:
 
 | Tool | Description |
 |:---|:---|
@@ -38,8 +38,10 @@ Ten tools for querying SEC EDGAR data, plus three for SQL analytics over the Duc
 | `secedgar_get_filing` | Fetch a specific filing's metadata and document content |
 | `secedgar_get_financials` | Get historical XBRL financial data for a company |
 | `secedgar_get_snapshot` | One-call financial profile — the latest value of every supported concept, grouped by statement |
+| `secedgar_get_material_events` | 8-K filings with item codes decoded and filterable — earnings, officer changes, non-reliance |
 | `secedgar_get_insider_transactions` | Form 4 / 4-A insider transactions (buys, sells, grants, exercises) parsed from ownership XML |
 | `secedgar_get_institutional_holdings` | 13F-HR quarterly institutional holdings parsed from the information table |
+| `secedgar_find_holders` | Reverse 13F lookup — which institutional managers reported holding an issuer |
 | `secedgar_fetch_frames` | Fetch SEC XBRL frames for one concept × one period across all reporting companies |
 | `secedgar_compare_companies` | Compare named companies across several concepts, aligned on calendar periods |
 | `secedgar_search_concepts` | Discover supported XBRL concept names or reverse-lookup a raw tag |
@@ -134,13 +136,39 @@ Surface Form 4 / 4-A insider activity for a company by parsing ownership XML. Fo
 
 Surface 13F-HR quarterly institutional holdings by parsing the information table.
 
-- Pass the institutional filer (CIK or full legal name, e.g. `0000102909` for Vanguard) to see what it holds — reverse lookup from a portfolio company to its holders is not supported (EDGAR has no issuer→13F index); use `secedgar_search_filings` with `forms=["13F-HR"]` for issuer-side questions
+- Pass the institutional filer (CIK or full legal name, e.g. `0000102909` for Vanguard) to see what it holds; for the reverse direction — which managers hold a given company — use `secedgar_find_holders`, whose `filer_cik` results feed straight back into this tool
 - Each holding: issuer name, CUSIP, market value (whole USD), shares/principal, and put/call; raw rows also carry investment discretion
 - Sub-lines for the same security (one per manager/account) are consolidated into distinct positions sorted by value by default — pass `consolidate: false` for raw filing rows
 - Resolves the filing-manager name and reporting quarter from the cover page; target a specific quarter with `quarter` (e.g. `"2025-Q4"`)
 - `total_holdings_in_filing` counts raw info-table rows; `total_positions` counts distinct positions after consolidation (both before `limit`)
 - Page through a large information table with `offset` — the response echoes the effective `offset` and returns `next_offset` while rows remain, so every position stays reachable even when the canvas is disabled
 - The full parsed holdings set is materialized as a `df_<id>` dataframe (the inline list is one page of `limit` rows) — query it with `secedgar_dataframe_query` for full-filing aggregation or cross-quarter joins on `cusip` + `reporting_period`
+
+---
+
+### `secedgar_find_holders`
+
+Reverse 13F lookup: which institutional managers reported a position in an issuer, for one reporting quarter.
+
+- Searching by `cusip` matches the identifier the 13F information table itself carries — the precise path. Louisiana-Pacific Q1 2026 returns 451 filings by CUSIP `546347105` against 43 by the phrase `"LOUISIANA-PACIFIC CORP"`; the name path both under-matches (managers write the name differently) and over-matches (an unrelated issuer sharing a word)
+- A CUSIP is not derivable from a ticker anywhere in EDGAR — read one off any `secedgar_get_institutional_holdings` result, or fall back to the name path
+- `quarter` targets a reporting period (`"2026-Q1"`); omit it for the newest quarter whose 45-day filing deadline has passed. The applied quarter and its filing window are echoed back
+- Filings are kept by the period they report, not the date they were filed, so amendments restating an older quarter (roughly 6% of any window) do not land in the wrong quarter's holder list
+- Up to 500 filer rows are fetched per call; `total_filings` reports the full count and `dataset.truncated` flags when more exist
+- **The list is unranked.** EDGAR search relevance carries no signal about position size — read a manager's actual position by passing its `filer_cik` to `secedgar_get_institutional_holdings`
+
+---
+
+### `secedgar_get_material_events`
+
+A company's 8-K history with item codes decoded and filterable — the only surface that can scope by what the event actually was rather than by form.
+
+- Filter with `items` (e.g. `["2.02"]` for results of operations, `["5.02"]` for officer departures, `["4.02"]` for non-reliance); `secedgar_search_filings` and `secedgar_company_search` cannot see items at all
+- Two numbering regimes are both accepted and decoded: the dotted scheme in force since 2004-08-23, and the single integers before it (legacy `12` is the ancestor of `2.02`, `9` of `7.01`). Decoding keys off the code's shape, so a filing straddling the changeover is never mis-decoded, and a window spanning it needs both codes in the filter
+- `item_distribution` counts every code across the scanned window before the filter, so a zero-hit filter comes back with the items that *are* present rather than a dead end
+- A date window pages into the older submissions archive, reaching 8-K filings that predate the ~1000-filing recent window; `history_scanned_through` discloses the scan depth
+- The full decode table is in the `secedgar://filing-types` resource
+- The full filtered set materializes as a `df_<id>` dataframe with item codes on every row — item frequency over time is one `secedgar_dataframe_query` away
 
 ---
 
@@ -185,7 +213,7 @@ Discover supported XBRL concept names before querying financials or cross-compan
 
 ### `secedgar_dataframe_describe` / `secedgar_dataframe_query` / `secedgar_dataframe_drop`
 
-In-conversation SQL analytics over the dataframes that `secedgar_fetch_frames`, `secedgar_compare_companies`, `secedgar_search_filings`, `secedgar_get_financials`, `secedgar_get_insider_transactions`, and `secedgar_get_institutional_holdings` materialize on a shared DuckDB-backed canvas. Each data-returning call adds a `dataset` field with a `df_XXXXX_XXXXX` handle; pass that handle to `secedgar_dataframe_query` for joins, aggregates, window functions, percentiles — standard DuckDB SQL.
+In-conversation SQL analytics over the dataframes that `secedgar_fetch_frames`, `secedgar_compare_companies`, `secedgar_search_filings`, `secedgar_get_financials`, `secedgar_get_material_events`, `secedgar_get_insider_transactions`, `secedgar_get_institutional_holdings`, and `secedgar_find_holders` materialize on a shared DuckDB-backed canvas. Each data-returning call adds a `dataset` field with a `df_XXXXX_XXXXX` handle; pass that handle to `secedgar_dataframe_query` for joins, aggregates, window functions, percentiles — standard DuckDB SQL.
 
 - **Read-only by default.** Writes, DDL, DROP, COPY, PRAGMA, ATTACH, and external-file table functions are rejected by the framework SQL gate. System catalogs (`information_schema`, `pg_catalog`, `sqlite_master`, `duckdb_*`) are denied at the bridge layer so callers can't enumerate dataframes they don't already hold a handle for. `secedgar_dataframe_drop` is the only destructive tool and is opt-in (`EDGAR_DATAFRAME_DROP_ENABLED=true`); TTL handles cleanup otherwise.
 - **Per-table TTL.** Each dataframe ages on its own clock (default 24h, override with `EDGAR_DATASET_TTL_SECONDS`). The canvas itself uses the framework's sliding TTL.
@@ -196,7 +224,7 @@ In-conversation SQL analytics over the dataframes that `secedgar_fetch_frames`, 
 | URI | Description |
 |:---|:---|
 | `secedgar://concepts` | Common XBRL financial concepts grouped by statement, mapping friendly names to XBRL tags |
-| `secedgar://filing-types` | Common SEC filing types with descriptions, cadence, and use cases |
+| `secedgar://filing-types` | Common SEC filing types with descriptions, cadence, and use cases, plus the full 8-K item-code decode tables for both numbering regimes |
 
 ## Prompts
 
@@ -222,7 +250,7 @@ SEC EDGAR–specific:
 - Friendly XBRL concept name mapping with historical tag change handling
 - Searchable concept catalog with statement-group metadata and reverse XBRL tag lookup
 - HTML-to-text conversion for filing documents via `html-to-text`
-- In-conversation SQL analytics: `secedgar_fetch_frames`, `secedgar_compare_companies`, `secedgar_search_filings`, `secedgar_get_financials`, `secedgar_get_insider_transactions`, and `secedgar_get_institutional_holdings` materialize their full result as a DuckDB-backed canvas dataframe queryable via `secedgar_dataframe_query`
+- In-conversation SQL analytics: `secedgar_fetch_frames`, `secedgar_compare_companies`, `secedgar_search_filings`, `secedgar_get_financials`, `secedgar_get_material_events`, `secedgar_get_insider_transactions`, `secedgar_get_institutional_holdings`, and `secedgar_find_holders` materialize their full result as a DuckDB-backed canvas dataframe queryable via `secedgar_dataframe_query`
 - No API keys required — SEC EDGAR is a free, public API
 
 ## Getting started
