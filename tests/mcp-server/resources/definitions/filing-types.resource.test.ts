@@ -57,6 +57,13 @@ describe('filingTypesResource', () => {
     expect(text).toContain('primary_doc.xml');
   });
 
+  it('lists NPORT-P, the fund portfolio report, with its per-series cadence (#80)', () => {
+    const ctx = createMockContext();
+    const text = filingTypesResource.handler({}, ctx) as string;
+    expect(text).toContain('**NPORT-P**');
+    expect(text).toContain('per fund series');
+  });
+
   it('lists resources correctly', async () => {
     const listing = await filingTypesResource.list!();
     expect(listing.resources).toHaveLength(1);

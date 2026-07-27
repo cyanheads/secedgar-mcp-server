@@ -1,12 +1,14 @@
 /**
  * @fileoverview Tests for EdgarApiService helpers — `pickPreferredTicker` (CIK
  * tie-breaker), `trigramSimilarity`/`suggestCompanies` (near-match suggestions),
- * and `buildTickerCache` MF-ticker merge behaviour via the private indexing logic.
+ * `buildTickerCache` MF-ticker merge behaviour via the private indexing logic, and
+ * `parseSeriesFilingFeed` (fund series → its own filings).
  * @module tests/services/edgar/edgar-api-service
  */
 
 import { describe, expect, it } from 'vitest';
 import {
+  parseSeriesFilingFeed,
   pickPreferredTicker,
   suggestCompanies,
   trigramSimilarity,
@@ -221,5 +223,79 @@ describe('former-name entries', () => {
     const suggestions = suggestCompanies('facebok', entries);
     expect(suggestions.length).toBeGreaterThan(0);
     expect(suggestions[0]).toMatchObject({ cik: '0001326801' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Series filing feed (fund series → its own filings)
+// ---------------------------------------------------------------------------
+
+/** EDGAR's company-browse Atom feed, trimmed to the elements the parser reads. */
+const SERIES_FEED = `<?xml version="1.0" encoding="ISO-8859-1" ?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <company-info>
+    <cik>36405</cik>
+    <conformed-name>VANGUARD INDEX FUNDS</conformed-name>
+    <formerly-names count="1"><names><name>VANGUARD INDEX TRUST</name></names></formerly-names>
+  </company-info>
+  <entry>
+    <content type="text/xml">
+      <accession-number>0000036405-26-000325</accession-number>
+      <filing-date>2026-05-28</filing-date>
+      <filing-type>NPORT-P</filing-type>
+    </content>
+  </entry>
+  <entry>
+    <content type="text/xml">
+      <accession-number>0002071691-26-015790</accession-number>
+      <filing-date>2026-07-13</filing-date>
+      <filing-type>NPORT-P/A</filing-type>
+    </content>
+  </entry>
+</feed>`;
+
+describe('parseSeriesFilingFeed', () => {
+  it('zero-pads the registrant CIK the feed reports bare', () => {
+    expect(parseSeriesFilingFeed(SERIES_FEED).registrantCik).toBe('0000036405');
+  });
+
+  it('names the registrant the series belongs to', () => {
+    expect(parseSeriesFilingFeed(SERIES_FEED).registrantName).toBe('VANGUARD INDEX FUNDS');
+  });
+
+  it('reads one row per filing, amendments of the form included', () => {
+    expect(parseSeriesFilingFeed(SERIES_FEED).filings).toEqual([
+      {
+        accessionNumber: '0000036405-26-000325',
+        filingDate: '2026-05-28',
+        form: 'NPORT-P',
+      },
+      {
+        accessionNumber: '0002071691-26-015790',
+        filingDate: '2026-07-13',
+        form: 'NPORT-P/A',
+      },
+    ]);
+  });
+
+  it('reports an unknown series as an empty feed rather than throwing', () => {
+    const empty = parseSeriesFilingFeed(
+      '<?xml version="1.0" ?><feed xmlns="http://www.w3.org/2005/Atom"><author><name>Webmaster</name></author></feed>',
+    );
+    expect(empty.filings).toEqual([]);
+    expect(empty.registrantCik).toBeUndefined();
+    expect(empty.registrantName).toBeUndefined();
+  });
+
+  it('skips an entry with no accession number instead of emitting a blank row', () => {
+    const partial = SERIES_FEED.replace(
+      '<accession-number>0000036405-26-000325</accession-number>',
+      '',
+    );
+    expect(parseSeriesFilingFeed(partial).filings).toHaveLength(1);
+  });
+
+  it('ignores an HTML error page served in place of the feed', () => {
+    expect(parseSeriesFilingFeed('<html><body>Not found</body></html>').filings).toEqual([]);
   });
 });

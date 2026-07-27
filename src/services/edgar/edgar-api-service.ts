@@ -7,6 +7,7 @@
 
 import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { httpErrorFromResponse } from '@cyanheads/mcp-ts-core/utils';
+import { parseDocument } from 'htmlparser2';
 import { getServerConfig } from '@/config/server-config.js';
 import { getEdgarMirror } from '@/services/edgar/mirror/index.js';
 import formerNamesData from './data/former-names.json' with { type: 'json' };
@@ -24,6 +25,7 @@ import type {
   SubmissionsResponse,
   TickerEntry,
 } from './types.js';
+import { childText, findTag, findTags } from './xml-nodes.js';
 
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 1000;
@@ -47,6 +49,8 @@ interface MfTickerFile {
 interface TickerCache {
   allEntries: CikMatch[];
   byCik: Map<string, CikMatch>;
+  /** Fund series ID → registrant. Built from company_tickers_mf.json, so it covers only series with a listed share class. */
+  bySeriesId: Map<string, CikMatch>;
   byTicker: Map<string, CikMatch>;
   loadedAt: number;
 }
@@ -62,6 +66,21 @@ export interface CompanySuggestion {
 export interface EntityNameMatch {
   cik: string;
   name: string;
+}
+
+/** One fund series of a registrant, as listed in company_tickers_mf.json. */
+export interface FundSeriesEntry {
+  seriesId: string;
+  /** Ticker of the first listed share class of the series. */
+  ticker: string | undefined;
+}
+
+/** A registrant's filings of one form type, scoped to a single fund series. */
+export interface SeriesFilingFeed {
+  filings: Array<{ accessionNumber: string; filingDate: string; form: string }>;
+  /** Registrant trust the series belongs to. Absent when the series is unknown to EDGAR. */
+  registrantCik: string | undefined;
+  registrantName: string | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +311,57 @@ class EdgarApiService {
     return cache.byCik.get(cik.padStart(10, '0'))?.ticker;
   }
 
+  /**
+   * Resolve a fund series ID (`S000002839`) to its registrant trust. Backed by
+   * company_tickers_mf.json, which lists a series only once one of its share classes has a
+   * ticker — a series with no listed class resolves to `undefined` rather than a wrong trust.
+   */
+  async resolveFundSeries(seriesId: string): Promise<CikMatch | undefined> {
+    const cache = await this.getTickerCache();
+    return cache.bySeriesId.get(seriesId.toUpperCase());
+  }
+
+  /**
+   * List a registrant's fund series, from the same company_tickers_mf.json index. A trust
+   * files one NPORT-P per series per period, so this is what tells a caller holding only a
+   * registrant CIK which series it must name. Covers series with at least one listed share
+   * class only — a trust whose series carry no ticker returns an empty list, which is not
+   * the same as having no series.
+   */
+  async listFundSeries(cik: string): Promise<FundSeriesEntry[]> {
+    const cache = await this.getTickerCache();
+    const padded = cik.padStart(10, '0');
+    const out: FundSeriesEntry[] = [];
+    for (const [seriesId, match] of cache.bySeriesId) {
+      if (match.cik === padded) out.push({ seriesId, ticker: match.ticker });
+    }
+    return out;
+  }
+
+  /**
+   * List a fund series' own filings of one form type. EDGAR's company browse accepts a
+   * series ID (`S000002839`) in place of a CIK and answers with just that series' filings,
+   * which is the only SEC surface that maps a series to its accession numbers — the
+   * submissions feed and the full-text index both report a fund filing under the registrant
+   * trust with no series field, and a trust files one report per series per period. The
+   * response also names the registrant, so a bare series ID resolves without a second call.
+   * Entries come back newest-filed first and include amendments of the form.
+   */
+  async getFundSeriesFilings(
+    seriesId: string,
+    formType: string,
+    count: number,
+  ): Promise<SeriesFilingFeed> {
+    const url = new URL('https://www.sec.gov/cgi-bin/browse-edgar');
+    url.searchParams.set('action', 'getcompany');
+    url.searchParams.set('CIK', seriesId);
+    url.searchParams.set('type', formType);
+    url.searchParams.set('owner', 'include');
+    url.searchParams.set('count', String(count));
+    url.searchParams.set('output', 'atom');
+    return parseSeriesFilingFeed(await this.fetchText(url.toString()));
+  }
+
   /** Return the current in-memory entry list (used by the handler for trigram suggestions). */
   async getAllEntries(): Promise<CikMatch[]> {
     const cache = await this.getTickerCache();
@@ -479,6 +549,59 @@ class EdgarApiService {
     return this.tryFetchText(
       `https://www.sec.gov/Archives/edgar/data/${padded}/${noDashes}/${document}`,
     );
+  }
+
+  /**
+   * Fetch the leading bytes of a filing document, stopping as soon as `stopAt` appears in
+   * the decoded text or `maxBytes` have arrived. Returns `null` on 404, and the whole
+   * document when it is shorter than the cutoff.
+   *
+   * SEC's archive host ignores `Range` — a ranged request answers 200 with the full body —
+   * so there is no server-side partial fetch. The saving here is client-side: the response
+   * body is cancelled mid-stream, so a routing scan that inspects a multi-megabyte report's
+   * header pays for the leading part of it instead of the whole file. Neither cutoff can cut
+   * below one read chunk, because both checks run between reads and the runtime picks the
+   * boundary — Bun hands SEC archive documents back in 262,144-byte reads, so a `stopAt` that
+   * appears 1.5 KB in still costs 256 KB, and a `maxBytes` below that costs the same. Treat
+   * both as "one chunk, not the file" rather than as a byte budget; `maxBytes` binds only on
+   * a document long enough to arrive in several chunks, which is what stops a document
+   * missing `stopAt` entirely from being read to the end. A runtime that hands back no
+   * readable body (a stubbed fetch, for one) falls through to reading it whole, which costs
+   * bandwidth but returns the same text.
+   */
+  async tryGetFilingDocumentHead(
+    cik: string,
+    accessionNumber: string,
+    document: string,
+    options: { maxBytes: number; stopAt: string },
+  ): Promise<string | null> {
+    const padded = cik.padStart(10, '0');
+    const noDashes = accessionNumber.replace(/-/g, '');
+    const response = await this.rawFetch(
+      `https://www.sec.gov/Archives/edgar/data/${padded}/${noDashes}/${document}`,
+      false,
+    );
+    if (response.status === 404) return null;
+    if (!response.body) return response.text();
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let text = '';
+    let read = 0;
+    try {
+      while (read < options.maxBytes) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        read += value.byteLength;
+        text += decoder.decode(value, { stream: true });
+        if (text.includes(options.stopAt)) break;
+      }
+    } finally {
+      await reader.cancel().catch(() => {
+        /* the body is being discarded; a cancel race has nothing left to report */
+      });
+    }
+    return text;
   }
 
   /**
@@ -814,6 +937,7 @@ class EdgarApiService {
   ): TickerCache {
     const byTicker = new Map<string, CikMatch>();
     const byCik = new Map<string, CikMatch>();
+    const bySeriesId = new Map<string, CikMatch>();
     const allEntries: CikMatch[] = [];
 
     for (const entry of entries) {
@@ -834,6 +958,12 @@ class EdgarApiService {
         byTicker.set(tickerKey, match);
       }
 
+      // A series has one entry per listed share class, so the first class registers the
+      // series; later classes of the same series would only re-point it at the same trust.
+      if (isMf && entry.seriesId && !bySeriesId.has(entry.seriesId.toUpperCase())) {
+        bySeriesId.set(entry.seriesId.toUpperCase(), match);
+      }
+
       // MF entries must not overwrite byCik — the trust CIK is 1:many with fund series.
       if (!isMf) {
         const existing = byCik.get(match.cik);
@@ -852,7 +982,7 @@ class EdgarApiService {
       allEntries.push({ cik: fn.cik, name: fn.name });
     }
 
-    this.tickerCache = { byTicker, byCik, allEntries, loadedAt: Date.now() };
+    this.tickerCache = { byTicker, byCik, bySeriesId, allEntries, loadedAt: Date.now() };
     return this.tickerCache;
   }
 }
@@ -933,6 +1063,45 @@ export function parseMasterIndex(text: string): FullIndexEntry[] {
     });
   }
   return entries;
+}
+
+/**
+ * Parse EDGAR's company-browse Atom feed into the registrant identity plus one row per
+ * filing. A series ID EDGAR does not know answers 200 with its HTML no-match page rather
+ * than a feed, which carries neither `company-info` nor entries and so parses to an empty
+ * result — the caller's cue that the series is unknown. Exported for direct unit testing.
+ */
+export function parseSeriesFilingFeed(xml: string): SeriesFilingFeed {
+  const doc = parseDocument(xml, { xmlMode: true, decodeEntities: true });
+  const info = findTag(doc.children, 'company-info');
+  const filings: SeriesFilingFeed['filings'] = [];
+  for (const entry of findTags(doc.children, 'entry')) {
+    const content = findTag(entry.children, 'content');
+    const accessionNumber = childText(content, 'accession-number');
+    if (!accessionNumber) continue;
+    filings.push({
+      accessionNumber,
+      filingDate: childText(content, 'filing-date') ?? '',
+      form: childText(content, 'filing-type') ?? '',
+    });
+  }
+  return {
+    registrantCik: childText(info, 'cik')?.padStart(10, '0'),
+    registrantName: childText(info, 'conformed-name'),
+    filings,
+  };
+}
+
+/**
+ * Name of the raw XML document inside a filing's archive directory. The submissions feed
+ * points at the human-readable rendering (`xslSCHEDULE_13D_X02/primary_doc.xml`,
+ * `xslFormNPORT-P_X01/primary_doc.xml`); the raw document is the same basename at the root
+ * of that directory. Idempotent, and answers the conventional default name for a filing
+ * whose primary document the feed does not name.
+ */
+export function rawDocumentName(primaryDocument: string | undefined): string {
+  const base = primaryDocument?.slice(primaryDocument.lastIndexOf('/') + 1);
+  return base || 'primary_doc.xml';
 }
 
 /**

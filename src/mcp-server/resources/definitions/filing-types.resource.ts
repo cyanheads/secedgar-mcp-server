@@ -64,6 +64,13 @@ const FILING_TYPES = [
     use_cases: 'Passive institutional ownership tracking',
   },
   {
+    form: 'NPORT-P',
+    cadence: 'Quarterly, per fund series',
+    description:
+      'Registered fund portfolio report: every position with value, share balance, and percent of net assets. One report per fund series, published on a roughly two-month lag.',
+    use_cases: 'ETF and mutual fund holdings, fund overlap and concentration analysis',
+  },
+  {
     form: 'S-1',
     cadence: 'One-time',
     description: 'IPO registration statement with prospectus, financials, and risk factors.',

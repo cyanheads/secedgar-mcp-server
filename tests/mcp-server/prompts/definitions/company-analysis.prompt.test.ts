@@ -98,4 +98,22 @@ describe('companyAnalysisPrompt', () => {
     expect(text).toContain('does not cover Form 3');
     expect(text).toContain('secedgar_search_filings');
   });
+
+  it('routes an activist-stake focus through secedgar_get_beneficial_owners (#83)', () => {
+    const text = generatedText({ company: 'AAPL', focus_areas: 'activist stake' });
+    expect(text).toContain('secedgar_get_beneficial_owners');
+    expect(text).toContain('2024-12-18');
+  });
+
+  it('adds the blockholder step to a generic ownership focus alongside the other two (#83)', () => {
+    const text = generatedText({ company: 'AAPL', focus_areas: 'ownership' });
+    expect(text).toContain('secedgar_get_insider_transactions');
+    expect(text).toContain('secedgar_find_holders');
+    expect(text).toContain('secedgar_get_beneficial_owners');
+  });
+
+  it('leaves the blockholder step out of an insider-only focus (#83)', () => {
+    const text = generatedText({ company: 'AAPL', focus_areas: 'insider selling' });
+    expect(text).not.toContain('secedgar_get_beneficial_owners');
+  });
 });

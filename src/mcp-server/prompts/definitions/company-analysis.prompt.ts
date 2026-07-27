@@ -19,13 +19,16 @@ export const companyAnalysisPrompt = prompt('secedgar_company_analysis', {
   }),
 
   generate: (args) => {
-    // Route ownership-focused analyses to the purpose-built ownership tools (#75).
-    // "ownership" is generic, so it surfaces both the insider and institutional steps;
-    // the baseline financial/filing/event/peer workflow is unchanged, and
+    // Route ownership-focused analyses to the purpose-built ownership tools (#75, #83).
+    // "ownership" is generic, so it surfaces the insider, institutional, and blockholder
+    // steps together; the baseline financial/filing/event/peer workflow is unchanged, and
     // secedgar_search_filings stays the fallback for broad discovery.
     const focus = (args.focus_areas ?? '').toLowerCase();
     const wantsInsider = /insider|management transaction|ownership/.test(focus);
     const wantsInstitutional = /institutional|13[\s-]?f|ownership/.test(focus);
+    const wantsBlockholders = /blockholder|activist|beneficial|13[\s-]?[dg]|stake|ownership/.test(
+      focus,
+    );
 
     const steps: string[] = [
       '**Company Identification** — Use `secedgar_company_search` to resolve the company and review recent filings.',
@@ -43,6 +46,11 @@ export const companyAnalysisPrompt = prompt('secedgar_company_analysis', {
         "**Institutional Ownership** — Use `secedgar_find_holders` to list the managers reporting a position in this company, then `secedgar_get_institutional_holdings` with a returned `filer_cik` to read that manager's reported position. `secedgar_get_institutional_holdings` takes the manager, never the issuer.",
       );
     }
+    if (wantsBlockholders) {
+      steps.push(
+        "**Blockholders** — Use `secedgar_get_beneficial_owners` for the 5%-and-over stakes, reading each reporting person separately (percent of class is per person, so joint filers do not sum). A 13D carries the holder's stated purpose of the transaction; a 13G is the passive form and has none. Structured coverage starts 2024-12-18 — the response counts the earlier text filings, which `secedgar_search_filings` finds and `secedgar_get_filing` reads.",
+      );
+    }
     steps.push(
       '**Industry Context** — Use `secedgar_fetch_frames` to compare key metrics against peers.',
     );
@@ -53,9 +61,9 @@ export const companyAnalysisPrompt = prompt('secedgar_company_analysis', {
       '- **Risk Factors** — material risks from latest filings',
       '- **Recent Events** — notable 8-K filings and their significance',
     ];
-    if (wantsInsider || wantsInstitutional) {
+    if (wantsInsider || wantsInstitutional || wantsBlockholders) {
       findings.push(
-        '- **Ownership Activity** — insider transactions and/or institutional holdings for the focus',
+        '- **Ownership Activity** — insider transactions, institutional holdings, and/or 5%+ blockholders for the focus',
       );
     }
     findings.push('- **Peer Comparison** — how the company stacks up on key metrics');
