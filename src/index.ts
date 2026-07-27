@@ -16,10 +16,12 @@ import { dataframeDescribeTool } from '@/mcp-server/tools/definitions/dataframe-
 import { dataframeDropTool } from '@/mcp-server/tools/definitions/dataframe-drop.tool.js';
 import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
 import { fetchFramesTool } from '@/mcp-server/tools/definitions/fetch-frames.tool.js';
+import { findHoldersTool } from '@/mcp-server/tools/definitions/find-holders.tool.js';
 import { getFilingTool } from '@/mcp-server/tools/definitions/get-filing.tool.js';
 import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials.tool.js';
 import { getInsiderTransactionsTool } from '@/mcp-server/tools/definitions/get-insider-transactions.tool.js';
 import { getInstitutionalHoldingsTool } from '@/mcp-server/tools/definitions/get-institutional-holdings.tool.js';
+import { getMaterialEventsTool } from '@/mcp-server/tools/definitions/get-material-events.tool.js';
 import { getSnapshotTool } from '@/mcp-server/tools/definitions/get-snapshot.tool.js';
 import { searchConceptsTool } from '@/mcp-server/tools/definitions/search-concepts.tool.js';
 import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
@@ -47,8 +49,10 @@ await createApp({
     getFilingTool,
     getFinancialsTool,
     getSnapshotTool,
+    getMaterialEventsTool,
     getInsiderTransactionsTool,
     getInstitutionalHoldingsTool,
+    findHoldersTool,
     fetchFramesTool,
     compareCompaniesTool,
     searchConceptsTool,
@@ -59,7 +63,7 @@ await createApp({
   resources: [conceptsResource, filingTypesResource],
   prompts: [companyAnalysisPrompt],
   instructions:
-    'Use the secedgar_* tools to query SEC EDGAR — US public-company filings since 1993 plus historical XBRL financials. Resolve companies with secedgar_company_search (accepts ticker, name, or CIK), fetch document text with secedgar_get_filing by accession number, and search filings with secedgar_search_filings (full-text covers 2001-present; pre-2001 date ranges browse the archives by form and entity/date, so pre-2001 full-text matching requires ticker:/cik: entity scope; supports boolean operators and inline ticker:AAPL / cik:320193 targeting). For financials, secedgar_get_financials and secedgar_fetch_frames accept friendly names like "revenue" or "eps_diluted" (discover them with secedgar_search_concepts) or raw XBRL tags; secedgar_get_snapshot profiles one company across every supported concept in a single call, and secedgar_compare_companies puts 2-10 named companies side by side on aligned calendar periods. Data-returning tools also materialize their full upstream response as a df_<id> handle for downstream SQL via secedgar_dataframe_query — list dataframes with secedgar_dataframe_describe.',
+    'Use the secedgar_* tools to query SEC EDGAR — US public-company filings since 1993 plus historical XBRL financials. Resolve companies with secedgar_company_search (accepts ticker, name, or CIK), fetch document text with secedgar_get_filing by accession number, and search filings with secedgar_search_filings (full-text covers 2001-present; pre-2001 date ranges browse the archives by form and entity/date, so pre-2001 full-text matching requires ticker:/cik: entity scope; supports boolean operators and inline ticker:AAPL / cik:320193 targeting). For financials, secedgar_get_financials and secedgar_fetch_frames accept friendly names like "revenue" or "eps_diluted" (discover them with secedgar_search_concepts) or raw XBRL tags; secedgar_get_snapshot profiles one company across every supported concept in a single call, and secedgar_compare_companies puts 2-10 named companies side by side on aligned calendar periods. For 8-K material events, secedgar_get_material_events filters a company\'s 8-K history by item code (2.02 results, 5.02 officer changes, 4.02 non-reliance). Ownership runs in both directions: secedgar_get_institutional_holdings takes a 13F manager and returns its portfolio, secedgar_find_holders takes an issuer and returns the managers reporting it. Data-returning tools also materialize their full upstream response as a df_<id> handle for downstream SQL via secedgar_dataframe_query — list dataframes with secedgar_dataframe_describe.',
   async setup(core) {
     initEdgarApiService();
     initCanvasBridge(core.canvas);

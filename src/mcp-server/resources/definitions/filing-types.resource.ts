@@ -4,6 +4,12 @@
  */
 
 import { resource } from '@cyanheads/mcp-ts-core';
+import {
+  CURRENT_EIGHT_K_ITEMS,
+  EIGHT_K_RENUMBERING_DATE,
+  EIGHT_K_SECTIONS,
+  LEGACY_EIGHT_K_ITEMS,
+} from '@/services/edgar/eight-k-items.js';
 
 const FILING_TYPES = [
   {
@@ -23,7 +29,7 @@ const FILING_TYPES = [
     form: '8-K',
     cadence: 'Event-driven',
     description:
-      'Current report for material events: M&A (1.01), earnings (2.02), exec changes (5.02).',
+      'Current report for material events, scoped by item code (see the item tables below).',
     use_cases: 'Breaking news, material events, earnings announcements',
   },
   {
@@ -74,7 +80,7 @@ const FILING_TYPES = [
 export const filingTypesResource = resource('secedgar://filing-types', {
   name: 'SEC Filing Types',
   description:
-    'Reference list of common SEC filing types with descriptions, cadence, and typical use cases. Helps choose the forms parameter for secedgar_search_filings or the form_types filter for secedgar_company_search.',
+    'Reference list of common SEC filing types with descriptions, cadence, and typical use cases, plus the full 8-K item-code decode tables for both numbering regimes. Helps choose the forms parameter for secedgar_search_filings, the form_types filter for secedgar_company_search, or the items filter for secedgar_get_material_events.',
   mimeType: 'text/markdown',
 
   handler(_params, _ctx) {
@@ -91,6 +97,42 @@ export const filingTypesResource = resource('secedgar://filing-types', {
     lines.push(
       '',
       '> **Beneficial-ownership form names (December 2024 transition):** 5%+ ownership filings now use the structured form names `SCHEDULE 13D` / `SCHEDULE 13G` (with a `primary_doc.xml`). The legacy `SC 13D` / `SC 13G` names stopped appearing on new filings, so filter EFTS (`secedgar_search_filings` forms) on the current names to reach recent filings.',
+    );
+
+    lines.push(
+      '',
+      '## 8-K item codes',
+      '',
+      `An 8-K reports one or more numbered items, and the item is what identifies the event. Pass these codes to \`secedgar_get_material_events\` (\`items\` filter). SEC replaced the original single-integer numbering with the dotted scheme effective **${EIGHT_K_RENUMBERING_DATE}**; the two vocabularies are disjoint, so a filter of dotted codes never matches a pre-changeover filing and vice versa.`,
+      '',
+      `### Current numbering (${EIGHT_K_RENUMBERING_DATE} onward)`,
+      '',
+      '| Item | Title |',
+      '|:-----|:------|',
+    );
+    let currentSection = '';
+    for (const [code, label] of Object.entries(CURRENT_EIGHT_K_ITEMS)) {
+      const section = EIGHT_K_SECTIONS[code.slice(0, 1)];
+      if (section && section !== currentSection) {
+        currentSection = section;
+        lines.push(`| | *Section ${code.slice(0, 1)} — ${section}* |`);
+      }
+      lines.push(`| \`${code}\` | ${label} |`);
+    }
+
+    lines.push(
+      '',
+      `### Legacy numbering (before ${EIGHT_K_RENUMBERING_DATE})`,
+      '',
+      '| Item | Title |',
+      '|:-----|:------|',
+    );
+    for (const [code, label] of Object.entries(LEGACY_EIGHT_K_ITEMS)) {
+      lines.push(`| \`${code}\` | ${label} |`);
+    }
+    lines.push(
+      '',
+      "> Legacy item 12 is the ancestor of today's 2.02 (results of operations), item 9 of today's 7.01 (Regulation FD), and item 7 of today's 9.01 (financial statements and exhibits). Items 10-12 were added in 2002-2003 and retired at the changeover along with the rest.",
     );
     return lines.join('\n');
   },

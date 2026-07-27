@@ -31,7 +31,7 @@ export const companyAnalysisPrompt = prompt('secedgar_company_analysis', {
       '**Company Identification** — Use `secedgar_company_search` to resolve the company and review recent filings.',
       '**Financial Trends** — Use `secedgar_get_financials` to pull key metrics (revenue, net_income, eps_diluted, assets, debt, operating_cash_flow) and identify trends over the last 3-5 years.',
       '**Recent Filings Review** — Use `secedgar_get_filing` to read the most recent 10-K or 10-Q for qualitative insights (risk factors, MD&A, business overview).',
-      '**Material Events** — Use `secedgar_search_filings` (or call `secedgar_company_search` with `form_types: ["8-K"]`) to surface recent material events (M&A, leadership changes, earnings surprises).',
+      '**Material Events** — Use `secedgar_get_material_events` to surface recent 8-K filings with their item codes decoded, narrowing to the events that matter (`items: ["1.01"]` for material agreements, `["2.02"]` for results, `["5.02"]` for officer changes, `["4.02"]` for non-reliance).',
     ];
     if (wantsInsider) {
       steps.push(
@@ -40,7 +40,7 @@ export const companyAnalysisPrompt = prompt('secedgar_company_analysis', {
     }
     if (wantsInstitutional) {
       steps.push(
-        "**Institutional Ownership** — Use `secedgar_get_institutional_holdings` for a 13F filer's reported positions (pass the institutional manager, not the issuer — EDGAR has no issuer-to-holder index).",
+        "**Institutional Ownership** — Use `secedgar_find_holders` to list the managers reporting a position in this company, then `secedgar_get_institutional_holdings` with a returned `filer_cik` to read that manager's reported position. `secedgar_get_institutional_holdings` takes the manager, never the issuer.",
       );
     }
     steps.push(

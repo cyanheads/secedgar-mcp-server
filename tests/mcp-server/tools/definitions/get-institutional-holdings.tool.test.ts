@@ -915,12 +915,16 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
     expect(err.message).toContain('operating company');
     expect(err.message).toContain('MSFT');
     expect(err.data.resolved_cik).toBe('0000789019');
+    // An issuer passed here is nearly always a reverse-lookup attempt, so
+    // secedgar_find_holders leads the routing (#81); the financial/filing tools
+    // stay behind it for callers who wanted the company itself.
     expect(err.data.suggestions.map((s: { tool: string }) => s.tool)).toEqual([
+      'secedgar_find_holders',
       'secedgar_get_financials',
       'secedgar_search_filings',
     ]);
     // Recovery hint mirrors to the text surface and names the routed tool.
-    expect(err.data.recovery.hint).toContain('secedgar_get_financials');
+    expect(err.data.recovery.hint).toContain('secedgar_find_holders');
   });
 
   it('does not classify a bare-CIK match that has submissions but no operating forms (#86)', async () => {

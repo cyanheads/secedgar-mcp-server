@@ -866,6 +866,20 @@ function buildFormerNameEntries(): Array<{ cik: string; name: string }> {
 }
 
 /**
+ * EDGAR's EFTS `display_names[0]` embeds the ticker(s) and CIK in trailing
+ * parentheticals (e.g. "Apple Inc.  (AAPL)  (CIK 0000320193)"). Strip them so
+ * consumers see a clean entity name — ticker and CIK are already surfaced as
+ * their own fields.
+ */
+export function cleanDisplayName(displayName: string): string {
+  return displayName
+    .replace(/\s*\(CIK\s*\d+\)/gi, '')
+    .replace(/\s*\([A-Z0-9,\s.-]+\)\s*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * Range-based selection of submissions archive-page manifest entries (`filings.files[]`),
  * returned newest-first (by `filingTo` descending). A page's [filingFrom, filingTo]
  * window is kept unless it lies entirely before `filedAfter` or entirely after

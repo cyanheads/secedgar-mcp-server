@@ -57,13 +57,27 @@ describe('companyAnalysisPrompt', () => {
       'secedgar_company_search',
       'secedgar_get_financials',
       'secedgar_get_filing',
-      'secedgar_search_filings',
+      // The Material Events step routes through the item-code-aware tool; a
+      // form-level secedgar_search_filings query cannot see 8-K items (#82).
+      'secedgar_get_material_events',
       'secedgar_fetch_frames',
     ]) {
       expect(text).toContain(toolName);
     }
     expect(text).not.toContain('secedgar_get_insider_transactions');
     expect(text).not.toContain('secedgar_get_institutional_holdings');
+  });
+
+  it('names the item codes an agent needs to scope the material-events step (#82)', () => {
+    const text = generatedText({ company: 'AAPL' });
+    expect(text).toContain('2.02');
+    expect(text).toContain('5.02');
+  });
+
+  it('routes issuer-side ownership through secedgar_find_holders before the 13F reader (#81)', () => {
+    const text = generatedText({ company: 'AAPL', focus_areas: '13F institutional holdings' });
+    expect(text).toContain('secedgar_find_holders');
+    expect(text).toContain('filer_cik');
   });
 
   it('keeps secedgar_search_filings as the fallback even on an ownership focus (#75)', () => {

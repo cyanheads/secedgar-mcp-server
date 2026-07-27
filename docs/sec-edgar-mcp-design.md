@@ -94,7 +94,7 @@ All require `User-Agent: AppName contact@email.com` header. Rate limit: 10 req/s
 |:-----|:--------|:-----------------|
 | **10-K** | Annual | Audited financials, MD&A, risk factors, business overview |
 | **10-Q** | Quarterly (Q1-Q3) | Unaudited financials, MD&A, market risks |
-| **8-K** | Event-driven | Material events: M&A (1.01), earnings (2.02), exec changes (5.02) |
+| **8-K** | Event-driven | Material events, scoped by item code. Two numbering regimes — the dotted scheme since 2004-08-23, single integers before it — with the full decode tables in `secedgar://filing-types` and `secedgar_get_material_events` filtering on them |
 | **DEF 14A** | Annual proxy | Board elections, executive pay, shareholder votes |
 | **13F-HR** | Quarterly | Institutional holdings ($100M+ AUM) |
 | **Form 4** | Per-transaction | Insider buy/sell: date, shares, price, transaction code |

@@ -14,6 +14,7 @@ import {
 } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import {
+  cleanDisplayName,
   getEdgarApiService,
   quartersInRange,
   selectArchivePages,
@@ -96,7 +97,7 @@ function eftsHitToRow(hit: EftsHit): SearchRow {
     form: hit._source.form ?? null,
     filing_date: hit._source.file_date,
     period_ending: hit._source.period_ending ?? null,
-    company_name: cleanCompanyName(displayName),
+    company_name: cleanDisplayName(displayName),
     cik: hit._source.ciks?.[0] ?? null,
     ticker: extractTicker(displayName),
     file_description: hit._source.file_description ?? null,
@@ -146,19 +147,6 @@ function buildFormDistribution(
     if (form) dist[form] = (dist[form] ?? 0) + 1;
   }
   return Object.keys(dist).length > 0 ? dist : undefined;
-}
-
-/**
- * EDGAR's `display_names[0]` embeds the ticker(s) and CIK in trailing parentheticals
- * (e.g., "Apple Inc.  (AAPL)  (CIK 0000320193)"). Strip them so consumers see a clean
- * company name — ticker and CIK are already surfaced as their own fields.
- */
-function cleanCompanyName(displayName: string): string {
-  return displayName
-    .replace(/\s*\(CIK\s*\d+\)/gi, '')
-    .replace(/\s*\([A-Z0-9,\s.-]+\)\s*$/, '')
-    .replace(/\s+/g, ' ')
-    .trim();
 }
 
 /**
@@ -842,7 +830,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         form: hit._source.form ?? undefined,
         filing_date: hit._source.file_date,
         period_ending: hit._source.period_ending ?? undefined,
-        company_name: cleanCompanyName(displayName),
+        company_name: cleanDisplayName(displayName),
         cik: hit._source.ciks?.[0] || '',
         ...(ticker !== null && { ticker }),
         file_description: hit._source.file_description ?? undefined,
