@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.15.0](changelog/0.15.x/0.15.0.md) — 2026-07-27
+
+Two new tools — secedgar_get_beneficial_owners (SCHEDULE 13D/13G blockholders) and secedgar_get_fund_holdings (NPORT-P fund portfolios) — plus bounded pre-2001 full-text and straddling-range merge for secedgar_search_filings.
+
 ## [0.14.0](changelog/0.14.x/0.14.0.md) — 2026-07-26
 
 Two new tools — secedgar_find_holders (reverse 13F lookup, issuer to the managers reporting it) and secedgar_get_material_events (8-K filings filtered by decoded item code). Series-staleness caveats now cover a current tag whose series simply ends, and ifrs-full stock_based_compensation picks its element per filer by coverage.

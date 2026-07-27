@@ -1,7 +1,7 @@
 <div align="center">
   <h1>@cyanheads/secedgar-mcp-server</h1>
   <p><b>Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.</b>
-  <div>14 Tools (+1 opt-in) • 2 Resources • 1 Prompt</div>
+  <div>16 Tools (+1 opt-in) • 2 Resources • 1 Prompt</div>
   </p>
 </div>
 
@@ -29,7 +29,7 @@
 
 ## Tools
 
-Twelve tools for querying SEC EDGAR data, plus three for SQL analytics over the DuckDB-backed canvas dataframes those tools materialize:
+Fourteen tools for querying SEC EDGAR data, plus three for SQL analytics over the DuckDB-backed canvas dataframes those tools materialize:
 
 | Tool | Description |
 |:---|:---|
@@ -42,6 +42,8 @@ Twelve tools for querying SEC EDGAR data, plus three for SQL analytics over the 
 | `secedgar_get_insider_transactions` | Form 4 / 4-A insider transactions (buys, sells, grants, exercises) parsed from ownership XML |
 | `secedgar_get_institutional_holdings` | 13F-HR quarterly institutional holdings parsed from the information table |
 | `secedgar_find_holders` | Reverse 13F lookup — which institutional managers reported holding an issuer |
+| `secedgar_get_beneficial_owners` | 5%+ blockholders of an issuer, parsed from structured SCHEDULE 13D / 13G filings |
+| `secedgar_get_fund_holdings` | ETF and mutual fund portfolio holdings from the quarterly NPORT-P report |
 | `secedgar_fetch_frames` | Fetch SEC XBRL frames for one concept × one period across all reporting companies |
 | `secedgar_compare_companies` | Compare named companies across several concepts, aligned on calendar periods |
 | `secedgar_search_concepts` | Discover supported XBRL concept names or reverse-lookup a raw tag |
@@ -70,7 +72,9 @@ Search EDGAR filings since 1993. Full-text search covers 2001-present (the EFTS 
 - Exact phrases (`"material weakness"`), boolean operators (`revenue OR income`), wildcards (`account*`)
 - Entity targeting within query string (`cik:320193` or `ticker:AAPL`) — scoped server-side by CIK, so filings made under a former company name (same CIK) are included
 - Browse mode: omit `query` to list filings by form type (`forms=["S-1"]`) and/or entity (`ticker:`/`cik:`), optionally narrowed by date — a bare date range is not a valid search and must be paired with forms or entity targeting
-- Pre-2001 date ranges (back to 1993) route to the archives: an entity-scoped range reads the filer's full submissions history; an unscoped forms/date range browses the quarterly full-index. A range straddling 2001-01-01 is rejected with a split instruction, and pre-2001 full-text (no entity scope) is unsupported. Each row carries a `source` field (`efts` / `submissions` / `full-index`), preserved into the `df_<id>` dataframe
+- Pre-2001 date ranges (back to 1993) route to the archives: an entity-scoped range reads the filer's full submissions history; an unscoped forms/date range browses the quarterly full-index. Each row carries a `source` field (`efts` / `submissions` / `full-index`), preserved into the `df_<id>` dataframe
+- Pre-2001 free text is matched by reading documents, so it needs `ticker:`/`cik:` scope to bound the work: the form + date pre-filter picks candidates, up to 50 are read, and `scan` reports candidates / scanned / matched rather than presenting a partial read as a complete one. SEC's request rate is the cost — roughly 5s for a full 50-document scan. Each read covers the whole accession `.txt` (pre-1997 filings expose no per-document URL), so a match can sit in an attached exhibit rather than the body of the requested form
+- A range crossing 2001-01-01 is split at the boundary and merged: the full-text index serves 2001 onward, the archives serve the rest. `period_ending`, `ticker`, `file_description`, `sic`, and `location` exist only on `source: efts` rows, so a merged result carries them on some rows and not others
 - Date range filtering, form type filtering, pagination up to 10,000 results
 - Returns form distribution for narrowing follow-up searches
 - When the entity-scoped window exceeds the inline limit, the already-fetched EFTS window is materialized as a `df_<id>` dataframe — query it with `secedgar_dataframe_query`
@@ -156,6 +160,30 @@ Reverse 13F lookup: which institutional managers reported a position in an issue
 - Filings are kept by the period they report, not the date they were filed, so amendments restating an older quarter (roughly 6% of any window) do not land in the wrong quarter's holder list
 - Up to 500 filer rows are fetched per call; `total_filings` reports the full count and `dataset.truncated` flags when more exist
 - **The list is unranked.** EDGAR search relevance carries no signal about position size — read a manager's actual position by passing its `filer_cik` to `secedgar_get_institutional_holdings`
+
+---
+
+### `secedgar_get_beneficial_owners`
+
+The 5%-and-over stakes in an issuer — the blockholder layer between Form 4 insiders and 13F portfolios. Input is the issuer, the company being held.
+
+- 13D is the activist form and carries the filer's stated purpose of the transaction; 13G is the passive form and has no purpose item at all, which is the substantive difference between a stake that intends to influence control and one that does not. Filter with `form_kind`
+- Every reporting person is listed separately. Voting power, dispositive power, and percent of class are reported per person even on a joint filing where several funds and their controlling principal report the same underlying shares — summing those percentages double-counts the position
+- Coverage starts **2024-12-18**, when SEC replaced the legacy `SC 13D` / `SC 13G` text filings with structured XML under the current `SCHEDULE 13D` / `SCHEDULE 13G` names. Earlier stakes are readable but not parseable, and `legacy_filings_before_coverage` reports how many the issuer has — reach them with `secedgar_search_filings` and read them with `secedgar_get_filing`
+- Amendments carry the current position and are included by default; `include_amendments=false` leaves only the filings that opened a position
+- The full parsed set registers as a `df_<id>` dataframe at one row per reporting person, so it joins the insider and 13F dataframes on issuer CIK
+
+---
+
+### `secedgar_get_fund_holdings`
+
+What an ETF or mutual fund owns, from the NPORT-P portfolio report it files each quarter — the inverse of the ownership tools, which answer who owns a company.
+
+- Input is the fund: a ticker (`VOO`), an SEC fund series ID (`S000002839`), or a CIK. Fund trusts are indexed by ticker and series rather than by name, so name the registrant by CIK unless the fund itself trades under that name (`SPDR S&P 500 ETF Trust`)
+- An NPORT-P covers exactly one fund series and a registrant trust files one report per series per period, so a trust running several funds needs the specific fund named. A registrant that resolves to more than one series comes back with the series listed, each with its ticker; one whose series carry no ticker is routed by reading the series off its newest report, because a trust's own filing history interleaves funds whose fiscal quarters end on different months
+- Every result is dated to `report_period_date`. Reports publish roughly two months after the period they cover, so the holdings are the portfolio as of that date, not as of today; `publication_lag_days` states the gap. Target an earlier period with `report_date`, chosen from the `available_report_periods` in any response
+- Positions carry the security name, CUSIP/ISIN/LEI where the filer reports them, share balance, USD value, and percent of net assets, alongside fund-level net assets, total assets, and total liabilities
+- Positions come back largest first by percent of net assets, one page of `limit` rows from `offset`. A broad index fund reports thousands — Vanguard Total Stock Market's most recent report carries 3,524 — so the full report registers as a `df_<id>` dataframe for aggregation and for joining the 13F and insider dataframes on CUSIP
 
 ---
 

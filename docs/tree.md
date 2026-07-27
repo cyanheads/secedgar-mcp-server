@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-07-27 00:11:35
+Generated on: 2026-07-27 08:24:55
 
 ```text
 secedgar-mcp-server/
@@ -28,6 +28,7 @@ secedgar-mcp-server/
 │   ├── 0.12.x/
 │   ├── 0.13.x/
 │   ├── 0.14.x/
+│   ├── 0.15.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
@@ -167,8 +168,10 @@ secedgar-mcp-server/
 │   │           ├── dataframe-query.tool.ts
 │   │           ├── fetch-frames.tool.ts
 │   │           ├── find-holders.tool.ts
+│   │           ├── get-beneficial-owners.tool.ts
 │   │           ├── get-filing.tool.ts
 │   │           ├── get-financials.tool.ts
+│   │           ├── get-fund-holdings.tool.ts
 │   │           ├── get-insider-transactions.tool.ts
 │   │           ├── get-institutional-holdings.tool.ts
 │   │           ├── get-material-events.tool.ts
@@ -188,6 +191,7 @@ secedgar-mcp-server/
 │   │       │   ├── index.ts
 │   │       │   ├── tickers-sync.ts
 │   │       │   └── types.ts
+│   │       ├── beneficial-ownership-parser.ts
 │   │       ├── concept-map.ts
 │   │       ├── concept-series.ts
 │   │       ├── edgar-api-service.ts
@@ -195,8 +199,10 @@ secedgar-mcp-server/
 │   │       ├── filing-headers.ts
 │   │       ├── filing-to-text.ts
 │   │       ├── fiscal-periods.ts
+│   │       ├── nport-parser.ts
 │   │       ├── ownership-parser.ts
-│   │       └── types.ts
+│   │       ├── types.ts
+│   │       └── xml-nodes.ts
 │   └── index.ts
 ├── tests/
 │   ├── mcp-server/
@@ -216,8 +222,10 @@ secedgar-mcp-server/
 │   │           ├── dataframe-query.tool.test.ts
 │   │           ├── fetch-frames.tool.test.ts
 │   │           ├── find-holders.tool.test.ts
+│   │           ├── get-beneficial-owners.tool.test.ts
 │   │           ├── get-filing.tool.test.ts
 │   │           ├── get-financials.tool.test.ts
+│   │           ├── get-fund-holdings.tool.test.ts
 │   │           ├── get-insider-transactions.tool.test.ts
 │   │           ├── get-institutional-holdings.tool.test.ts
 │   │           ├── get-material-events.tool.test.ts
@@ -236,6 +244,7 @@ secedgar-mcp-server/
 │           │   ├── companyfacts-sync.test.ts
 │           │   ├── edgar-mirror.test.ts
 │           │   └── tickers-sync.test.ts
+│           ├── beneficial-ownership-parser.test.ts
 │           ├── concept-map.test.ts
 │           ├── concept-series.test.ts
 │           ├── edgar-api-service.efts.test.ts
@@ -245,7 +254,9 @@ secedgar-mcp-server/
 │           ├── eight-k-items.test.ts
 │           ├── filing-to-text.test.ts
 │           ├── fiscal-periods.test.ts
-│           └── ownership-parser.test.ts
+│           ├── nport-parser.test.ts
+│           ├── ownership-parser.test.ts
+│           └── xml-nodes.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes
