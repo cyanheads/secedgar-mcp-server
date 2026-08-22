@@ -67,7 +67,15 @@ export const companySearchTool = tool('secedgar_company_search', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance when include_filings=true but no filings matched the form_types filter.'),
+      .describe(
+        'Guidance when include_filings=true but no filings matched the form_types filter, or when filing_limit withheld some.',
+      ),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when more filings matched than `filing_limit` allowed into the inline list.'),
+    shown: z.number().optional().describe('Number of filings returned inline.'),
+    cap: z.number().optional().describe('The `filing_limit` that was applied.'),
   },
 
   errors: [
@@ -389,6 +397,16 @@ export const companySearchTool = tool('secedgar_company_search', {
       ctx.enrich.notice(
         `No filings matched form types [${input.form_types.join(', ')}] for this entity. Try different form types or remove the filter.`,
       );
+    } else if (
+      filings !== undefined &&
+      totalFilings !== undefined &&
+      totalFilings > filings.length
+    ) {
+      ctx.enrich.truncated({
+        shown: filings.length,
+        cap: input.filing_limit,
+        guidance: `Showing ${filings.length} of ${totalFilings} matching filings. Raise filing_limit, or query the dataset with secedgar_dataframe_query when one is attached.`,
+      });
     }
 
     return {

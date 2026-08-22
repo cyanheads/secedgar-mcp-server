@@ -34,6 +34,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService, suggestCompanies } from '@/services/edgar/edgar-api-service.js';
+import { at, blockAt, blockText } from '../../../support/assertions.js';
 
 const mockSubmissions: SubmissionsResponse = {
   cik: '0000320193',
@@ -190,7 +191,7 @@ describe('companySearchTool', () => {
 
     expect(result.filings).toBeDefined();
     expect(result.filings!.length).toBe(2);
-    expect(result.filings![0].form).toBe('10-K');
+    expect(at(result.filings, 0).form).toBe('10-K');
     expect(result.total_filings).toBe(2);
   });
 
@@ -211,7 +212,7 @@ describe('companySearchTool', () => {
     const result = await companySearchTool.handler(input, ctx);
 
     expect(result.filings).toHaveLength(1);
-    expect(result.filings![0].form).toBe('10-K');
+    expect(at(result.filings, 0).form).toBe('10-K');
     expect(result.total_filings).toBe(1);
   });
 
@@ -277,10 +278,10 @@ describe('companySearchTool', () => {
     };
     const blocks = companySearchTool.format!(output);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].type).toBe('text');
-    expect(blocks[0].text).toContain('Apple Inc.');
-    expect(blocks[0].text).toContain('AAPL');
-    expect(blocks[0].text).toContain('10-K');
+    expect(blockAt(blocks).type).toBe('text');
+    expect(blockText(blocks)).toContain('Apple Inc.');
+    expect(blockText(blocks)).toContain('AAPL');
+    expect(blockText(blocks)).toContain('10-K');
   });
 
   it('populates enrichment notice when form_types filter returns no filings', async () => {
@@ -315,8 +316,8 @@ describe('companySearchTool', () => {
       fiscal_year_end: '0930',
     };
     const blocks = companySearchTool.format!(output);
-    expect(blocks[0].text).toContain('no ticker');
-    expect(blocks[0].text).not.toContain('Recent filings');
+    expect(blockText(blocks)).toContain('no ticker');
+    expect(blockText(blocks)).not.toContain('Recent filings');
   });
 
   // --- ETF/MF fund ticker resolution (#40) ---
@@ -364,8 +365,8 @@ describe('companySearchTool', () => {
       class_id: 'C000092055',
     };
     const blocks = companySearchTool.format!(output);
-    expect(blocks[0].text).toContain('S000002839');
-    expect(blocks[0].text).toContain('C000092055');
+    expect(blockText(blocks)).toContain('S000002839');
+    expect(blockText(blocks)).toContain('C000092055');
   });
 
   // --- Trigram suggestions on no-match (#41) ---
@@ -549,7 +550,7 @@ describe('companySearchTool', () => {
     expect(result.total_filings).toBe(4);
     expect(result.filings!.every((f) => f.filing_date <= '2010-12-31')).toBe(true);
     // Newest-first ordering across the archive page.
-    expect(result.filings![0].filing_date).toBe('2010-10-27');
+    expect(at(result.filings, 0).filing_date).toBe('2010-10-27');
   });
 
   it('discloses history_scanned_through as the oldest archive page reached', async () => {
@@ -645,6 +646,13 @@ describe('companySearchTool', () => {
     expect(result.dataset?.truncated).toBe(false); // the single page was fully scanned
     expect(result.filings).toHaveLength(2); // inline stays capped at filing_limit
     expect(result.total_filings).toBe(4);
+    // The cap is disclosed structurally, so a client reading only enrichment
+    // still knows the inline list is partial.
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.truncated).toBe(true);
+    expect(enrichment.shown).toBe(2);
+    expect(enrichment.cap).toBe(input.filing_limit);
+    expect(enrichment.notice).toContain('2 of 4');
   });
 
   it('skips canvas registration for a plain lookup that stays in the recent window', async () => {

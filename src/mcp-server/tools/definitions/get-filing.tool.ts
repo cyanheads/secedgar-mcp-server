@@ -120,6 +120,22 @@ export const getFilingTool = tool('secedgar_get_filing', {
     "Fetch a specific filing's metadata and document content by accession number. Returns the primary document as readable text. Use offset/next_offset for multi-page access to large filings (10-K, S-1 can exceed 1M chars): pass the next_offset from a truncated response to read the next page. Use section to jump directly to a heading (e.g. 'risk factors', 'item 7') without needing an offset.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
+  // Agent-facing disclosure of the content window. `content_truncated` types the
+  // fact on the wire; this carries how much of the document the page actually
+  // held and the cap that produced it, which the output schema does not.
+  enrichment: {
+    notice: z
+      .string()
+      .optional()
+      .describe('Guidance on reading the next page when the content was capped.'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when the document is longer than `content_limit` allowed through.'),
+    shown: z.number().optional().describe('Characters of document text returned on this page.'),
+    cap: z.number().optional().describe('The `content_limit` that was applied.'),
+  },
+
   errors: [
     {
       reason: 'document_not_found',
@@ -300,7 +316,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       )
       .optional()
       .describe(
-        'Document outline — detected headings with their character offsets. Present on the first page of a truncated response (offset=0, no section). Use a heading offset as offset, or pass heading text as section, to jump to that section.',
+        'Document outline — up to 50 detected headings with their character offsets. Present on the first page of a truncated response (offset=0, no section). Use a heading offset as offset, or pass heading text as section, to jump to that section.',
       ),
     filing_url: z.string().describe('Direct URL to the filing on SEC.gov.'),
   }),
@@ -471,6 +487,14 @@ export const getFilingTool = tool('secedgar_get_filing', {
       effectiveOffset,
       input.content_limit,
     );
+
+    if (truncated) {
+      ctx.enrich.truncated({
+        shown: text.length,
+        cap: input.content_limit,
+        guidance: `Showing ${text.length} of ${totalLength} characters. Pass next_offset (${nextOffset ?? '?'}) as offset to read the next page, or jump with section.`,
+      });
+    }
 
     // Emit outline on first-page truncated responses (not on subsequent pages or section jumps)
     const shouldEmitOutline = truncated && effectiveOffset === 0 && !input.section;

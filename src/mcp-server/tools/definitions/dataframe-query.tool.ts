@@ -22,7 +22,18 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance when the query returned no rows, or when results were capped.'),
+      .describe('Guidance when the query returned no rows, or when the row cap withheld some.'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when the result set held more rows than the row cap allowed through.'),
+    shown: z.number().optional().describe('Number of rows returned inline.'),
+    cap: z
+      .number()
+      .optional()
+      .describe(
+        'The row cap that actually bound — `preview` when it is lower than `row_limit`, otherwise `row_limit`.',
+      ),
   },
 
   errors: [
@@ -151,9 +162,17 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
         'Query returned 0 rows. Verify dataframe names (use secedgar_dataframe_describe) and check your WHERE conditions.',
       );
     } else if (result.rowCount > result.rows.length) {
-      ctx.enrich.notice(
-        `Showing ${result.rows.length} of ${result.rowCount} rows (capped). Use register_as to persist the full result, or raise row_limit (max 10000).`,
-      );
+      // `preview` and `row_limit` are independent ceilings; report the one that
+      // actually bound, so `cap` names a number the caller can act on and the
+      // guidance points at the lever that will widen the window.
+      const preview = input.preview;
+      const previewBinds = preview !== undefined && preview < input.row_limit;
+      const lever = previewBinds ? 'raise preview' : 'raise row_limit (max 10000)';
+      ctx.enrich.truncated({
+        shown: result.rows.length,
+        cap: previewBinds ? preview : input.row_limit,
+        guidance: `Showing ${result.rows.length} of ${result.rowCount} rows (capped). Use register_as to persist the full result, or ${lever}.`,
+      });
     }
 
     return {

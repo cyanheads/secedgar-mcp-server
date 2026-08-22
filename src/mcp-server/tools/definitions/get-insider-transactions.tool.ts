@@ -436,6 +436,13 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       `${result.transactions.length} transaction(s) from ${result.filings_scanned} Form 4 filing(s) scanned`,
     ];
 
+    // One legend rather than a per-row tag: every row spells the direction out
+    // as "shares acquired" / "shares disposed", and repeating the raw enum on
+    // each line would grow the rendered text without adding information.
+    if (result.transactions.length > 0) {
+      lines.push('Direction: "shares acquired" = acquire, "shares disposed" = dispose.');
+    }
+
     for (const tx of result.transactions) {
       lines.push('');
       const sharesStr =

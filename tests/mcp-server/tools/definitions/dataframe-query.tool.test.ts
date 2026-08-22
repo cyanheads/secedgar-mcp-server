@@ -13,6 +13,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
 }));
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import { blockText } from '../../../support/assertions.js';
 
 const mockBridge = {
   query: vi.fn(),
@@ -259,6 +260,62 @@ describe('dataframeQueryTool', () => {
     const enrichment = getEnrichment(ctx);
     expect(typeof enrichment.notice).toBe('string');
     expect(enrichment.notice).toContain('1000 of 5000');
+    // The cap is disclosed structurally, not only in the notice prose.
+    expect(enrichment.truncated).toBe(true);
+    expect(enrichment.shown).toBe(1000);
+    expect(enrichment.cap).toBe(dataframeQueryTool.input.parse({ sql: 'SELECT 1' }).row_limit);
+  });
+
+  it('reports preview as the cap when it binds below row_limit', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+    mockBridge.query.mockResolvedValue({
+      result: {
+        columns: ['id'],
+        rowCount: 67,
+        rows: Array.from({ length: 3 }, (_, i) => ({ id: String(i) })),
+      },
+      meta: undefined,
+    });
+    const ctx = createMockContext({ errors: dataframeQueryTool.errors });
+    const input = dataframeQueryTool.input.parse({
+      sql: 'SELECT id FROM df_MID',
+      preview: 3,
+      row_limit: 1000,
+    });
+    await dataframeQueryTool.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.truncated).toBe(true);
+    expect(enrichment.shown).toBe(3);
+    // preview (3), not row_limit (1000), is what actually withheld the rows.
+    expect(enrichment.cap).toBe(3);
+    expect(enrichment.notice).toContain('raise preview');
+  });
+
+  it('reports row_limit as the cap when preview does not bind below it', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+    mockBridge.query.mockResolvedValue({
+      result: {
+        columns: ['id'],
+        rowCount: 5000,
+        rows: Array.from({ length: 100 }, (_, i) => ({ id: String(i) })),
+      },
+      meta: undefined,
+    });
+    const ctx = createMockContext({ errors: dataframeQueryTool.errors });
+    // preview === row_limit is the boundary the canvas provider allows; it
+    // rejects preview > rowLimit outright, so that combination never reaches here.
+    const input = dataframeQueryTool.input.parse({
+      sql: 'SELECT id FROM df_BIG',
+      preview: 100,
+      row_limit: 100,
+    });
+    await dataframeQueryTool.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.truncated).toBe(true);
+    expect(enrichment.cap).toBe(100);
+    expect(enrichment.notice).toContain('raise row_limit');
   });
 
   it('does not populate enrichment notice on normal results', async () => {
@@ -273,6 +330,7 @@ describe('dataframeQueryTool', () => {
 
     const enrichment = getEnrichment(ctx);
     expect(enrichment.notice).toBeUndefined();
+    expect(enrichment.truncated).toBeUndefined();
   });
 
   it('register_as rejects names not matching df_XXXXX_XXXXX pattern (#53)', () => {
@@ -327,14 +385,14 @@ describe('dataframeQueryTool', () => {
     const blocks = dataframeQueryTool.format!(result);
 
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].text).toContain('| name | value |');
-    expect(blocks[0].text).toContain('Apple');
+    expect(blockText(blocks)).toContain('| name | value |');
+    expect(blockText(blocks)).toContain('Apple');
   });
 
   it('formats empty results with no-rows message', () => {
     const result = { columns: ['id'], row_count: 0, rows: [] };
     const blocks = dataframeQueryTool.format!(result);
 
-    expect(blocks[0].text).toContain('No rows');
+    expect(blockText(blocks)).toContain('No rows');
   });
 });

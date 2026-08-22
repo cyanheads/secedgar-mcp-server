@@ -25,6 +25,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
 }));
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import { blockAt, blockText, caught, recoveryHint } from '../../../support/assertions.js';
 
 /** A canvas bridge stub whose registerDataframe echoes the rows + truncated flag it received. */
 function stubBridge() {
@@ -374,15 +375,18 @@ describe('getInsiderTransactionsTool', () => {
     };
     const blocks = getInsiderTransactionsTool.format!(output);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].type).toBe('text');
-    expect(blocks[0].text).toContain('Apple Inc.');
-    expect(blocks[0].text).toContain('AAPL');
-    expect(blocks[0].text).toContain('LEVINSON ARTHUR D');
-    expect(blocks[0].text).toContain('Director');
-    expect(blocks[0].text).toContain('sale');
-    expect(blocks[0].text).toContain('10,000 shares disposed');
-    expect(blocks[0].text).toContain('$175.50');
-    expect(blocks[0].text).toContain('500,000');
+    expect(blockAt(blocks).type).toBe('text');
+    expect(blockText(blocks)).toContain('Apple Inc.');
+    expect(blockText(blocks)).toContain('AAPL');
+    expect(blockText(blocks)).toContain('LEVINSON ARTHUR D');
+    expect(blockText(blocks)).toContain('Director');
+    expect(blockText(blocks)).toContain('sale');
+    expect(blockText(blocks)).toContain('10,000 shares disposed');
+    expect(blockText(blocks)).toContain('$175.50');
+    expect(blockText(blocks)).toContain('500,000');
+    // The raw `direction` enum reaches content[] through one legend rather than
+    // a per-row tag, so a content-only client can map the prose back to it.
+    expect(blockText(blocks)).toContain('"shares acquired" = acquire, "shares disposed" = dispose');
   });
 
   it('formats acquisition with positive shares', () => {
@@ -412,9 +416,9 @@ describe('getInsiderTransactionsTool', () => {
       filings_scanned: 1,
     };
     const blocks = getInsiderTransactionsTool.format!(output);
-    expect(blocks[0].text).toContain('5,000 shares acquired');
-    expect(blocks[0].text).toContain('$170.00');
-    expect(blocks[0].text).not.toContain('AAPL'); // ticker is undefined
+    expect(blockText(blocks)).toContain('5,000 shares acquired');
+    expect(blockText(blocks)).toContain('$170.00');
+    expect(blockText(blocks)).not.toContain('AAPL'); // ticker is undefined
   });
 
   it('format handles empty transactions list', () => {
@@ -426,8 +430,10 @@ describe('getInsiderTransactionsTool', () => {
       filings_scanned: 5,
     };
     const blocks = getInsiderTransactionsTool.format!(output);
-    expect(blocks[0].text).toContain('0 transaction(s)');
-    expect(blocks[0].text).toContain('5 Form 4 filing(s)');
+    expect(blockText(blocks)).toContain('0 transaction(s)');
+    expect(blockText(blocks)).toContain('5 Form 4 filing(s)');
+    // Nothing to decode, so the legend stays off an empty listing.
+    expect(blockText(blocks)).not.toContain('shares acquired" = acquire');
   });
 
   it('format renders indirect ownership with nature (#46)', () => {
@@ -458,10 +464,10 @@ describe('getInsiderTransactionsTool', () => {
       filings_scanned: 1,
     };
     const blocks = getInsiderTransactionsTool.format!(output);
-    expect(blocks[0].text).toContain('indirect: By Spouse');
-    expect(blocks[0].text).not.toContain('[derivative]');
+    expect(blockText(blocks)).toContain('indirect: By Spouse');
+    expect(blockText(blocks)).not.toContain('[derivative]');
     // Disposal renders as "shares disposed" not "shares acquired"
-    expect(blocks[0].text).toContain('shares disposed');
+    expect(blockText(blocks)).toContain('shares disposed');
   });
 
   it('format marks derivative transactions', () => {
@@ -491,7 +497,7 @@ describe('getInsiderTransactionsTool', () => {
       filings_scanned: 1,
     };
     const blocks = getInsiderTransactionsTool.format!(output);
-    expect(blocks[0].text).toContain('[derivative]');
+    expect(blockText(blocks)).toContain('[derivative]');
   });
 
   // Security: no API keys or env vars should appear in output
@@ -711,11 +717,11 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
     const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: '0001193125' });
 
-    const err = await getInsiderTransactionsTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(getInsiderTransactionsTool.handler(input, ctx));
     expect(err.code).toBe(JsonRpcErrorCode.NotFound);
     expect(err.data.reason).toBe('company_not_found');
     expect(err.message).toMatch(/accession-number prefix/i);
-    expect(err.data.recovery.hint).toContain('secedgar_company_search');
+    expect(recoveryHint(err)).toContain('secedgar_company_search');
     // No raw SEC URL on the message or the structured data.
     expect(err.message).not.toContain('data.sec.gov');
     expect(err.message).not.toContain('https://');
@@ -734,7 +740,7 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
     const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
 
-    const err = await getInsiderTransactionsTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(getInsiderTransactionsTool.handler(input, ctx));
     expect(err.code).toBe(JsonRpcErrorCode.NotFound);
     expect(err.data?.reason).toBeUndefined();
     expect(err.message).toContain('data.sec.gov');
