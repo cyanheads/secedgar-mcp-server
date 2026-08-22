@@ -1,11 +1,9 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-07-27 08:24:55
+Generated on: 2026-08-22 19:21:15
 
 ```text
 secedgar-mcp-server/
-├── .agents/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
@@ -16,6 +14,8 @@ secedgar-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/
@@ -214,49 +214,52 @@ secedgar-mcp-server/
 │   │   │       ├── concepts.resource.test.ts
 │   │   │       └── filing-types.resource.test.ts
 │   │   └── tools/
-│   │       └── definitions/
-│   │           ├── company-search.tool.test.ts
-│   │           ├── compare-companies.tool.test.ts
-│   │           ├── dataframe-describe.tool.test.ts
-│   │           ├── dataframe-drop.tool.test.ts
-│   │           ├── dataframe-query.tool.test.ts
-│   │           ├── fetch-frames.tool.test.ts
-│   │           ├── find-holders.tool.test.ts
-│   │           ├── get-beneficial-owners.tool.test.ts
-│   │           ├── get-filing.tool.test.ts
-│   │           ├── get-financials.tool.test.ts
-│   │           ├── get-fund-holdings.tool.test.ts
-│   │           ├── get-insider-transactions.tool.test.ts
-│   │           ├── get-institutional-holdings.tool.test.ts
-│   │           ├── get-material-events.tool.test.ts
-│   │           ├── get-snapshot.tool.test.ts
-│   │           ├── search-concepts.tool.test.ts
-│   │           ├── search-filings.tool.test.ts
-│   │           └── security.test.ts
+│   │       ├── definitions/
+│   │       │   ├── company-search.tool.test.ts
+│   │       │   ├── compare-companies.tool.test.ts
+│   │       │   ├── dataframe-describe.tool.test.ts
+│   │       │   ├── dataframe-drop.tool.test.ts
+│   │       │   ├── dataframe-query.tool.test.ts
+│   │       │   ├── fetch-frames.tool.test.ts
+│   │       │   ├── find-holders.tool.test.ts
+│   │       │   ├── get-beneficial-owners.tool.test.ts
+│   │       │   ├── get-filing.tool.test.ts
+│   │       │   ├── get-financials.tool.test.ts
+│   │       │   ├── get-fund-holdings.tool.test.ts
+│   │       │   ├── get-insider-transactions.tool.test.ts
+│   │       │   ├── get-institutional-holdings.tool.test.ts
+│   │       │   ├── get-material-events.tool.test.ts
+│   │       │   ├── get-snapshot.tool.test.ts
+│   │       │   ├── search-concepts.tool.test.ts
+│   │       │   ├── search-filings.tool.test.ts
+│   │       │   └── security.test.ts
+│   │       └── strict-inputs.test.ts
 │   ├── scripts/
 │   │   └── bundle-entry-patterns.test.ts
-│   └── services/
-│       ├── canvas-bridge/
-│       │   ├── canvas-bridge.test.ts
-│       │   └── sql-gate-extras.test.ts
-│       └── edgar/
-│           ├── mirror/
-│           │   ├── companyfacts-sync.test.ts
-│           │   ├── edgar-mirror.test.ts
-│           │   └── tickers-sync.test.ts
-│           ├── beneficial-ownership-parser.test.ts
-│           ├── concept-map.test.ts
-│           ├── concept-series.test.ts
-│           ├── edgar-api-service.efts.test.ts
-│           ├── edgar-api-service.full-index.test.ts
-│           ├── edgar-api-service.mirror.test.ts
-│           ├── edgar-api-service.test.ts
-│           ├── eight-k-items.test.ts
-│           ├── filing-to-text.test.ts
-│           ├── fiscal-periods.test.ts
-│           ├── nport-parser.test.ts
-│           ├── ownership-parser.test.ts
-│           └── xml-nodes.test.ts
+│   ├── services/
+│   │   ├── canvas-bridge/
+│   │   │   ├── canvas-bridge.test.ts
+│   │   │   └── sql-gate-extras.test.ts
+│   │   └── edgar/
+│   │       ├── mirror/
+│   │       │   ├── companyfacts-sync.test.ts
+│   │       │   ├── edgar-mirror.test.ts
+│   │       │   └── tickers-sync.test.ts
+│   │       ├── beneficial-ownership-parser.test.ts
+│   │       ├── concept-map.test.ts
+│   │       ├── concept-series.test.ts
+│   │       ├── edgar-api-service.efts.test.ts
+│   │       ├── edgar-api-service.full-index.test.ts
+│   │       ├── edgar-api-service.mirror.test.ts
+│   │       ├── edgar-api-service.test.ts
+│   │       ├── eight-k-items.test.ts
+│   │       ├── filing-to-text.test.ts
+│   │       ├── fiscal-periods.test.ts
+│   │       ├── nport-parser.test.ts
+│   │       ├── ownership-parser.test.ts
+│   │       └── xml-nodes.test.ts
+│   └── support/
+│       └── assertions.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes

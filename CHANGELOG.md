@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.15.1](changelog/0.15.x/0.15.1.md) — 2026-08-22
+
+Adopts @cyanheads/mcp-ts-core 0.12.3: tool inputs are strict, so an undeclared argument key is rejected by name instead of silently dropped. .env.example now defaults MCP_SESSION_MODE to stateless, and the three tools that cap their inline results disclose the cap through enrichment.
+
 ## [0.15.0](changelog/0.15.x/0.15.0.md) — 2026-07-27
 
 Two new tools — secedgar_get_beneficial_owners (SCHEDULE 13D/13G blockholders) and secedgar_get_fund_holdings (NPORT-P fund portfolios) — plus bounded pre-2001 full-text and straddling-range merge for secedgar_search_filings.
