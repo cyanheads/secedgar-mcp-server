@@ -14,7 +14,7 @@ issue.
 - **Preferred:** open a private advisory via the repository's
   [Security tab](https://github.com/cyanheads/secedgar-mcp-server/security/advisories/new)
   ("Report a vulnerability").
-- **Email:** casey@caseyjhand.com
+- **Email:** security@caseyjhand.com
 
 Include the affected version, a description of the impact, and steps to
 reproduce where possible. You will receive an acknowledgement, and a fix will be
