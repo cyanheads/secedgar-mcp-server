@@ -16,6 +16,7 @@ import {
   setExtractCache,
   windowText,
 } from '@/services/edgar/filing-to-text.js';
+import { at } from '../../support/assertions.js';
 
 afterEach(() => {
   clearExtractCache();
@@ -281,7 +282,7 @@ describe('detectHeadings', () => {
     expect(rf).toHaveLength(1);
     // Should be the later (body) occurrence
     const laterIndex = text.lastIndexOf('RISK FACTORS');
-    expect(rf[0].offset).toBe(laterIndex);
+    expect(at(rf, 0).offset).toBe(laterIndex);
   });
 
   it('caps output at maxEntries', () => {
@@ -349,8 +350,8 @@ describe('detectHeadings — mixed-case Item/Part headings (#71)', () => {
     const headings = detectHeadings(text);
     const partOne = headings.filter((h) => h.heading.toLowerCase() === 'part i');
     expect(partOne).toHaveLength(1);
-    expect(partOne[0].heading).toBe('PART I');
-    expect(partOne[0].offset).toBe(text.lastIndexOf('PART I'));
+    expect(at(partOne, 0).heading).toBe('PART I');
+    expect(at(partOne, 0).offset).toBe(text.lastIndexOf('PART I'));
   });
 
   it('still detects all-caps ITEM headings alongside mixed-case forms', () => {

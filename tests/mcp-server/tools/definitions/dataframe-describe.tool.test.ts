@@ -13,6 +13,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
 }));
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import { blockText } from '../../../support/assertions.js';
 
 const mockBridge = {
   describe: vi.fn(),
@@ -129,7 +130,7 @@ describe('dataframeDescribeTool', () => {
     const result = { dataframes: [] };
     const blocks = dataframeDescribeTool.format!(result);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].text).toBe('No active dataframes.');
+    expect(blockText(blocks)).toBe('No active dataframes.');
   });
 
   it('formats single dataframe with provenance and schema', () => {
@@ -150,11 +151,11 @@ describe('dataframeDescribeTool', () => {
     };
     const blocks = dataframeDescribeTool.format!(result);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].text).toContain('1 active dataframe(s)');
-    expect(blocks[0].text).toContain('df_ABCDE_FGHIJ');
-    expect(blocks[0].text).toContain('secedgar_fetch_frames');
-    expect(blocks[0].text).toContain('3131');
-    expect(blocks[0].text).toContain('cik:VARCHAR');
+    expect(blockText(blocks)).toContain('1 active dataframe(s)');
+    expect(blockText(blocks)).toContain('df_ABCDE_FGHIJ');
+    expect(blockText(blocks)).toContain('secedgar_fetch_frames');
+    expect(blockText(blocks)).toContain('3131');
+    expect(blockText(blocks)).toContain('cik:VARCHAR');
   });
 
   it('format renders truncated indicator when truncated=true', () => {
@@ -174,8 +175,8 @@ describe('dataframeDescribeTool', () => {
       ],
     };
     const blocks = dataframeDescribeTool.format!(result);
-    expect(blocks[0].text).toContain('truncated');
-    expect(blocks[0].text).toContain('at 1000');
+    expect(blockText(blocks)).toContain('truncated');
+    expect(blockText(blocks)).toContain('at 1000');
   });
 
   it('format renders multiple dataframes with section headers', () => {
@@ -194,8 +195,8 @@ describe('dataframeDescribeTool', () => {
       dataframes: [df('df_AAAAA_11111'), df('df_BBBBB_22222')],
     };
     const blocks = dataframeDescribeTool.format!(result);
-    expect(blocks[0].text).toContain('2 active dataframe(s)');
-    expect(blocks[0].text).toContain('df_AAAAA_11111');
-    expect(blocks[0].text).toContain('df_BBBBB_22222');
+    expect(blockText(blocks)).toContain('2 active dataframe(s)');
+    expect(blockText(blocks)).toContain('df_AAAAA_11111');
+    expect(blockText(blocks)).toContain('df_BBBBB_22222');
   });
 });

@@ -6,6 +6,7 @@
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { conceptsResource } from '@/mcp-server/resources/definitions/concepts.resource.js';
+import { listResources } from '../../../support/assertions.js';
 
 describe('conceptsResource', () => {
   it('returns markdown content with concept tables', () => {
@@ -46,7 +47,7 @@ describe('conceptsResource', () => {
   });
 
   it('lists resources correctly', async () => {
-    const listing = await conceptsResource.list!();
+    const listing = await listResources(conceptsResource.list!);
     expect(listing.resources).toHaveLength(1);
     expect(listing.resources[0]).toMatchObject({
       uri: 'secedgar://concepts',

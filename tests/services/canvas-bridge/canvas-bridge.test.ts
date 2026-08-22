@@ -83,7 +83,7 @@ describe('init/accessor', () => {
 describe('CanvasBridge.registerDataframe', () => {
   it('returns undefined and skips canvas work when rows is empty', async () => {
     const acquire = vi.fn();
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -99,7 +99,7 @@ describe('CanvasBridge.registerDataframe', () => {
 
   it('returns undefined and logs warning when canvas acquire fails (best-effort)', async () => {
     const acquire = vi.fn().mockRejectedValue(new Error('canvas down'));
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
     const warningSpy = vi.spyOn(ctx.log, 'warning');
@@ -126,7 +126,7 @@ describe('CanvasBridge.registerDataframe', () => {
       registerTable,
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -149,7 +149,7 @@ describe('CanvasBridge.drop', () => {
       drop: vi.fn().mockResolvedValue(false),
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -164,7 +164,7 @@ describe('CanvasBridge.query error classification (#47)', () => {
     // non_select_statement; the bridge pre-check surfaces a useful missing_table
     // first — before the canvas is even acquired.
     const acquire = vi.fn();
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -177,7 +177,7 @@ describe('CanvasBridge.query error classification (#47)', () => {
 
   it('missing_table names the df and points to dataframe_describe, no catalog leak (#47)', async () => {
     const acquire = vi.fn();
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -195,7 +195,7 @@ describe('CanvasBridge.query error classification (#47)', () => {
       query: vi.fn().mockResolvedValue({ columns: ['note'], rows: [], rowCount: 0 }),
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
     await ctx.state.set('df-meta/df_AAAAA_BBBBB', {
@@ -228,7 +228,7 @@ describe('CanvasBridge.query error classification (#47)', () => {
       query: vi.fn().mockRejectedValue(structured),
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -256,7 +256,7 @@ describe('CanvasBridge.query error classification (#47)', () => {
       query: vi.fn().mockRejectedValue(structured),
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -280,7 +280,7 @@ describe('CanvasBridge.query error classification (#47)', () => {
       query: vi.fn(),
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
     await ctx.state.set('df-meta/df_TRACK_00001', {
@@ -304,7 +304,7 @@ describe('CanvasBridge.query error classification (#47)', () => {
       query: vi.fn().mockRejectedValue(new Error('Parser Error: syntax error at or near "SELEKT"')),
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -334,7 +334,7 @@ describe('CanvasBridge.query error classification (#47)', () => {
       query: vi.fn().mockRejectedValue(frameworkErr),
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -363,7 +363,7 @@ describe('CanvasBridge.query error classification (#47)', () => {
       query: vi.fn().mockRejectedValue(frameworkErr),
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -388,7 +388,7 @@ describe('CanvasBridge.query error classification (#47)', () => {
       query: vi.fn().mockRejectedValue(gateErr),
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
     await ctx.state.set('df-meta/df_AAAAA_BBBBB', {
@@ -418,7 +418,7 @@ describe('CanvasBridge.query error classification (#47)', () => {
       query: vi.fn().mockRejectedValue(gateErr),
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
     await ctx.state.set('df-meta/df_AAAAA_BBBBB', {
@@ -451,7 +451,7 @@ describe('CanvasBridge.query error classification (#47)', () => {
       query: vi.fn().mockRejectedValue(gateErr),
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -475,7 +475,7 @@ describe('CanvasBridge.query error classification (#47)', () => {
       query: vi.fn().mockRejectedValue(gateErr),
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -505,7 +505,7 @@ describe('CanvasBridge.query error classification (#47)', () => {
       query: vi.fn().mockRejectedValue(gateErr),
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
     await ctx.state.set('df-meta/df_AAAAA_BBBBB', {
@@ -557,7 +557,7 @@ describe('CanvasBridge.query with registerAs', () => {
       ]),
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -602,7 +602,7 @@ describe('CanvasBridge.query with registerAs', () => {
       ]),
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
@@ -633,7 +633,7 @@ describe('CanvasBridge.query with registerAs', () => {
       describe: vi.fn().mockResolvedValue([]),
     };
     const acquire = vi.fn().mockResolvedValue(instance);
-    const canvas = { acquire } as unknown as Parameters<typeof CanvasBridge>[0];
+    const canvas = { acquire } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas);
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 

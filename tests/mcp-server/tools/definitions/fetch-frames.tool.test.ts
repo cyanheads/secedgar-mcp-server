@@ -14,6 +14,7 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
 }));
 
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+import { at, blockText } from '../../../support/assertions.js';
 
 const mockFramesResponse: FramesResponse = {
   ccp: 'CY2023',
@@ -77,7 +78,7 @@ describe('fetchFramesTool', () => {
 
     expect(result.total_companies).toBe(5000);
     expect(result.data.length).toBe(3);
-    expect(result.data[0].value).toBeGreaterThanOrEqual(result.data[1].value);
+    expect(at(result.data, 0).value).toBeGreaterThanOrEqual(at(result.data, 1).value);
   });
 
   it('resolves friendly concept names', async () => {
@@ -119,7 +120,7 @@ describe('fetchFramesTool', () => {
     });
     const result = await fetchFramesTool.handler(input, ctx);
 
-    expect(result.data[0].value).toBeLessThanOrEqual(result.data[1].value);
+    expect(at(result.data, 0).value).toBeLessThanOrEqual(at(result.data, 1).value);
   });
 
   it('applies limit', async () => {
@@ -396,10 +397,10 @@ describe('fetchFramesTool', () => {
     };
     const blocks = fetchFramesTool.format!(output);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].text).toContain('Revenue');
-    expect(blocks[0].text).toContain('5000 companies');
-    expect(blocks[0].text).toContain('AMZN');
-    expect(blocks[0].text).toMatch(/\$574\.7[89]B/);
+    expect(blockText(blocks)).toContain('Revenue');
+    expect(blockText(blocks)).toContain('5000 companies');
+    expect(blockText(blocks)).toContain('AMZN');
+    expect(blockText(blocks)).toMatch(/\$574\.7[89]B/);
   });
 
   it('formats USD-per-shares values with dollar sign', () => {
@@ -427,7 +428,7 @@ describe('fetchFramesTool', () => {
       caveats: [],
     };
     const blocks = fetchFramesTool.format!(output);
-    expect(blocks[0].text).toContain('$15.42');
+    expect(blockText(blocks)).toContain('$15.42');
   });
 
   it('renders dataset hint when present', () => {
@@ -451,9 +452,9 @@ describe('fetchFramesTool', () => {
       caveats: [],
     };
     const blocks = fetchFramesTool.format!(output);
-    expect(blocks[0].text).toContain('df_ABCDE_FGHIJ');
-    expect(blocks[0].text).toContain('5000 rows');
-    expect(blocks[0].text).toContain('secedgar_dataframe_query');
+    expect(blockText(blocks)).toContain('df_ABCDE_FGHIJ');
+    expect(blockText(blocks)).toContain('5000 rows');
+    expect(blockText(blocks)).toContain('secedgar_dataframe_query');
   });
 
   it('renders coverage, value dispersion, and period range in format text', () => {
@@ -477,10 +478,10 @@ describe('fetchFramesTool', () => {
       caveats: [],
     };
     const blocks = fetchFramesTool.format!(output);
-    expect(blocks[0].text).toContain('Coverage: 1 of 3 XBRL tags queried');
-    expect(blocks[0].text).toContain('Revenues, SalesRevenueNet');
-    expect(blocks[0].text).toContain('max/p95 15×');
-    expect(blocks[0].text).toContain('2023-01-31 → 2024-12-31');
+    expect(blockText(blocks)).toContain('Coverage: 1 of 3 XBRL tags queried');
+    expect(blockText(blocks)).toContain('Revenues, SalesRevenueNet');
+    expect(blockText(blocks)).toContain('max/p95 15×');
+    expect(blockText(blocks)).toContain('2023-01-31 → 2024-12-31');
   });
 
   it('renders related_tags hint in format text (#36)', () => {
@@ -504,8 +505,8 @@ describe('fetchFramesTool', () => {
       caveats: [],
     };
     const blocks = fetchFramesTool.format!(output);
-    expect(blocks[0].text).toContain('Related tags');
-    expect(blocks[0].text).toContain(
+    expect(blockText(blocks)).toContain('Related tags');
+    expect(blockText(blocks)).toContain(
       'CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents',
     );
   });
@@ -621,8 +622,8 @@ describe('fetchFramesTool', () => {
       caveats: ['Filers whose fiscal Q4 spans calendar Q3 are absent — AAPL Sep-end.'],
     };
     const blocks = fetchFramesTool.format!(output);
-    expect(blocks[0].text).toContain('Caveat:');
-    expect(blocks[0].text).toContain('AAPL Sep-end');
+    expect(blockText(blocks)).toContain('Caveat:');
+    expect(blockText(blocks)).toContain('AAPL Sep-end');
   });
 });
 
@@ -728,7 +729,7 @@ describe('fetchFramesTool offset pagination (#89)', () => {
       offset: 5,
     });
     const result = await fetchFramesTool.handler(input, ctx);
-    const text = fetchFramesTool.format!(result)[0].text;
+    const text = blockText(fetchFramesTool.format!(result));
 
     expect(text).toContain('Page offset: 5');
     expect(text).toContain('Next offset: 10');

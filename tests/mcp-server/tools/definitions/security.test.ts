@@ -45,6 +45,7 @@ import {
   getExtractCache,
   windowText,
 } from '@/services/edgar/filing-to-text.js';
+import { caught, rejection } from '../../../support/assertions.js';
 
 const mockApi = {
   resolveCik: vi.fn(),
@@ -131,7 +132,7 @@ describe('companySearchTool — input validation', () => {
     mockApi.resolveCik.mockResolvedValue([]);
     const ctx = createMockContext({ errors: companySearchTool.errors });
     const input = companySearchTool.input.parse({ query: "' OR 1=1 --" });
-    const err = await companySearchTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(companySearchTool.handler(input, ctx));
     // Check the wire-level fields only (code + data), not the raw Error.stack which always contains file paths
     const wireFields = { code: err?.code, message: err?.message, data: err?.data };
     const wireStr = JSON.stringify(wireFields);
@@ -147,7 +148,7 @@ describe('companySearchTool — input validation', () => {
     mockApi.resolveCik.mockResolvedValue([]);
     const ctx = createMockContext({ errors: companySearchTool.errors });
     const input = companySearchTool.input.parse({ query: 'test' });
-    const err = await companySearchTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(companySearchTool.handler(input, ctx));
     expect(JSON.stringify(err)).not.toContain('TestApp user@example.com');
   });
 });
@@ -283,7 +284,7 @@ describe('getFilingTool — input validation', () => {
       accession_number: '0000320193-23-000106',
       document: '../../etc/passwd',
     });
-    const err = await getFilingTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(getFilingTool.handler(input, ctx));
     // Either fails with document_not_found or no_documents — not reading arbitrary paths
     expect(err?.data?.reason).toMatch(/document_not_found|no_documents/);
   });
@@ -354,7 +355,7 @@ describe('getFinancialsTool — input validation', () => {
     mockApi.resolveCik.mockResolvedValue([]);
     const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({ company: 'AAPL', concept: 'revenue' });
-    const err = await getFinancialsTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(getFinancialsTool.handler(input, ctx));
     expect(JSON.stringify(err)).not.toContain('PrivateApp private@test.com');
   });
 });
@@ -407,7 +408,7 @@ describe('fetchFramesTool — input validation', () => {
     mockApi.tryGetFrames.mockResolvedValue(null);
     const ctx = createMockContext({ errors: fetchFramesTool.errors });
     const input = fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2023' });
-    const err = await fetchFramesTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(fetchFramesTool.handler(input, ctx));
     expect(JSON.stringify(err)).not.toContain('EnvSecret env@test.com');
   });
 });
@@ -428,7 +429,7 @@ describe('env-var leakage — all tools', () => {
     mockApi.resolveCik.mockResolvedValue([]);
     const ctx = createMockContext({ errors: companySearchTool.errors });
     const input = companySearchTool.input.parse({ query: 'test' });
-    const err = await companySearchTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(companySearchTool.handler(input, ctx));
     expect(JSON.stringify(err)).not.toContain(secretValue);
   });
 
@@ -436,8 +437,9 @@ describe('env-var leakage — all tools', () => {
     mockApi.searchFilings.mockRejectedValue(new Error('upstream error'));
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({ query: 'test' });
-    const err = await searchFilingsTool.handler(input, ctx).catch((e) => e);
-    // The env var should not appear in the error propagation
+    // The upstream throw is a raw Error, classified by the framework wrapper
+    // rather than at this call site — the assertion is about propagation.
+    const err = await rejection(searchFilingsTool.handler(input, ctx));
     expect(JSON.stringify(err)).not.toContain(secretValue);
   });
 
@@ -445,7 +447,7 @@ describe('env-var leakage — all tools', () => {
     mockApi.resolveCik.mockResolvedValue([]);
     const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({ company: 'TEST', concept: 'revenue' });
-    const err = await getFinancialsTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(getFinancialsTool.handler(input, ctx));
     expect(JSON.stringify(err)).not.toContain(secretValue);
   });
 
@@ -453,7 +455,7 @@ describe('env-var leakage — all tools', () => {
     mockApi.tryGetFrames.mockResolvedValue(null);
     const ctx = createMockContext({ errors: fetchFramesTool.errors });
     const input = fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2023' });
-    const err = await fetchFramesTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(fetchFramesTool.handler(input, ctx));
     expect(JSON.stringify(err)).not.toContain(secretValue);
   });
 });

@@ -166,7 +166,7 @@ describe('EdgarApiService.resolveEntityByName — EFTS entity-autocomplete (#73)
   });
 
   it('sends the typed name via the keysTyped query param', async () => {
-    const fetchMock = vi.fn(async () => jsonResponse({ hits: { hits: [] } }));
+    const fetchMock = vi.fn(async (_input: unknown) => jsonResponse({ hits: { hits: [] } }));
     vi.stubGlobal('fetch', fetchMock);
 
     await getEdgarApiService().resolveEntityByName('vanguard group');

@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { companyAnalysisPrompt } from '@/mcp-server/prompts/definitions/company-analysis.prompt.js';
+import { at } from '../../../support/assertions.js';
 
 /** Parse args and flatten the generated messages to a single searchable string. */
 function generatedText(args: { company: string; focus_areas?: string }): string {
@@ -13,13 +14,13 @@ function generatedText(args: { company: string; focus_areas?: string }): string 
 }
 
 describe('companyAnalysisPrompt', () => {
-  it('generates a well-formed user message', () => {
-    const messages = companyAnalysisPrompt.generate(
+  it('generates a well-formed user message', async () => {
+    const messages = await companyAnalysisPrompt.generate(
       companyAnalysisPrompt.args!.parse({ company: 'AAPL' }),
     );
     expect(messages).toHaveLength(1);
-    expect(messages[0]).toHaveProperty('role', 'user');
-    expect(messages[0]).toHaveProperty('content');
+    expect(at(messages)).toHaveProperty('role', 'user');
+    expect(at(messages)).toHaveProperty('content');
   });
 
   it('routes insider-focused analysis through secedgar_get_insider_transactions (#75)', () => {

@@ -31,6 +31,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+import { at, blockAt, blockText, caught, recoveryHint } from '../../../support/assertions.js';
 
 const mockEftsResponse: EftsResponse = {
   hits: {
@@ -135,9 +136,9 @@ describe('searchFilingsTool', () => {
     expect(result.total).toBe(42);
     expect(result.total_is_exact).toBe(true);
     expect(result.results).toHaveLength(2);
-    expect(result.results[0].accession_number).toBe('0000320193-23-000106');
-    expect(result.results[0].form).toBe('10-K');
-    expect(result.results[0].company_name).toBe('Apple Inc.');
+    expect(at(result.results, 0).accession_number).toBe('0000320193-23-000106');
+    expect(at(result.results, 0).form).toBe('10-K');
+    expect(at(result.results, 0).company_name).toBe('Apple Inc.');
   });
 
   it('passes through caller offset/limit when sort=relevance', async () => {
@@ -459,7 +460,7 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({ query: 'test' });
     const result = await searchFilingsTool.handler(input, ctx);
 
-    expect(result.results[0].accession_number).toBe('0000320193-23-000106');
+    expect(at(result.results, 0).accession_number).toBe('0000320193-23-000106');
   });
 
   it('extracts ticker from display_names parenthetical', async () => {
@@ -495,10 +496,10 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({ query: 'test', sort: 'relevance' });
     const result = await searchFilingsTool.handler(input, ctx);
 
-    expect(result.results[0].ticker).toBe('AAPL');
-    expect(result.results[0].company_name).toBe('Apple Inc.');
-    expect(result.results[1].ticker).toBe('BRK-A');
-    expect(result.results[1].company_name).toBe('BERKSHIRE HATHAWAY INC');
+    expect(at(result.results, 0).ticker).toBe('AAPL');
+    expect(at(result.results, 0).company_name).toBe('Apple Inc.');
+    expect(at(result.results, 1).ticker).toBe('BRK-A');
+    expect(at(result.results, 1).company_name).toBe('BERKSHIRE HATHAWAY INC');
   });
 
   it('omits ticker when display_names has no ticker parenthetical', async () => {
@@ -524,8 +525,8 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({ query: 'test' });
     const result = await searchFilingsTool.handler(input, ctx);
 
-    expect(result.results[0].ticker).toBeUndefined();
-    expect(result.results[0].company_name).toBe('Some Private Co.');
+    expect(at(result.results, 0).ticker).toBeUndefined();
+    expect(at(result.results, 0).company_name).toBe('Some Private Co.');
   });
 
   it('materializes the entity-scoped EFTS window to a dataframe — single call (#35)', async () => {
@@ -743,7 +744,7 @@ describe('searchFilingsTool', () => {
       expect.objectContaining({ query: '', forms: ['S-1'] }),
     );
     expect(result.total).toBe(80);
-    expect(result.results[0].form).toBe('S-1');
+    expect(at(result.results, 0).form).toBe('S-1');
   });
 
   it('rejects a date-range-only browse with no query or forms — missing_criteria (#79)', async () => {
@@ -905,10 +906,10 @@ describe('searchFilingsTool', () => {
     };
     const blocks = searchFilingsTool.format!(output);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].type).toBe('text');
-    expect(blocks[0].text).toContain('42 filings');
-    expect(blocks[0].text).toContain('10-K');
-    expect(blocks[0].text).toContain('Form distribution');
+    expect(blockAt(blocks).type).toBe('text');
+    expect(blockText(blocks)).toContain('42 filings');
+    expect(blockText(blocks)).toContain('10-K');
+    expect(blockText(blocks)).toContain('Form distribution');
   });
 
   it('formats non-exact total with capped note', () => {
@@ -918,7 +919,7 @@ describe('searchFilingsTool', () => {
       results: [],
     };
     const blocks = searchFilingsTool.format!(output);
-    expect(blocks[0].text).toContain('capped at 10,000');
+    expect(blockText(blocks)).toContain('capped at 10,000');
   });
 
   it('renders the source marker per row (format-parity)', () => {
@@ -944,7 +945,7 @@ describe('searchFilingsTool', () => {
         },
       ],
     };
-    const text = searchFilingsTool.format!(output)[0].text;
+    const text = blockText(searchFilingsTool.format!(output));
     expect(text).toContain('source: submissions');
     expect(text).toContain('source: efts');
   });
@@ -952,11 +953,12 @@ describe('searchFilingsTool', () => {
   // --- Pre-2001 date routing to the archives (#77) ---
 
   it('declares pre2001_full_text_unscoped and drops the reasons #87 replaced with service', () => {
+    const reasons = searchFilingsTool.errors?.map((e) => e.reason) ?? [];
     const byReason = new Map(searchFilingsTool.errors?.map((e) => [e.reason, e]));
     expect(byReason.get('pre2001_full_text_unscoped')?.code).toBe(JsonRpcErrorCode.ValidationError);
     // Both arms now serve these shapes, so a declared-but-unreachable reason would lie.
-    expect(byReason.has('straddling_date_range')).toBe(false);
-    expect(byReason.has('pre2001_full_text_scoped')).toBe(false);
+    expect(reasons).not.toContain('straddling_date_range');
+    expect(reasons).not.toContain('pre2001_full_text_scoped');
   });
 
   it('routes a pre-2001 entity-scoped range to the submissions archive (source: submissions) (#77)', async () => {
@@ -989,7 +991,7 @@ describe('searchFilingsTool', () => {
     expect(result.total).toBe(2);
     expect(result.results.every((r) => r.source === 'submissions')).toBe(true);
     // Newest-first by default; both recent 10-Ks fall inside the window.
-    expect(result.results[0].filing_date).toBe('1999-12-01');
+    expect(at(result.results, 0).filing_date).toBe('1999-12-01');
     expect(result.results.map((r) => r.accession_number)).toContain('0000320193-97-000010');
   });
 
@@ -1035,8 +1037,8 @@ describe('searchFilingsTool', () => {
 
     expect(mockApi.fetchArchivePage).toHaveBeenCalledWith('CIK0000320193-submissions-001.json');
     expect(result.total).toBe(1);
-    expect(result.results[0].accession_number).toBe('0000320193-94-000005');
-    expect(result.results[0].source).toBe('submissions');
+    expect(at(result.results, 0).accession_number).toBe('0000320193-94-000005');
+    expect(at(result.results, 0).source).toBe('submissions');
   });
 
   it('routes a pre-2001 unscoped forms/date browse to the full-index (source: full-index) (#77)', async () => {
@@ -1234,11 +1236,11 @@ describe('searchFilingsTool', () => {
       end_date: '1999-12-31',
     });
 
-    const err = await searchFilingsTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(searchFilingsTool.handler(input, ctx));
     expect(err.code).toBe(JsonRpcErrorCode.NotFound);
     expect(err.data.reason).toBe('entity_not_found');
     expect(err.message).toMatch(/accession-number prefix/i);
-    expect(err.data.recovery.hint).toContain('secedgar_company_search');
+    expect(recoveryHint(err)).toContain('secedgar_company_search');
     expect(err.message).not.toContain('data.sec.gov');
     expect(err.message).not.toContain('https://');
     expect(JSON.stringify(err.data)).not.toContain('data.sec.gov');
@@ -1265,7 +1267,7 @@ describe('searchFilingsTool', () => {
       end_date: '1999-12-31',
     });
 
-    const err = await searchFilingsTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(searchFilingsTool.handler(input, ctx));
     expect(err.code).toBe(JsonRpcErrorCode.NotFound);
     expect(err.data?.reason).toBeUndefined();
     expect(err.message).toContain('data.sec.gov');
@@ -1304,7 +1306,7 @@ describe('searchFilingsTool', () => {
       '0000320193-97-000010.txt',
     );
     expect(result.results.map((r) => r.accession_number)).toEqual(['0000320193-97-000010']);
-    expect(result.results[0].source).toBe('submissions');
+    expect(at(result.results, 0).source).toBe('submissions');
     expect(result.total).toBe(1);
     expect(result.total_is_exact).toBe(true);
     expect(result.scan).toEqual({ candidates: 3, scanned: 3, matched: 1, capped: false });
@@ -1448,12 +1450,14 @@ describe('searchFilingsTool', () => {
   });
 
   it('renders the scan disclosure in format() (format-parity) (#87)', () => {
-    const text = searchFilingsTool.format!({
-      total: 23,
-      total_is_exact: false,
-      results: [],
-      scan: { candidates: 112, scanned: 50, matched: 23, capped: true },
-    })[0].text;
+    const text = blockText(
+      searchFilingsTool.format!({
+        total: 23,
+        total_is_exact: false,
+        results: [],
+        scan: { candidates: 112, scanned: 50, matched: 23, capped: true },
+      }),
+    );
 
     expect(text).toContain('read 50 of 112 candidate filings, 23 matched');
     expect(text).toContain('Capped — the remaining 62 went unread');
@@ -1461,12 +1465,14 @@ describe('searchFilingsTool', () => {
 
     // The uncapped case says so rather than going silent — a reader must be able
     // to tell a complete read from a partial one without inspecting counts.
-    const uncapped = searchFilingsTool.format!({
-      total: 1,
-      total_is_exact: true,
-      results: [],
-      scan: { candidates: 3, scanned: 3, matched: 1, capped: false },
-    })[0].text;
+    const uncapped = blockText(
+      searchFilingsTool.format!({
+        total: 1,
+        total_is_exact: true,
+        results: [],
+        scan: { candidates: 3, scanned: 3, matched: 1, capped: false },
+      }),
+    );
     expect(uncapped).toContain('Not capped — every candidate was read.');
   });
 
@@ -1688,7 +1694,7 @@ describe('searchFilingsTool', () => {
       end_date: '2004-12-31',
     });
 
-    const err = await searchFilingsTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(searchFilingsTool.handler(input, ctx));
     expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(err.data.reason).toBe('pre2001_full_text_unscoped');
     // Names the unservable half, not the whole range.

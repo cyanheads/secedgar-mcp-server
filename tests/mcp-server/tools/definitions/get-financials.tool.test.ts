@@ -21,6 +21,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
 
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+import { at, blockText, caught, records } from '../../../support/assertions.js';
 
 const mockConceptResponse: CompanyConceptResponse = {
   cik: 320193,
@@ -208,7 +209,7 @@ describe('getFinancialsTool', () => {
     const result = await getFinancialsTool.handler(input, ctx);
 
     for (let i = 1; i < result.data.length; i++) {
-      expect(result.data[i - 1].end >= result.data[i].end).toBe(true);
+      expect(at(result.data, i - 1).end >= at(result.data, i).end).toBe(true);
     }
   });
 
@@ -294,7 +295,7 @@ describe('getFinancialsTool', () => {
     const result = await getFinancialsTool.handler(input, ctx);
 
     expect(result.data.length).toBeGreaterThan(0);
-    expect(result.data[0].period).toMatch(/I$/);
+    expect(at(result.data, 0).period).toMatch(/I$/);
   });
 
   it('duration concept still defaults to clean annual series (#48)', async () => {
@@ -420,7 +421,7 @@ describe('getFinancialsTool', () => {
 
     expect(result.data).toHaveLength(1);
     // The total (Revenue, tag index 0) must win
-    expect(result.data[0].value).toBe(totalRevenue);
+    expect(at(result.data, 0).value).toBe(totalRevenue);
   });
 
   it('same tag / later filed wins over earlier filed (restatement) (#44)', async () => {
@@ -468,7 +469,7 @@ describe('getFinancialsTool', () => {
 
     expect(result.data).toHaveLength(1);
     // Later filed (restatement) wins within the same tag
-    expect(result.data[0].value).toBe(amended);
+    expect(at(result.data, 0).value).toBe(amended);
   });
 
   it('IFRS revenue ifrsTags lists the IAS 1 total (Revenue) first (#44)', () => {
@@ -521,8 +522,8 @@ describe('getFinancialsTool', () => {
         matches: expect.arrayContaining([expect.objectContaining({ cik: '0000000000' })]),
       },
     });
-    const err = await getFinancialsTool.handler(input, ctx).catch((e) => e);
-    expect(err.data.matches.length).toBeLessThanOrEqual(10);
+    const err = await caught(getFinancialsTool.handler(input, ctx));
+    expect(records(err.data.matches).length).toBeLessThanOrEqual(10);
   });
 
   it('renders the ambiguous_company candidates in the message, not just error data (#90)', async () => {
@@ -534,14 +535,14 @@ describe('getFinancialsTool', () => {
     const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({ company: 'Apple', concept: 'revenue' });
 
-    const err = await getFinancialsTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(getFinancialsTool.handler(input, ctx));
     // CIK, name, and ticker (when present) all reach the text surface, so a
     // content-only client can act on the "retry with a ticker or CIK" recovery.
     expect(err.message).toContain('0000320193 Apple Inc. (AAPL)');
     expect(err.message).toContain('0001418121 Apple Hospitality REIT, Inc. (APLE)');
     expect(err.message).toContain('0006084276 Apple Bank for Savings');
     // Text and structured data are built from one capped list, so they cannot drift.
-    for (const m of err.data.matches) expect(err.message).toContain(m.cik);
+    for (const m of records(err.data.matches)) expect(err.message).toContain(m.cik);
   });
 
   it('caps the rendered ambiguous_company candidate list at 10 (#90)', async () => {
@@ -554,7 +555,7 @@ describe('getFinancialsTool', () => {
     const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({ company: 'Company', concept: 'revenue' });
 
-    const err = await getFinancialsTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(getFinancialsTool.handler(input, ctx));
     expect(err.message).toContain('0000000010 Company 0');
     expect(err.message).toContain('0000000019 Company 9');
     expect(err.message).not.toContain('Company 10');
@@ -658,7 +659,7 @@ describe('getFinancialsTool', () => {
 
     expect(result.data).toHaveLength(1);
     // Series is newest-first, so the single inline row is the most recent period.
-    expect(result.data[0].period).toBe('CY2023');
+    expect(at(result.data, 0).period).toBe('CY2023');
   });
 
   it('returns every period inline when limit is omitted (#32)', async () => {
@@ -700,8 +701,8 @@ describe('getFinancialsTool', () => {
       },
     };
     const blocks = getFinancialsTool.format!(output);
-    expect(blocks[0].text).toContain('showing the 1 most-recent of 5 periods');
-    expect(blocks[0].text).toContain('df_ABCDE_FGHIJ');
+    expect(blockText(blocks)).toContain('showing the 1 most-recent of 5 periods');
+    expect(blockText(blocks)).toContain('df_ABCDE_FGHIJ');
   });
 
   it('formats USD values in millions', () => {
@@ -726,8 +727,8 @@ describe('getFinancialsTool', () => {
     };
     const blocks = getFinancialsTool.format!(output);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].text).toContain('Revenue');
-    expect(blocks[0].text).toContain('$383285.0M');
+    expect(blockText(blocks)).toContain('Revenue');
+    expect(blockText(blocks)).toContain('$383285.0M');
   });
 
   it('formats USD/shares values with decimal', () => {
@@ -751,7 +752,7 @@ describe('getFinancialsTool', () => {
       ],
     };
     const blocks = getFinancialsTool.format!(output);
-    expect(blocks[0].text).toContain('$6.13');
+    expect(blockText(blocks)).toContain('$6.13');
   });
 });
 
@@ -828,7 +829,7 @@ describe('off-calendar fiscal-period caveat (#95)', () => {
     });
     const result = await getFinancialsTool.handler(input, ctx);
     const blocks = getFinancialsTool.format!(result);
-    expect(blocks[0].text).toContain('Caveat: Calendar Q2');
+    expect(blockText(blocks)).toContain('Caveat: Calendar Q2');
   });
 
   it('omits caveats on an annual series', async () => {
@@ -962,8 +963,8 @@ describe('deprecated-tag staleness caveat (#98)', () => {
     const result = await getFinancialsTool.handler(input, ctx);
     const blocks = getFinancialsTool.format!(result);
 
-    expect(blocks[0].text).toContain('Caveat:');
-    expect(blocks[0].text).toContain('SalesRevenueGoodsNet');
+    expect(blockText(blocks)).toContain('Caveat:');
+    expect(blockText(blocks)).toContain('SalesRevenueGoodsNet');
   });
 
   it('stays silent once the Including-assessed-tax tag resolves the filer (#98)', async () => {
@@ -1298,8 +1299,8 @@ describe('stopped-series staleness caveat (#102)', () => {
     const result = await getFinancialsTool.handler(input(), ctx);
     const blocks = getFinancialsTool.format!(result);
 
-    expect(blocks[0].text).toContain('Caveat:');
-    expect(blocks[0].text).toContain('is a current tag');
+    expect(blockText(blocks)).toContain('Caveat:');
+    expect(blockText(blocks)).toContain('is a current tag');
   });
 
   it('stays silent for a filer one fiscal year plus a filing window behind', async () => {
@@ -1361,7 +1362,7 @@ describe('dataframe registration (#72)', () => {
     const result = await getFinancialsTool.handler(input, ctx);
 
     expect(registerDataframe).toHaveBeenCalledTimes(1);
-    const { rows } = registerDataframe.mock.calls[0][1];
+    const { rows } = at(registerDataframe.mock.calls, 0)[1];
     expect(rows.length).toBeGreaterThan(0);
     for (const row of rows) {
       expect(row).toHaveProperty('source_filing_fy');

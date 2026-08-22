@@ -124,7 +124,7 @@ describe('EdgarApiService.fetchFullIndexQuarter', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it('fetches the QTR master.idx and returns parsed rows', async () => {
-    const fetchMock = vi.fn(async () => textResponse(MASTER_IDX_FIXTURE));
+    const fetchMock = vi.fn(async (_input: unknown) => textResponse(MASTER_IDX_FIXTURE));
     vi.stubGlobal('fetch', fetchMock);
 
     const entries = await getEdgarApiService().fetchFullIndexQuarter(1998, 1);

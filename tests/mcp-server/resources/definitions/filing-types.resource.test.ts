@@ -6,6 +6,7 @@
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { filingTypesResource } from '@/mcp-server/resources/definitions/filing-types.resource.js';
+import { listResources } from '../../../support/assertions.js';
 
 describe('filingTypesResource', () => {
   it('returns markdown content with filing type table', () => {
@@ -65,7 +66,7 @@ describe('filingTypesResource', () => {
   });
 
   it('lists resources correctly', async () => {
-    const listing = await filingTypesResource.list!();
+    const listing = await listResources(filingTypesResource.list!);
     expect(listing.resources).toHaveLength(1);
     expect(listing.resources[0]).toMatchObject({
       uri: 'secedgar://filing-types',

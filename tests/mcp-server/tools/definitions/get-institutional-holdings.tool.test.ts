@@ -26,6 +26,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
 }));
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import { blockAt, blockText, caught, records, recoveryHint } from '../../../support/assertions.js';
 
 /** A canvas bridge stub whose registerDataframe echoes the row count it received. */
 function stubBridge() {
@@ -628,18 +629,18 @@ describe('getInstitutionalHoldingsTool', () => {
     };
     const blocks = getInstitutionalHoldingsTool.format!(output);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].type).toBe('text');
-    expect(blocks[0].text).toContain('Vanguard Group Inc');
-    expect(blocks[0].text).toContain('0000102909');
-    expect(blocks[0].text).toContain('APPLE INC');
-    expect(blocks[0].text).toContain('037833100');
-    expect(blocks[0].text).toContain('$5.00M'); // Apple position, millions scale
-    expect(blocks[0].text).toContain('$2.50B'); // NVIDIA position, billions scale
-    expect(blocks[0].text).toContain('26,000');
-    expect(blocks[0].text).toContain('[Call]');
-    expect(blocks[0].text).toContain('DFND');
-    expect(blocks[0].text).toContain('2 of 2');
-    expect(blocks[0].text).toContain('period: 2024-12-31');
+    expect(blockAt(blocks).type).toBe('text');
+    expect(blockText(blocks)).toContain('Vanguard Group Inc');
+    expect(blockText(blocks)).toContain('0000102909');
+    expect(blockText(blocks)).toContain('APPLE INC');
+    expect(blockText(blocks)).toContain('037833100');
+    expect(blockText(blocks)).toContain('$5.00M'); // Apple position, millions scale
+    expect(blockText(blocks)).toContain('$2.50B'); // NVIDIA position, billions scale
+    expect(blockText(blocks)).toContain('26,000');
+    expect(blockText(blocks)).toContain('[Call]');
+    expect(blockText(blocks)).toContain('DFND');
+    expect(blockText(blocks)).toContain('2 of 2');
+    expect(blockText(blocks)).toContain('period: 2024-12-31');
   });
 
   it('formats empty holdings list', () => {
@@ -654,7 +655,7 @@ describe('getInstitutionalHoldingsTool', () => {
       holdings: [],
     };
     const blocks = getInstitutionalHoldingsTool.format!(output);
-    expect(blocks[0].text).toContain('0 of 0');
+    expect(blockText(blocks)).toContain('0 of 0');
   });
 
   // Security: injection in ticker input
@@ -811,13 +812,10 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: 'vanguard group' });
 
-    const err = await getInstitutionalHoldingsTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(getInstitutionalHoldingsTool.handler(input, ctx));
     expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(err.data.reason).toBe('ambiguous_entity');
-    expect(err.data.matches.map((m: { cik: string }) => m.cik)).toEqual([
-      '0000735286',
-      '0000102909',
-    ]);
+    expect(records(err.data.matches).map((m) => m.cik)).toEqual(['0000735286', '0000102909']);
     // Both CIKs surface in the message so the caller can disambiguate; never auto-picks.
     expect(err.message).toContain('0000735286');
     expect(err.message).toContain('0000102909');
@@ -833,7 +831,7 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: 'capital group' });
 
-    const err = await getInstitutionalHoldingsTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(getInstitutionalHoldingsTool.handler(input, ctx));
     expect(err.data.reason).toBe('ambiguous_entity');
     expect(mockApi.resolveEntityByName).not.toHaveBeenCalled(); // cache already had hits
     expect(mockApi.getSubmissions).not.toHaveBeenCalled();
@@ -852,7 +850,7 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0001193125' });
 
-    const err = await getInstitutionalHoldingsTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(getInstitutionalHoldingsTool.handler(input, ctx));
     expect(err.data.reason).toBe('company_not_found');
     expect(err.message).toMatch(/accession-number prefix/i);
     // No raw SEC URL leaked anywhere on the message or the structured data.
@@ -873,7 +871,7 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
 
-    const err = await getInstitutionalHoldingsTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(getInstitutionalHoldingsTool.handler(input, ctx));
     expect(err.code).toBe(JsonRpcErrorCode.NotFound);
     expect(err.data?.reason).toBeUndefined(); // not reclassified to a declared reason
     expect(err.message).toContain('data.sec.gov'); // raw error propagated unchanged
@@ -909,7 +907,7 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000789019' });
 
-    const err = await getInstitutionalHoldingsTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(getInstitutionalHoldingsTool.handler(input, ctx));
     expect(err.data.reason).toBe('no_filings_found');
     expect(err.message).toContain('MICROSOFT CORP');
     expect(err.message).toContain('operating company');
@@ -918,13 +916,13 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
     // An issuer passed here is nearly always a reverse-lookup attempt, so
     // secedgar_find_holders leads the routing (#81); the financial/filing tools
     // stay behind it for callers who wanted the company itself.
-    expect(err.data.suggestions.map((s: { tool: string }) => s.tool)).toEqual([
+    expect(records(err.data.suggestions).map((s) => s.tool)).toEqual([
       'secedgar_find_holders',
       'secedgar_get_financials',
       'secedgar_search_filings',
     ]);
     // Recovery hint mirrors to the text surface and names the routed tool.
-    expect(err.data.recovery.hint).toContain('secedgar_find_holders');
+    expect(recoveryHint(err)).toContain('secedgar_find_holders');
   });
 
   it('does not classify a bare-CIK match that has submissions but no operating forms (#86)', async () => {
@@ -938,7 +936,7 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0001193125' });
 
-    const err = await getInstitutionalHoldingsTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(getInstitutionalHoldingsTool.handler(input, ctx));
     expect(err.data.reason).toBe('no_filings_found');
     expect(err.data.suggestions).toBeUndefined(); // no operating-company routing
     expect(err.message).toContain('SOME FILING AGENT');
@@ -1043,7 +1041,7 @@ describe('getInstitutionalHoldingsTool offset pagination (#94)', () => {
       offset: 5,
     });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
-    const text = getInstitutionalHoldingsTool.format!(result)[0].text;
+    const text = blockText(getInstitutionalHoldingsTool.format!(result));
 
     expect(text).toContain('Page offset: 5');
     expect(text).toContain('Next offset: 10');

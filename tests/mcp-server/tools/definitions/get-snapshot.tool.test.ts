@@ -15,6 +15,7 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
 }));
 
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+import { blockText, caught } from '../../../support/assertions.js';
 
 function fact(overrides: Partial<CompanyConceptUnit> & { frame: string }): CompanyConceptUnit {
   return {
@@ -384,7 +385,7 @@ describe('getSnapshotTool', () => {
     const ctx = createMockContext({ errors: getSnapshotTool.errors });
     const input = getSnapshotTool.input.parse({ company: 'Apple' });
 
-    const err = await getSnapshotTool.handler(input, ctx).catch((e) => e);
+    const err = await caught(getSnapshotTool.handler(input, ctx));
     expect(err.data.reason).toBe('ambiguous_company');
     expect(err.message).toContain('0000320193 Apple Inc. (AAPL)');
   });
@@ -403,7 +404,7 @@ describe('getSnapshotTool', () => {
     const ctx = createMockContext({ errors: getSnapshotTool.errors });
     const input = getSnapshotTool.input.parse({ company: 'AAPL' });
     const result = await getSnapshotTool.handler(input, ctx);
-    const text = getSnapshotTool.format!(result)[0].text;
+    const text = blockText(getSnapshotTool.format!(result));
 
     expect(text).toContain('Apple Inc.');
     expect(text).toContain('annual CY2024 = 391035000000');

@@ -22,6 +22,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
 
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+import { at, blockText } from '../../../support/assertions.js';
 
 function fact(overrides: Partial<CompanyConceptUnit> & { frame: string }): CompanyConceptUnit {
   return {
@@ -174,7 +175,7 @@ describe('compareCompaniesTool', () => {
     expect(result.periods).toHaveLength(2);
     expect(result.cells.every((c) => result.periods.includes(c.period))).toBe(true);
     // The dataframe holds every aligned period, not just the inline window.
-    const { rows } = registerDataframe.mock.calls[0][1];
+    const { rows } = at(registerDataframe.mock.calls, 0)[1];
     expect(new Set(rows.map((r: { period: string }) => r.period)).size).toBeGreaterThan(2);
     expect(result.dataset?.name).toBe('df_AAAAA_BBBBB');
   });
@@ -450,7 +451,7 @@ describe('compareCompaniesTool', () => {
       periods: 1,
     });
     const result = await compareCompaniesTool.handler(input, ctx);
-    const text = compareCompaniesTool.format!(result)[0].text;
+    const text = blockText(compareCompaniesTool.format!(result));
 
     expect(text).toContain('CALENDAR CO');
     expect(text).toContain('JUNE CO');

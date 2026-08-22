@@ -13,6 +13,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
 }));
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import { blockText } from '../../../support/assertions.js';
 
 const mockBridge = {
   drop: vi.fn(),
@@ -67,16 +68,16 @@ describe('dataframeDropTool', () => {
     const result = { name: 'df_ABCDE_FGHIJ', dropped: true };
     const blocks = dataframeDropTool.format!(result);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].text).toContain('Dropped');
-    expect(blocks[0].text).toContain('df_ABCDE_FGHIJ');
+    expect(blockText(blocks)).toContain('Dropped');
+    expect(blockText(blocks)).toContain('df_ABCDE_FGHIJ');
   });
 
   it('formats dropped=false as not-found message', () => {
     const result = { name: 'df_NOTHI_NGHERE', dropped: false };
     const blocks = dataframeDropTool.format!(result);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].text).toContain('not found');
-    expect(blocks[0].text).toContain('df_NOTHI_NGHERE');
+    expect(blockText(blocks)).toContain('not found');
+    expect(blockText(blocks)).toContain('df_NOTHI_NGHERE');
   });
 
   it('calls bridge.drop with the exact name from input', async () => {

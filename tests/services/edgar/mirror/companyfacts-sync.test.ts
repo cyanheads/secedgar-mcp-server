@@ -14,6 +14,7 @@ import {
   fileToRows,
   makeCompanyFactsSync,
 } from '@/services/edgar/mirror/companyfacts-sync.js';
+import type { CompanyFactsConcept } from '@/services/edgar/types.js';
 
 const LM = 'Sat, 31 May 2026 03:00:00 GMT';
 const LM_ISO = new Date(LM).toISOString();
@@ -29,7 +30,18 @@ describe('fileToRows', () => {
             label: 'Revenues',
             description: 'Total revenue',
             units: {
-              USD: [{ end: '2023-09-30', val: 383285000000, frame: 'CY2023', accn: 'a' }],
+              USD: [
+                {
+                  accn: 'a',
+                  end: '2023-09-30',
+                  filed: '2023-11-03',
+                  form: '10-K',
+                  fp: 'FY',
+                  frame: 'CY2023',
+                  fy: 2023,
+                  val: 383285000000,
+                },
+              ],
             },
           },
         },
@@ -56,7 +68,10 @@ describe('fileToRows', () => {
   });
 
   it('skips concepts without units, and companies without facts or a numeric cik', () => {
-    expect(fileToRows({ cik: 1, facts: { 'us-gaap': { NoUnits: {} } } })).toHaveLength(0);
+    // A concept carrying no `units` cannot occur in a well-formed payload — the
+    // cast feeds the ingester the malformed shape this assertion is about.
+    const noUnits = {} as unknown as CompanyFactsConcept;
+    expect(fileToRows({ cik: 1, facts: { 'us-gaap': { NoUnits: noUnits } } })).toHaveLength(0);
     expect(fileToRows({ entityName: 'no cik' })).toHaveLength(0);
     expect(fileToRows({ cik: 'x' as unknown as number, facts: {} })).toHaveLength(0);
   });
@@ -97,7 +112,25 @@ describe('makeCompanyFactsSync', () => {
     const apple: CompanyFactsFile = {
       cik: 320193,
       entityName: 'Apple Inc.',
-      facts: { 'us-gaap': { Revenues: { units: { USD: [{ end: '2023-09-30', val: 1 }] } } } },
+      facts: {
+        'us-gaap': {
+          Revenues: {
+            units: {
+              USD: [
+                {
+                  accn: 'a',
+                  end: '2023-09-30',
+                  filed: '2023-11-03',
+                  form: '10-K',
+                  fp: 'FY',
+                  fy: 2023,
+                  val: 1,
+                },
+              ],
+            },
+          },
+        },
+      },
     };
     const msft: CompanyFactsFile = {
       cik: 789019,
