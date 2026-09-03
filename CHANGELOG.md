@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.15.2](changelog/0.15.x/0.15.2.md) — 2026-09-02
+
+Adopts @cyanheads/mcp-ts-core 0.12.5. An SEC 5xx now classifies as ServiceUnavailable rather than InternalError, a caller disconnect as RequestCancelled, and server identity resolves from the served package instead of the launching client's working directory. No changes to this server's own source.
+
 ## [0.15.1](changelog/0.15.x/0.15.1.md) — 2026-08-22
 
 Adopts @cyanheads/mcp-ts-core 0.12.3: tool inputs are strict, so an undeclared argument key is rejected by name instead of silently dropped. .env.example now defaults MCP_SESSION_MODE to stateless, and the three tools that cap their inline results disclose the cap through enrichment.
