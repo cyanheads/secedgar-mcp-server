@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.15.4](changelog/0.15.x/0.15.4.md) — 2026-09-09
+
+Fixes secedgar_get_filing's heading outline and section matching: 20-F filings with bare Item markers and running page headers now produce a full outline of all Items and Parts, and section now resolves headings whose whitespace or quote style differs from the caller's input.
+
 ## [0.15.3](changelog/0.15.x/0.15.3.md) — 2026-09-09
 
 Fixes four EDGAR resolution gaps: corporate-suffix name matching, dotted share-class tickers, ticker near-match suggestions, and a 429 that retried into SEC's ten-minute rate-limit block. Adopts mcp-ts-core 0.12.8 plus dependency refresh.

@@ -92,7 +92,7 @@ Fetch a specific filing's metadata and document content by accession number.
 - Can fetch specific exhibits by document name
 - Binary entries — scanned pages, PDF exhibits, packaged archives and spreadsheets — are marked `binary` in the document catalog and rejected with a `binary_document` error instead of being returned as decoded bytes
 - **Offset paging** for large documents (10-K, S-1/A can exceed 1M chars): pass `next_offset` from a truncated response as `offset` on the next call to continue reading; first-page truncated responses include a detected `outline` (headings with offsets) for targeted navigation
-- **Section targeting** via the `section` param: jumps directly to a named heading by case-insensitive substring match (e.g. `"risk factors"`, `"item 7"`, `"certain relationships"`); on a miss, the error carries the detected outline so you can pick the correct heading
+- **Section targeting** via the `section` param: jumps directly to a named heading by substring match that ignores case, whitespace style, and quote style (e.g. `"risk factors"`, `"item 7"`, `"certain relationships"`), so a heading copied from the outline resolves whether it carries the filing's non-breaking spaces and curly quotes or plain ones; on a miss, the error carries the detected outline so you can pick the correct heading
 - Extracted text is cached per `accession + document` (bounded LRU, 8 entries), making subsequent paged calls cheap
 
 ---
