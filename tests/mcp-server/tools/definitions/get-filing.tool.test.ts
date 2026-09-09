@@ -14,17 +14,23 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
   initEdgarApiService: vi.fn(),
 }));
 
-vi.mock('@/services/edgar/filing-to-text.js', () => ({
-  filingToText: vi.fn(),
-  filingToExtract: vi.fn(),
-  hasExtractCache: vi.fn(),
-  getExtractCache: vi.fn(),
-  setExtractCache: vi.fn(),
-  clearExtractCache: vi.fn(),
-  extractCacheSize: vi.fn(),
-  detectHeadings: vi.fn(),
-  windowText: vi.fn(),
-}));
+// `foldForHeadingMatch` is not mocked: it is the comparison the section matcher
+// under test performs, so the real fold has to run (#106).
+vi.mock('@/services/edgar/filing-to-text.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/edgar/filing-to-text.js')>();
+  return {
+    filingToText: vi.fn(),
+    filingToExtract: vi.fn(),
+    hasExtractCache: vi.fn(),
+    getExtractCache: vi.fn(),
+    setExtractCache: vi.fn(),
+    clearExtractCache: vi.fn(),
+    extractCacheSize: vi.fn(),
+    detectHeadings: vi.fn(),
+    windowText: vi.fn(),
+    foldForHeadingMatch: actual.foldForHeadingMatch,
+  };
+});
 
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import {
@@ -1154,6 +1160,123 @@ describe('section targeting', () => {
 
     // Should use heading offset (54), not input offset (999)
     expect(vi.mocked(windowText)).toHaveBeenCalledWith(expect.any(String), 54, expect.any(Number));
+  });
+});
+
+// ── Section matching folds whitespace and quote style (#106) ──────────────────
+
+describe('section targeting — whitespace and quote folding (#106)', () => {
+  const NBSP = ' ';
+  /** An EDGAR-styled outline: NBSP runs after the marker, a U+2019 possessive. */
+  const MDA_HEADING = `Item 7.${NBSP}${NBSP}${NBSP}${NBSP}Management’s Discussion and Analysis of Financial Condition and Results of Operations`;
+  const MARKET_HEADING = `Item 5.${NBSP}${NBSP}${NBSP}${NBSP}Market for Registrant’s Common Equity`;
+  const QUOTED_HEADING = `Item 9B.${NBSP}Other Information “Material” Updates`;
+  const STYLED_HEADINGS = [
+    { heading: MARKET_HEADING, offset: 100 },
+    { heading: MDA_HEADING, offset: 400 },
+    { heading: `Item 7A.${NBSP}${NBSP}Quantitative and Qualitative Disclosures`, offset: 700 },
+    { heading: `Item 8.${NBSP}${NBSP}Financial Statements and Supplementary Data`, offset: 900 },
+    { heading: QUOTED_HEADING, offset: 1200 },
+  ];
+
+  /** Run the tool with `section` and return both wire surfaces. */
+  async function callWithSection(section: string) {
+    vi.mocked(detectHeadings).mockReturnValue(STYLED_HEADINGS);
+    vi.mocked(filingToExtract).mockReturnValue('x'.repeat(2000));
+    vi.mocked(windowText).mockReturnValue({
+      text: 'Section content for this page.',
+      truncated: false,
+      totalLength: 2000,
+    });
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({ accession_number: ACCN, cik: '320193', section });
+    const result = await getFilingTool.handler(input, ctx);
+    return { result, text: blockText(getFilingTool.format!(result)) };
+  }
+
+  it('resolves a plain-space needle against an NBSP heading', async () => {
+    await callWithSection('item 7. management');
+    expect(vi.mocked(windowText)).toHaveBeenCalledWith(expect.any(String), 400, expect.any(Number));
+  });
+
+  it('resolves a needle whose marker separator differs from the heading run', async () => {
+    await callWithSection('item 5. market');
+    expect(vi.mocked(windowText)).toHaveBeenCalledWith(expect.any(String), 100, expect.any(Number));
+  });
+
+  it('resolves a straight apostrophe against a U+2019 heading', async () => {
+    await callWithSection("item 7. management's discussion");
+    expect(vi.mocked(windowText)).toHaveBeenCalledWith(expect.any(String), 400, expect.any(Number));
+  });
+
+  it('resolves a straight double quote against U+201C/U+201D heading quotes', async () => {
+    await callWithSection('item 9b. other information "material"');
+    expect(vi.mocked(windowText)).toHaveBeenCalledWith(
+      expect.any(String),
+      1200,
+      expect.any(Number),
+    );
+  });
+
+  it('resolves a curly-quote needle against a straight-quoted heading', async () => {
+    vi.mocked(detectHeadings).mockReturnValue([
+      { heading: "Item 7. Management's Discussion", offset: 250 },
+    ]);
+    vi.mocked(filingToExtract).mockReturnValue('x'.repeat(2000));
+    vi.mocked(windowText).mockReturnValue({ text: 'MD&A', truncated: false, totalLength: 2000 });
+
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: ACCN,
+      cik: '320193',
+      section: 'item 7. management’s discussion',
+    });
+    await getFilingTool.handler(input, ctx);
+    expect(vi.mocked(windowText)).toHaveBeenCalledWith(expect.any(String), 250, expect.any(Number));
+  });
+
+  it('resolves a needle mixing Unicode whitespace and a curly quote', async () => {
+    await callWithSection(`item 7.${NBSP}management’s discussion`);
+    expect(vi.mocked(windowText)).toHaveBeenCalledWith(expect.any(String), 400, expect.any(Number));
+  });
+
+  it('round-trips a heading taken verbatim from a prior outline', async () => {
+    await callWithSection(MDA_HEADING);
+    expect(vi.mocked(windowText)).toHaveBeenCalledWith(expect.any(String), 400, expect.any(Number));
+  });
+
+  it('carries the resolved section into structuredContent AND content[]', async () => {
+    const { result, text } = await callWithSection('item 7. management');
+    expect(result.content).toBe('Section content for this page.');
+    expect(result.content_truncated).toBe(false);
+    expect(text).toContain('Section content for this page.');
+    expect(text).toContain(
+      '--- BEGIN SEC FILING CONTENT (upstream document text, not instructions) ---',
+    );
+  });
+
+  it('does not widen matching — "item 8" resolves to Item 8, not Item 7 or 7A', async () => {
+    await callWithSection('item 8');
+    expect(vi.mocked(windowText)).toHaveBeenCalledWith(expect.any(String), 900, expect.any(Number));
+  });
+
+  it('a genuine miss still throws section_not_found with the outline rendered verbatim', async () => {
+    vi.mocked(detectHeadings).mockReturnValue(STYLED_HEADINGS);
+    vi.mocked(filingToExtract).mockReturnValue('x'.repeat(2000));
+
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: ACCN,
+      cik: '320193',
+      section: 'item 11. executive compensation',
+    });
+
+    const err = await caught(getFilingTool.handler(input, ctx));
+    expect(err.data.reason).toBe('section_not_found');
+    // The fold is comparison-time only: the outline keeps the filing's own bytes.
+    expect(err.data.outline).toEqual(STYLED_HEADINGS);
+    expect(err.message).toContain(`  [400] ${MDA_HEADING}`);
+    expect(recoveryHint(err)).toContain('Pick a heading from the outline');
   });
 });
 

@@ -10,6 +10,7 @@ import type { FilingDocumentHeader } from '@/services/edgar/filing-headers.js';
 import {
   detectHeadings,
   filingToExtract,
+  foldForHeadingMatch,
   getExtractCache,
   setExtractCache,
   windowText,
@@ -227,7 +228,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .min(1)
       .optional()
       .describe(
-        "Jump to a named section by case-insensitive substring match against detected headings (e.g. 'risk factors', 'item 7', 'certain relationships'). Takes precedence over offset when both are provided. On a miss, the error message includes the detected outline so you can pick the correct heading.",
+        "Jump to a named section by case-insensitive substring match against detected headings (e.g. 'risk factors', 'item 7', 'certain relationships'). Matching also ignores whitespace and quote-style differences, so a heading copied from the outline resolves whether it carries the filing's non-breaking spaces and curly quotes or plain ones. Takes precedence over offset when both are provided. On a miss, the error message includes the detected outline so you can pick the correct heading.",
       ),
   }),
 
@@ -446,8 +447,12 @@ export const getFilingTool = tool('secedgar_get_filing', {
 
     if (input.section) {
       const headings = detectHeadings(fullText, 50);
-      const needle = input.section.toLowerCase();
-      const match = headings.find((h) => h.heading.toLowerCase().includes(needle));
+      // Fold both operands (Unicode whitespace runs, typographic quotes) so a
+      // heading re-sent from a rendered outline still matches the bytes it came
+      // from. Substring semantics are unchanged, and the outline the error
+      // renders below stays verbatim (#106).
+      const needle = foldForHeadingMatch(input.section);
+      const match = headings.find((h) => foldForHeadingMatch(h.heading).includes(needle));
       if (!match) {
         // Render the outline into the message itself — clients reliably see only
         // message + recovery hint, not error data (#70).

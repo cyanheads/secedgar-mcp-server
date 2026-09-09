@@ -25,17 +25,23 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
   toDatasetField: vi.fn(),
 }));
 
-vi.mock('@/services/edgar/filing-to-text.js', () => ({
-  filingToText: vi.fn(),
-  filingToExtract: vi.fn(),
-  hasExtractCache: vi.fn(),
-  getExtractCache: vi.fn(),
-  setExtractCache: vi.fn(),
-  clearExtractCache: vi.fn(),
-  extractCacheSize: vi.fn(),
-  detectHeadings: vi.fn(),
-  windowText: vi.fn(),
-}));
+vi.mock('@/services/edgar/filing-to-text.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/edgar/filing-to-text.js')>();
+  return {
+    filingToText: vi.fn(),
+    filingToExtract: vi.fn(),
+    hasExtractCache: vi.fn(),
+    getExtractCache: vi.fn(),
+    setExtractCache: vi.fn(),
+    clearExtractCache: vi.fn(),
+    extractCacheSize: vi.fn(),
+    detectHeadings: vi.fn(),
+    windowText: vi.fn(),
+    // Pure comparison helper the section matcher calls — a stub would make the
+    // mock an incomplete surface of the module under test.
+    foldForHeadingMatch: actual.foldForHeadingMatch,
+  };
+});
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';

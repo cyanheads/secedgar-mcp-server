@@ -11,6 +11,7 @@ import {
   extractCacheSize,
   filingToExtract,
   filingToText,
+  foldForHeadingMatch,
   getExtractCache,
   hasExtractCache,
   setExtractCache,
@@ -359,5 +360,227 @@ describe('detectHeadings — mixed-case Item/Part headings (#71)', () => {
     const texts = detectHeadings(text).map((h) => h.heading);
     expect(texts).toContain('ITEM 1A. RISK FACTORS');
     expect(texts).toContain(`Item 7.${NBSP}Management's Discussion`);
+  });
+});
+
+describe('detectHeadings — bare Item markers and running page headers (#105)', () => {
+  /** A 20-F renders each Item as a marker line, a blank line, then the title. */
+  const bodyItem = (marker: string, title: string) => `${marker}\n\n${title}\n\nSection body.\n\n`;
+
+  it('joins a bare Item marker with the title on the following line', () => {
+    const text = `Intro paragraph.\n\n${bodyItem('Item 3.', 'Key Information')}`;
+    const texts = detectHeadings(text).map((h) => h.heading);
+    expect(texts).toContain('Item 3. Key Information');
+  });
+
+  it('keys the joined heading to the marker offset, not the title offset', () => {
+    const text = `Intro paragraph.\n\n${bodyItem('Item 3.', 'Key Information')}`;
+    const item3 = detectHeadings(text).filter((h) => h.heading === 'Item 3. Key Information');
+    const { offset } = at(item3, 0);
+    expect(text.slice(offset, offset + 7)).toBe('Item 3.');
+    expect(offset).toBe(text.indexOf('Item 3.'));
+  });
+
+  it('dedups a TOC occurrence carrying a page number against the body occurrence', () => {
+    // TOC: marker, blank line, title + trailing page number. Body: same, no page number.
+    const text =
+      `Item 3.\n\n   Key Information      3  \n\n` +
+      `Item 4.\n\n   Information on the Company      42  \n\n` +
+      `${bodyItem('Item 3.', 'Key Information')}`;
+    const item3 = detectHeadings(text).filter((h) => h.heading === 'Item 3. Key Information');
+    expect(item3).toHaveLength(1);
+    expect(at(item3, 0).offset).toBe(text.lastIndexOf('Item 3.'));
+  });
+
+  it('dedups a TOC occurrence against a body occurrence that ends in a period', () => {
+    const text =
+      `Item 16J\n\n   Insider Trading Policies      122  \n\n` +
+      `${bodyItem('Item 16J', 'Insider Trading Policies.')}`;
+    const entries = detectHeadings(text).filter((h) => h.heading.startsWith('Item 16J'));
+    expect(entries).toHaveLength(1);
+    expect(at(entries, 0).heading).toBe('Item 16J Insider Trading Policies.');
+    expect(at(entries, 0).offset).toBe(text.lastIndexOf('Item 16J'));
+  });
+
+  it('detects lettered-suffix markers past "c" and unpunctuated markers (20-F Items)', () => {
+    const text =
+      `PART III\n\n` +
+      bodyItem('Item 4A', 'Unresolved Staff Comments') +
+      bodyItem('Item 16D', 'Exemptions from the Listing Standards for Audit Committees') +
+      bodyItem('Item 16K', 'Cybersecurity');
+    const texts = detectHeadings(text).map((h) => h.heading);
+    expect(texts).toContain('PART III');
+    expect(texts).toContain('Item 4A Unresolved Staff Comments');
+    expect(texts).toContain('Item 16D Exemptions from the Listing Standards for Audit Committees');
+    expect(texts).toContain('Item 16K Cybersecurity');
+  });
+
+  it('joins a tight marker/title pair when no page-number cell sits under the title', () => {
+    // A 20-F body renders some Items with no blank line after the marker
+    // ("Item 16K\nCybersecurity"), unlike the TOC row that ends in a page number.
+    const text = `Body prose.\n\nItem 16K\nCybersecurity\n\nRisk Management and Strategy.\n`;
+    const texts = detectHeadings(text).map((h) => h.heading);
+    expect(texts).toContain('Item 16K Cybersecurity');
+  });
+
+  it('rejects a tight marker/title pair followed by a page-number cell (TOC row)', () => {
+    const text = `Item 16K\nCybersecurity\n122\nItem 17.\nFinancial Statements\n124\n`;
+    expect(detectHeadings(text)).toHaveLength(0);
+  });
+
+  it('rejects a bare marker whose next line is only a page number', () => {
+    const text = `Item 3.\n\n      3  \n\nItem 4.\n\n      42  \n`;
+    expect(detectHeadings(text)).toHaveLength(0);
+  });
+
+  it('rejects a bare marker with no following line (heading at end of document)', () => {
+    const text = `Some closing body text.\n\nItem 19.`;
+    expect(detectHeadings(text)).toHaveLength(0);
+  });
+
+  it('rejects a bare marker followed only by blank lines', () => {
+    const text = `Some closing body text.\n\nItem 19.\n\n   \n\n`;
+    expect(detectHeadings(text)).toHaveLength(0);
+  });
+
+  it('rejects a bare marker whose next line is another marker', () => {
+    const text = `Item 17.\n\nItem 18.\n\nFinancial Statements\n\nBody.`;
+    const texts = detectHeadings(text).map((h) => h.heading);
+    expect(texts).toContain('Item 18. Financial Statements');
+    expect(texts).not.toContain('Item 17. Item 18.');
+  });
+
+  it('rejects a bare marker whose next line reads as body prose (over the length bound)', () => {
+    const text = `Item 5.\n\n${'word '.repeat(60)}end of a long unwrapped paragraph.\n\n`;
+    expect(detectHeadings(text)).toHaveLength(0);
+  });
+
+  it('does not fuse consecutive all-caps lines into one composite heading', () => {
+    const text = `TABLE OF CONTENTS\n\nPART I\n\nBody content here.`;
+    const texts = detectHeadings(text).map((h) => h.heading);
+    expect(texts).toContain('PART I');
+    expect(texts.every((h) => !h.includes('\n'))).toBe(true);
+  });
+
+  it('collapses a running page header repeated across the document to one entry', () => {
+    const page = `TABLE OF CONTENTS\n\nSome page body text.\n\n`;
+    const text = `${page.repeat(8)}${bodyItem('Item 3.', 'Key Information')}`;
+    const headings = detectHeadings(text);
+    const texts = headings.map((h) => h.heading);
+    expect(texts.filter((h) => h === 'TABLE OF CONTENTS')).toHaveLength(1);
+    expect(at(headings, 0)).toEqual({ heading: 'TABLE OF CONTENTS', offset: 0 });
+    expect(texts).toContain('Item 3. Key Information');
+  });
+
+  it('keeps the first occurrence of a repeated heading that carries real text', () => {
+    // An S-1 stamps the notes section's own heading on every page of it. The
+    // heading is furniture AND the section start, so the first occurrence is the
+    // section start and the rest are furniture.
+    const NOTES = 'NOTES TO THE CONSOLIDATED FINANCIAL STATEMENTS';
+    const text = `Opening prose.\n\n${`${NOTES}\n\nNote body.\n\n`.repeat(6)}`;
+    const notes = detectHeadings(text, 200).filter((h) => h.heading === NOTES);
+    expect(notes).toHaveLength(1);
+    expect(at(notes, 0).offset).toBe(text.indexOf(NOTES));
+  });
+
+  it('drops every occurrence of a repeated bare Part marker, keeping none', () => {
+    // A bare marker carries no navigable text, so its first occurrence is worth
+    // no more than the rest — unlike a repeated heading with a title.
+    const text = `TABLE OF CONTENTS\n\nPART I\n\nPage body.\n\n`.repeat(6);
+    const headings = detectHeadings(text, 200);
+    const texts = headings.map((h) => h.heading);
+    expect(texts).not.toContain('PART I');
+    expect(texts.filter((h) => h === 'TABLE OF CONTENTS')).toHaveLength(1);
+    expect(at(headings, 0)).toEqual({ heading: 'TABLE OF CONTENTS', offset: 0 });
+    expect(texts.every((h) => !h.includes('\n'))).toBe(true);
+  });
+
+  it('keeps a heading that repeats only as TOC + body (under the running-header bound)', () => {
+    const text = `RISK FACTORS\n\nTOC line.\n\nRISK FACTORS\n\nBody content.`;
+    const texts = detectHeadings(text).map((h) => h.heading);
+    expect(texts).toContain('RISK FACTORS');
+  });
+
+  it('counts distinct offsets, not raw matches, when judging a running header', () => {
+    // An all-caps "ITEM 1 BUSINESS" line satisfies two of the detection arms, so
+    // a per-match count would read these three occurrences as six.
+    const occurrence = `ITEM 1 BUSINESS\n\nSome page body text.\n\n`;
+    const texts = detectHeadings(occurrence.repeat(3)).map((h) => h.heading);
+    expect(texts).toContain('ITEM 1 BUSINESS');
+  });
+
+  it('detects Items nested under a Part heading, both as outline entries', () => {
+    const text =
+      `PART I\n\n` +
+      bodyItem('Item 1.', 'Identity of Directors, Senior Management and Advisers') +
+      bodyItem('Item 2.', 'Offer Statistics and Expected Timetable') +
+      `PART II\n\n` +
+      bodyItem('Item 13.', 'Defaults, Dividend Arrearages and Delinquencies');
+    const headings = detectHeadings(text);
+    const texts = headings.map((h) => h.heading);
+    expect(texts).toEqual([
+      'PART I',
+      'Item 1. Identity of Directors, Senior Management and Advisers',
+      'Item 2. Offer Statistics and Expected Timetable',
+      'PART II',
+      'Item 13. Defaults, Dividend Arrearages and Delinquencies',
+    ]);
+  });
+
+  it('suppresses a bare Item marker that recurs as a running page header', () => {
+    // A 10-Q stamps "PART I / Item 1" at the foot of every page, so the marker's
+    // "title" is whatever prose the next page happens to open with. Each composite
+    // is unique, so only the marker line itself identifies the furniture.
+    const page = (n: number) =>
+      `Page body ${n}.\n\n${n}\n\nPART I\n\nItem 1\n\n \n\nCarried-over paragraph ${n}.\n\n`;
+    const text = `${bodyItem('Item 1.', 'Financial Statements')}${[1, 2, 3, 4, 5, 6]
+      .map(page)
+      .join('')}`;
+    const texts = detectHeadings(text, 200).map((h) => h.heading);
+    expect(texts.filter((h) => h.startsWith('Item 1 Carried-over'))).toHaveLength(0);
+    expect(texts).toContain('Item 1. Financial Statements');
+  });
+
+  it('detects an all-caps heading whose words are separated by a non-breaking space', () => {
+    const text = `Body prose.\n\nMICROSOFT CORPORATION\n\nSignature block.\n`;
+    expect(detectHeadings(text).map((h) => h.heading)).toContain('MICROSOFT CORPORATION');
+  });
+
+  it('does not fuse two all-caps lines separated by a single newline', () => {
+    const text = `INDEX TO FINANCIAL STATEMENTS\nCONSOLIDATED BALANCE SHEETS\n\nBody.`;
+    const texts = detectHeadings(text).map((h) => h.heading);
+    expect(texts).toContain('INDEX TO FINANCIAL STATEMENTS');
+    expect(texts).toContain('CONSOLIDATED BALANCE SHEETS');
+  });
+});
+
+describe('foldForHeadingMatch (#106)', () => {
+  const NBSP = ' ';
+
+  it('collapses Unicode whitespace runs to a single plain space', () => {
+    expect(foldForHeadingMatch(`Item 7.${NBSP}${NBSP}${NBSP}${NBSP}Management`)).toBe(
+      'item 7. management',
+    );
+  });
+
+  it('folds typographic quotes to their ASCII counterparts', () => {
+    expect(foldForHeadingMatch('‘Management’s’ “Discussion”')).toBe(`'management's' "discussion"`);
+  });
+
+  it('trims and lowercases', () => {
+    expect(foldForHeadingMatch('  ITEM 1A. Risk Factors \n')).toBe('item 1a. risk factors');
+  });
+
+  it('is idempotent — folding an already-folded string is a no-op', () => {
+    const once = foldForHeadingMatch(`Item 7.${NBSP}Management’s Discussion`);
+    expect(foldForHeadingMatch(once)).toBe(once);
+  });
+
+  it('does not widen matching — a straight-quote needle folds to the same form as a curly heading', () => {
+    const heading = `Item 7.${NBSP}${NBSP}Management’s Discussion and Analysis`;
+    expect(foldForHeadingMatch(heading).includes(foldForHeadingMatch("item 7. management's"))).toBe(
+      true,
+    );
+    expect(foldForHeadingMatch(heading).includes(foldForHeadingMatch('item 8'))).toBe(false);
   });
 });
