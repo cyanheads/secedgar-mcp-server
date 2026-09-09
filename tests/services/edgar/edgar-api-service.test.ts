@@ -1,6 +1,7 @@
 /**
  * @fileoverview Tests for EdgarApiService helpers — `pickPreferredTicker` (CIK
- * tie-breaker), `trigramSimilarity`/`suggestCompanies` (near-match suggestions),
+ * tie-breaker), `normalizeCompanySuffix` (corporate-suffix comparison form),
+ * `trigramSimilarity`/`suggestCompanies` (near-match suggestions),
  * `buildTickerCache` MF-ticker merge behaviour via the private indexing logic, and
  * `parseSeriesFilingFeed` (fund series → its own filings).
  * @module tests/services/edgar/edgar-api-service
@@ -8,6 +9,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  normalizeCompanySuffix,
   parseSeriesFilingFeed,
   pickPreferredTicker,
   suggestCompanies,
@@ -76,6 +78,65 @@ describe('pickPreferredTicker', () => {
     const a: CikMatch = { cik: '1', name: 'A' };
     const b: CikMatch = { cik: '1', name: 'B' };
     expect(pickPreferredTicker(a, b)).toBe(b);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// normalizeCompanySuffix (#107)
+// ---------------------------------------------------------------------------
+
+describe('normalizeCompanySuffix', () => {
+  it.each([
+    ['corp', 'beacon financial corp', 'beacon financial corporation'],
+    ['corporation', 'beacon financial corporation', 'beacon financial corporation'],
+    ['inc', 'apple inc', 'apple incorporated'],
+    ['incorporated', 'apple incorporated', 'apple incorporated'],
+    ['co', 'toro co', 'toro company'],
+    ['company', 'toro company', 'toro company'],
+    ['ltd', 'canon ltd', 'canon limited'],
+    ['limited', 'canon limited', 'canon limited'],
+  ])('expands the terminal %s token to its canonical long form', (_bucket, input, expected) => {
+    expect(normalizeCompanySuffix(input)).toBe(expected);
+  });
+
+  it('keeps the four buckets distinct so different registrants never compare equal', () => {
+    // TORO CO (CIK 0000737758) and TORO CORP. (CIK 0001941131) share a base name.
+    expect(normalizeCompanySuffix('toro co')).not.toBe(normalizeCompanySuffix('toro corp.'));
+    expect(normalizeCompanySuffix('blue owl capital inc.')).not.toBe(
+      normalizeCompanySuffix('blue owl capital corp'),
+    );
+    expect(normalizeCompanySuffix('acme ltd')).not.toBe(normalizeCompanySuffix('acme co'));
+  });
+
+  it('strips a trailing period or comma as part of recognizing the suffix token', () => {
+    expect(normalizeCompanySuffix('toro corp.')).toBe('toro corporation');
+    expect(normalizeCompanySuffix('society pass incorporated.')).toBe('society pass incorporated');
+    expect(normalizeCompanySuffix('acme inc,')).toBe('acme incorporated');
+  });
+
+  it('leaves a long-form suffix word sitting mid-name untouched', () => {
+    expect(normalizeCompanySuffix('american water works company, inc.')).toBe(
+      'american water works company, incorporated',
+    );
+    expect(normalizeCompanySuffix('precision optics corporation, inc.')).toBe(
+      'precision optics corporation, incorporated',
+    );
+  });
+
+  it('leaves a terminal token that merely contains a suffix untouched', () => {
+    expect(normalizeCompanySuffix('sanrio company, ltd./adr')).toBe('sanrio company, ltd./adr');
+  });
+
+  it('returns a name with no recognized terminal suffix unchanged', () => {
+    expect(normalizeCompanySuffix('microsoft corp holdings')).toBe('microsoft corp holdings');
+    expect(normalizeCompanySuffix('ibm')).toBe('ibm');
+    expect(normalizeCompanySuffix('')).toBe('');
+  });
+
+  it('does not fold the limited-partnership family into the ltd/limited bucket', () => {
+    expect(normalizeCompanySuffix('brookfield lp')).toBe('brookfield lp');
+    expect(normalizeCompanySuffix('brookfield llc')).toBe('brookfield llc');
+    expect(normalizeCompanySuffix('brookfield plc')).toBe('brookfield plc');
   });
 });
 
@@ -161,6 +222,56 @@ describe('suggestCompanies', () => {
     for (const s of suggestions) {
       expect(s.cik).not.toBe('0001067839');
     }
+  });
+
+  // --- Ticker scoring alongside name scoring (#111) ---
+
+  // Rows verbatim from company_tickers.json — the near-ticker shapes are real.
+  const tickerEntries: CikMatch[] = [
+    { cik: '0001624794', name: 'CSW INDUSTRIALS, INC.', ticker: 'CSW' },
+    { cik: '0000017313', name: 'CAPITAL SOUTHWEST CORP', ticker: 'CSWC' },
+    { cik: '0001367859', name: 'Citizens Community Bancorp Inc.', ticker: 'CZWI' },
+    { cik: '0000857855', name: 'UNITED COMMUNITY BANKS INC', ticker: 'UCB' },
+    { cik: '0000789019', name: 'MICROSOFT CORP', ticker: 'MSFT' },
+  ];
+
+  it('suggests the near-ticker registrant for a ticker-shaped miss (#111)', () => {
+    const suggestions = suggestCompanies('CSWI', tickerEntries);
+    expect(suggestions[0]).toMatchObject({ cik: '0001624794', ticker: 'CSW' });
+  });
+
+  it('ranks a strong ticker match ahead of unrelated candidates (#111)', () => {
+    const suggestions = suggestCompanies('UCBI', tickerEntries);
+    expect(suggestions[0]).toMatchObject({ cik: '0000857855', ticker: 'UCB' });
+    expect(suggestions.map((s) => s.cik)).not.toContain('0000789019');
+  });
+
+  it('scores an entry with a ticker but no name without throwing (#111)', () => {
+    const tickerOnly: CikMatch[] = [{ cik: '0001624794', ticker: 'CSW' }];
+    const suggestions = suggestCompanies('CSWI', tickerOnly);
+    expect(suggestions).toEqual([{ cik: '0001624794', ticker: 'CSW' }]);
+  });
+
+  it('scores an entry with a name but no ticker without throwing (#111)', () => {
+    // Former-name entries (#42) have a name and no ticker.
+    const nameOnly: CikMatch[] = [{ cik: '0001326801', name: 'facebook inc' }];
+    expect(suggestCompanies('facebok', nameOnly)).toEqual([
+      { cik: '0001326801', name: 'facebook inc' },
+    ]);
+  });
+
+  it('contributes one suggestion for a candidate scoring on both name and ticker (#111)', () => {
+    const both: CikMatch[] = [{ cik: '0000789019', name: 'MSFT CORP', ticker: 'MSFT' }];
+    expect(suggestCompanies('msft corp', both)).toHaveLength(1);
+  });
+
+  it('does not let ticker noise displace name candidates for a name-shaped query (#111)', () => {
+    const suggestions = suggestCompanies('microsfot corp', tickerEntries);
+    expect(suggestions[0]).toMatchObject({ cik: '0000789019', ticker: 'MSFT' });
+  });
+
+  it('still returns nothing when neither name nor ticker clears the threshold (#111)', () => {
+    expect(suggestCompanies('zzzzzzzzz completely unrelated', tickerEntries)).toHaveLength(0);
   });
 });
 

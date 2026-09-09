@@ -34,7 +34,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService, suggestCompanies } from '@/services/edgar/edgar-api-service.js';
-import { at, blockAt, blockText } from '../../../support/assertions.js';
+import { at, blockAt, blockText, caught, recoveryHint } from '../../../support/assertions.js';
 
 const mockSubmissions: SubmissionsResponse = {
   cik: '0000320193',
@@ -397,6 +397,28 @@ describe('companySearchTool', () => {
     expect(err.message).toContain('MICROSOFT CORP');
   });
 
+  // --- Ticker-aware no_match recovery (#111) ---
+
+  it('carries one recovery string covering both ticker- and name-shaped misses (#111)', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+    vi.mocked(suggestCompanies).mockReturnValue([
+      { cik: '0001624794', name: 'CSW INDUSTRIALS, INC.', ticker: 'CSW' },
+    ]);
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({ query: 'CSWI' });
+
+    const err = await caught(companySearchTool.handler(input, ctx));
+
+    expect(err.data.reason).toBe('no_match');
+    const hint = recoveryHint(err);
+    expect(hint).toContain('data.suggestions');
+    // The ETF/mutual-fund ticker guidance survives the rewrite.
+    expect(hint).toContain('VOO');
+    expect(err.data.suggestions).toHaveLength(1);
+    expect(err.message).toContain('CSW INDUSTRIALS, INC.');
+  });
+
   it('throws a clean no_match (no suggestions key) when trigram finds nothing', async () => {
     mockApi.resolveCik.mockResolvedValue([]);
     vi.mocked(suggestCompanies).mockReturnValue([]);
@@ -413,6 +435,35 @@ describe('companySearchTool', () => {
 
     const err = caught as { data?: { suggestions?: unknown } };
     expect(err.data?.suggestions).toBeUndefined();
+  });
+
+  // --- Suffix-form resolution reaching both output surfaces (#107) ---
+
+  it('surfaces a suffix-form resolution on structuredContent and in format() (#107)', async () => {
+    // "Beacon Financial Corporation" resolves to the registry's "Beacon Financial Corp"
+    // (CIK 0001108134). The tool renders the SEC-conformed name, not the query's spelling.
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0001108134',
+      name: 'Beacon Financial Corp',
+      ticker: 'BBT',
+    });
+    mockApi.getSubmissions.mockResolvedValue({
+      ...mockSubmissions,
+      cik: '0001108134',
+      name: 'Beacon Financial Corp',
+      tickers: ['BBT'],
+    });
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({ query: 'Beacon Financial Corporation' });
+    const result = await companySearchTool.handler(input, ctx);
+
+    expect(result.cik).toBe('0001108134');
+    expect(result.name).toBe('Beacon Financial Corp');
+    const text = blockText(companySearchTool.format!(result));
+    expect(text).toContain('Beacon Financial Corp');
+    expect(text).toContain('BBT');
+    expect(text).toContain('0001108134');
   });
 
   // --- Former-name resolution (#42) ---

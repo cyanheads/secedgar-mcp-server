@@ -29,7 +29,13 @@ import { childText, findTag, findTags } from './xml-nodes.js';
 
 const MAX_RETRIES = 3;
 const BASE_BACKOFF_MS = 1000;
-const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+/**
+ * Statuses worth a retry. 429 is deliberately absent: SEC holds a rate-limit block
+ * until the request rate has stayed under the threshold for ten minutes, so the
+ * ~3s retry budget cannot outlast it and every retry restarts the clock the caller
+ * is waiting on (#112).
+ */
+const RETRYABLE_STATUSES = new Set([500, 502, 503, 504]);
 
 /** URL for SEC's mutual-fund ticker file (ETFs and open-end funds). */
 const MF_TICKERS_URL = 'https://www.sec.gov/files/company_tickers_mf.json';
@@ -84,6 +90,48 @@ export interface SeriesFilingFeed {
 }
 
 // ---------------------------------------------------------------------------
+// Corporate-suffix normalization
+// ---------------------------------------------------------------------------
+
+/**
+ * Terminal corporate-suffix token → the canonical long form it compares as. Four
+ * separate buckets, never merged: the registry carries real distinct registrants
+ * that differ only in which suffix they use (`TORO CO` CIK 0000737758 vs
+ * `TORO CORP.` CIK 0001941131), so one shared "has a suffix" marker would compare
+ * two different companies equal.
+ */
+const SUFFIX_CANONICAL = new Map([
+  ['corp', 'corporation'],
+  ['corporation', 'corporation'],
+  ['inc', 'incorporated'],
+  ['incorporated', 'incorporated'],
+  ['co', 'company'],
+  ['company', 'company'],
+  ['ltd', 'limited'],
+  ['limited', 'limited'],
+]);
+
+/**
+ * Expand a lowercased company name's trailing corporate-suffix token to its
+ * canonical long form, so a query spelling the suffix out matches a registry title
+ * abbreviating it (`beacon financial corporation` ↔ `beacon financial corp`) (#107).
+ *
+ * Only the terminal whitespace-delimited token is considered, and a trailing `.`
+ * or `,` is stripped from it as part of recognizing it (`toro corp.`,
+ * `society pass incorporated.`). Everything else is left byte-for-byte alone: the
+ * long-form words also occur mid-name in titles ending in a different suffix
+ * (`american water works company, inc.`), and a terminal token that only contains
+ * a suffix (`ltd./adr`) is not one. Names with no recognized terminal suffix come
+ * back unchanged, so the result is safe to compare against a raw lowercased name.
+ */
+export function normalizeCompanySuffix(name: string): string {
+  const cut = name.lastIndexOf(' ');
+  if (cut < 0) return name;
+  const canonical = SUFFIX_CANONICAL.get(name.slice(cut + 1).replace(/[.,]$/, ''));
+  return canonical ? `${name.slice(0, cut)} ${canonical}` : name;
+}
+
+// ---------------------------------------------------------------------------
 // Trigram (Dice-coefficient) similarity
 // ---------------------------------------------------------------------------
 
@@ -118,17 +166,23 @@ export function trigramSimilarity(a: string, b: string): number {
 }
 
 /**
- * Run a trigram similarity scan over the in-memory entry set.
- * Only entries with a name are considered. Returns up to TRIGRAM_TOP_N
- * candidates whose Dice score meets TRIGRAM_THRESHOLD, sorted descending.
+ * Run a trigram similarity scan over the in-memory entry set. Each entry is scored
+ * on its name and on its ticker, and keeps the higher of the two — one ranked,
+ * deduped, TRIGRAM_TOP_N-capped list rather than two disjoint ones, so a strong
+ * ticker match can outrank a weak name match and vice versa (#111). An entry
+ * missing either field is simply not scored on it: former-name entries carry a
+ * name and no ticker. Returns up to TRIGRAM_TOP_N candidates whose Dice score
+ * meets TRIGRAM_THRESHOLD, sorted descending.
  */
 export function suggestCompanies(query: string, allEntries: CikMatch[]): CompanySuggestion[] {
   const q = query.toLowerCase();
   const scored: Array<{ score: number; entry: CikMatch }> = [];
 
   for (const entry of allEntries) {
-    if (!entry.name) continue;
-    const score = trigramSimilarity(q, entry.name.toLowerCase());
+    const score = Math.max(
+      entry.name ? trigramSimilarity(q, entry.name.toLowerCase()) : 0,
+      entry.ticker ? trigramSimilarity(q, entry.ticker.toLowerCase()) : 0,
+    );
     if (score >= TRIGRAM_THRESHOLD) {
       scored.push({ score, entry });
     }
@@ -233,8 +287,12 @@ class EdgarApiService {
       if (match) return match;
     }
 
-    // Name search: exact → prefix → substring (current names + former names)
+    // Name search: exact → prefix → substring (current names + former names).
+    // The exact tier also accepts a suffix-normalized equality, so a query differing
+    // from the registry title only in suffix form resolves as an exact hit rather than
+    // ranking behind unrelated prefix hits or falling through to a suggestion (#107).
     const lower = trimmed.toLowerCase();
+    const lowerNormalized = normalizeCompanySuffix(lower);
     const exact: CikMatch[] = [];
     const prefix: CikMatch[] = [];
     const substring: CikMatch[] = [];
@@ -242,7 +300,7 @@ class EdgarApiService {
     for (const entry of cache.allEntries) {
       if (!entry.name) continue;
       const name = entry.name.toLowerCase();
-      if (name === lower) {
+      if (name === lower || normalizeCompanySuffix(name) === lowerNormalized) {
         exact.push(entry);
       } else if (name.startsWith(lower)) {
         prefix.push(entry);
@@ -269,8 +327,12 @@ class EdgarApiService {
     }
 
     // Also try as ticker if nothing matched (handles >5-char and digit-containing symbols
-    // that bypassed the early ticker gate above)
-    const tickerMatch = cache.byTicker.get(upper);
+    // that bypassed the early ticker gate above). On a miss, retry a dotted symbol in
+    // SEC's hyphenated share-class form — brokers and market-data sites write BRK.B where
+    // company_tickers.json lists BRK-B, and no registrant has both forms on file (#110).
+    const tickerMatch =
+      cache.byTicker.get(upper) ??
+      (upper.includes('.') ? cache.byTicker.get(upper.replaceAll('.', '-')) : undefined);
     return tickerMatch ?? [];
   }
 
@@ -770,8 +832,18 @@ class EdgarApiService {
         data.recovery = {
           hint: `${host} may be blocking requests. Check EDGAR_USER_AGENT format ("AppName contact@email.com") or retry later.`,
         };
+      } else if (response.status === 429) {
+        data.recovery = {
+          hint: 'SEC is rate-limiting this IP and does not resume serving it until the request rate has stayed below 10 requests/second for 10 minutes. Wait out that cool-down before retrying — further requests restart it. A shared outbound IP can trigger this even while this server is under the limit.',
+        };
       }
-      throw await httpErrorFromResponse(response, { service: 'SEC EDGAR', data });
+      throw await httpErrorFromResponse(response, {
+        service: 'SEC EDGAR',
+        data,
+        // SEC answers a rate-limit block with a full HTML page. The recovery hint
+        // above carries everything actionable, so the markup is not forwarded (#112).
+        captureBody: response.status !== 429,
+      });
     }
 
     throw serviceUnavailable('SEC EDGAR API request failed after retries', { url });

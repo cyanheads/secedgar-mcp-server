@@ -84,7 +84,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       code: JsonRpcErrorCode.NotFound,
       when: 'No company matches the query',
       recovery:
-        'Use a ticker symbol for ETFs, mutual funds, and equities (e.g. "VOO", "AAPL"), or try the full legal company name or a 10-digit CIK.',
+        'Check `data.suggestions` for near matches. SEC\'s ticker index reflects the filer\'s own submissions record, which can differ from the exchange-listed symbol. ETFs and mutual funds resolve only by ticker (e.g. "VOO"); operating companies also resolve by full legal name or 10-digit CIK.',
     },
     {
       reason: 'multiple_matches',
@@ -100,7 +100,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       .trim()
       .min(1, 'Query cannot be blank')
       .describe(
-        'Company ticker symbol (e.g., "AAPL", "VOO"), name (e.g., "Apple"), or CIK number (e.g., "320193"). Ticker is the fastest lookup and works for equities, ETFs, and mutual funds. Name search matches current and former names.',
+        'Company ticker symbol (e.g., "AAPL", "VOO"), name (e.g., "Apple"), or CIK number (e.g., "320193"). Ticker is the fastest lookup and works for equities, ETFs, and mutual funds; a multi-class share ticker resolves in either form ("BRK-B" or "BRK.B"). Name search matches current and former names, and the corporate suffix does not have to match the registry\'s form ("Beacon Financial Corporation" finds "Beacon Financial Corp") — but Corp, Inc, Co, and Ltd stay distinct from each other, since separate registrants differ only by which one they use.',
       ),
     include_filings: z
       .boolean()

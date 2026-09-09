@@ -629,6 +629,33 @@ describe('searchFilingsTool', () => {
     expect(mockApi.searchFilings).not.toHaveBeenCalled();
   });
 
+  // #110 — the ticker: token reaches resolveCik verbatim, dot included, and whatever
+  // it resolves becomes the EFTS entity scope. That resolveCik maps the dotted form
+  // onto SEC's hyphenated key is pinned against the real registry shape in
+  // tests/services/edgar/edgar-api-service.resolve-cik.test.ts.
+  it('scopes ticker:BRK.B to the resolved issuer CIK (#110)', async () => {
+    const resolveCik = vi.fn().mockResolvedValue({
+      cik: '0001067983',
+      name: 'BERKSHIRE HATHAWAY INC',
+      ticker: 'BRK-B',
+    });
+    (mockApi as any).resolveCik = resolveCik;
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: { total: { value: 0, relation: 'eq' }, hits: [] },
+    });
+
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({ query: 'ticker:BRK.B insurance', limit: 5 });
+    await searchFilingsTool.handler(input, ctx);
+
+    // The dot survives tokenization — resolveCik sees the caller's literal symbol.
+    expect(resolveCik).toHaveBeenCalledWith('BRK.B');
+    expect(mockApi.searchFilings).toHaveBeenCalledWith(
+      expect.objectContaining({ query: 'insurance', ciks: ['0001067983'] }),
+    );
+  });
+
   it('malformed cik: targeting fails with typed invalid_cik, no EFTS call (#61)', async () => {
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({ query: 'cik:ABC123 revenue' });
