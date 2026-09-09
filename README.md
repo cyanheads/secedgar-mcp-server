@@ -55,10 +55,11 @@ Fourteen tools for querying SEC EDGAR data, plus three for SQL analytics over th
 
 Entry point for most EDGAR workflows — resolve tickers, names, or CIKs to entity details.
 
-- Supports ticker symbols (`AAPL`, `VOO`), company names (`Apple`), or CIK numbers (`320193`)
+- Supports ticker symbols (`AAPL`, `VOO`), company names (`Apple`), or CIK numbers (`320193`); a multi-class share ticker resolves in either form (`BRK-B` or `BRK.B`)
 - ETFs and mutual funds resolve by ticker via `company_tickers_mf.json`; fund results include `series_id` and `class_id` for downstream scoping
 - Current and former company names both resolve (`Facebook` → Meta Platforms, `Square` → Block)
-- Near-match suggestions on zero-result name search (e.g. `Microsfot` → `MICROSOFT CORP / MSFT`)
+- Corporate suffix form does not have to match the registry (`Beacon Financial Corporation` → `Beacon Financial Corp`); `Corp`, `Inc`, `Co`, and `Ltd` stay distinct from one another, since separate registrants differ only by which one they use (`TORO CO` vs `TORO CORP.`)
+- Near-match suggestions on a zero-result name or ticker search (e.g. `Microsfot` → `MICROSOFT CORP / MSFT`, `CSWI` → `CSW INDUSTRIALS, INC. / CSW`)
 - Optionally includes recent filings with form type filtering
 - Date filtering (`filed_after` / `filed_before`) and under-filled form filters page into the older submissions archive, reaching filings that predate the ~1000-entry recent window (e.g. a 2005 10-K); `history_scanned_through` discloses the scan depth, and the full filtered history materializes as a `df_<id>` dataframe when it exceeds the inline `filing_limit`
 - Returns entity metadata: SIC code, exchanges, fiscal year end, state of incorporation
@@ -70,7 +71,7 @@ Entry point for most EDGAR workflows — resolve tickers, names, or CIKs to enti
 Search EDGAR filings since 1993. Full-text search covers 2001-present (the EFTS index floor); pre-2001 date ranges are served from the archives — pre-2001 full-text matching requires entity scope.
 
 - Exact phrases (`"material weakness"`), boolean operators (`revenue OR income`), wildcards (`account*`)
-- Entity targeting within query string (`cik:320193` or `ticker:AAPL`) — scoped server-side by CIK, so filings made under a former company name (same CIK) are included
+- Entity targeting within query string (`cik:320193` or `ticker:AAPL`) — scoped server-side by CIK, so filings made under a former company name (same CIK) are included; a multi-class share ticker resolves in either form (`ticker:BRK-B` or `ticker:BRK.B`)
 - Browse mode: omit `query` to list filings by form type (`forms=["S-1"]`) and/or entity (`ticker:`/`cik:`), optionally narrowed by date — a bare date range is not a valid search and must be paired with forms or entity targeting
 - Pre-2001 date ranges (back to 1993) route to the archives: an entity-scoped range reads the filer's full submissions history; an unscoped forms/date range browses the quarterly full-index. Each row carries a `source` field (`efts` / `submissions` / `full-index`), preserved into the `df_<id>` dataframe
 - Pre-2001 free text is matched by reading documents, so it needs `ticker:`/`cik:` scope to bound the work: the form + date pre-filter picks candidates, up to 50 are read, and `scan` reports candidates / scanned / matched rather than presenting a partial read as a complete one. SEC's request rate is the cost — roughly 5s for a full 50-document scan. Each read covers the whole accession `.txt` (pre-1997 filings expose no per-document URL), so a match can sit in an attached exhibit rather than the body of the requested form
@@ -274,7 +275,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core):
 SEC EDGAR–specific:
 
 - Rate-limited HTTP client respecting SEC's 10 req/s limit with automatic inter-request delay
-- CIK resolution from tickers (including ETFs and mutual funds via `company_tickers_mf.json`), company names (current and former), or raw CIK numbers with local caching; near-match trigram suggestions on zero-result name queries; committed `former-names.json` asset for prior-name resolution (`Facebook` → Meta, `Square` → Block)
+- CIK resolution from tickers (including ETFs and mutual funds via `company_tickers_mf.json`), company names (current and former), or raw CIK numbers with local caching; corporate-suffix normalization on the name passes and dotted share-class tickers (`BRK.B`) resolved to SEC's hyphenated form; near-match trigram suggestions on zero-result name and ticker queries; committed `former-names.json` asset for prior-name resolution (`Facebook` → Meta, `Square` → Block)
 - Friendly XBRL concept name mapping with historical tag change handling
 - Searchable concept catalog with statement-group metadata and reverse XBRL tag lookup
 - HTML-to-text conversion for filing documents via `html-to-text`

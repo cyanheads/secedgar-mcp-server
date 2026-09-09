@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.15.3](changelog/0.15.x/0.15.3.md) — 2026-09-09
+
+Fixes four EDGAR resolution gaps: corporate-suffix name matching, dotted share-class tickers, ticker near-match suggestions, and a 429 that retried into SEC's ten-minute rate-limit block. Adopts mcp-ts-core 0.12.8 plus dependency refresh.
+
 ## [0.15.2](changelog/0.15.x/0.15.2.md) — 2026-09-02
 
 Adopts @cyanheads/mcp-ts-core 0.12.5. An SEC 5xx now classifies as ServiceUnavailable rather than InternalError, a caller disconnect as RequestCancelled, and server identity resolves from the served package instead of the launching client's working directory. No changes to this server's own source.
