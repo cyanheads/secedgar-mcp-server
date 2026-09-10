@@ -49,7 +49,7 @@ Fourteen tools for querying SEC EDGAR data, plus three for SQL analytics over th
 | `secedgar_search_concepts` | Discover supported XBRL concept names or reverse-lookup a raw tag |
 | `secedgar_dataframe_describe` | List canvas dataframes with provenance, TTL, and schema |
 | `secedgar_dataframe_query` | Run a single-statement SELECT across dataframes |
-| `secedgar_dataframe_drop` | Drop a canvas dataframe by name. Opt-in via `EDGAR_DATAFRAME_DROP_ENABLED=true` — off by default since TTL already handles cleanup |
+| `secedgar_dataframe_drop` | Drop a canvas dataframe by name. Opt-in via `EDGAR_DATAFRAME_DROP_ENABLED=true` — off by default since TTL already handles cleanup, and uncallable until the flag is set |
 
 ### `secedgar_company_search`
 
@@ -242,11 +242,12 @@ Discover supported XBRL concept names before querying financials or cross-compan
 
 ### `secedgar_dataframe_describe` / `secedgar_dataframe_query` / `secedgar_dataframe_drop`
 
-In-conversation SQL analytics over the dataframes that `secedgar_fetch_frames`, `secedgar_compare_companies`, `secedgar_search_filings`, `secedgar_get_financials`, `secedgar_get_material_events`, `secedgar_get_insider_transactions`, `secedgar_get_institutional_holdings`, and `secedgar_find_holders` materialize on a shared DuckDB-backed canvas. Each data-returning call adds a `dataset` field with a `df_XXXXX_XXXXX` handle; pass that handle to `secedgar_dataframe_query` for joins, aggregates, window functions, percentiles — standard DuckDB SQL.
+In-conversation SQL analytics over the dataframes that the data-returning `secedgar_*` tools materialize on a shared DuckDB-backed canvas. Any call whose response carries a `dataset` field holds a `df_XXXXX_XXXXX` handle: read its columns with `secedgar_dataframe_describe`, then analyze it with `secedgar_dataframe_query` — joins, aggregates, window functions, percentiles, standard DuckDB SQL.
 
 - **Read-only by default.** Writes, DDL, DROP, COPY, PRAGMA, ATTACH, and external-file table functions are rejected by the framework SQL gate. System catalogs (`information_schema`, `pg_catalog`, `sqlite_master`, `duckdb_*`) are denied at the bridge layer so callers can't enumerate dataframes they don't already hold a handle for. `secedgar_dataframe_drop` is the only destructive tool and is opt-in (`EDGAR_DATAFRAME_DROP_ENABLED=true`); TTL handles cleanup otherwise.
 - **Per-table TTL.** Each dataframe ages on its own clock (default 24h, override with `EDGAR_DATASET_TTL_SECONDS`). The canvas itself uses the framework's sliding TTL.
 - **`register_as` chaining.** `secedgar_dataframe_query` can persist its result as a new dataframe (`df_XXXXX_XXXXX`) with a fresh TTL — pipe analyses without re-running the source query.
+- **Capped results say so.** When `row_limit` bounds the query, `row_count_capped` comes back `true` and `row_count` is that cap rather than a total — raise `row_limit` (max 10000) or use `register_as` to materialize the whole result, whose count is then exact.
 
 ## Resources
 
@@ -279,7 +280,7 @@ SEC EDGAR–specific:
 - Friendly XBRL concept name mapping with historical tag change handling
 - Searchable concept catalog with statement-group metadata and reverse XBRL tag lookup
 - HTML-to-text conversion for filing documents via `html-to-text`
-- In-conversation SQL analytics: `secedgar_fetch_frames`, `secedgar_compare_companies`, `secedgar_search_filings`, `secedgar_get_financials`, `secedgar_get_material_events`, `secedgar_get_insider_transactions`, `secedgar_get_institutional_holdings`, and `secedgar_find_holders` materialize their full result as a DuckDB-backed canvas dataframe queryable via `secedgar_dataframe_query`
+- In-conversation SQL analytics: the data-returning `secedgar_*` tools materialize their full result as a DuckDB-backed canvas dataframe — inspect its columns with `secedgar_dataframe_describe`, then query it with `secedgar_dataframe_query`
 - No API keys required — SEC EDGAR is a free, public API
 
 ## Getting started
@@ -384,7 +385,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 | `EDGAR_RATE_LIMIT_RPS` | Max requests/second to SEC APIs. Do not exceed 10. | `10` |
 | `EDGAR_TICKER_CACHE_TTL` | Seconds to cache the company tickers lookup file. | `3600` |
 | `EDGAR_DATASET_TTL_SECONDS` | Per-table TTL for canvas-registered dataframes. Sliding window touched on every dataframe op. | `86400` |
-| `EDGAR_DATAFRAME_DROP_ENABLED` | Set to `true` to expose `secedgar_dataframe_drop` — the only destructive tool on this server. Off by default; TTL handles cleanup. | `false` |
+| `EDGAR_DATAFRAME_DROP_ENABLED` | Set to `true` to expose `secedgar_dataframe_drop` — the only destructive tool on this server. Off by default; TTL handles cleanup, and the tool is still listed on the HTTP landing page as disabled, with the flag that enables it. | `false` |
 | `EDGAR_MIRROR_ENABLED` | Enable the local SQLite mirror of `company_tickers` + XBRL company-facts so CIK resolution and financials read from disk instead of the live API. Node/Bun only (skipped on Workers). Bootstrap once with `bun run mirror:init`. | `false` |
 | `EDGAR_MIRROR_PATH` | Directory holding the mirror SQLite databases. | `./data/edgar-mirror` |
 | `EDGAR_MIRROR_REFRESH_CRON` | Cron for the in-process nightly refresh (HTTP transport only). Recommended `0 9 * * *`. Omit to refresh out-of-band via `bun run mirror:refresh`. | — |

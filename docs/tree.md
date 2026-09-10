@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-09-09 22:19:47
+Generated on: 2026-09-10 01:02:08
 
 ```text
 secedgar-mcp-server/
@@ -178,6 +178,7 @@ secedgar-mcp-server/
 │   │           ├── get-institutional-holdings.tool.ts
 │   │           ├── get-material-events.tool.ts
 │   │           ├── get-snapshot.tool.ts
+│   │           ├── index.ts
 │   │           ├── search-concepts.tool.ts
 │   │           └── search-filings.tool.ts
 │   ├── services/
@@ -234,7 +235,9 @@ secedgar-mcp-server/
 │   │       │   ├── get-snapshot.tool.test.ts
 │   │       │   ├── search-concepts.tool.test.ts
 │   │       │   ├── search-filings.tool.test.ts
-│   │       │   └── security.test.ts
+│   │       │   ├── security.test.ts
+│   │       │   └── tool-definitions.test.ts
+│   │       ├── dataframe-pointers.test.ts
 │   │       └── strict-inputs.test.ts
 │   ├── scripts/
 │   │   └── bundle-entry-patterns.test.ts

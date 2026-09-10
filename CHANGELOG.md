@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.15.5](changelog/0.15.x/0.15.5.md) — 2026-09-09
+
+Registers the gated dataframe-drop tool as discoverable-but-disabled, adds a describe-then-query pointer across every dataframe-producing tool, and fixes secedgar_dataframe_query's row_limit-bound truncation disclosure with a new row_count_capped field.
+
 ## [0.15.4](changelog/0.15.x/0.15.4.md) — 2026-09-09
 
 Fixes secedgar_get_filing's heading outline and section matching: 20-F filings with bare Item markers and running page headers now produce a full outline of all Items and Parts, and section now resolves headings whose whitespace or quote style differs from the caller's input.
