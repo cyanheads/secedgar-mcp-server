@@ -73,6 +73,22 @@ export function toDatasetField(registered: RegisterDataframeResult): {
   };
 }
 
+/**
+ * Describe-then-query pointer for a staged `df_<id>` handle. Composed here so
+ * every producer names both dataframe tools in the same order and the wording
+ * cannot drift site to site (#104).
+ *
+ * Emit it only on the branch that actually registered a dataframe:
+ * {@link CanvasBridge.registerDataframe} returns `undefined` when the canvas is
+ * off, registration failed, or the row set was empty, and this text promises a
+ * table the caller can query. `ctx.enrich.notice` is last-wins across
+ * `notice`/`truncated`, so a call site where both can fire composes one string
+ * rather than emitting two.
+ */
+export function dataframeGuidance(dataset: { name: string; row_count: number }): string {
+  return `Full set staged as ${dataset.name} (${dataset.row_count} rows) — use secedgar_dataframe_describe to inspect its columns, then secedgar_dataframe_query to analyze it with SQL.`;
+}
+
 /** Options accepted by {@link CanvasBridge.registerDataframe}. */
 export interface RegisterDataframeOptions {
   maxRows?: number;

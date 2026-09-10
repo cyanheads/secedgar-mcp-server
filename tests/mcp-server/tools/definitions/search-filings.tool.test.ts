@@ -20,7 +20,10 @@ vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
   };
 });
 
-vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+// Partial mock: the canvas accessors are stubbed, but `dataframeGuidance` stays
+// real so the staged-dataframe pointer is asserted against the shipped wording.
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/canvas-bridge/canvas-bridge.js')>()),
   getCanvasBridge: vi.fn(),
   toDatasetField: (r: { tableName: string; rowCount: number; expiresAt: string }) => ({
     name: r.tableName,
@@ -574,6 +577,13 @@ describe('searchFilingsTool', () => {
     expect(call.queryParams.entity_cik).toBe('0000320193');
     expect(call.truncated).toBe(true);
     expect(result.dataset?.name).toBe('df_TEST1_TEST2');
+    // The 25 rows past the inline window are only reachable through the
+    // dataframe, so the truncation guidance names both dataframe tools (#104).
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('df_TEST1_TEST2');
+    expect(notice).toContain('secedgar_dataframe_describe');
+    expect(notice).toContain('secedgar_dataframe_query');
+    expect(notice.match(/secedgar_dataframe_describe/g)).toHaveLength(1);
   });
 
   it('skips dataset registration when the entity-scoped hits fit inline', async () => {
@@ -1831,5 +1841,53 @@ describe('searchFilingsTool', () => {
     // EFTS reported 500 matches behind a 1-row window — more exists than was materialized.
     expect(call.truncated).toBe(true);
     expect(result.dataset?.truncated).toBe(true);
+    // Second success path that registers a dataframe — it carries the same
+    // describe-then-query pointer as the 2001-onward path (#104).
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('df_MERGE_ROWS11');
+    expect(notice).toContain('secedgar_dataframe_describe');
+    expect(notice).toContain('secedgar_dataframe_query');
+    expect(notice.match(/secedgar_dataframe_describe/g)).toHaveLength(1);
+  });
+
+  it('promises no pointer on the merged path when the canvas is unavailable (#104)', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      submissionsWith([
+        { accession: 'ARCH1', date: '2000-12-01' },
+        { accession: 'ARCH2', date: '2000-11-01' },
+      ]),
+    );
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: {
+        total: { value: 500, relation: 'eq' },
+        hits: [
+          {
+            _id: 'e1',
+            _source: {
+              adsh: 'EFTS1',
+              form: '10-K',
+              file_date: '2002-01-01',
+              display_names: ['X'],
+              ciks: ['0000320193'],
+            },
+          },
+        ],
+      },
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const input = searchFilingsTool.input.parse({
+      query: 'cik:320193',
+      forms: ['10-K'],
+      start_date: '2000-01-01',
+      end_date: '2003-12-31',
+      limit: 1,
+    });
+    const result = await searchFilingsTool.handler(input, ctx);
+
+    expect(result.dataset).toBeUndefined();
+    expect(String(getEnrichment(ctx).notice)).not.toContain('secedgar_dataframe_describe');
   });
 });

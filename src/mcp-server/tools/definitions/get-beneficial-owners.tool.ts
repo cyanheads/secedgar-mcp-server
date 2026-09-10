@@ -12,7 +12,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  dataframeGuidance,
+  getCanvasBridge,
+  toDatasetField,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import {
   type BeneficialOwner,
   type BeneficialOwnershipForm,
@@ -63,7 +67,7 @@ interface FilingRef {
 export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
   title: 'Get Beneficial Owners',
   description:
-    "List the 5%-and-over beneficial owners of a public company, parsed from the structured SCHEDULE 13D and SCHEDULE 13G filings made about it. The input is the ISSUER — the company being held — which is the opposite direction from secedgar_get_institutional_holdings, where the input is the manager. 13D is the activist form and carries the filer's stated purpose of the transaction; 13G is the passive form and has no purpose field at all, which is the substantive difference between a stake that intends to influence control and one that does not. Every filing is returned with each reporting person listed separately, because voting power, dispositive power, and percent of class are reported per person even on a joint filing where several funds and their controlling principal report overlapping shares — summing those percentages double-counts the same position. Coverage starts at 2024-12-18, when SEC replaced the legacy SC 13D / SC 13G text filings with this XML format; earlier stakes are readable but not parseable, and the response reports how many of them the issuer has. The full parsed set is materialized as df_<id> when a canvas is available, one row per reporting person, so it joins against the insider and 13F dataframes on issuer CIK.",
+    "List the 5%-and-over beneficial owners of a public company, parsed from the structured SCHEDULE 13D and SCHEDULE 13G filings made about it. The input is the ISSUER — the company being held — which is the opposite direction from secedgar_get_institutional_holdings, where the input is the manager. 13D is the activist form and carries the filer's stated purpose of the transaction; 13G is the passive form and has no purpose field at all, which is the substantive difference between a stake that intends to influence control and one that does not. Every filing is returned with each reporting person listed separately, because voting power, dispositive power, and percent of class are reported per person even on a joint filing where several funds and their controlling principal report overlapping shares — summing those percentages double-counts the same position. Coverage starts at 2024-12-18, when SEC replaced the legacy SC 13D / SC 13G text filings with this XML format; earlier stakes are readable but not parseable, and the response reports how many of them the issuer has. The full parsed set is materialized as df_<id> when a canvas is available, one row per reporting person, so it joins against the insider and 13F dataframes on issuer CIK — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -266,7 +270,9 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       .object({
         name: z
           .string()
-          .describe('Dataframe handle (df_XXXXX_XXXXX) — pass to secedgar_dataframe_query.'),
+          .describe(
+            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+          ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
         truncated: z
@@ -479,8 +485,12 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       ctx.enrich.truncated({
         shown: filings.length,
         cap: input.limit,
-        guidance: `${totalMatching} structured blockholder filings are indexed for this issuer. Raise limit to reach further back, or narrow with form_kind or include_amendments=false.`,
+        guidance:
+          `${totalMatching} structured blockholder filings are indexed for this issuer. Raise limit to reach further back, or narrow with form_kind or include_amendments=false.` +
+          (dataset ? ` ${dataframeGuidance(dataset)}` : ''),
       });
+    } else if (dataset) {
+      ctx.enrich.notice(dataframeGuidance(dataset));
     }
 
     ctx.log.info('Beneficial owners retrieved', {

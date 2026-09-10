@@ -22,7 +22,10 @@ vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
 
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
-vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+// Partial mock: the canvas accessors are stubbed, but `dataframeGuidance` stays
+// real so the staged-dataframe pointer is asserted against the shipped wording.
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/canvas-bridge/canvas-bridge.js')>()),
   getCanvasBridge: vi.fn(),
   toDatasetField: (r: { tableName: string; rowCount: number; expiresAt: string }) => ({
     name: r.tableName,
@@ -349,6 +352,38 @@ describe('findHoldersTool', () => {
       quarter: '2026-Q1',
       reporting_period: '2026-03-31',
     });
+    // The managers past the inline cap are only reachable through the dataframe (#104).
+    const notice = String(getEnrichment(ctx).notice);
+    expect(getEnrichment(ctx).truncated).toBe(true);
+    expect(notice).toContain('df_TEST0_TEST1');
+    expect(notice).toContain('secedgar_dataframe_describe');
+    expect(notice).toContain('secedgar_dataframe_query');
+    expect(notice.match(/secedgar_dataframe_describe/g)).toHaveLength(1);
+  });
+
+  it('promises no dataframe pointer when the canvas is unavailable (#104)', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+    mockApi.searchFilings.mockResolvedValue(
+      eftsPage(
+        Array.from({ length: 5 }, (_, i) =>
+          hit({ accession: `0000000000-26-${String(i).padStart(6, '0')}` }),
+        ),
+        5,
+      ),
+    );
+    const ctx = createMockContext({ errors: findHoldersTool.errors });
+    const input = findHoldersTool.input.parse({
+      issuer: 'AAPL',
+      cusip: '037833100',
+      limit: 2,
+    });
+    const result = await findHoldersTool.handler(input, ctx);
+
+    expect(result.dataset).toBeUndefined();
+    const notice = String(getEnrichment(ctx).notice);
+    expect(getEnrichment(ctx).truncated).toBe(true);
+    expect(notice).not.toContain('secedgar_dataframe_describe');
+    expect(notice).toContain('Raise limit');
   });
 
   it('fails when the issuer resolves to a bare CIK with no name to phrase-match', async () => {

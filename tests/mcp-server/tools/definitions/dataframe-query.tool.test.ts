@@ -318,6 +318,230 @@ describe('dataframeQueryTool', () => {
     expect(enrichment.notice).toContain('raise row_limit');
   });
 
+  // (#109) `row_limit` is pushed into the query as the provider's `rowLimit`, so a
+  // capped result comes back with `rowCount === rows.length` and the row arithmetic
+  // cannot see it. `QueryResult.truncated` is the only signal, and when it is set
+  // `rowCount` is the cap rather than a total — so the guidance must never print
+  // "of {rowCount}". Each case below mirrors one row of the issue's truth table.
+  describe('row_limit-bound truncation (#109)', () => {
+    it('discloses truncation when row_limit bound and rowCount equals rows.length', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+      mockBridge.query.mockResolvedValue({
+        result: {
+          columns: ['id'],
+          rowCount: 3,
+          rows: Array.from({ length: 3 }, (_, i) => ({ id: String(i) })),
+          truncated: true,
+        },
+        meta: undefined,
+      });
+      const ctx = createMockContext({ errors: dataframeQueryTool.errors });
+      const input = dataframeQueryTool.input.parse({ sql: 'SELECT * FROM df_BIG', row_limit: 3 });
+      const result = await dataframeQueryTool.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBe(true);
+      expect(enrichment.shown).toBe(3);
+      expect(enrichment.cap).toBe(3);
+      expect(enrichment.notice).toContain('row_limit');
+      // rowCount is the cap here, so no "of 3 rows" total may be claimed.
+      expect(enrichment.notice).not.toMatch(/of \d+ rows/);
+      expect(result.row_count_capped).toBe(true);
+    });
+
+    it('names both ceilings when row_limit and preview bind on the same query', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+      // row_limit=5 capped the query (truncated), preview=3 cut the inline rows further.
+      mockBridge.query.mockResolvedValue({
+        result: {
+          columns: ['id'],
+          rowCount: 5,
+          rows: Array.from({ length: 3 }, (_, i) => ({ id: String(i) })),
+          truncated: true,
+        },
+        meta: undefined,
+      });
+      const ctx = createMockContext({ errors: dataframeQueryTool.errors });
+      const input = dataframeQueryTool.input.parse({
+        sql: 'SELECT * FROM df_BIG',
+        row_limit: 5,
+        preview: 3,
+      });
+      const result = await dataframeQueryTool.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBe(true);
+      expect(enrichment.shown).toBe(3);
+      // preview is the ceiling that bound the inline list.
+      expect(enrichment.cap).toBe(3);
+      expect(enrichment.notice).toContain('preview');
+      expect(enrichment.notice).toContain('row_limit');
+      // 5 is the row_limit cap, not the size of the result — never presented as a total.
+      expect(enrichment.notice).not.toContain('of 5');
+      expect(result.row_count_capped).toBe(true);
+    });
+
+    it('stays silent when row_limit is above the true row count', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+      mockBridge.query.mockResolvedValue({
+        result: { columns: ['id'], rowCount: 2, rows: [{ id: '1' }, { id: '2' }] },
+        meta: undefined,
+      });
+      const ctx = createMockContext({ errors: dataframeQueryTool.errors });
+      const input = dataframeQueryTool.input.parse({ sql: 'SELECT * FROM df_SMALL' });
+      const result = await dataframeQueryTool.handler(input, ctx);
+
+      expect(getEnrichment(ctx).truncated).toBeUndefined();
+      expect(result.row_count_capped).toBe(false);
+    });
+
+    it('stays silent for a caller-supplied LIMIT equal to row_limit (documented ambiguity)', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+      // DuckDB cannot distinguish this from a table holding exactly 10 matching rows:
+      // its own LIMIT bounds what the engine ever produces, so `truncated` stays unset.
+      mockBridge.query.mockResolvedValue({
+        result: {
+          columns: ['id'],
+          rowCount: 10,
+          rows: Array.from({ length: 10 }, (_, i) => ({ id: String(i) })),
+        },
+        meta: undefined,
+      });
+      const ctx = createMockContext({ errors: dataframeQueryTool.errors });
+      const input = dataframeQueryTool.input.parse({
+        sql: 'SELECT * FROM df_BIG LIMIT 10',
+        row_limit: 10,
+      });
+      const result = await dataframeQueryTool.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBeUndefined();
+      expect(enrichment.notice).toBeUndefined();
+      expect(result.row_count_capped).toBe(false);
+    });
+
+    it('keeps the exact-total wording on the register_as path, where truncated is never set', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+      // registerAs materializes the whole result and counts it with COUNT(*), so
+      // rowCount is exact and the fallback comparison stays load-bearing.
+      mockBridge.query.mockResolvedValue({
+        result: {
+          columns: ['id'],
+          rowCount: 67,
+          rows: Array.from({ length: 3 }, (_, i) => ({ id: String(i) })),
+          tableName: 'df_NEW01_NEW02',
+        },
+        meta: { tableName: 'df_NEW01_NEW02', expiresAt: '2026-05-18T00:00:00.000Z' },
+      });
+      const ctx = createMockContext({ errors: dataframeQueryTool.errors });
+      const input = dataframeQueryTool.input.parse({
+        sql: 'SELECT * FROM df_BIG',
+        register_as: 'df_NEW01_NEW02',
+        preview: 3,
+      });
+      const result = await dataframeQueryTool.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBe(true);
+      expect(enrichment.notice).toContain('3 of 67');
+      expect(result.row_count_capped).toBe(false);
+    });
+
+    it('stays silent when a register_as query is fully materialized within the preview', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+      mockBridge.query.mockResolvedValue({
+        result: {
+          columns: ['id'],
+          rowCount: 3,
+          rows: [{ id: '1' }, { id: '2' }, { id: '3' }],
+          tableName: 'df_NEW01_NEW02',
+        },
+        meta: { tableName: 'df_NEW01_NEW02', expiresAt: '2026-05-18T00:00:00.000Z' },
+      });
+      const ctx = createMockContext({ errors: dataframeQueryTool.errors });
+      const input = dataframeQueryTool.input.parse({
+        sql: 'SELECT * FROM df_SMALL',
+        register_as: 'df_NEW01_NEW02',
+      });
+      await dataframeQueryTool.handler(input, ctx);
+
+      expect(getEnrichment(ctx).truncated).toBeUndefined();
+    });
+
+    it('stays silent on an aggregate producing fewer rows than any cap', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+      mockBridge.query.mockResolvedValue({
+        result: { columns: ['count'], rowCount: 1, rows: [{ count: '4200' }] },
+        meta: undefined,
+      });
+      const ctx = createMockContext({ errors: dataframeQueryTool.errors });
+      const input = dataframeQueryTool.input.parse({ sql: 'SELECT COUNT(*) AS count FROM df_BIG' });
+      await dataframeQueryTool.handler(input, ctx);
+
+      expect(getEnrichment(ctx).truncated).toBeUndefined();
+    });
+
+    it('keeps the empty-result notice untouched when the cap never bound', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+      mockBridge.query.mockResolvedValue({
+        result: { columns: ['id'], rowCount: 0, rows: [] },
+        meta: undefined,
+      });
+      const ctx = createMockContext({ errors: dataframeQueryTool.errors });
+      const input = dataframeQueryTool.input.parse({
+        sql: 'SELECT id FROM df_BIG OFFSET 9999',
+      });
+      const result = await dataframeQueryTool.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.notice).toContain('0 rows');
+      expect(enrichment.truncated).toBeUndefined();
+      expect(result.row_count_capped).toBe(false);
+    });
+
+    it('carries the cap disclosure into format() output, without claiming a total', () => {
+      // content[]-only clients read format(); row_count is the cap in this state, so
+      // the header must not present it as the size of the result.
+      const blocks = dataframeQueryTool.format!({
+        columns: ['id'],
+        row_count: 3,
+        row_count_capped: true,
+        rows: [{ id: '1' }, { id: '2' }, { id: '3' }],
+      });
+
+      const text = blockText(blocks);
+      expect(text).toContain('row_limit');
+      expect(text).not.toContain('showing 3 of 3');
+    });
+
+    it('names the cap, not a total, in format() when row_limit and preview both bind', () => {
+      // row_limit=5 capped the query and preview=3 cut further: row_count is the
+      // cap, so the "of M" wording the preview-only branch uses must not appear.
+      const blocks = dataframeQueryTool.format!({
+        columns: ['id'],
+        row_count: 5,
+        row_count_capped: true,
+        rows: [{ id: '1' }, { id: '2' }, { id: '3' }],
+      });
+
+      const text = blockText(blocks);
+      expect(text).toContain('capped at row_limit');
+      expect(text).toContain('showing 3');
+      expect(text).not.toContain('of 5');
+    });
+
+    it('keeps the of-total wording in format() when the count is exact', () => {
+      const blocks = dataframeQueryTool.format!({
+        columns: ['id'],
+        row_count: 67,
+        row_count_capped: false,
+        rows: [{ id: '1' }, { id: '2' }, { id: '3' }],
+      });
+
+      expect(blockText(blocks)).toContain('showing 3 of 67');
+    });
+  });
+
   it('does not populate enrichment notice on normal results', async () => {
     vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
     mockBridge.query.mockResolvedValue({
@@ -380,6 +604,7 @@ describe('dataframeQueryTool', () => {
     const result = {
       columns: ['name', 'value'],
       row_count: 1,
+      row_count_capped: false,
       rows: [{ name: 'Apple', value: '100' }],
     };
     const blocks = dataframeQueryTool.format!(result);
@@ -390,7 +615,7 @@ describe('dataframeQueryTool', () => {
   });
 
   it('formats empty results with no-rows message', () => {
-    const result = { columns: ['id'], row_count: 0, rows: [] };
+    const result = { columns: ['id'], row_count: 0, row_count_capped: false, rows: [] };
     const blocks = dataframeQueryTool.format!(result);
 
     expect(blockText(blocks)).toContain('No rows');

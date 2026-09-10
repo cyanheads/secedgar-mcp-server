@@ -11,7 +11,7 @@ import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 
 export const dataframeDescribeTool = tool('secedgar_dataframe_describe', {
   description:
-    'List dataframes (df_XXXXX_XXXXX) materialized by secedgar_fetch_frames, secedgar_search_filings, secedgar_get_financials, secedgar_get_insider_transactions, and secedgar_get_institutional_holdings. Each entry surfaces source tool, query parameters, creation/expiry timestamps, row count, column schema, and whether the dataframe is truncated relative to the upstream source.',
+    'List the dataframes (df_XXXXX_XXXXX) registered by the data-returning secedgar_* tools — any tool whose response carries a `dataset` handle stages its full result set here. Each entry surfaces source tool, query parameters, creation/expiry timestamps, row count, column schema, and whether the dataframe is truncated relative to the upstream source. Read the column schema here before writing SQL for secedgar_dataframe_query.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   errors: [

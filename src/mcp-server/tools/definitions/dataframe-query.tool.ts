@@ -13,7 +13,7 @@ import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 
 export const dataframeQueryTool = tool('secedgar_dataframe_query', {
   description:
-    'Run a single-statement SELECT against the canvas dataframes registered by secedgar_fetch_frames, secedgar_search_filings, and secedgar_get_financials. Read-only: writes, DDL, DROP, COPY, PRAGMA, ATTACH, and external-file table functions are rejected. System catalogs (information_schema, pg_catalog, sqlite_master, duckdb_*) are denied — list dataframes via secedgar_dataframe_describe. Optional register_as chains the result as a new dataframe with a fresh TTL.',
+    'Run a single-statement SELECT against the canvas dataframes registered by the data-returning secedgar_* tools — any tool whose response carries a `dataset` handle. Inspect a dataframe with secedgar_dataframe_describe first; its column schema is what the SQL has to match. Read-only: writes, DDL, DROP, COPY, PRAGMA, ATTACH, and external-file table functions are rejected. System catalogs (information_schema, pg_catalog, sqlite_master, duckdb_*) are denied — list dataframes via secedgar_dataframe_describe. Optional register_as chains the result as a new dataframe with a fresh TTL.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   // Agent-facing context — empty-result and row-cap notices populated via ctx.enrich
@@ -113,7 +113,7 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       .max(10000)
       .default(1000)
       .describe(
-        'Hard cap on rows materialized in the response. Default 1000, max 10000. The full result lives on-canvas under register_as when provided — do not raise this to keep large results.',
+        'Hard cap on rows materialized in the response. Default 1000, max 10000. A query matching more rows than this stops at the cap and `row_count_capped` comes back true; the full result lives on-canvas under register_as when provided, so do not raise this to keep large results. One case is not detectable: a SQL LIMIT exactly equal to this cap reads identically to a result that genuinely holds that many rows, and is reported as exact.',
       ),
   }),
 
@@ -121,7 +121,14 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
     columns: z.array(z.string()).describe('Column names in projection order.'),
     row_count: z
       .number()
-      .describe('Total rows the query produced (may exceed `rows.length` when capped).'),
+      .describe(
+        'Rows the query produced, up to `row_limit` (exceeds `rows.length` when `preview` returned fewer). Read it with `row_count_capped`: when that is true this number is the `row_limit` cap itself, and the size of the full result is not in this response.',
+      ),
+    row_count_capped: z
+      .boolean()
+      .describe(
+        'True when the query matched more rows than `row_limit`, so `row_count` is that cap rather than a total. False means `row_count` is exact — including when it happens to equal `row_limit`.',
+      ),
     rows: z
       .array(z.record(z.string(), z.unknown()))
       .describe('Materialized rows, bounded by `preview` / `row_limit`.'),
@@ -157,17 +164,41 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       registeredAs: meta?.tableName,
     });
 
+    // `preview` and `row_limit` are independent ceilings; report the one that
+    // actually bound, so `cap` names a number the caller can act on and the
+    // guidance points at the lever that will widen the window.
+    const preview = input.preview;
+    const previewBinds = preview !== undefined && preview < input.row_limit;
+    const lever = previewBinds ? 'raise preview' : 'raise row_limit (max 10000)';
+
     if (result.rowCount === 0) {
       ctx.enrich.notice(
         'Query returned 0 rows. Verify dataframe names (use secedgar_dataframe_describe) and check your WHERE conditions.',
       );
+    } else if (result.truncated === true) {
+      /**
+       * `row_limit` is pushed into the query as the provider's own cap, so the
+       * query stops at it and `rowCount` equals `rows.length` — the row
+       * arithmetic below cannot see the withheld rows. The provider reads one
+       * row past the cap and reports `truncated`, which is the only signal
+       * separating a capped result from a table holding exactly `row_limit`
+       * rows (#109). `rowCount` is that cap here, never a total, so the
+       * guidance names the ceiling instead of claiming a size.
+       */
+      ctx.enrich.truncated({
+        shown: result.rows.length,
+        cap: previewBinds ? preview : input.row_limit,
+        guidance:
+          `Showing ${result.rows.length} rows. The query matched more than row_limit (${input.row_limit}), so row_count is that cap and the full size is not in this response. ` +
+          `Use register_as to materialize the whole result — its row_count is then exact — or ${lever}` +
+          (previewBinds ? `, and raise row_limit (max 10000) to fetch past the query cap.` : '.'),
+      });
     } else if (result.rowCount > result.rows.length) {
-      // `preview` and `row_limit` are independent ceilings; report the one that
-      // actually bound, so `cap` names a number the caller can act on and the
-      // guidance points at the lever that will widen the window.
-      const preview = input.preview;
-      const previewBinds = preview !== undefined && preview < input.row_limit;
-      const lever = previewBinds ? 'raise preview' : 'raise row_limit (max 10000)';
+      /**
+       * `preview` slices after the query runs, and the `registerAs` path counts
+       * the materialized table with COUNT(*), so `rowCount` is exact on both —
+       * the "of M" wording is correct here and only here.
+       */
       ctx.enrich.truncated({
         shown: result.rows.length,
         cap: previewBinds ? preview : input.row_limit,
@@ -178,6 +209,7 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
     return {
       columns: result.columns,
       row_count: result.rowCount,
+      row_count_capped: result.truncated === true,
       rows: result.rows,
       registered_as: meta?.tableName,
       expires_at: meta?.expiresAt,
@@ -191,11 +223,19 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
         `Registered as ${result.registered_as} (expires ${result.expires_at ?? 'unknown'}).`,
       );
     }
-    const cappedNote =
-      result.row_count > result.rows.length
+    /**
+     * A bare row count reads as the size of the result. When `row_limit` capped
+     * the query it is the cap instead, and the header has to say so — this line
+     * is the whole disclosure for clients that forward only `content[]` (#109).
+     */
+    const shownNote =
+      result.rows.length < result.row_count ? `, showing ${result.rows.length}` : '';
+    const cappedNote = result.row_count_capped
+      ? ` — capped at row_limit${shownNote}; more rows matched`
+      : shownNote
         ? ` (showing ${result.rows.length} of ${result.row_count})`
         : '';
-    lines.push(`**${result.row_count} rows**${cappedNote}\n`);
+    lines.push(`**${result.row_count} ${result.row_count === 1 ? 'row' : 'rows'}**${cappedNote}\n`);
 
     if (result.rows.length === 0) {
       lines.push('_No rows._');

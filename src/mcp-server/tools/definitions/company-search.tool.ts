@@ -6,7 +6,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  dataframeGuidance,
+  getCanvasBridge,
+  toDatasetField,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import {
   getEdgarApiService,
   selectArchivePages,
@@ -57,7 +61,7 @@ function zipFilings(block: FilingsRecent): FilingEntry[] {
 
 export const companySearchTool = tool('secedgar_company_search', {
   description:
-    'Find companies and retrieve entity info with optional recent filings. Entry point for most EDGAR workflows — resolves tickers, names, or CIKs to entity details, with accession numbers in the result feeding secedgar_get_filing for document content.',
+    'Find companies and retrieve entity info with optional recent filings. Entry point for most EDGAR workflows — resolves tickers, names, or CIKs to entity details, with accession numbers in the result feeding secedgar_get_filing for document content. When a date or form filter carries the scan past the recent submissions window, the full filtered filing history is also staged as df_<id> — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   // Agent-facing context — notice for empty filings (e.g. filtered form types with
@@ -221,7 +225,9 @@ export const companySearchTool = tool('secedgar_company_search', {
       .object({
         name: z
           .string()
-          .describe('Dataframe handle (df_XXXXX_XXXXX) — pass to secedgar_dataframe_query.'),
+          .describe(
+            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+          ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
         truncated: z
@@ -405,7 +411,11 @@ export const companySearchTool = tool('secedgar_company_search', {
       ctx.enrich.truncated({
         shown: filings.length,
         cap: input.filing_limit,
-        guidance: `Showing ${filings.length} of ${totalFilings} matching filings. Raise filing_limit, or query the dataset with secedgar_dataframe_query when one is attached.`,
+        // The pointer only rides along when a dataframe was actually registered —
+        // it is not, for a history that never left the recent window (#104).
+        guidance: `Showing ${filings.length} of ${totalFilings} matching filings. ${
+          dataset ? dataframeGuidance(dataset) : 'Raise filing_limit to see more inline.'
+        }`,
       });
     }
 

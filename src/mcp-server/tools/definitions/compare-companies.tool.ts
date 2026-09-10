@@ -10,7 +10,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  dataframeGuidance,
+  getCanvasBridge,
+  toDatasetField,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import { resolveConceptTarget } from '@/services/edgar/concept-map.js';
 import {
   type FramedUnit,
@@ -79,10 +83,20 @@ interface Cell {
 
 export const compareCompaniesTool = tool('secedgar_compare_companies', {
   description:
-    'Compare 2-10 named companies across 1-8 XBRL concepts, aligned on calendar periods. This is the middle shape between secedgar_get_financials (one company, one concept, full history) and secedgar_fetch_frames (one concept, one period, every reporting company) — reach for it when the question names the companies. One companyfacts read per company, resolved through the same frame dedup and tag priority as secedgar_get_financials so the numbers agree. Balance-sheet and entity-info concepts are filed as point-in-time values and align on the calendar year (annual) or quarter (quarterly) their snapshot falls in, so they sit in the same matrix as income-statement lines. The inline matrix covers the most recent periods up to `periods`, trimmed further when companies x concepts x periods is too large to return in one response; the full aligned series is materialized as df_<id> for growth rates and spreads via secedgar_dataframe_query. A company that fails to resolve is reported in failed_companies and the comparison proceeds with the rest, and a company that does not report a concept is reported in gaps with the tags that were tried — never interpolated or zero-filled. Off-calendar filers and unit mismatches are surfaced in caveats rather than silently mixed.',
+    'Compare 2-10 named companies across 1-8 XBRL concepts, aligned on calendar periods. This is the middle shape between secedgar_get_financials (one company, one concept, full history) and secedgar_fetch_frames (one concept, one period, every reporting company) — reach for it when the question names the companies. One companyfacts read per company, resolved through the same frame dedup and tag priority as secedgar_get_financials so the numbers agree. Balance-sheet and entity-info concepts are filed as point-in-time values and align on the calendar year (annual) or quarter (quarterly) their snapshot falls in, so they sit in the same matrix as income-statement lines. The inline matrix covers the most recent periods up to `periods`, trimmed further when companies x concepts x periods is too large to return in one response; the full aligned series is materialized as df_<id> for growth rates and spreads — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query. A company that fails to resolve is reported in failed_companies and the comparison proceeds with the rest, and a company that does not report a concept is reported in gaps with the tags that were tried — never interpolated or zero-filled. Off-calendar filers and unit mismatches are surfaced in caveats rather than silently mixed.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   enrichment: {
+    // Declared so the staged-dataframe pointer reaches the wire at all: the
+    // framework parses the handler result against output.extend(enrichment) and
+    // strips any key the block does not declare, including the `notice` that
+    // ctx.enrich.truncated writes (#104).
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance when the inline matrix dropped periods, or when the full aligned series is staged as a dataframe.',
+      ),
     truncated: z
       .boolean()
       .optional()
@@ -252,7 +266,9 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       .object({
         name: z
           .string()
-          .describe('Dataframe handle (df_XXXXX_XXXXX) — pass to secedgar_dataframe_query.'),
+          .describe(
+            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+          ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
       })
@@ -460,9 +476,6 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     }
     const inlineSet = new Set(inlinePeriods);
     const inlineCells = cells.filter((c) => inlineSet.has(c.period));
-    if (allPeriods.length > inlinePeriods.length) {
-      ctx.enrich.truncated({ shown: inlinePeriods.length, cap: input.periods });
-    }
 
     /**
      * Period ends inside ONE aligned period, not fiscal year ends: the alignment
@@ -507,6 +520,21 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
         },
       });
       if (registered) dataset = toDatasetField(registered);
+    }
+
+    // Emitted after registration so the pointer names a table that exists (#104).
+    if (allPeriods.length > inlinePeriods.length) {
+      ctx.enrich.truncated({
+        shown: inlinePeriods.length,
+        cap: input.periods,
+        guidance: `Showing the ${inlinePeriods.length} most-recent of ${allPeriods.length} aligned periods. ${
+          dataset
+            ? dataframeGuidance(dataset)
+            : 'Narrow companies or concepts to fit more periods inline.'
+        }`,
+      });
+    } else if (dataset) {
+      ctx.enrich.notice(dataframeGuidance(dataset));
     }
 
     ctx.log.info('Comparison built', {

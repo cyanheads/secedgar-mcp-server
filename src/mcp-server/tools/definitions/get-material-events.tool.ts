@@ -7,7 +7,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  dataframeGuidance,
+  getCanvasBridge,
+  toDatasetField,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import {
   getEdgarApiService,
   selectArchivePages,
@@ -72,7 +76,7 @@ function zipEightKs(block: FilingsRecent): EventRow[] {
 export const getMaterialEventsTool = tool('secedgar_get_material_events', {
   title: 'Get Material Events',
   description:
-    "Retrieve a company's 8-K filings with their item codes decoded, optionally filtered to specific items. 8-K item codes are how material events are actually scoped — 1.01 material agreements, 2.02 results of operations, 4.02 non-reliance on previously issued financials, 5.02 officer and director departures — and filtering by them is narrower than any form-level filter in secedgar_search_filings or secedgar_company_search, neither of which can see items. Each row carries the accession number and primary document for secedgar_get_filing; press releases usually ride as EX-99 exhibits rather than in the primary document. Two numbering regimes exist: filings from 2004-08-23 onward use the x.xx codes, earlier ones use single integers (12 was the old results-of-operations item, 9 the old Regulation FD item), and both are accepted as filters and decoded in the response. A date window reaches filings older than the recent submissions window by paging into the archive. The full filtered set is materialized as a dataframe for item-distribution analysis over time.",
+    "Retrieve a company's 8-K filings with their item codes decoded, optionally filtered to specific items. 8-K item codes are how material events are actually scoped — 1.01 material agreements, 2.02 results of operations, 4.02 non-reliance on previously issued financials, 5.02 officer and director departures — and filtering by them is narrower than any form-level filter in secedgar_search_filings or secedgar_company_search, neither of which can see items. Each row carries the accession number and primary document for secedgar_get_filing; press releases usually ride as EX-99 exhibits rather than in the primary document. Two numbering regimes exist: filings from 2004-08-23 onward use the x.xx codes, earlier ones use single integers (12 was the old results-of-operations item, 9 the old Regulation FD item), and both are accepted as filters and decoded in the response. A date window reaches filings older than the recent submissions window by paging into the archive. The full filtered set is materialized as df_<id> for item-distribution analysis over time — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -229,7 +233,9 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       .object({
         name: z
           .string()
-          .describe('Dataframe handle (df_XXXXX_XXXXX) — pass to secedgar_dataframe_query.'),
+          .describe(
+            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+          ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
         truncated: z
@@ -404,7 +410,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
         shown: input.limit,
         cap: input.limit,
         guidance: dataset
-          ? 'Query the full filtered set with secedgar_dataframe_query, or narrow the date range.'
+          ? dataframeGuidance(dataset)
           : 'Narrow the date range or the items filter to see the rest.',
       });
     }

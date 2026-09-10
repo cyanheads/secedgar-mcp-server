@@ -23,7 +23,10 @@ vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
   };
 });
 
-vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+// Partial mock: the canvas accessors are stubbed, but `dataframeGuidance` stays
+// real so the staged-dataframe pointer is asserted against the shipped wording.
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/canvas-bridge/canvas-bridge.js')>()),
   getCanvasBridge: vi.fn(),
   toDatasetField: (r: { tableName: string; rowCount: number; expiresAt: string }) => ({
     name: r.tableName,
@@ -704,6 +707,35 @@ describe('companySearchTool', () => {
     expect(enrichment.shown).toBe(2);
     expect(enrichment.cap).toBe(input.filing_limit);
     expect(enrichment.notice).toContain('2 of 4');
+    // The rows past the inline cap live only on the dataframe, so the same
+    // guidance names both dataframe tools, describe first (#104).
+    const notice = String(enrichment.notice);
+    expect(notice).toContain('df_HIST1_HIST2');
+    expect(notice).toContain('secedgar_dataframe_describe');
+    expect(notice).toContain('secedgar_dataframe_query');
+    expect(notice.match(/secedgar_dataframe_describe/g)).toHaveLength(1);
+  });
+
+  it('promises no dataframe pointer when nothing was staged (#104)', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+    mockApi.getSubmissions.mockResolvedValue(mockPagedSubmissions);
+    // Canvas off: the history is still truncated inline, but there is no table
+    // to point at, so the guidance must not name one.
+    vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const input = companySearchTool.input.parse({
+      query: 'AAPL',
+      filed_before: '2010-12-31',
+      filing_limit: 2,
+    });
+    const result = await companySearchTool.handler(input, ctx);
+
+    expect(result.dataset).toBeUndefined();
+    const notice = String(getEnrichment(ctx).notice);
+    expect(getEnrichment(ctx).truncated).toBe(true);
+    expect(notice).not.toContain('secedgar_dataframe_describe');
+    expect(notice).toContain('Raise filing_limit');
   });
 
   it('skips canvas registration for a plain lookup that stays in the recent window', async () => {

@@ -20,7 +20,10 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
   trigramSimilarity: vi.fn(),
 }));
 
-vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+// Partial mock: the canvas accessors are stubbed, but `dataframeGuidance` stays
+// real so the staged-dataframe pointer is asserted against the shipped wording.
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/canvas-bridge/canvas-bridge.js')>()),
   getCanvasBridge: vi.fn(),
   toDatasetField: vi.fn(),
 }));

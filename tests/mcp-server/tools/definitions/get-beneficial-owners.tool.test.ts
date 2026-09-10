@@ -19,7 +19,10 @@ vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
 
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
-vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+// Partial mock: the canvas accessors are stubbed, but `dataframeGuidance` stays
+// real so the staged-dataframe pointer is asserted against the shipped wording.
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/canvas-bridge/canvas-bridge.js')>()),
   getCanvasBridge: vi.fn(),
   toDatasetField: (r: { tableName: string; rowCount: number; expiresAt: string }) => ({
     name: r.tableName,
@@ -336,6 +339,41 @@ describe('getBeneficialOwnersTool', () => {
     expect(result.dataset?.truncated).toBe(true);
     expect(getEnrichment(ctx).truncated).toBe(true);
     expect(getEnrichment(ctx).cap).toBe(1);
+
+    // Both halves of the guidance survive in ONE notice — the limit boundary and
+    // the describe-then-query pointer. `notice` is last-wins across notice and
+    // truncated, so a second enrich call here would clobber the first (#104).
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('Raise limit to reach further back');
+    expect(notice).toContain('df_TEST0_TEST1');
+    expect(notice).toContain('secedgar_dataframe_describe');
+    expect(notice).toContain('secedgar_dataframe_query');
+    expect(notice.match(/secedgar_dataframe_describe/g)).toHaveLength(1);
+    expect(notice.match(/df_TEST0_TEST1/g)).toHaveLength(1);
+  });
+
+  it('names both dataframe tools when every structured filing was parsed (#104)', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+    const ctx = createMockContext({ errors: getBeneficialOwnersTool.errors });
+    const input = getBeneficialOwnersTool.input.parse({ issuer: 'AAPL', limit: 20 });
+    const result = await getBeneficialOwnersTool.handler(input, ctx);
+
+    expect(result.dataset?.truncated).toBe(false);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.truncated).toBeUndefined();
+    expect(String(enrichment.notice)).toContain('secedgar_dataframe_describe');
+  });
+
+  it('promises no pointer when the canvas is unavailable (#104)', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(undefined as never);
+    const ctx = createMockContext({ errors: getBeneficialOwnersTool.errors });
+    const input = getBeneficialOwnersTool.input.parse({ issuer: 'AAPL', limit: 1 });
+    const result = await getBeneficialOwnersTool.handler(input, ctx);
+
+    expect(result.dataset).toBeUndefined();
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('Raise limit to reach further back');
+    expect(notice).not.toContain('secedgar_dataframe_describe');
   });
 
   it('routes a zero-hit issuer to the legacy filings it does have', async () => {

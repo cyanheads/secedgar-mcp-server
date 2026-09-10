@@ -10,14 +10,18 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  dataframeGuidance,
+  getCanvasBridge,
+  toDatasetField,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import { resolveConcept } from '@/services/edgar/concept-map.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { fiscalQ4Caveats } from '@/services/edgar/fiscal-periods.js';
 
 export const fetchFramesTool = tool('secedgar_fetch_frames', {
   description:
-    'Fetch SEC XBRL frames for one concept × one period across all reporting companies. Inline response returns a page of the ranked companies — start at the top or pass offset/next_offset to walk further down the ranking; the full frames response (all reporters) is materialized as df_<id> when a canvas is available, queryable via secedgar_dataframe_query. Accepts friendly names like "revenue" or "assets" (discover via secedgar_search_concepts) or raw XBRL tags. One call hits one XBRL tag — when a friendly name maps to multiple same-meaning tags, the response\'s `unqueried_tags` lists the others; call again per tag and UNION/COALESCE in SQL with an analysis-specific priority (e.g. SalesRevenueGoodsNet is goods-only). The response\'s `related_tags` separately flags alternate-DEFINITION tags a meaningful share of filers use as their primary line (e.g. cash incl. restricted cash, equity incl. noncontrolling interest) — a whole-universe screen on the base tag silently omits those filers; query them separately, but do not blindly union (the semantics differ). Response includes `value_distribution` and `period_end_range` to flag XBRL scale-factor anomalies and fiscal-year mixing.',
+    'Fetch SEC XBRL frames for one concept × one period across all reporting companies. Inline response returns a page of the ranked companies — start at the top or pass offset/next_offset to walk further down the ranking; the full frames response (all reporters) is materialized as df_<id> when a canvas is available — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query. Accepts friendly names like "revenue" or "assets" (discover via secedgar_search_concepts) or raw XBRL tags. One call hits one XBRL tag — when a friendly name maps to multiple same-meaning tags, the response\'s `unqueried_tags` lists the others; call again per tag and UNION/COALESCE in SQL with an analysis-specific priority (e.g. SalesRevenueGoodsNet is goods-only). The response\'s `related_tags` separately flags alternate-DEFINITION tags a meaningful share of filers use as their primary line (e.g. cash incl. restricted cash, equity incl. noncontrolling interest) — a whole-universe screen on the base tag silently omits those filers; query them separately, but do not blindly union (the semantics differ). Response includes `value_distribution` and `period_end_range` to flag XBRL scale-factor anomalies and fiscal-year mixing.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   enrichment: {
@@ -130,7 +134,9 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       .object({
         name: z
           .string()
-          .describe('Dataframe handle (df_XXXXX_XXXXX) — pass to secedgar_dataframe_query.'),
+          .describe(
+            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+          ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
       })
@@ -241,13 +247,6 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     const pageEnd = input.offset + input.limit;
     const sliced = sorted.slice(input.offset, pageEnd);
     const nextOffset = pageEnd < sorted.length ? pageEnd : undefined;
-    if (sliced.length === 0 && input.offset > 0) {
-      ctx.enrich.notice(
-        `Offset (${input.offset}) is at or past the ${sorted.length} companies reporting this concept for this period. Lower the offset to page back into the ranking.`,
-      );
-    } else if (nextOffset !== undefined) {
-      ctx.enrich.truncated({ shown: sliced.length, cap: input.limit });
-    }
     const data = sliced.map(({ entry, cik, ticker }, i) => ({
       rank: input.offset + i + 1,
       company_name: entry.entityName,
@@ -284,6 +283,25 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
         },
       });
       if (registered) dataset = toDatasetField(registered);
+    }
+
+    // Emitted after registration so the pointer can name a table that exists —
+    // `registerDataframe` returns undefined when the canvas is off or the row
+    // set was empty (#104). `notice` is last-wins across notice/truncated, so
+    // each arm composes one string.
+    if (sliced.length === 0 && input.offset > 0) {
+      ctx.enrich.notice(
+        `Offset (${input.offset}) is at or past the ${sorted.length} companies reporting this concept for this period. Lower the offset to page back into the ranking.` +
+          (dataset ? ` ${dataframeGuidance(dataset)}` : ''),
+      );
+    } else if (nextOffset !== undefined) {
+      ctx.enrich.truncated({
+        shown: sliced.length,
+        cap: input.limit,
+        ...(dataset && { guidance: dataframeGuidance(dataset) }),
+      });
+    } else if (dataset) {
+      ctx.enrich.notice(dataframeGuidance(dataset));
     }
 
     const sortedValues = framesResponse.data.map((e) => e.val).sort((a, b) => a - b);
@@ -371,7 +389,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     }
     if (result.dataset) {
       lines.push(
-        `\nDataset: ${result.dataset.name} (${result.dataset.row_count} rows, expires ${result.dataset.expires_at}) — query with secedgar_dataframe_query.`,
+        `\nDataset: ${result.dataset.name} (${result.dataset.row_count} rows, expires ${result.dataset.expires_at}) — inspect with secedgar_dataframe_describe, then query with secedgar_dataframe_query.`,
       );
     }
 

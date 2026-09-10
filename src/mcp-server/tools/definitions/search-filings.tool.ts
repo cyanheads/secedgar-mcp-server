@@ -13,7 +13,11 @@ import {
   notFound,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
-import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  dataframeGuidance,
+  getCanvasBridge,
+  toDatasetField,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import {
   cleanDisplayName,
   getEdgarApiService,
@@ -373,15 +377,24 @@ async function finishAssembledResult(
     ctx.enrich.notice(`No filings matched ${args.zeroHitCriteria}. ${args.coverageNote}`);
   } else if (results.length === 0 && args.offset >= sorted.length) {
     ctx.enrich.notice(
-      `Offset (${args.offset}) exceeds the ${sorted.length} rows this search assembled. ${args.total} filings matched — lower the offset or query the full set via secedgar_dataframe_query.`,
+      `Offset (${args.offset}) exceeds the ${sorted.length} rows this search assembled. ${args.total} filings matched — lower the offset.` +
+        (dataset ? ` ${dataframeGuidance(dataset)}` : ''),
     );
   } else if (args.total > results.length) {
+    // `notice` is last-wins across notice/truncated, so every applicable clause —
+    // coverage, the fetch boundary, the staged-dataframe pointer — is composed
+    // into this one guidance string rather than emitted as competing notices (#104).
+    const guidance = [args.coverageNote];
+    if (args.truncated) {
+      guidance.push('More matches exist beyond the rows fetched — narrow the range.');
+    }
+    if (dataset) guidance.push(dataframeGuidance(dataset));
+    else if (!args.truncated) guidance.push('Page further with offset.');
+
     ctx.enrich.truncated({
       shown: results.length,
       cap: args.limit,
-      guidance: args.truncated
-        ? `${args.coverageNote} More matches exist beyond the rows fetched — narrow the range, or query the dataframe.`
-        : `${args.coverageNote} Query the full matched set via secedgar_dataframe_query, or page with offset.`,
+      guidance: guidance.join(' '),
     });
   }
 
@@ -603,7 +616,7 @@ async function fetchEftsRows(args: {
 
 export const searchFilingsTool = tool('secedgar_search_filings', {
   description:
-    "Search EDGAR filings since 1993. Full-text search covers 2001-present (the EFTS index floor); pre-2001 date ranges (to 1993) are served from the archives by form and entity/date. Pre-2001 free text needs entity scope (ticker:/cik:) — with it, the tool reads the entity's matching filings and matches the terms locally, which costs a few seconds (SEC's request rate caps the scan at roughly 5s for the 50-document maximum). A range crossing 2001-01-01 is split at the boundary and the two eras merged, each row tagged with its source. Supports exact phrases, boolean operators, wildcards, and entity targeting (ticker:AAPL or cik:320193 in query).",
+    "Search EDGAR filings since 1993. Full-text search covers 2001-present (the EFTS index floor); pre-2001 date ranges (to 1993) are served from the archives by form and entity/date. Pre-2001 free text needs entity scope (ticker:/cik:) — with it, the tool reads the entity's matching filings and matches the terms locally, which costs a few seconds (SEC's request rate caps the scan at roughly 5s for the 50-document maximum). A range crossing 2001-01-01 is split at the boundary and the two eras merged, each row tagged with its source. Supports exact phrases, boolean operators, wildcards, and entity targeting (ticker:AAPL or cik:320193 in query). When the match set outruns the inline list it is also staged as df_<id> — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   // Agent-facing context for the success path — the query as EDGAR executed it and
@@ -834,7 +847,9 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .object({
         name: z
           .string()
-          .describe('Dataframe handle (df_XXXXX_XXXXX) — pass to secedgar_dataframe_query.'),
+          .describe(
+            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+          ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
         truncated: z
@@ -1129,13 +1144,18 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       // so switching to sort=relevance does NOT unlock deeper EDGAR-side pagination on
       // that path — only the non-entity path pages server-side via relevance.
       const deeperPaging = entityCik
-        ? 'narrow the search with forms or dates, or query the full window via secedgar_dataframe_query'
+        ? 'narrow the search with forms or dates'
         : 'switch to sort=relevance for EDGAR-side pagination up to 10,000 results, or narrow the search with forms, dates, or entity targeting';
       ctx.enrich.notice(
-        `Offset (${input.offset}) exceeds the fetched window (${hits.length} rows — date sorts and entity targeting fetch a single window). ${total} filings matched: ${deeperPaging}.`,
+        `Offset (${input.offset}) exceeds the fetched window (${hits.length} rows — date sorts and entity targeting fetch a single window). ${total} filings matched: ${deeperPaging}.` +
+          (dataset ? ` ${dataframeGuidance(dataset)}` : ''),
       );
     } else if (total > results.length) {
-      ctx.enrich.truncated({ shown: results.length, cap: input.limit });
+      ctx.enrich.truncated({
+        shown: results.length,
+        cap: input.limit,
+        ...(dataset && { guidance: dataframeGuidance(dataset) }),
+      });
     }
 
     return {

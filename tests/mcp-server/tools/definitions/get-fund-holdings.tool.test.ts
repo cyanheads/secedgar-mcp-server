@@ -21,7 +21,10 @@ vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
 
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
-vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+// Partial mock: the canvas accessors are stubbed, but `dataframeGuidance` stays
+// real so the staged-dataframe pointer is asserted against the shipped wording.
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/canvas-bridge/canvas-bridge.js')>()),
   getCanvasBridge: vi.fn(),
   toDatasetField: (r: { tableName: string; rowCount: number; expiresAt: string }) => ({
     name: r.tableName,
@@ -761,6 +764,67 @@ describe('getFundHoldingsTool — response', () => {
       accession_number: '0000036405-26-000325',
       name: 'NVIDIA Corp',
       cusip: '67066G104',
+    });
+    // The positions past the inline page live only on the dataframe (#104).
+    const notice = String(getEnrichment(ctx).notice);
+    expect(getEnrichment(ctx).truncated).toBe(true);
+    expect(notice).toContain('df_TEST0_TEST1');
+    expect(notice).toContain('secedgar_dataframe_describe');
+    expect(notice).toContain('secedgar_dataframe_query');
+    expect(notice.match(/secedgar_dataframe_describe/g)).toHaveLength(1);
+  });
+
+  describe('staged-dataframe pointer (#104)', () => {
+    it('names both dataframe tools when the whole report fit on one page', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+      const ctx = createMockContext({ errors: getFundHoldingsTool.errors });
+      const input = getFundHoldingsTool.input.parse({ fund: 'VOO' });
+      await getFundHoldingsTool.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBeUndefined();
+      expect(String(enrichment.notice)).toContain('secedgar_dataframe_describe');
+    });
+
+    it('composes the pointer into the offset-past-the-end notice', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+      const ctx = createMockContext({ errors: getFundHoldingsTool.errors });
+      const input = getFundHoldingsTool.input.parse({ fund: 'VOO', offset: 50 });
+      await getFundHoldingsTool.handler(input, ctx);
+
+      const notice = String(getEnrichment(ctx).notice);
+      expect(notice).toContain('at or past the 3 positions');
+      expect(notice).toContain('secedgar_dataframe_describe');
+      expect(notice.match(/secedgar_dataframe_describe/g)).toHaveLength(1);
+    });
+
+    it('promises no pointer for a report that lists no positions', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+      mockApi.tryGetFilingDocument.mockResolvedValue(
+        report({ seriesId: 'S000002839', reportDate: '2026-03-31', holdings: [] }),
+      );
+      const ctx = createMockContext({ errors: getFundHoldingsTool.errors });
+      const input = getFundHoldingsTool.input.parse({ fund: 'VOO' });
+      const result = await getFundHoldingsTool.handler(input, ctx);
+
+      expect(result.dataset).toBeUndefined();
+      expect(String(getEnrichment(ctx).notice)).not.toContain('secedgar_dataframe_describe');
+    });
+
+    it('still discloses the capped page with no canvas to stage on', async () => {
+      // The truncation call moved below registration; it must fire on its own
+      // terms, not only when a dataframe exists to point at (#104).
+      vi.mocked(getCanvasBridge).mockReturnValue(undefined as never);
+      const ctx = createMockContext({ errors: getFundHoldingsTool.errors });
+      const input = getFundHoldingsTool.input.parse({ fund: 'VOO', limit: 1 });
+      const result = await getFundHoldingsTool.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(result.dataset).toBeUndefined();
+      expect(enrichment.truncated).toBe(true);
+      expect(enrichment.shown).toBe(1);
+      expect(enrichment.cap).toBe(1);
+      expect(String(enrichment.notice)).not.toContain('secedgar_dataframe_describe');
     });
   });
 

@@ -22,7 +22,10 @@ vi.mock('@/services/edgar/edgar-api-service.js', async (importOriginal) => {
 
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
-vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+// Partial mock: the canvas accessors are stubbed, but `dataframeGuidance` stays
+// real so the staged-dataframe pointer is asserted against the shipped wording.
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/canvas-bridge/canvas-bridge.js')>()),
   getCanvasBridge: vi.fn(),
   toDatasetField: (r: { tableName: string; rowCount: number; expiresAt: string }) => ({
     name: r.tableName,
@@ -324,6 +327,25 @@ describe('getMaterialEventsTool', () => {
       item_regime: 'current',
     });
     expect(getEnrichment(ctx).truncated).toBe(true);
+    // The rows past the inline cap are only reachable through the dataframe (#104).
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).toContain('df_TEST0_TEST1');
+    expect(notice).toContain('secedgar_dataframe_describe');
+    expect(notice).toContain('secedgar_dataframe_query');
+    expect(notice.match(/secedgar_dataframe_describe/g)).toHaveLength(1);
+  });
+
+  it('promises no dataframe pointer when the canvas is unavailable (#104)', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+    const ctx = createMockContext({ errors: getMaterialEventsTool.errors });
+    const input = getMaterialEventsTool.input.parse({ company: 'AAPL', limit: 2 });
+    const result = await getMaterialEventsTool.handler(input, ctx);
+
+    expect(result.dataset).toBeUndefined();
+    const notice = String(getEnrichment(ctx).notice);
+    expect(getEnrichment(ctx).truncated).toBe(true);
+    expect(notice).not.toContain('secedgar_dataframe_describe');
+    expect(notice).toContain('Narrow the date range');
   });
 
   it('fails with suggestions when the company does not resolve', async () => {

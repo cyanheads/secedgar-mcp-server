@@ -13,6 +13,16 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
   initEdgarApiService: vi.fn(),
 }));
 
+// Partial mock: only the canvas accessor is stubbed, and it returns undefined by
+// default — the uninitialized-bridge state these tests already assume.
+// `dataframeGuidance` and `toDatasetField` stay real, so the staged-dataframe
+// pointer is asserted against the shipped wording.
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/canvas-bridge/canvas-bridge.js')>()),
+  getCanvasBridge: vi.fn(),
+}));
+
+import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { at, blockText } from '../../../support/assertions.js';
 
@@ -234,6 +244,98 @@ describe('fetchFramesTool', () => {
     const result = await fetchFramesTool.handler(input, ctx);
 
     expect(result.dataset).toBeUndefined();
+    // No table exists, so nothing may promise one (#104).
+    expect(String(getEnrichment(ctx).notice ?? '')).not.toContain('secedgar_dataframe_describe');
+  });
+
+  describe('staged-dataframe pointer (#104)', () => {
+    /** Stage a dataframe the way a successful registration does. */
+    function stageDataframe(rowCount = 3) {
+      const registerDataframe = vi.fn().mockResolvedValue({
+        tableName: 'df_FRAME_ROWS1',
+        rowCount,
+        expiresAt: '2026-05-18T00:00:00.000Z',
+        columnSchema: [],
+      });
+      vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as never);
+      return registerDataframe;
+    }
+
+    it('names both dataframe tools when the whole ranking fit inline', async () => {
+      stageDataframe();
+      const ctx = createMockContext({ errors: fetchFramesTool.errors });
+      // The fixture holds 3 reporters; a limit of 25 leaves nothing capped, but
+      // the dataframe still carries the full frame.
+      const input = fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2023' });
+      const result = await fetchFramesTool.handler(input, ctx);
+
+      expect(result.dataset?.name).toBe('df_FRAME_ROWS1');
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBeUndefined();
+      const notice = String(enrichment.notice);
+      expect(notice).toContain('df_FRAME_ROWS1');
+      expect(notice).toContain('secedgar_dataframe_describe');
+      expect(notice).toContain('secedgar_dataframe_query');
+    });
+
+    it('carries the pointer in the truncation guidance when the page caps the ranking', async () => {
+      stageDataframe();
+      const ctx = createMockContext({ errors: fetchFramesTool.errors });
+      const input = fetchFramesTool.input.parse({
+        concept: 'revenue',
+        period: 'CY2023',
+        limit: 1,
+      });
+      await fetchFramesTool.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBe(true);
+      const notice = String(enrichment.notice);
+      expect(notice).toContain('secedgar_dataframe_describe');
+      expect(notice.match(/secedgar_dataframe_describe/g)).toHaveLength(1);
+    });
+
+    it('composes the pointer into the offset-past-the-end notice', async () => {
+      stageDataframe();
+      const ctx = createMockContext({ errors: fetchFramesTool.errors });
+      const input = fetchFramesTool.input.parse({
+        concept: 'revenue',
+        period: 'CY2023',
+        offset: 99,
+      });
+      await fetchFramesTool.handler(input, ctx);
+
+      const notice = String(getEnrichment(ctx).notice);
+      expect(notice).toContain('Offset (99)');
+      expect(notice).toContain('secedgar_dataframe_describe');
+      expect(notice.match(/secedgar_dataframe_describe/g)).toHaveLength(1);
+    });
+
+    it('keeps the truncation and offset notices whole with no canvas to stage on', async () => {
+      // The enrichment moved below registration; neither pre-existing notice may
+      // become conditional on a table having been registered (#104).
+      vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+      const capped = createMockContext({ errors: fetchFramesTool.errors });
+      await fetchFramesTool.handler(
+        fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2023', limit: 1 }),
+        capped,
+      );
+      const cappedEnrichment = getEnrichment(capped);
+      expect(cappedEnrichment.truncated).toBe(true);
+      expect(cappedEnrichment.shown).toBe(1);
+      expect(cappedEnrichment.cap).toBe(1);
+      expect(String(cappedEnrichment.notice)).not.toContain('secedgar_dataframe_describe');
+
+      const pastEnd = createMockContext({ errors: fetchFramesTool.errors });
+      await fetchFramesTool.handler(
+        fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2023', offset: 99 }),
+        pastEnd,
+      );
+      const pastEndNotice = String(getEnrichment(pastEnd).notice);
+      expect(pastEndNotice).toContain('Offset (99)');
+      expect(pastEndNotice).toContain('Lower the offset to page back into the ranking.');
+      expect(pastEndNotice).not.toContain('secedgar_dataframe_describe');
+    });
   });
 
   it('surfaces unqueried tags for multi-tag friendly names', async () => {

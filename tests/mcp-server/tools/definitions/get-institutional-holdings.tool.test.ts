@@ -16,7 +16,10 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
 
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
-vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+// Partial mock: the canvas accessors are stubbed, but `dataframeGuidance` stays
+// real so the staged-dataframe pointer is asserted against the shipped wording.
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/canvas-bridge/canvas-bridge.js')>()),
   getCanvasBridge: vi.fn(),
   toDatasetField: (r: { tableName: string; rowCount: number; expiresAt: string }) => ({
     name: r.tableName,
@@ -1060,5 +1063,69 @@ describe('getInstitutionalHoldingsTool offset pagination (#94)', () => {
 
     expect(bridge.registerDataframe.mock.calls[0]![1].rows).toHaveLength(12);
     expect(result.dataset?.row_count).toBe(12);
+  });
+
+  describe('staged-dataframe pointer (#104)', () => {
+    it('carries the pointer in the truncation guidance when a page caps the positions', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+      const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+      const input = getInstitutionalHoldingsTool.input.parse({
+        ticker_or_cik: '0000102909',
+        limit: 5,
+      });
+      await getInstitutionalHoldingsTool.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBe(true);
+      const notice = String(enrichment.notice);
+      expect(notice).toContain('df_TEST0_TEST1');
+      expect(notice).toContain('secedgar_dataframe_describe');
+      expect(notice).toContain('secedgar_dataframe_query');
+      expect(notice.match(/secedgar_dataframe_describe/g)).toHaveLength(1);
+    });
+
+    it('names both dataframe tools when the whole filing fit on one page', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+      const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+      const input = getInstitutionalHoldingsTool.input.parse({
+        ticker_or_cik: '0000102909',
+        limit: 500,
+      });
+      await getInstitutionalHoldingsTool.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBeUndefined();
+      expect(String(enrichment.notice)).toContain('secedgar_dataframe_describe');
+    });
+
+    it('composes the pointer into the offset-past-the-end notice', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+      const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+      const input = getInstitutionalHoldingsTool.input.parse({
+        ticker_or_cik: '0000102909',
+        offset: 999,
+      });
+      const result = await getInstitutionalHoldingsTool.handler(input, ctx);
+
+      expect(result.holdings).toHaveLength(0);
+      const notice = String(getEnrichment(ctx).notice);
+      expect(notice).toContain('Offset (999)');
+      expect(notice).toContain('secedgar_dataframe_describe');
+      expect(notice.match(/secedgar_dataframe_describe/g)).toHaveLength(1);
+    });
+
+    it('promises no pointer when the canvas is unavailable', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+      const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+      const input = getInstitutionalHoldingsTool.input.parse({
+        ticker_or_cik: '0000102909',
+        limit: 5,
+      });
+      const result = await getInstitutionalHoldingsTool.handler(input, ctx);
+
+      expect(result.dataset).toBeUndefined();
+      expect(getEnrichment(ctx).truncated).toBe(true);
+      expect(String(getEnrichment(ctx).notice ?? '')).not.toContain('secedgar_dataframe_describe');
+    });
   });
 });

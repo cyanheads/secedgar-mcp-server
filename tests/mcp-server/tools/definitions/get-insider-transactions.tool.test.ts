@@ -15,7 +15,10 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
 
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
-vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+// Partial mock: the canvas accessors are stubbed, but `dataframeGuidance` stays
+// real so the staged-dataframe pointer is asserted against the shipped wording.
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/canvas-bridge/canvas-bridge.js')>()),
   getCanvasBridge: vi.fn(),
   toDatasetField: (r: { tableName: string; rowCount: number; expiresAt: string }) => ({
     name: r.tableName,
@@ -574,6 +577,42 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
       row_count: 5,
       truncated: false,
     });
+    // The three transactions past the inline cap live only on the dataframe (#104).
+    const notice = String(getEnrichment(ctx).notice);
+    expect(getEnrichment(ctx).truncated).toBe(true);
+    expect(notice).toContain('df_TEST0_TEST1');
+    expect(notice).toContain('secedgar_dataframe_describe');
+    expect(notice).toContain('secedgar_dataframe_query');
+    expect(notice.match(/secedgar_dataframe_describe/g)).toHaveLength(1);
+  });
+
+  it('names both dataframe tools when the whole scanned set fit inline (#104)', async () => {
+    mockApi.getRecentFilingsByForm.mockResolvedValue(filings(2));
+    vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+
+    const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
+    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 20 });
+    await getInsiderTransactionsTool.handler(input, ctx);
+
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment.truncated).toBeUndefined();
+    expect(String(enrichment.notice)).toContain('secedgar_dataframe_describe');
+  });
+
+  it('promises no pointer when no transaction parsed, so nothing was staged (#104)', async () => {
+    mockApi.getRecentFilingsByForm.mockResolvedValue(filings(2));
+    // Every document fetch misses → no transactions, no registration.
+    mockApi.tryGetFilingDocument.mockResolvedValue(undefined);
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+
+    const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
+    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+    const result = await getInsiderTransactionsTool.handler(input, ctx);
+
+    expect(bridge.registerDataframe).not.toHaveBeenCalled();
+    expect(result.dataset).toBeUndefined();
+    expect(String(getEnrichment(ctx).notice)).not.toContain('secedgar_dataframe_describe');
   });
 
   it('disposal row: positive magnitude + direction:dispose in both inline and dataframe (#46)', async () => {

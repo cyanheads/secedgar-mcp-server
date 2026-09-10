@@ -6,7 +6,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  dataframeGuidance,
+  getCanvasBridge,
+  toDatasetField,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import {
   type InsiderTransaction,
@@ -49,7 +53,7 @@ function ownerRelationship(owner: ReportingOwner): string {
 export const getInsiderTransactionsTool = tool('secedgar_get_insider_transactions', {
   title: 'Get Insider Transactions',
   description:
-    'Fetch Form 4 insider transactions (purchases, sales, grants, exercises) for a company by parsing SEC EDGAR ownership XML. Returns the reporting person, their relationship to the issuer, transaction date, type, shares traded (absolute magnitude), direction (acquire/dispose), price per share, and shares owned after the transaction. Covers nonDerivative transactions (open-market buys/sells, gifts) and derivative transactions (option exercises, RSU vests). When a canvas is available, the full set of transactions parsed from the scanned recent filings is materialized as df_<id> (the inline list is a preview capped at limit) — query it with secedgar_dataframe_query to aggregate net buy/sell by insider: SUM(CASE WHEN direction=\'dispose\' THEN -shares_traded ELSE shares_traded END). Use secedgar_search_filings with forms=["4"] for broader date-range queries or to search across all companies.',
+    'Fetch Form 4 insider transactions (purchases, sales, grants, exercises) for a company by parsing SEC EDGAR ownership XML. Returns the reporting person, their relationship to the issuer, transaction date, type, shares traded (absolute magnitude), direction (acquire/dispose), price per share, and shares owned after the transaction. Covers nonDerivative transactions (open-market buys/sells, gifts) and derivative transactions (option exercises, RSU vests). When a canvas is available, the full set of transactions parsed from the scanned recent filings is materialized as df_<id> (the inline list is a preview capped at limit) — inspect it with secedgar_dataframe_describe, then query it with secedgar_dataframe_query to aggregate net buy/sell by insider: SUM(CASE WHEN direction=\'dispose\' THEN -shares_traded ELSE shares_traded END). Use secedgar_search_filings with forms=["4"] for broader date-range queries or to search across all companies.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -178,7 +182,9 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       .object({
         name: z
           .string()
-          .describe('Dataframe handle (df_XXXXX_XXXXX) — pass to secedgar_dataframe_query.'),
+          .describe(
+            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+          ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
         truncated: z
@@ -408,7 +414,13 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
 
     const inlineTransactions = transactions.slice(0, input.limit);
     if (transactions.length > input.limit) {
-      ctx.enrich.truncated({ shown: inlineTransactions.length, cap: input.limit });
+      ctx.enrich.truncated({
+        shown: inlineTransactions.length,
+        cap: input.limit,
+        ...(dataset && { guidance: dataframeGuidance(dataset) }),
+      });
+    } else if (dataset) {
+      ctx.enrich.notice(dataframeGuidance(dataset));
     }
 
     ctx.log.info('Insider transactions retrieved', {

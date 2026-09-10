@@ -9,7 +9,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
-import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  dataframeGuidance,
+  getCanvasBridge,
+  toDatasetField,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { parseInfoTableXml } from '@/services/edgar/ownership-parser.js';
 import type { FilingsRecent } from '@/services/edgar/types.js';
@@ -144,7 +148,7 @@ function recentFilingsOfForm(
 export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_holdings', {
   title: 'Get Institutional Holdings',
   description:
-    'Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR information table XML. ticker_or_cik is the institutional filer — its 10-digit CIK (e.g. 0000102909), or an entity name resolved through EDGAR entity search — and the tool returns what that institution holds. A name that matches several EDGAR filers (some legal names are shared across entities) returns those candidates so you can retry with the exact CIK, rather than guessing. For the reverse direction — which institutions hold a given portfolio company — use secedgar_find_holders, whose filer_cik results feed straight back into this tool. The 13F information table lists each position: issuer name, CUSIP, shares held, market value (in whole USD), and put/call designation for options. Sub-lines for the same security are consolidated into distinct positions sorted by value by default (set consolidate=false for raw filing rows). The inline holdings list is one page of limit rows starting at offset — pass the returned next_offset to walk further down a large information table. The full parsed holdings set is also materialized as df_<id> when a canvas is available — so query it with secedgar_dataframe_query to aggregate the whole filing or self-join across quarters on cusip + reporting_period. Institutions with less than $100M in 13(f) securities are exempt and may not file. Use secedgar_search_filings with forms=["13F-HR"] for broader search.',
+    'Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR information table XML. ticker_or_cik is the institutional filer — its 10-digit CIK (e.g. 0000102909), or an entity name resolved through EDGAR entity search — and the tool returns what that institution holds. A name that matches several EDGAR filers (some legal names are shared across entities) returns those candidates so you can retry with the exact CIK, rather than guessing. For the reverse direction — which institutions hold a given portfolio company — use secedgar_find_holders, whose filer_cik results feed straight back into this tool. The 13F information table lists each position: issuer name, CUSIP, shares held, market value (in whole USD), and put/call designation for options. Sub-lines for the same security are consolidated into distinct positions sorted by value by default (set consolidate=false for raw filing rows). The inline holdings list is one page of limit rows starting at offset — pass the returned next_offset to walk further down a large information table. The full parsed holdings set is also materialized as df_<id> when a canvas is available — inspect it with secedgar_dataframe_describe, then query it with secedgar_dataframe_query to aggregate the whole filing or self-join across quarters on cusip + reporting_period. Institutions with less than $100M in 13(f) securities are exempt and may not file. Use secedgar_search_filings with forms=["13F-HR"] for broader search.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -302,7 +306,9 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       .object({
         name: z
           .string()
-          .describe('Dataframe handle (df_XXXXX_XXXXX) — pass to secedgar_dataframe_query.'),
+          .describe(
+            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+          ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
       })
@@ -600,14 +606,15 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     const pageEnd = input.offset + input.limit;
     const holdings = positions.slice(input.offset, pageEnd);
     const nextOffset = pageEnd < positions.length ? pageEnd : undefined;
-    if (nextOffset !== undefined) {
-      ctx.enrich.truncated({ shown: holdings.length, cap: input.limit });
-    }
 
+    // One chain, because `notice` is last-wins across notice/truncated: each arm
+    // composes the staged-dataframe pointer into its own string rather than
+    // emitting a second notice that would clobber the first (#104).
     if (holdings.length === 0 && input.offset > 0) {
       ctx.enrich.notice(
         `Offset (${input.offset}) is at or past the ${positions.length} positions in this filing. ` +
-          `Lower the offset to page back into the holdings.`,
+          `Lower the offset to page back into the holdings.` +
+          (dataset ? ` ${dataframeGuidance(dataset)}` : ''),
       );
     } else if (holdings.length === 0) {
       ctx.enrich.notice(
@@ -615,6 +622,14 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
           `This may be a 13F-NT (notice-only) filing or an amendment. ` +
           `Use secedgar_search_filings with forms=["13F-HR"] to find the correct filing.`,
       );
+    } else if (nextOffset !== undefined) {
+      ctx.enrich.truncated({
+        shown: holdings.length,
+        cap: input.limit,
+        ...(dataset && { guidance: dataframeGuidance(dataset) }),
+      });
+    } else if (dataset) {
+      ctx.enrich.notice(dataframeGuidance(dataset));
     }
 
     ctx.log.info('Institutional holdings retrieved', {

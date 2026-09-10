@@ -6,7 +6,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  dataframeGuidance,
+  getCanvasBridge,
+  toDatasetField,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import { resolveConceptTarget } from '@/services/edgar/concept-map.js';
 import {
   type FramedUnit,
@@ -22,10 +26,20 @@ import type { CompanyConceptUnit } from '@/services/edgar/types.js';
 
 export const getFinancialsTool = tool('secedgar_get_financials', {
   description:
-    'Get historical XBRL financial data for a company. Accepts friendly concept names (e.g., "revenue", "net_income", "assets") or raw XBRL tags. Discover available friendly names with secedgar_search_concepts. Handles historical tag changes and deduplicates data automatically.',
+    'Get historical XBRL financial data for a company. Accepts friendly concept names (e.g., "revenue", "net_income", "assets") or raw XBRL tags. Discover available friendly names with secedgar_search_concepts. Handles historical tag changes and deduplicates data automatically. The full series is also staged as df_<id> when a canvas is available — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   enrichment: {
+    // Declared so the staged-dataframe pointer reaches the wire at all: the
+    // framework parses the handler result against output.extend(enrichment) and
+    // strips any key the block does not declare, including the `notice` that
+    // ctx.enrich.truncated writes (#104).
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance when the inline series was capped, or when the full series is staged as a dataframe.',
+      ),
     truncated: z.boolean().optional().describe('True when the inline data[] was capped by limit.'),
     shown: z.number().optional().describe('Number of periods shown inline.'),
     cap: z.number().optional().describe('The limit cap applied.'),
@@ -152,7 +166,9 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       .object({
         name: z
           .string()
-          .describe('Dataframe handle (df_XXXXX_XXXXX) — pass to secedgar_dataframe_query.'),
+          .describe(
+            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+          ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
       })
@@ -456,7 +472,15 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     // full series, so older periods stay queryable via the dataframe handle (#32).
     const inlineData = input.limit ? data.slice(0, input.limit) : data;
     if (input.limit && data.length > input.limit) {
-      ctx.enrich.truncated({ shown: input.limit, cap: input.limit });
+      ctx.enrich.truncated({
+        shown: inlineData.length,
+        cap: input.limit,
+        guidance: `Showing the ${inlineData.length} most-recent of ${data.length} periods. ${
+          dataset ? dataframeGuidance(dataset) : 'Raise limit to see more inline.'
+        }`,
+      });
+    } else if (dataset) {
+      ctx.enrich.notice(dataframeGuidance(dataset));
     }
 
     ctx.log.info('Financials retrieved', {

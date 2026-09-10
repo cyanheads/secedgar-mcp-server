@@ -11,7 +11,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  dataframeGuidance,
+  getCanvasBridge,
+  toDatasetField,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService, rawDocumentName } from '@/services/edgar/edgar-api-service.js';
 import {
   type NportHeader,
@@ -217,7 +221,7 @@ function daysBetween(from: string, to: string): number {
 export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
   title: 'Get Fund Holdings',
   description:
-    "List what an ETF or mutual fund holds, parsed from the NPORT-P portfolio report it files with the SEC every quarter. The input is the fund — a ticker like VOO, a fund series ID, or the registrant trust — which is the opposite direction from the ownership tools: secedgar_get_institutional_holdings and secedgar_find_holders answer who owns a company, this answers what a fund owns. Each position carries the security name, CUSIP/ISIN/LEI where the filer reports them, share balance, market value in USD, and percent of the fund's net assets, alongside fund-level net assets and total assets. Positions are returned largest-first by percent of net assets, one page of limit rows starting at offset; the full report registers as df_<id> when a canvas is available, which is how a fund running to thousands of positions is aggregated or joined against the 13F and insider dataframes. An NPORT-P covers exactly one fund series and a registrant trust files one report per series, so a trust with several funds needs the specific fund named — pass its ticker or series_id. Reports publish roughly two months after the period they cover, so every result is dated: the holdings are the portfolio as of report_period_date, not as of today.",
+    "List what an ETF or mutual fund holds, parsed from the NPORT-P portfolio report it files with the SEC every quarter. The input is the fund — a ticker like VOO, a fund series ID, or the registrant trust — which is the opposite direction from the ownership tools: secedgar_get_institutional_holdings and secedgar_find_holders answer who owns a company, this answers what a fund owns. Each position carries the security name, CUSIP/ISIN/LEI where the filer reports them, share balance, market value in USD, and percent of the fund's net assets, alongside fund-level net assets and total assets. Positions are returned largest-first by percent of net assets, one page of limit rows starting at offset; the full report registers as df_<id> when a canvas is available — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query, which is how a fund running to thousands of positions is aggregated or joined against the 13F and insider dataframes. An NPORT-P covers exactly one fund series and a registrant trust files one report per series, so a trust with several funds needs the specific fund named — pass its ticker or series_id. Reports publish roughly two months after the period they cover, so every result is dated: the holdings are the portfolio as of report_period_date, not as of today.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -451,7 +455,9 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       .object({
         name: z
           .string()
-          .describe('Dataframe handle (df_XXXXX_XXXXX) — pass to secedgar_dataframe_query.'),
+          .describe(
+            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+          ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
       })
@@ -735,9 +741,6 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
     const pageEnd = input.offset + input.limit;
     const holdings = positions.slice(input.offset, pageEnd);
     const nextOffset = pageEnd < positions.length ? pageEnd : undefined;
-    if (nextOffset !== undefined) {
-      ctx.enrich.truncated({ shown: holdings.length, cap: input.limit });
-    }
 
     const lagDays = report.report_period_date
       ? daysBetween(report.report_period_date, target.filingDate)
@@ -748,14 +751,26 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
         : `This report states no portfolio date; it was filed ${target.filingDate}. NPORT-P publishes on a lag, so these are not current-day positions.`,
     });
 
+    // One chain, because `notice` is last-wins across notice/truncated: each arm
+    // composes the staged-dataframe pointer into its own string rather than
+    // emitting a second notice that would clobber the first (#104).
     if (holdings.length === 0 && input.offset > 0) {
       ctx.enrich.notice(
-        `Offset (${input.offset}) is at or past the ${positions.length} positions in this report. Lower the offset to page back into the portfolio.`,
+        `Offset (${input.offset}) is at or past the ${positions.length} positions in this report. Lower the offset to page back into the portfolio.` +
+          (dataset ? ` ${dataframeGuidance(dataset)}` : ''),
       );
     } else if (holdings.length === 0) {
       ctx.enrich.notice(
         `Report ${target.accessionNumber} lists no portfolio positions. A fund that had liquidated by the period end files an empty report — is_final_filing says whether this is one — and secedgar_get_filing on this accession shows the document as filed.`,
       );
+    } else if (nextOffset !== undefined) {
+      ctx.enrich.truncated({
+        shown: holdings.length,
+        cap: input.limit,
+        ...(dataset && { guidance: dataframeGuidance(dataset) }),
+      });
+    } else if (dataset) {
+      ctx.enrich.notice(dataframeGuidance(dataset));
     }
 
     ctx.log.info('Fund holdings retrieved', {

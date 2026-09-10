@@ -5,7 +5,7 @@
  * @module tests/mcp-server/tools/definitions/compare-companies.tool
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { compareCompaniesTool } from '@/mcp-server/tools/definitions/compare-companies.tool.js';
 import type { CompanyConceptUnit, CompanyFactsResponse } from '@/services/edgar/types.js';
@@ -15,7 +15,10 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
   initEdgarApiService: vi.fn(),
 }));
 
-vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+// Partial mock: the canvas accessors are stubbed, but `dataframeGuidance` stays
+// real so the staged-dataframe pointer is asserted against the shipped wording.
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/canvas-bridge/canvas-bridge.js')>()),
   getCanvasBridge: vi.fn(),
   toDatasetField: vi.fn(),
 }));
@@ -178,6 +181,79 @@ describe('compareCompaniesTool', () => {
     const { rows } = at(registerDataframe.mock.calls, 0)[1];
     expect(new Set(rows.map((r: { period: string }) => r.period)).size).toBeGreaterThan(2);
     expect(result.dataset?.name).toBe('df_AAAAA_BBBBB');
+
+    // The dropped periods are only reachable through the dataframe, so the
+    // truncation guidance carries the describe-then-query pointer (#104).
+    const enrichment = getEnrichment(ctx);
+    const notice = String(enrichment.notice);
+    expect(enrichment.truncated).toBe(true);
+    expect(notice).toContain('df_AAAAA_BBBBB');
+    expect(notice).toContain('secedgar_dataframe_describe');
+    expect(notice).toContain('secedgar_dataframe_query');
+    expect(notice.match(/secedgar_dataframe_describe/g)).toHaveLength(1);
+  });
+
+  describe('staged-dataframe pointer (#104)', () => {
+    /** Stage a dataframe the way a successful registration does. */
+    function stageDataframe(rowCount = 12) {
+      const registerDataframe = vi.fn().mockResolvedValue({
+        name: 'df_AAAAA_BBBBB',
+        rowCount,
+        expiresAt: '2026-01-01T00:00:00.000Z',
+      });
+      vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as never);
+      vi.mocked(toDatasetField).mockReturnValue({
+        name: 'df_AAAAA_BBBBB',
+        row_count: rowCount,
+        expires_at: '2026-01-01T00:00:00.000Z',
+      });
+    }
+
+    it('points at the staged dataframe even when every aligned period fit inline', async () => {
+      stageDataframe();
+      const ctx = createMockContext({ errors: compareCompaniesTool.errors });
+      const input = compareCompaniesTool.input.parse({
+        companies: ['CAL', 'JUN'],
+        concepts: ['revenue'],
+        periods: 12,
+      });
+      await compareCompaniesTool.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      expect(enrichment.truncated).toBeUndefined();
+      expect(String(enrichment.notice)).toContain('secedgar_dataframe_describe');
+    });
+
+    it('reaches both structuredContent and content[] through the real tool pipeline', async () => {
+      // Without `notice` declared in the enrichment block the framework strips
+      // it from the effective output and the pointer never leaves the handler.
+      stageDataframe();
+      const result = await runToolContract(compareCompaniesTool, {
+        companies: ['CAL', 'JUN'],
+        concepts: ['revenue'],
+        periods: 2,
+      });
+
+      expect(result.isError).toBeFalsy();
+      const structured = result.structuredContent as { notice?: string };
+      expect(structured.notice).toContain('secedgar_dataframe_describe');
+      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+      expect(text).toContain('secedgar_dataframe_describe');
+    });
+
+    it('promises no pointer when the canvas is unavailable', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+      const ctx = createMockContext({ errors: compareCompaniesTool.errors });
+      const input = compareCompaniesTool.input.parse({
+        companies: ['CAL', 'JUN'],
+        concepts: ['revenue'],
+        periods: 2,
+      });
+      const result = await compareCompaniesTool.handler(input, ctx);
+
+      expect(result.dataset).toBeUndefined();
+      expect(String(getEnrichment(ctx).notice)).not.toContain('secedgar_dataframe_describe');
+    });
   });
 
   it('rejects a periods value above the inline cap', () => {

@@ -3,7 +3,7 @@
  * @module tests/mcp-server/tools/definitions/get-financials.tool
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials.tool.js';
 import { resolveConcept } from '@/services/edgar/concept-map.js';
@@ -14,7 +14,10 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
   initEdgarApiService: vi.fn(),
 }));
 
-vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+// Partial mock: the canvas accessors are stubbed, but `dataframeGuidance` stays
+// real so the staged-dataframe pointer is asserted against the shipped wording.
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/canvas-bridge/canvas-bridge.js')>()),
   getCanvasBridge: vi.fn(),
   toDatasetField: vi.fn(),
 }));
@@ -1378,5 +1381,99 @@ describe('dataframe registration (#72)', () => {
     expect(result.data[0]).toHaveProperty('fiscal_year');
     expect(result.data[0]).toHaveProperty('fiscal_period');
     expect(result.dataset?.name).toBe('df_ABCDE_FGHIJ');
+  });
+
+  describe('staged-dataframe pointer (#104)', () => {
+    /** Stage a dataframe the way a successful registration does. */
+    function stageDataframe(rowCount = 3) {
+      const registerDataframe = vi.fn().mockResolvedValue({
+        name: 'df_ABCDE_FGHIJ',
+        rowCount,
+        expiresAt: '2026-01-01T00:00:00.000Z',
+      });
+      vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+      vi.mocked(toDatasetField).mockReturnValue({
+        name: 'df_ABCDE_FGHIJ',
+        row_count: rowCount,
+        expires_at: '2026-01-01T00:00:00.000Z',
+      });
+      return registerDataframe;
+    }
+
+    it('names both dataframe tools when the full series is staged and nothing was capped', async () => {
+      stageDataframe();
+      const ctx = createMockContext({ errors: getFinancialsTool.errors });
+      const input = getFinancialsTool.input.parse({
+        company: 'AAPL',
+        concept: 'revenue',
+        period_type: 'all',
+      });
+      await getFinancialsTool.handler(input, ctx);
+
+      const notice = String(getEnrichment(ctx).notice);
+      expect(notice).toContain('df_ABCDE_FGHIJ');
+      expect(notice).toContain('secedgar_dataframe_describe');
+      expect(notice).toContain('secedgar_dataframe_query');
+      expect(getEnrichment(ctx).truncated).toBeUndefined();
+    });
+
+    it('composes the pointer into the truncation guidance rather than emitting a second notice', async () => {
+      stageDataframe();
+      const ctx = createMockContext({ errors: getFinancialsTool.errors });
+      const input = getFinancialsTool.input.parse({
+        company: 'AAPL',
+        concept: 'revenue',
+        period_type: 'all',
+        limit: 1,
+      });
+      await getFinancialsTool.handler(input, ctx);
+
+      const enrichment = getEnrichment(ctx);
+      const notice = String(enrichment.notice);
+      expect(enrichment.truncated).toBe(true);
+      expect(enrichment.shown).toBe(1);
+      // Both halves survive in one string — the cap disclosure and the pointer.
+      expect(notice).toContain('most-recent of 3 periods');
+      expect(notice).toContain('secedgar_dataframe_describe');
+      // Written once, not once per enrich call.
+      expect(notice.match(/secedgar_dataframe_describe/g)).toHaveLength(1);
+    });
+
+    it('promises no pointer when the canvas is unavailable', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+      const ctx = createMockContext({ errors: getFinancialsTool.errors });
+      const input = getFinancialsTool.input.parse({
+        company: 'AAPL',
+        concept: 'revenue',
+        period_type: 'all',
+        limit: 1,
+      });
+      const result = await getFinancialsTool.handler(input, ctx);
+
+      expect(result.dataset).toBeUndefined();
+      const notice = String(getEnrichment(ctx).notice);
+      expect(notice).not.toContain('secedgar_dataframe_describe');
+      expect(notice).toContain('Raise limit');
+    });
+
+    it('reaches both structuredContent and content[] through the real tool pipeline', async () => {
+      // The prerequisite this issue names: without `notice` in the enrichment
+      // block the framework strips it from the effective output and the pointer
+      // never leaves the handler.
+      stageDataframe();
+      const result = await runToolContract(getFinancialsTool, {
+        company: 'AAPL',
+        concept: 'revenue',
+        period_type: 'all',
+      });
+
+      expect(result.isError).toBeFalsy();
+      const structured = result.structuredContent as { notice?: string };
+      expect(structured.notice).toContain('secedgar_dataframe_describe');
+      expect(structured.notice).toContain('secedgar_dataframe_query');
+      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+      expect(text).toContain('secedgar_dataframe_describe');
+      expect(text).toContain('secedgar_dataframe_query');
+    });
   });
 });

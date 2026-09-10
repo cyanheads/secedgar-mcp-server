@@ -8,7 +8,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  dataframeGuidance,
+  getCanvasBridge,
+  toDatasetField,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 import { cleanDisplayName, getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import type { EftsHit } from '@/services/edgar/types.js';
 
@@ -93,7 +97,7 @@ function hitToHolder(hit: EftsHit): HolderRow {
 export const findHoldersTool = tool('secedgar_find_holders', {
   title: 'Find Holders',
   description:
-    'Find which institutional managers reported holding an issuer, by searching 13F-HR information tables for one reporting quarter. This is the reverse direction of secedgar_get_institutional_holdings: that tool takes a manager and returns its portfolio, this one takes an issuer and returns its managers — pass a returned filer_cik plus the same quarter to read the actual position. Searching by cusip is the precise path, matching the identifier the information table itself carries; without it the issuer name is matched as a phrase against the filing text, which both over-matches (unrelated issuers sharing a word) and under-matches (managers writing the name differently), so prefer cusip whenever one is known. A CUSIP cannot be derived from a ticker here — read one off any 13F information table returned by secedgar_get_institutional_holdings. The returned list is unranked: the search index scores by text relevance, which carries no signal about position size, and no ordering by shares or market value is available without opening each filing. Managers holding under $100M in 13(f) securities are exempt from filing at all.',
+    'Find which institutional managers reported holding an issuer, by searching 13F-HR information tables for one reporting quarter. This is the reverse direction of secedgar_get_institutional_holdings: that tool takes a manager and returns its portfolio, this one takes an issuer and returns its managers — pass a returned filer_cik plus the same quarter to read the actual position. Searching by cusip is the precise path, matching the identifier the information table itself carries; without it the issuer name is matched as a phrase against the filing text, which both over-matches (unrelated issuers sharing a word) and under-matches (managers writing the name differently), so prefer cusip whenever one is known. A CUSIP cannot be derived from a ticker here — read one off any 13F information table returned by secedgar_get_institutional_holdings. The returned list is unranked: the search index scores by text relevance, which carries no signal about position size, and no ordering by shares or market value is available without opening each filing. Managers holding under $100M in 13(f) securities are exempt from filing at all. When more managers match than fit inline, the full fetched set is staged as df_<id> — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -235,7 +239,9 @@ export const findHoldersTool = tool('secedgar_find_holders', {
       .object({
         name: z
           .string()
-          .describe('Dataframe handle (df_XXXXX_XXXXX) — pass to secedgar_dataframe_query.'),
+          .describe(
+            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+          ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
         truncated: z
@@ -425,9 +431,11 @@ export const findHoldersTool = tool('secedgar_find_holders', {
       ctx.enrich.truncated({
         shown: input.limit,
         cap: input.limit,
-        guidance: truncated
-          ? `${total} filings matched in the window; the fetch budget of ${FETCH_PAGE_BUDGET * EFTS_PAGE_SIZE} retrieved ${hitsFetched}, resolving to ${rows.length} managers reporting ${quarter}. Query that set with secedgar_dataframe_query, or narrow to a single share class with cusip.`
-          : 'Query the full matched set with secedgar_dataframe_query.',
+        guidance: dataset
+          ? truncated
+            ? `${total} filings matched in the window; the fetch budget of ${FETCH_PAGE_BUDGET * EFTS_PAGE_SIZE} retrieved ${hitsFetched}, resolving to ${rows.length} managers reporting ${quarter}. ${dataframeGuidance(dataset)}`
+            : dataframeGuidance(dataset)
+          : 'Raise limit to see more inline, or narrow to a single share class with cusip.',
       });
     }
 
