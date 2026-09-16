@@ -33,15 +33,17 @@ describe('bundle entry patterns', () => {
   it('matches dependency-shipped agent docs and leaves project files alone', () => {
     expect(
       filterAgentDocEntries([
-        'node_modules/@cyanheads/mcp-ts-core/skills/add-tool/SKILL.md',
+        'node_modules/@cyanheads/mcp-ts-core/framework-skills/add-tool/SKILL.md',
+        'node_modules/some-dep/skills/add-tool/SKILL.md',
         'node_modules/some-dep/.claude/settings.json',
         'node_modules/some-dep/.agents/skills/x.md',
         'node_modules/some-dep/SKILL.md',
         'dist/index.js',
-        'skills/add-tool/SKILL.md',
+        'framework-skills/add-tool/SKILL.md',
       ]),
     ).toEqual([
-      'node_modules/@cyanheads/mcp-ts-core/skills/add-tool/SKILL.md',
+      'node_modules/@cyanheads/mcp-ts-core/framework-skills/add-tool/SKILL.md',
+      'node_modules/some-dep/skills/add-tool/SKILL.md',
       'node_modules/some-dep/.claude/settings.json',
       'node_modules/some-dep/.agents/skills/x.md',
       'node_modules/some-dep/SKILL.md',
