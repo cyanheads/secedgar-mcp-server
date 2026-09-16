@@ -18,7 +18,7 @@ import { filingTypesResource } from '@/mcp-server/resources/definitions/filing-t
 import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { initEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import { initEdgarMirror } from '@/services/edgar/mirror/index.js';
+import { closeEdgarMirror, initEdgarMirror } from '@/services/edgar/mirror/index.js';
 
 // DuckDB is the only canvas engine we support and ships as a direct dep, so
 // enable the canvas by default. Set CANVAS_PROVIDER_TYPE=none explicitly to
@@ -38,6 +38,10 @@ await createApp({
   tools: buildToolDefinitions({ dropEnabled }),
   resources: [conceptsResource, filingTypesResource],
   prompts: [companyAnalysisPrompt],
+  // No tool calls ctx.requestInput, so no HTTP session state is needed and every
+  // request can land on any instance. MCP_SESSION_MODE still overrides this when
+  // it carries a meaningful value.
+  sessionMode: 'stateless',
   instructions:
     'Use the secedgar_* tools to query SEC EDGAR — US public-company filings since 1993 plus historical XBRL financials. Resolve companies with secedgar_company_search (accepts ticker, name, or CIK), fetch document text with secedgar_get_filing by accession number, and search filings with secedgar_search_filings (full-text covers 2001-present; pre-2001 date ranges browse the archives by form and entity/date, so pre-2001 full-text matching requires ticker:/cik: entity scope; supports boolean operators and inline ticker:AAPL / cik:320193 targeting). For financials, secedgar_get_financials and secedgar_fetch_frames accept friendly names like "revenue" or "eps_diluted" (discover them with secedgar_search_concepts) or raw XBRL tags; secedgar_get_snapshot profiles one company across every supported concept in a single call, and secedgar_compare_companies puts 2-10 named companies side by side on aligned calendar periods. For 8-K material events, secedgar_get_material_events filters a company\'s 8-K history by item code (2.02 results, 5.02 officer changes, 4.02 non-reliance). Ownership runs in both directions: secedgar_get_institutional_holdings takes a 13F manager and returns its portfolio, secedgar_find_holders takes an issuer and returns the managers reporting it, and secedgar_get_beneficial_owners takes an issuer and returns its 5%-and-over blockholders from the structured SCHEDULE 13D/13G filings (2024-12-18 onward). For funds, secedgar_get_fund_holdings takes an ETF or mutual fund and returns the portfolio from its quarterly NPORT-P report, which is dated to the reporting period rather than to today. Data-returning tools also materialize their full upstream response as a df_<id> handle — inspect its columns with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query.',
   async setup(core) {
@@ -98,5 +102,12 @@ await createApp({
         }
       }
     }
+  },
+  // The mirror holds two SQLite files open for the process lifetime; nothing
+  // else setup() allocates outlives the framework's own disposal. The scheduled
+  // refresh needs no stop here — shutdown() runs schedulerService.destroyAll()
+  // right after this hook.
+  async teardown() {
+    await closeEdgarMirror();
   },
 });

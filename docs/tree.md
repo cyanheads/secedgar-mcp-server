@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-09-10 01:02:08
+Generated on: 2026-09-16 11:55:15
 
 ```text
 secedgar-mcp-server/
@@ -41,29 +41,7 @@ secedgar-mcp-server/
 ├── claude-plans/
 ├── docs/
 │   └── sec-edgar-mcp-design.md
-├── scripts/
-│   ├── _mirror-context.ts
-│   ├── build-changelog.ts
-│   ├── build.ts
-│   ├── check-dependency-specifiers.ts
-│   ├── check-docs-sync.ts
-│   ├── check-framework-antipatterns.ts
-│   ├── check-skill-versions.ts
-│   ├── check-skills-sync.ts
-│   ├── clean-mcpb.ts
-│   ├── clean.ts
-│   ├── devcheck.ts
-│   ├── edgar-mirror-init.ts
-│   ├── edgar-mirror-refresh.ts
-│   ├── edgar-mirror-verify.ts
-│   ├── gen-former-names.ts
-│   ├── lint-mcp.ts
-│   ├── lint-packaging.ts
-│   ├── list-skills.ts
-│   ├── release-github.ts
-│   ├── split-changelog.ts
-│   └── tree.ts
-├── skills/
+├── framework-skills/
 │   ├── add-app-tool/
 │   │   └── SKILL.md
 │   ├── add-prompt/
@@ -150,6 +128,28 @@ secedgar-mcp-server/
 │   │   └── SKILL.md
 │   └── tool-defs-analysis/
 │       └── SKILL.md
+├── scripts/
+│   ├── _mirror-context.ts
+│   ├── build-changelog.ts
+│   ├── build.ts
+│   ├── check-dependency-specifiers.ts
+│   ├── check-docs-sync.ts
+│   ├── check-framework-antipatterns.ts
+│   ├── check-skill-versions.ts
+│   ├── check-skills-sync.ts
+│   ├── clean-mcpb.ts
+│   ├── clean.ts
+│   ├── devcheck.ts
+│   ├── edgar-mirror-init.ts
+│   ├── edgar-mirror-refresh.ts
+│   ├── edgar-mirror-verify.ts
+│   ├── gen-former-names.ts
+│   ├── lint-mcp.ts
+│   ├── lint-packaging.ts
+│   ├── list-skills.ts
+│   ├── release-github.ts
+│   ├── split-changelog.ts
+│   └── tree.ts
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -249,6 +249,7 @@ secedgar-mcp-server/
 │   │       ├── mirror/
 │   │       │   ├── companyfacts-sync.test.ts
 │   │       │   ├── edgar-mirror.test.ts
+│   │       │   ├── singleton.test.ts
 │   │       │   └── tickers-sync.test.ts
 │   │       ├── beneficial-ownership-parser.test.ts
 │   │       ├── concept-map.test.ts

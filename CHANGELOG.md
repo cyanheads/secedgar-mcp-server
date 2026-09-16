@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.15.6](changelog/0.15.x/0.15.6.md) — 2026-09-16 · 🛡️ Security
+
+Adopts mcp-ts-core through 0.13.2: HTTP sessions resolve stateless by default, shutdown closes the EDGAR mirror, and a linear-time SQL comment stripper replaces a regex a crafted query could hang on. Plugin manifests now deliver EDGAR_USER_AGENT correctly, and an empty or placeholder value fails startup instead of running blank.
+
 ## [0.15.5](changelog/0.15.x/0.15.5.md) — 2026-09-09
 
 Registers the gated dataframe-drop tool as discoverable-but-disabled, adds a describe-then-query pointer across every dataframe-producing tool, and fixes secedgar_dataframe_query's row_limit-bound truncation disclosure with a new row_count_capped field.

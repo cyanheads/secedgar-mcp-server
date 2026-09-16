@@ -1,20 +1,33 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "secedgar-mcp-server",
-  "version": "0.15.5",
+  "version": "0.15.6",
   "description": "Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.",
   "author": {
-    "name": "cyanheads"
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
   },
   "homepage": "https://github.com/cyanheads/secedgar-mcp-server#readme",
   "repository": "https://github.com/cyanheads/secedgar-mcp-server",
   "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "sec", "edgar", "xbrl", "filings", "financial-data"],
+  "userConfig": {
+    "EDGAR_USER_AGENT": {
+      "type": "string",
+      "title": "SEC User-Agent",
+      "description": "Required by SEC for every request. Format: \"AppName contact@email.com\".",
+      "sensitive": false,
+      "required": true
+    }
+  },
   "mcpServers": {
     "secedgar-mcp-server": {
       "command": "npx",
       "args": ["-y", "@cyanheads/secedgar-mcp-server"],
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
-        "EDGAR_USER_AGENT": "${EDGAR_USER_AGENT}"
+        "EDGAR_USER_AGENT": "${user_config.EDGAR_USER_AGENT}"
       }
     }
   }

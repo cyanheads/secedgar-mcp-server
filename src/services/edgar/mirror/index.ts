@@ -23,3 +23,15 @@ export function initEdgarMirror(opts: EdgarMirrorOptions): EdgarMirror {
 export function getEdgarMirror(): EdgarMirror | undefined {
   return _mirror;
 }
+
+/**
+ * Close the mirror's SQLite handles and drop the singleton. A no-op when the
+ * mirror was never initialized — the disabled path and an unsupported runtime
+ * both leave the singleton unset, and shutdown runs either way.
+ */
+export async function closeEdgarMirror(): Promise<void> {
+  const mirror = _mirror;
+  if (!mirror) return;
+  _mirror = undefined;
+  await mirror.close();
+}

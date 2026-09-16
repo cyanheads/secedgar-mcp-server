@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "secedgar-mcp-server",
-  "version": "0.15.5",
+  "version": "0.15.6",
   "description": "Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.",
   "author": {
     "name": "cyanheads"
@@ -22,8 +22,8 @@
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
         "NODE_ENV": "production",
-        "EDGAR_USER_AGENT": "${EDGAR_USER_AGENT}",
-        "MCP_LOG_LEVEL": "${MCP_LOG_LEVEL}"
+        "EDGAR_USER_AGENT": "${user_config.EDGAR_USER_AGENT}",
+        "MCP_LOG_LEVEL": "${user_config.MCP_LOG_LEVEL}"
       }
     }
   },
