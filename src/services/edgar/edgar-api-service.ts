@@ -956,13 +956,8 @@ class EdgarApiService {
       }
       if (gate.reopensAt > Date.now()) throw this.cooldownRefusal();
 
-      let settle!: () => void;
-      const probe: BlockGate = {
-        state: 'probing',
-        settled: new Promise<void>((resolve) => {
-          settle = resolve;
-        }),
-      };
+      const { promise: settled, resolve: settle } = Promise.withResolvers<void>();
+      const probe: BlockGate = { state: 'probing', settled };
       this.gate = probe;
       return {
         gate: probe,
