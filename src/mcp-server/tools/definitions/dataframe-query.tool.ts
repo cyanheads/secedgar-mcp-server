@@ -14,8 +14,8 @@ import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 /**
  * Escape text for one Markdown table cell. Backslashes go first: a cell is
  * inline Markdown, where a backslash before ASCII punctuation is consumed as an
- * escape, so escaping only the pipe drops every literal backslash from the
- * rendered text (`x\|y` would render as `x|y`) (#114).
+ * escape, so escaping only the pipe drops a literal backslash that precedes
+ * punctuation from the rendered text (`x\|y` would render as `x|y`) (#114).
  */
 function escapeTableCell(text: string): string {
   return text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
