@@ -13,6 +13,7 @@ const { config, mirrorRef } = vi.hoisted(() => ({
   config: {
     userAgent: 'test test@example.com',
     rateLimitRps: 10,
+    rateLimitCooldownSeconds: 600,
     tickerCacheTtl: 3600,
     mirrorFallbackLive: true,
   },
@@ -184,6 +185,52 @@ describe('EdgarApiService — mirror routing', () => {
 
     expect((result as { pts?: number } | null)?.pts).toBe(1);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps answering from the mirror while SEC’s rate-limit block is active (#116)', async () => {
+    // A live read draws the 429 and closes the gate.
+    const fetchMock = vi.fn(async () => new Response('blocked', { status: 429 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const api = getEdgarApiService();
+    await expect(api.tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023')).rejects.toMatchObject({
+      data: { reason: 'rate_limited' },
+    });
+
+    const mirror = makeMirrorStub();
+    mirror.tickersReady.mockResolvedValue(true);
+    mirror.getTickerRows.mockResolvedValue([
+      { cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' },
+    ]);
+    mirror.companyFactsReady.mockResolvedValue(true);
+    mirror.companyFactsComplete.mockResolvedValue(true);
+    mirror.getCompanyFacts.mockResolvedValue({ cik: 320193, entityName: 'Apple Inc.', facts: {} });
+    mirror.getCompanyConcept.mockResolvedValue({
+      cik: 320193,
+      entityName: 'Apple Inc.',
+      taxonomy: 'us-gaap',
+      tag: 'Revenues',
+      label: 'Revenues',
+      units: {},
+    });
+    mirror.getFrames.mockResolvedValue({ ccp: 'CY2023', data: [], pts: 0, tag: 'Revenues' });
+    mirrorRef.current = mirror;
+
+    // Ticker cache (its live fund-ticker merge is refused locally and degrades), company
+    // facts, concept, and frames all answer from the mirror.
+    expect(await api.resolveCik('AAPL')).toMatchObject({ cik: '0000320193' });
+    expect((await api.tryGetCompanyFacts('320193'))?.entityName).toBe('Apple Inc.');
+    expect((await api.tryGetCompanyConcept('320193', 'us-gaap', 'Revenues'))?.entityName).toBe(
+      'Apple Inc.',
+    );
+    expect(await api.tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023')).toMatchObject({
+      tag: 'Revenues',
+    });
+
+    // A live-only read in the same window is refused without a request.
+    await expect(api.getSubmissions('320193')).rejects.toMatchObject({
+      data: { reason: 'rate_limited' },
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it('uses the live API directly when no mirror is registered', async () => {

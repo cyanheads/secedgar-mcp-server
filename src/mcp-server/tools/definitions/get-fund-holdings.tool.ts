@@ -246,9 +246,18 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
     {
       reason: 'no_filings_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No NPORT-P report exists for this fund, or none for the requested report_date',
+      when: 'No NPORT-P report exists for this fund, or none covers the report_date requested',
       recovery:
         'Drop report_date to take the newest report, or use secedgar_search_filings with forms ["NPORT-P"] to see what the registrant has filed.',
+    },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
+      recovery:
+        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
+      retryable: true,
+      thrownBy: 'service',
     },
   ],
 

@@ -28,6 +28,13 @@
           "isRequired": true
         },
         {
+          "name": "EDGAR_RATE_LIMIT_COOLDOWN_SECONDS",
+          "description": "Seconds to stop sending to SEC after a 429: calls are refused locally, then one probe request goes out.",
+          "format": "number",
+          "isRequired": false,
+          "default": "600"
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -51,6 +58,13 @@
           "description": "User-Agent header for SEC compliance. Format: \"AppName contact@email.com\".",
           "format": "string",
           "isRequired": true
+        },
+        {
+          "name": "EDGAR_RATE_LIMIT_COOLDOWN_SECONDS",
+          "description": "Seconds to stop sending to SEC after a 429: calls are refused locally, then one probe request goes out.",
+          "format": "number",
+          "isRequired": false,
+          "default": "600"
         },
         {
           "name": "MCP_HTTP_HOST",

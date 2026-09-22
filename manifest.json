@@ -23,6 +23,7 @@
         "MCP_AUTH_MODE": "none",
         "NODE_ENV": "production",
         "EDGAR_USER_AGENT": "${user_config.EDGAR_USER_AGENT}",
+        "EDGAR_RATE_LIMIT_COOLDOWN_SECONDS": "${user_config.EDGAR_RATE_LIMIT_COOLDOWN_SECONDS}",
         "MCP_LOG_LEVEL": "${user_config.MCP_LOG_LEVEL}"
       }
     }
@@ -40,6 +41,14 @@
       "description": "User-Agent header for SEC compliance. Format: \"AppName contact@email.com\".",
       "type": "string",
       "required": true
+    },
+    "EDGAR_RATE_LIMIT_COOLDOWN_SECONDS": {
+      "title": "Rate-limit cool-down (seconds)",
+      "description": "Seconds to stop sending to SEC after a 429: calls are refused locally, then one probe request goes out.",
+      "type": "number",
+      "required": false,
+      "default": 600,
+      "min": 1
     },
     "MCP_LOG_LEVEL": {
       "title": "Log Level",

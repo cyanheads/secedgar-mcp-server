@@ -91,6 +91,15 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       recovery:
         'Use secedgar_search_filings with forms ["SC 13D","SC 13G"] to reach the pre-2024-12-18 text filings, then read them with secedgar_get_filing.',
     },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
+      recovery:
+        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
 
   input: z.object({

@@ -17,6 +17,14 @@ const ServerConfigSchema = z.object({
     .max(10)
     .default(10)
     .describe('Max requests/second to SEC APIs'),
+  rateLimitCooldownSeconds: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .default(600)
+    .describe(
+      'Seconds to stop sending to SEC after a 429. SEC blocks an IP until its request rate has stayed under the limit for ten minutes, and every request sent meanwhile restarts that clock, so calls are refused locally for this long and the first one after it goes out alone as a probe.',
+    ),
   tickerCacheTtl: z.coerce
     .number()
     .int()
@@ -71,6 +79,7 @@ export function getServerConfig(): ServerConfig {
   _config ??= parseEnvConfig(ServerConfigSchema, {
     userAgent: 'EDGAR_USER_AGENT',
     rateLimitRps: 'EDGAR_RATE_LIMIT_RPS',
+    rateLimitCooldownSeconds: 'EDGAR_RATE_LIMIT_COOLDOWN_SECONDS',
     tickerCacheTtl: 'EDGAR_TICKER_CACHE_TTL',
     datasetTtlSeconds: 'EDGAR_DATASET_TTL_SECONDS',
     dataframeDropEnabled: 'EDGAR_DATAFRAME_DROP_ENABLED',

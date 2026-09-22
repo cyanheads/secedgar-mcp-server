@@ -14,6 +14,7 @@ const { config } = vi.hoisted(() => ({
   config: {
     userAgent: 'test test@example.com',
     rateLimitRps: 1000,
+    rateLimitCooldownSeconds: 600,
     tickerCacheTtl: 3600,
     mirrorFallbackLive: true,
   },

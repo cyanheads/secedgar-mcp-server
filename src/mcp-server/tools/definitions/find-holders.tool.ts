@@ -115,6 +115,15 @@ export const findHoldersTool = tool('secedgar_find_holders', {
       recovery:
         'Retry with the ticker or the 10-digit CIK of the intended issuer from the matches list.',
     },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
+      recovery:
+        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
 
   input: z.object({
@@ -217,7 +226,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
             filer_cik: z
               .string()
               .describe(
-                "Filer CIK, zero-padded to 10 digits. Pass as ticker_or_cik to secedgar_get_institutional_holdings for this manager's positions.",
+                "Filer CIK, zero-padded to 10 digits. Pass as company to secedgar_get_institutional_holdings for this manager's positions.",
               ),
             accession_number: z
               .string()

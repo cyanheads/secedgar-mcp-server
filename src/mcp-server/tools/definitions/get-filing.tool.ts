@@ -175,6 +175,15 @@ export const getFilingTool = tool('secedgar_get_filing', {
       recovery:
         'Pick a heading from the outline in the error message, or use offset paging instead.',
     },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
+      recovery:
+        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
 
   input: z.object({

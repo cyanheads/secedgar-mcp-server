@@ -119,6 +119,15 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       recovery:
         'Switch period_type, or discover reported concept names with secedgar_search_concepts.',
     },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
+      recovery:
+        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
 
   input: z.object({

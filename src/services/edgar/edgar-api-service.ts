@@ -1,12 +1,17 @@
 /**
  * @fileoverview Rate-limited HTTP client for all SEC EDGAR API interactions.
- * Handles User-Agent compliance, rate limiting, retry with backoff, CIK resolution,
- * and ticker/entity caching.
+ * Handles User-Agent compliance, request pacing, SEC's rate-limit block, retry
+ * with backoff, CIK resolution, and ticker/entity caching.
  * @module services/edgar/edgar-api-service
  */
 
-import { notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-import { httpErrorFromResponse } from '@cyanheads/mcp-ts-core/utils';
+import {
+  type McpError,
+  notFound,
+  rateLimited,
+  serviceUnavailable,
+} from '@cyanheads/mcp-ts-core/errors';
+import { createPacer, httpErrorFromResponse, type Pacer } from '@cyanheads/mcp-ts-core/utils';
 import { parseDocument } from 'htmlparser2';
 import { getServerConfig } from '@/config/server-config.js';
 import { getEdgarMirror } from '@/services/edgar/mirror/index.js';
@@ -36,6 +41,46 @@ const BASE_BACKOFF_MS = 1000;
  * is waiting on (#112).
  */
 const RETRYABLE_STATUSES = new Set([500, 502, 503, 504]);
+
+/**
+ * `data.reason` on every SEC rate-limit failure — the upstream 429 and a call
+ * refused locally while the cool-down after one runs — so a caller branches the
+ * same way on either (#116).
+ */
+const RATE_LIMITED_REASON = 'rate_limited';
+
+/**
+ * This server's view of SEC's rate-limit block (#116). SEC stops serving an IP
+ * until its request rate has stayed under the limit for ten minutes, and every
+ * request sent meanwhile restarts that clock, so after a 429 nothing may go out:
+ * - `open` — send normally.
+ * - `closed` — refuse every call locally until `reopensAt`; the first call after
+ *   that instant becomes the probe.
+ * - `probing` — the probe is in flight; every other call waits on `settled`, then
+ *   re-reads the gate.
+ */
+type BlockGate =
+  | { readonly state: 'open' }
+  | { readonly state: 'closed'; readonly reopensAt: number }
+  | { readonly state: 'probing'; readonly settled: Promise<void> };
+
+const OPEN_GATE: BlockGate = { state: 'open' };
+
+/** A call cleared to send: the gate it was admitted under, and — for the probe — how to settle it. */
+interface Admission {
+  gate: BlockGate;
+  /** Present on the probe only. `answered` is true when SEC replied with anything but a 429. */
+  releaseProbe?: (answered: boolean) => void;
+}
+
+/**
+ * Recovery hint for both the upstream 429 and the local refusal. The message
+ * carries the seconds remaining too, so a client reading only `content[]` sees
+ * the wait as well as one reading `data.retryAfter`.
+ */
+function rateLimitHint(retryAfterSeconds: number): string {
+  return `SEC is rate-limiting this server's IP. It resumes serving an IP only after its request rate has stayed below 10 requests/second for 10 minutes, and any request sent meanwhile restarts that clock, so this server sends nothing to SEC until the cool-down ends — retry in ${retryAfterSeconds} seconds. A shared outbound IP can trigger the block even while this server stays under the limit.`;
+}
 
 /** URL for SEC's mutual-fund ticker file (ETFs and open-end funds). */
 const MF_TICKERS_URL = 'https://www.sec.gov/files/company_tickers_mf.json';
@@ -208,11 +253,12 @@ export function suggestCompanies(query: string, allEntries: CikMatch[]): Company
 }
 
 class EdgarApiService {
-  private lastRequestAt = 0;
-  private minIntervalMs: number;
+  /** One queue for every SEC request in the process, spacing starts at the configured rate. */
+  private readonly pacer: Pacer;
+  private readonly cooldownMs: number;
+  private gate: BlockGate = OPEN_GATE;
   private tickerCache: TickerCache | undefined;
   private tickerCacheLoad: Promise<TickerCache> | undefined;
-  private throttleQueue: Promise<void> = Promise.resolve();
   /** Per-CIK submissions doc cache, keyed by padded CIK (TTL = EDGAR_TICKER_CACHE_TTL). */
   private submissionsCache = new Map<string, { at: number; data: SubmissionsResponse }>();
   /** Per-page submissions archive cache, keyed by page name (TTL = EDGAR_TICKER_CACHE_TTL). */
@@ -222,7 +268,26 @@ class EdgarApiService {
 
   constructor() {
     const config = getServerConfig();
-    this.minIntervalMs = Math.ceil(1000 / config.rateLimitRps);
+    this.cooldownMs = config.rateLimitCooldownSeconds * 1000;
+    /**
+     * Start spacing only. No concurrency cap, so a slow response never holds the
+     * next start back; no wait budget, so an ordinary burst drains at the
+     * configured rate instead of being shed; and no pacer cooldown — the pacer's
+     * gate would hold queued calls until it reopened and then release them all,
+     * where SEC's block needs local refusals and a single probe (the block gate).
+     */
+    this.pacer = createPacer({
+      name: 'sec-edgar',
+      minStartGapMs: Math.ceil(1000 / config.rateLimitRps),
+    });
+  }
+
+  /**
+   * Stop the pacer: queued requests reject with `RequestCancelled`, and so does
+   * any request made afterwards. Requests already sent are left to finish.
+   */
+  dispose(): void {
+    this.pacer.dispose();
   }
 
   /** Fetch and parse JSON, throwing on non-OK responses. */
@@ -808,16 +873,16 @@ class EdgarApiService {
   // --- Internals ---
 
   /**
-   * Rate-limited fetch with retry/backoff. Returns the response on 2xx or 404;
-   * throws a status-classified `McpError` on other non-OK statuses after retries are exhausted.
+   * Paced fetch with retry/backoff. Returns the response on 2xx or 404; throws a
+   * status-classified `McpError` on other non-OK statuses after retries are
+   * exhausted, and the local refusal while SEC's rate-limit block is active.
    */
   private async rawFetch(url: string, acceptJson: boolean): Promise<Response> {
     const headers: Record<string, string> = { 'User-Agent': getServerConfig().userAgent };
     if (acceptJson) headers.Accept = 'application/json';
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      await this.throttle();
-      const response = await globalThis.fetch(url, { headers });
+      const response = await this.send(url, headers);
 
       if (response.ok || response.status === 404) return response;
 
@@ -833,9 +898,11 @@ class EdgarApiService {
           hint: `${host} may be blocking requests. Check EDGAR_USER_AGENT format ("AppName contact@email.com") or retry later.`,
         };
       } else if (response.status === 429) {
-        data.recovery = {
-          hint: 'SEC is rate-limiting this IP and does not resume serving it until the request rate has stayed below 10 requests/second for 10 minutes. Wait out that cool-down before retrying — further requests restart it. A shared outbound IP can trigger this even while this server is under the limit.',
-        };
+        // send() closed the gate on this response, so the wait is the full cool-down.
+        const retryAfter = this.cooldownSecondsRemaining();
+        data.reason = RATE_LIMITED_REASON;
+        data.retryAfter = retryAfter;
+        data.recovery = { hint: rateLimitHint(retryAfter) };
       }
       throw await httpErrorFromResponse(response, {
         service: 'SEC EDGAR',
@@ -850,21 +917,84 @@ class EdgarApiService {
   }
 
   /**
-   * Serialize throttle checks through a promise chain so concurrent callers
-   * can't observe a stale `lastRequestAt` and fire in parallel within one window.
+   * One request through the block gate and the pacer. A 429 closes the gate
+   * before the response is handed back, so no call admitted after it sends.
    */
-  private throttle(): Promise<void> {
-    const next = this.throttleQueue.then(async () => {
-      const elapsed = Date.now() - this.lastRequestAt;
-      if (elapsed < this.minIntervalMs) {
-        await sleep(this.minIntervalMs - elapsed);
+  private async send(url: string, headers: Record<string, string>): Promise<Response> {
+    const admission = await this.admit();
+    let answered = false;
+    try {
+      const response = await this.pacer.run(() => {
+        // Re-read at dispatch: a 429 may have landed while this call waited for its
+        // slot, and a call queued before the block must not go out inside it.
+        if (this.gate !== admission.gate) throw this.cooldownRefusal();
+        return globalThis.fetch(url, { headers });
+      });
+      if (response.status === 429) {
+        this.gate = { state: 'closed', reopensAt: Date.now() + this.cooldownMs };
+      } else {
+        answered = true;
       }
-      this.lastRequestAt = Date.now();
-    });
-    this.throttleQueue = next.catch(() => {
-      /* swallow: errors propagate to the caller's awaited chain, not the queue */
-    });
-    return next;
+      return response;
+    } finally {
+      admission.releaseProbe?.(answered);
+    }
+  }
+
+  /**
+   * Wait until this call may send, or throw the local refusal while the
+   * cool-down runs. The first call after the cool-down becomes the probe; every
+   * call behind it waits for the probe to resolve and then reads the gate again.
+   */
+  private async admit(): Promise<Admission> {
+    for (;;) {
+      const gate = this.gate;
+      if (gate.state === 'open') return { gate };
+      if (gate.state === 'probing') {
+        await gate.settled;
+        continue;
+      }
+      if (gate.reopensAt > Date.now()) throw this.cooldownRefusal();
+
+      let settle!: () => void;
+      const probe: BlockGate = {
+        state: 'probing',
+        settled: new Promise<void>((resolve) => {
+          settle = resolve;
+        }),
+      };
+      this.gate = probe;
+      return {
+        gate: probe,
+        releaseProbe: (answered) => {
+          /**
+           * A probe 429 has already closed the gate for a full cool-down. Any other
+           * reply means SEC is serving again; no reply at all (a network error)
+           * proves nothing, so the next call probes in its place.
+           */
+          if (this.gate === probe) {
+            this.gate = answered ? OPEN_GATE : { state: 'closed', reopensAt: Date.now() };
+          }
+          settle();
+        },
+      };
+    }
+  }
+
+  /** The error for a call made while the cool-down runs — nothing was sent. */
+  private cooldownRefusal(): McpError {
+    const retryAfter = this.cooldownSecondsRemaining();
+    return rateLimited(
+      `SEC EDGAR request not sent: SEC is rate-limiting this server's IP, and requests are held for another ${retryAfter}s so the block can clear.`,
+      { reason: RATE_LIMITED_REASON, retryAfter, recovery: { hint: rateLimitHint(retryAfter) } },
+    );
+  }
+
+  /** Whole seconds until the gate reopens — never below 1, since a caller told to wait 0s is refused again. */
+  private cooldownSecondsRemaining(): number {
+    const gate = this.gate;
+    const remainingMs = gate.state === 'closed' ? gate.reopensAt - Date.now() : 0;
+    return Math.max(1, Math.ceil(remainingMs / 1000));
   }
 
   private getTickerCache(): Promise<TickerCache> {
@@ -1244,4 +1374,9 @@ export function getEdgarApiService(): EdgarApiService {
   if (!_service)
     throw new Error('EdgarApiService not initialized — call initEdgarApiService() in setup()');
   return _service;
+}
+
+/** Stop the service's request pacer — wired through `createApp({ teardown })`. */
+export function disposeEdgarApiService(): void {
+  _service?.dispose();
 }
