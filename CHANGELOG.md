@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [0.15.7](changelog/0.15.x/0.15.7.md) — 2026-09-21
 
-A 429 now closes a local rate-limit block gate instead of being retried into SEC's cool-down. company/filed_after/filed_before/forms replace ticker_or_cik/start_date/end_date/form_types, old spellings accepted as aliases. secedgar_dataframe_query fixes a backslash-escaping bug and gains a fuller SQL error contract.
+After a 429, calls are refused locally for SEC's cool-down instead of each reaching SEC and restarting its block. company/filed_after/filed_before/forms replace ticker_or_cik/start_date/end_date/form_types, old spellings accepted as aliases. secedgar_dataframe_query fixes a backslash-escaping bug and gains a fuller SQL error contract.
 
 ## [0.15.6](changelog/0.15.x/0.15.6.md) — 2026-09-16 · 🛡️ Security
 
