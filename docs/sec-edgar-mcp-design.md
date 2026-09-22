@@ -8,8 +8,8 @@
 
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
-| `secedgar_company_search` | Find companies and retrieve entity info with optional recent filings. Entry point for most workflows. | `query`, `include_filings?`, `form_types?`, `filing_limit?` | `readOnlyHint`, `openWorldHint` |
-| `secedgar_search_filings` | Search EDGAR filings since 1993 — EFTS full-text for 2001-present, archive-backed browse (submissions history / quarterly full-index) for pre-2001 ranges. | `query`, `forms?`, `start_date?`, `end_date?`, `limit?`, `offset?` | `readOnlyHint`, `openWorldHint` |
+| `secedgar_company_search` | Find companies and retrieve entity info with optional recent filings. Entry point for most workflows. | `query`, `include_filings?`, `forms?`, `filing_limit?` | `readOnlyHint`, `openWorldHint` |
+| `secedgar_search_filings` | Search EDGAR filings since 1993 — EFTS full-text for 2001-present, archive-backed browse (submissions history / quarterly full-index) for pre-2001 ranges. | `query`, `forms?`, `filed_after?`, `filed_before?`, `limit?`, `offset?` | `readOnlyHint`, `openWorldHint` |
 | `secedgar_get_filing` | Fetch a specific filing's metadata and document content by accession number. | `accession_number`, `cik?`, `content_limit?`, `document?` | `readOnlyHint`, `idempotentHint` |
 | `secedgar_get_financials` | Get historical XBRL financial data for a company. Accepts friendly concept names. | `company`, `concept`, `taxonomy?`, `period_type?` | `readOnlyHint`, `idempotentHint` |
 | `secedgar_compare_metric` | Compare a financial metric across all reporting companies for a specific period. | `concept`, `period`, `unit?`, `limit?`, `sort?` | `readOnlyHint`, `openWorldHint` |
@@ -134,7 +134,7 @@ input: z.object({
       + 'Ticker is the fastest lookup. Name search does fuzzy matching.'),
   include_filings: z.boolean().default(true)
     .describe('Include recent filings in the response. Set to false for entity-info-only lookups.'),
-  form_types: z.array(z.string()).optional()
+  forms: z.array(z.string()).optional()
     .describe('Filter filings to specific form types (e.g., ["10-K", "10-Q", "8-K"]). '
       + 'Without this, returns all form types.'),
   filing_limit: z.number().int().min(1).max(50).default(10)
@@ -157,7 +157,7 @@ output: z.object({
     report_date: z.string().optional(),
     primary_document: z.string(),
     description: z.string().optional(),
-  })).optional().describe('Recent filings, filtered by form_types if specified.'),
+  })).optional().describe('Recent filings, filtered by forms if specified.'),
   total_filings: z.number().optional()
     .describe('Total number of filings matching the filter (may exceed filing_limit).'),
 })
@@ -168,7 +168,7 @@ output: z.object({
 2. If `query` is 1-5 letters → case-insensitive ticker lookup via `Map` (O(1))
 3. Otherwise → name search against `company_tickers.json`: exact match first, then case-insensitive prefix, then substring. Return top 5 scored matches. No fuzzy-matching library needed — prefix + substring covers practical cases across ~10K entries.
 4. Fetch `data.sec.gov/submissions/CIK{padded}.json`
-5. Filter `filings.recent` parallel arrays by `form_types` if provided
+5. Filter `filings.recent` parallel arrays by `forms` if provided
 6. Slice to `filing_limit`
 
 **Error guidance:**
@@ -196,10 +196,10 @@ input: z.object({
   forms: z.array(z.string()).optional()
     .describe('Filter to specific form types (e.g., ["10-K", "10-Q", "8-K"]). '
       + 'Without this, searches all form types.'),
-  start_date: z.string().optional()
-    .describe('Start of date range (YYYY-MM-DD). Both start_date and end_date must be provided for date filtering.'),
-  end_date: z.string().optional()
-    .describe('End of date range (YYYY-MM-DD). Both start_date and end_date must be provided for date filtering.'),
+  filed_after: z.string().optional()
+    .describe('Only include filings filed on or after this date (YYYY-MM-DD). Both filed_after and filed_before must be provided for date filtering.'),
+  filed_before: z.string().optional()
+    .describe('Only include filings filed on or before this date (YYYY-MM-DD). Both filed_after and filed_before must be provided for date filtering.'),
   limit: z.number().int().min(1).max(100).default(20)
     .describe('Results per page. Max 100. Default 20 to keep responses concise.'),
   offset: z.number().int().min(0).default(0)
@@ -489,8 +489,9 @@ output: z.object({
 
 Owns all EDGAR HTTP I/O. Init/accessor pattern — initialized in `setup()`.
 
-- **Rate-limited fetch** — Enforces 10 req/s outbound via minimum 100ms inter-request delay. Separate from the framework's inbound rate limiter — this prevents SEC IP bans.
-- **Retry with backoff** — Retries 429/503 responses with exponential backoff (3 attempts, 1s/2s/4s). SEC returns these intermittently during peak load and maintenance.
+- **Paced fetch** — One process-wide `createPacer` queue spaces request starts to 10 req/s (100ms apart). Separate from the framework's inbound rate limiter — this prevents SEC IP bans.
+- **Retry with backoff** — Retries 500/502/503/504 with exponential backoff (3 attempts, 1s/2s/4s). A 429 is never retried: SEC blocks the IP until its request rate has stayed under the limit for ten minutes, and each request sent meanwhile restarts that clock.
+- **Rate-limit block gate** — A 429 stops all outbound SEC traffic for `EDGAR_RATE_LIMIT_COOLDOWN_SECONDS` (default 600): calls fail locally as `rate_limited` with `retryAfter` counting down, then the first call after the cool-down goes out alone as a probe. Mirror-served reads keep answering during the block.
 - **User-Agent** — Required `"AppName contact@email.com"` header on every request.
 - **CIK resolution** — Loads `company_tickers.json` into memory (TTL: 1 hour). Builds O(1) lookup indexes: ticker → CIK (`Map`), CIK → entity (`Map`). Name search uses case-insensitive prefix then substring against the entity list.
 
@@ -588,6 +589,7 @@ One row per `(cik, taxonomy, tag)` stores the concept's full `units` map verbati
 |:--------|:---------|:--------|:------------|
 | `EDGAR_USER_AGENT` | **Yes** | — | User-Agent string for SEC compliance. Format: `"AppName contact@email.com"`. SEC may block requests without this. |
 | `EDGAR_RATE_LIMIT_RPS` | No | `10` | Max requests per second to SEC APIs. Do not exceed 10. |
+| `EDGAR_RATE_LIMIT_COOLDOWN_SECONDS` | No | `600` | Seconds to stop sending to SEC after a 429 before one probe request goes out. |
 | `EDGAR_TICKER_CACHE_TTL` | No | `3600` | Seconds to cache the company_tickers.json lookup file. |
 
 Minimal config — the API is entirely public and free.
@@ -622,7 +624,7 @@ Every 10-K filing includes prior-year comparatives. Apple's 2023 10-K reports 20
 
 ### Why not parse Form 4 XML?
 
-Insider trading (Form 4) is a common workflow, but Form 4 documents are structured XML requiring dedicated parsing — transaction codes, derivative vs. non-derivative tables, footnotes. This adds significant complexity for a niche use case. The initial design serves insider trading through the general-purpose tools: filter company filings to `form_types: ["4"]`, then read individual filings. A dedicated `secedgar_insider_trades` tool with XML parsing is a natural Phase 2 addition.
+Insider trading (Form 4) is a common workflow, but Form 4 documents are structured XML requiring dedicated parsing — transaction codes, derivative vs. non-derivative tables, footnotes. This adds significant complexity for a niche use case. The initial design serves insider trading through the general-purpose tools: filter company filings to `forms: ["4"]`, then read individual filings. A dedicated `secedgar_insider_trades` tool with XML parsing is a natural Phase 2 addition.
 
 ### Why not wrap an existing npm package?
 
