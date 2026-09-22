@@ -6,7 +6,7 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { companySearchTool } from '@/mcp-server/tools/definitions/company-search.tool.js';
 import type { CikMatch, FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
@@ -208,10 +208,10 @@ describe('companySearchTool', () => {
     expect(result.total_filings).toBeUndefined();
   });
 
-  it('filters filings by form_types', async () => {
+  it('filters filings by forms', async () => {
     mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
     const ctx = createMockContext({ errors: companySearchTool.errors });
-    const input = companySearchTool.input.parse({ query: 'AAPL', form_types: ['10-K'] });
+    const input = companySearchTool.input.parse({ query: 'AAPL', forms: ['10-K'] });
     const result = await companySearchTool.handler(input, ctx);
 
     expect(result.filings).toHaveLength(1);
@@ -287,10 +287,10 @@ describe('companySearchTool', () => {
     expect(blockText(blocks)).toContain('10-K');
   });
 
-  it('populates enrichment notice when form_types filter returns no filings', async () => {
+  it('populates enrichment notice when forms filter returns no filings', async () => {
     mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
     const ctx = createMockContext({ errors: companySearchTool.errors });
-    const input = companySearchTool.input.parse({ query: 'AAPL', form_types: ['S-1'] });
+    const input = companySearchTool.input.parse({ query: 'AAPL', forms: ['S-1'] });
     await companySearchTool.handler(input, ctx);
 
     const enrichment = getEnrichment(ctx);
@@ -301,7 +301,7 @@ describe('companySearchTool', () => {
   it('does not populate enrichment notice when filings are returned', async () => {
     mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
     const ctx = createMockContext({ errors: companySearchTool.errors });
-    const input = companySearchTool.input.parse({ query: 'AAPL', form_types: ['10-K'] });
+    const input = companySearchTool.input.parse({ query: 'AAPL', forms: ['10-K'] });
     await companySearchTool.handler(input, ctx);
 
     const enrichment = getEnrichment(ctx);
@@ -639,7 +639,7 @@ describe('companySearchTool', () => {
     // Recent holds 1 10-K; asking for 3 under-fills → walk the archive for older 10-Ks.
     const input = companySearchTool.input.parse({
       query: 'AAPL',
-      form_types: ['10-K'],
+      forms: ['10-K'],
       filing_limit: 3,
     });
     const result = await companySearchTool.handler(input, ctx);
@@ -663,7 +663,7 @@ describe('companySearchTool', () => {
     // Recent holds 1 10-K and filing_limit is 1 → filled from recent, no archive walk.
     const input = companySearchTool.input.parse({
       query: 'AAPL',
-      form_types: ['10-K'],
+      forms: ['10-K'],
       filing_limit: 1,
     });
     const result = await companySearchTool.handler(input, ctx);
@@ -752,5 +752,50 @@ describe('companySearchTool', () => {
     expect(registerDataframe).not.toHaveBeenCalled();
     expect(result.dataset).toBeUndefined();
     expect(result.total_filings).toBe(2);
+  });
+});
+
+// Through the real argument-parsing path, where `inputAliases` is applied (#115).
+describe('companySearchTool parameter names (#115)', () => {
+  const call = (args: Record<string, unknown>) => runToolContract(companySearchTool, args as never);
+
+  beforeEach(() => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+  });
+
+  it.each(['forms', 'form_types'])('filters filings by form with %s', async (key) => {
+    const result = await call({ query: 'AAPL', [key]: ['10-K'] });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      total_filings: 1,
+      filings: [{ form: '10-K', accession_number: '0000320193-23-000106' }],
+    });
+    const text = blockText(result.content);
+    expect(text).toContain('0000320193-23-000106');
+    expect(text).not.toContain('0000320193-23-000077');
+  });
+
+  it.each([
+    ['filed_after', 'filed_before'],
+    ['start_date', 'end_date'],
+    ['date_from', 'date_to'],
+  ])('bounds the filing date with %s / %s, both ends inclusive', async (after, before) => {
+    const result = await call({ query: 'AAPL', [after]: '2023-08-04', [before]: '2023-08-04' });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      total_filings: 1,
+      filings: [{ form: '10-Q', filing_date: '2023-08-04' }],
+    });
+    expect(blockText(result.content)).toContain('0000320193-23-000077');
+  });
+
+  it('still rejects an unrelated unknown key by name', async () => {
+    const result = await call({ query: 'AAPL', bogus: true });
+
+    expect(result.isError).toBe(true);
+    expect(blockText(result.content)).toContain('bogus');
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
   });
 });

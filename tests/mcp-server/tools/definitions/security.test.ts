@@ -191,8 +191,8 @@ describe('searchFilingsTool — input validation', () => {
     expect(() =>
       searchFilingsTool.input.parse({
         query: 'test',
-        start_date: '2023-01-01',
-        end_date: '2023-12-31',
+        filed_after: '2023-01-01',
+        filed_before: '2023-12-31',
       }),
     ).not.toThrow();
   });
@@ -201,20 +201,20 @@ describe('searchFilingsTool — input validation', () => {
     // Form-based clients may send "" for an omitted optional field — the union
     // variant accepts it and the handler treats it as absent.
     expect(() =>
-      searchFilingsTool.input.parse({ query: 'test', start_date: '', end_date: '' }),
+      searchFilingsTool.input.parse({ query: 'test', filed_after: '', filed_before: '' }),
     ).not.toThrow();
   });
 
-  it('rejects malformed start_date via the pattern (#25)', () => {
+  it('rejects malformed filed_after via the pattern (#25)', () => {
     expect(() =>
-      searchFilingsTool.input.parse({ query: 'test', start_date: '2023/01/01' }),
-    ).toThrow();
+      searchFilingsTool.input.parse({ query: 'test', filed_after: '2023/01/01' }),
+    ).toThrow(/YYYY-MM-DD/);
   });
 
-  it('rejects malformed end_date via the pattern (#25)', () => {
+  it('rejects malformed filed_before via the pattern (#25)', () => {
     expect(() =>
-      searchFilingsTool.input.parse({ query: 'test', end_date: '01-31-2023' }),
-    ).toThrow();
+      searchFilingsTool.input.parse({ query: 'test', filed_before: '01-31-2023' }),
+    ).toThrow(/YYYY-MM-DD/);
   });
 
   it('boolean operator injection in query is passed through safely to API', async () => {

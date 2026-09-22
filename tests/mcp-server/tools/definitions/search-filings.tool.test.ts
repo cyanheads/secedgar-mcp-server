@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
 import type { EftsResponse } from '@/services/edgar/types.js';
@@ -149,8 +149,8 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({
       query: 'revenue growth',
       forms: ['10-K', '10-Q'],
-      start_date: '2023-01-01',
-      end_date: '2023-12-31',
+      filed_after: '2023-01-01',
+      filed_before: '2023-12-31',
       limit: 10,
       offset: 20,
       sort: 'relevance',
@@ -771,8 +771,8 @@ describe('searchFilingsTool', () => {
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({
       forms: ['S-1'],
-      start_date: '2026-06-25',
-      end_date: '2026-07-04',
+      filed_after: '2026-06-25',
+      filed_before: '2026-07-04',
     });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -789,8 +789,8 @@ describe('searchFilingsTool', () => {
     // not valid". The guard fires before any EFTS call.
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({
-      start_date: '2026-06-25',
-      end_date: '2026-07-04',
+      filed_after: '2026-06-25',
+      filed_before: '2026-07-04',
     });
 
     await expect(searchFilingsTool.handler(input, ctx)).rejects.toMatchObject({
@@ -824,8 +824,8 @@ describe('searchFilingsTool', () => {
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({
       forms: ['S-1'],
-      start_date: '2026-06-25',
-      end_date: '2026-07-04',
+      filed_after: '2026-06-25',
+      filed_before: '2026-07-04',
     });
     await searchFilingsTool.handler(input, ctx);
 
@@ -847,8 +847,8 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({
       query: 'xyzabc123',
       forms: ['S-1'],
-      start_date: '2022-01-01',
-      end_date: '2022-06-30',
+      filed_after: '2022-01-01',
+      filed_before: '2022-06-30',
     });
     await searchFilingsTool.handler(input, ctx);
 
@@ -1018,8 +1018,8 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({
       query: 'cik:320193',
       forms: ['10-K'],
-      start_date: '1996-01-01',
-      end_date: '1999-12-31',
+      filed_after: '1996-01-01',
+      filed_before: '1999-12-31',
     });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -1067,8 +1067,8 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({
       query: 'cik:320193',
       forms: ['10-K'],
-      start_date: '1993-01-01',
-      end_date: '1996-12-31',
+      filed_after: '1993-01-01',
+      filed_before: '1996-12-31',
     });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -1106,8 +1106,8 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({
       query: '',
       forms: ['10-K'],
-      start_date: '1998-01-01',
-      end_date: '1998-03-31',
+      filed_after: '1998-01-01',
+      filed_before: '1998-03-31',
     });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -1141,8 +1141,8 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({
       query: '',
       forms: ['10-K'],
-      start_date: '1993-01-01',
-      end_date: '2000-12-31',
+      filed_after: '1993-01-01',
+      filed_before: '2000-12-31',
       limit: 10,
     });
     const result = await searchFilingsTool.handler(input, ctx);
@@ -1159,8 +1159,8 @@ describe('searchFilingsTool', () => {
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({
       query: 'revenue',
-      start_date: '1998-01-01',
-      end_date: '1998-12-31',
+      filed_after: '1998-01-01',
+      filed_before: '1998-12-31',
     });
     await expect(searchFilingsTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ValidationError,
@@ -1169,14 +1169,14 @@ describe('searchFilingsTool', () => {
     expect(mockApi.searchFilings).not.toHaveBeenCalled();
   });
 
-  it('treats end_date 2000-12-31 as pre-2001 → archive full-index, not EFTS (#77)', async () => {
+  it('treats filed_before 2000-12-31 as pre-2001 → archive full-index, not EFTS (#77)', async () => {
     mockApi.fetchFullIndexQuarter.mockResolvedValue([]);
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({
       query: '',
       forms: ['10-K'],
-      start_date: '2000-10-01',
-      end_date: '2000-12-31',
+      filed_after: '2000-10-01',
+      filed_before: '2000-12-31',
     });
     await searchFilingsTool.handler(input, ctx);
 
@@ -1184,12 +1184,12 @@ describe('searchFilingsTool', () => {
     expect(mockApi.searchFilings).not.toHaveBeenCalled();
   });
 
-  it('treats start_date 2001-01-01 as EFTS, not archive — post-2001 unchanged, source: efts (#77)', async () => {
+  it('treats filed_after 2001-01-01 as EFTS, not archive — post-2001 unchanged, source: efts (#77)', async () => {
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({
       query: 'revenue',
-      start_date: '2001-01-01',
-      end_date: '2001-12-31',
+      filed_after: '2001-01-01',
+      filed_before: '2001-12-31',
     });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -1238,8 +1238,8 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({
       query: '',
       forms: ['SC 13D'],
-      start_date: '1998-01-01',
-      end_date: '1998-03-31',
+      filed_after: '1998-01-01',
+      filed_before: '1998-03-31',
     });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -1269,8 +1269,8 @@ describe('searchFilingsTool', () => {
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({
       query: 'cik:0001193125',
-      start_date: '1997-01-01',
-      end_date: '1999-12-31',
+      filed_after: '1997-01-01',
+      filed_before: '1999-12-31',
     });
 
     const err = await caught(searchFilingsTool.handler(input, ctx));
@@ -1300,8 +1300,8 @@ describe('searchFilingsTool', () => {
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({
       query: 'cik:320193',
-      start_date: '1997-01-01',
-      end_date: '1999-12-31',
+      filed_after: '1997-01-01',
+      filed_before: '1999-12-31',
     });
 
     const err = await caught(searchFilingsTool.handler(input, ctx));
@@ -1328,8 +1328,8 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({
       query: 'cik:320193 Macintosh',
       forms: ['10-K'],
-      start_date: '1996-01-01',
-      end_date: '1999-12-31',
+      filed_after: '1996-01-01',
+      filed_before: '1999-12-31',
     });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -1365,8 +1365,8 @@ describe('searchFilingsTool', () => {
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({
       query: 'cik:320193 Macintosh',
-      start_date: '1996-01-01',
-      end_date: '1999-12-31',
+      filed_after: '1996-01-01',
+      filed_before: '1999-12-31',
       limit: 5,
     });
     const result = await searchFilingsTool.handler(input, ctx);
@@ -1391,8 +1391,8 @@ describe('searchFilingsTool', () => {
     // ascending must reach for the oldest candidate first.
     const input = searchFilingsTool.input.parse({
       query: 'cik:320193 Macintosh',
-      start_date: '1993-01-01',
-      end_date: '1999-12-31',
+      filed_after: '1993-01-01',
+      filed_before: '1999-12-31',
       sort: 'filing_date_asc',
     });
     await searchFilingsTool.handler(input, ctx);
@@ -1424,8 +1424,8 @@ describe('searchFilingsTool', () => {
       const result = await searchFilingsTool.handler(
         searchFilingsTool.input.parse({
           query: `cik:320193 ${query}`,
-          start_date: '1998-01-01',
-          end_date: '1998-12-31',
+          filed_after: '1998-01-01',
+          filed_before: '1998-12-31',
         }),
         ctx,
       );
@@ -1452,8 +1452,8 @@ describe('searchFilingsTool', () => {
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({
       query: 'cik:320193 Macintosh',
-      start_date: '1998-01-01',
-      end_date: '1998-12-31',
+      filed_after: '1998-01-01',
+      filed_before: '1998-12-31',
     });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -1477,8 +1477,8 @@ describe('searchFilingsTool', () => {
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({
       query: 'cik:320193 Macintosh',
-      start_date: '1998-01-01',
-      end_date: '1998-12-31',
+      filed_after: '1998-01-01',
+      filed_before: '1998-12-31',
     });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -1548,8 +1548,8 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({
       query: 'cik:320193',
       forms: ['10-K'],
-      start_date: '1999-01-01',
-      end_date: '2003-12-31',
+      filed_after: '1999-01-01',
+      filed_before: '2003-12-31',
       limit: 20,
     });
     const result = await searchFilingsTool.handler(input, ctx);
@@ -1608,8 +1608,8 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({
       query: 'cik:320193',
       forms: ['10-K'],
-      start_date: '2000-01-01',
-      end_date: '2003-12-31',
+      filed_after: '2000-01-01',
+      filed_before: '2003-12-31',
     });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -1662,8 +1662,8 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({
       query: '',
       forms: ['10-K'],
-      start_date: '2000-10-01',
-      end_date: '2001-03-31',
+      filed_after: '2000-10-01',
+      filed_before: '2001-03-31',
       limit: 20,
     });
     const result = await searchFilingsTool.handler(input, ctx);
@@ -1709,8 +1709,8 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({
       query: 'cik:320193 Macintosh',
       forms: ['10-K'],
-      start_date: '1999-01-01',
-      end_date: '2003-12-31',
+      filed_after: '1999-01-01',
+      filed_before: '2003-12-31',
     });
     const result = await searchFilingsTool.handler(input, ctx);
 
@@ -1727,8 +1727,8 @@ describe('searchFilingsTool', () => {
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({
       query: 'material weakness',
-      start_date: '1998-01-01',
-      end_date: '2004-12-31',
+      filed_after: '1998-01-01',
+      filed_before: '2004-12-31',
     });
 
     const err = await caught(searchFilingsTool.handler(input, ctx));
@@ -1780,8 +1780,8 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({
       query: 'cik:320193',
       forms: ['10-K'],
-      start_date: '2000-01-01',
-      end_date: '2003-12-31',
+      filed_after: '2000-01-01',
+      filed_before: '2003-12-31',
       limit: 2,
       offset: 1,
     });
@@ -1829,8 +1829,8 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({
       query: 'cik:320193',
       forms: ['10-K'],
-      start_date: '2000-01-01',
-      end_date: '2003-12-31',
+      filed_after: '2000-01-01',
+      filed_before: '2003-12-31',
       limit: 1,
     });
     const result = await searchFilingsTool.handler(input, ctx);
@@ -1881,13 +1881,75 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({
       query: 'cik:320193',
       forms: ['10-K'],
-      start_date: '2000-01-01',
-      end_date: '2003-12-31',
+      filed_after: '2000-01-01',
+      filed_before: '2003-12-31',
       limit: 1,
     });
     const result = await searchFilingsTool.handler(input, ctx);
 
     expect(result.dataset).toBeUndefined();
     expect(String(getEnrichment(ctx).notice)).not.toContain('secedgar_dataframe_describe');
+  });
+});
+
+// Through the real argument-parsing path, where `inputAliases` is applied (#115).
+describe('searchFilingsTool parameter names (#115)', () => {
+  const call = (args: Record<string, unknown>) => runToolContract(searchFilingsTool, args as never);
+
+  it.each([
+    ['filed_after', 'filed_before'],
+    ['start_date', 'end_date'],
+    ['date_from', 'date_to'],
+  ])('bounds the filing date with %s / %s', async (after, before) => {
+    const result = await call({
+      query: 'material weakness',
+      [after]: '2023-01-01',
+      [before]: '2023-12-31',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.searchFilings).toHaveBeenCalledWith(
+      expect.objectContaining({ startDate: '2023-01-01', endDate: '2023-12-31' }),
+    );
+    expect(result.structuredContent).toMatchObject({ total: 42 });
+    expect(blockText(result.content)).toContain('0000320193-23-000106');
+  });
+
+  it.each(['forms', 'form_types'])('filters by form with %s', async (key) => {
+    const result = await call({ [key]: ['10-K'] });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.searchFilings).toHaveBeenCalledWith(
+      expect.objectContaining({ forms: ['10-K'] }),
+    );
+    expect(blockText(result.content)).toContain('Found 42 filings');
+  });
+
+  it('names the canonical bounds when a retired spelling arrives with only one of them', async () => {
+    const result = await call({ query: 'material weakness', start_date: '2023-01-01' });
+
+    expect(result.isError).toBe(true);
+    const error = (result.structuredContent as { error: { data?: { reason?: string } } }).error;
+    expect(error.data?.reason).toBe('invalid_date_range');
+    const text = blockText(result.content);
+    expect(text).toContain('filed_after');
+    expect(text).toContain('filed_before');
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
+  });
+
+  it('leaves a singular form_type out — one string cannot fill the forms array', async () => {
+    const result = await call({ form_type: '10-K' });
+
+    expect(result.isError).toBe(true);
+    expect(blockText(result.content)).toContain('form_type');
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
+  });
+
+  it('still rejects an unrelated unknown key by name', async () => {
+    const result = await call({ query: 'material weakness', bogus: true });
+
+    expect(result.isError).toBe(true);
+    expect(blockText(result.content)).toContain('bogus');
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
   });
 });

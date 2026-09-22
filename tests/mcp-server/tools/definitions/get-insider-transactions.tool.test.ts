@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getInsiderTransactionsTool } from '@/mcp-server/tools/definitions/get-insider-transactions.tool.js';
 
@@ -157,7 +157,7 @@ beforeEach(() => {
 describe('getInsiderTransactionsTool', () => {
   it('returns transactions for a valid company', async () => {
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL' });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
 
     expect(result.issuer_name).toBe('Apple Inc.');
@@ -169,7 +169,7 @@ describe('getInsiderTransactionsTool', () => {
 
   it('parses sale transaction fields correctly (#46: magnitude + direction)', async () => {
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL' });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
 
     const tx = result.transactions[0]!;
@@ -189,7 +189,7 @@ describe('getInsiderTransactionsTool', () => {
   it('filters to purchases only with transaction_type=purchase', async () => {
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
     const input = getInsiderTransactionsTool.input.parse({
-      ticker_or_cik: 'AAPL',
+      company: 'AAPL',
       transaction_type: 'purchase',
     });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
@@ -202,7 +202,7 @@ describe('getInsiderTransactionsTool', () => {
   it('enrichment notice is set when filter produces empty results', async () => {
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
     const input = getInsiderTransactionsTool.input.parse({
-      ticker_or_cik: 'AAPL',
+      company: 'AAPL',
       transaction_type: 'purchase',
     });
     await getInsiderTransactionsTool.handler(input, ctx);
@@ -216,7 +216,7 @@ describe('getInsiderTransactionsTool', () => {
     mockApi.tryGetFilingDocument.mockResolvedValue(PURCHASE_XML);
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
     const input = getInsiderTransactionsTool.input.parse({
-      ticker_or_cik: 'AAPL',
+      company: 'AAPL',
       transaction_type: 'purchase',
     });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
@@ -232,7 +232,7 @@ describe('getInsiderTransactionsTool', () => {
     mockApi.tryGetFilingDocument.mockResolvedValue(PURCHASE_XML);
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
     const input = getInsiderTransactionsTool.input.parse({
-      ticker_or_cik: 'AAPL',
+      company: 'AAPL',
       transaction_type: 'sale',
     });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
@@ -250,7 +250,7 @@ describe('getInsiderTransactionsTool', () => {
     mockApi.tryGetFilingDocument.mockResolvedValue(SALE_XML);
 
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 1 });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL', limit: 1 });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
 
     expect(result.transactions).toHaveLength(1);
@@ -263,7 +263,7 @@ describe('getInsiderTransactionsTool', () => {
     mockApi.tryGetFilingDocument.mockResolvedValue(null);
 
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL' });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
 
     expect(result.transactions).toHaveLength(0);
@@ -280,7 +280,7 @@ describe('getInsiderTransactionsTool', () => {
     ]);
 
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL' });
     await getInsiderTransactionsTool.handler(input, ctx);
 
     // Should have been called with the bare filename, not the prefixed one
@@ -294,7 +294,7 @@ describe('getInsiderTransactionsTool', () => {
   it('throws company_not_found when CIK resolves to empty array', async () => {
     mockApi.resolveCik.mockResolvedValue([]);
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'XYZNOTREAL' });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'XYZNOTREAL' });
 
     await expect(getInsiderTransactionsTool.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'company_not_found' },
@@ -304,7 +304,7 @@ describe('getInsiderTransactionsTool', () => {
   it('throws no_filings_found when no Form 4 filings exist', async () => {
     mockApi.getRecentFilingsByForm.mockResolvedValue([]);
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL' });
 
     await expect(getInsiderTransactionsTool.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'no_filings_found' },
@@ -322,7 +322,7 @@ describe('getInsiderTransactionsTool', () => {
       .mockResolvedValueOnce(SALE_XML);
 
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL' });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
 
     // The valid filing still produces a transaction
@@ -332,7 +332,7 @@ describe('getInsiderTransactionsTool', () => {
 
   it('enrichment notice absent when transactions are returned', async () => {
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL' });
     await getInsiderTransactionsTool.handler(input, ctx);
 
     const enrichment = getEnrichment(ctx);
@@ -340,13 +340,13 @@ describe('getInsiderTransactionsTool', () => {
   });
 
   it('default input values are applied', () => {
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL' });
     expect(input.transaction_type).toBe('all');
     expect(input.limit).toBe(20);
   });
 
-  it('validates ticker_or_cik must be non-empty', () => {
-    expect(() => getInsiderTransactionsTool.input.parse({ ticker_or_cik: '' })).toThrow();
+  it('validates company must be non-empty', () => {
+    expect(() => getInsiderTransactionsTool.input.parse({ company: '' })).toThrow();
   });
 
   it('formats transaction output correctly (#46: magnitude + direction)', () => {
@@ -507,7 +507,7 @@ describe('getInsiderTransactionsTool', () => {
   it('output contains no process.env values', async () => {
     process.env.EDGAR_USER_AGENT = 'MyApp test@example.com';
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL' });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain('MyApp test@example.com');
@@ -518,7 +518,7 @@ describe('getInsiderTransactionsTool', () => {
     mockApi.resolveCik.mockResolvedValue([]);
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
     const input = getInsiderTransactionsTool.input.parse({
-      ticker_or_cik: "AAPL'; DROP TABLE companies; --",
+      company: "AAPL'; DROP TABLE companies; --",
     });
     await expect(getInsiderTransactionsTool.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'company_not_found' },
@@ -527,9 +527,7 @@ describe('getInsiderTransactionsTool', () => {
 
   // Security: oversized limit is capped by schema
   it('rejects limit above 100', () => {
-    expect(() =>
-      getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 101 }),
-    ).toThrow();
+    expect(() => getInsiderTransactionsTool.input.parse({ company: 'AAPL', limit: 101 })).toThrow();
   });
 });
 
@@ -548,7 +546,7 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
 
   it('omits dataset when the canvas is unavailable', async () => {
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL' });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
 
     expect(result.dataset).toBeUndefined();
@@ -560,7 +558,7 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
     vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
 
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 2 });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL', limit: 2 });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
 
     // Inline preview capped at limit; the full 5-filing scan lands on the canvas.
@@ -591,7 +589,7 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
     vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
 
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 20 });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL', limit: 20 });
     await getInsiderTransactionsTool.handler(input, ctx);
 
     const enrichment = getEnrichment(ctx);
@@ -607,7 +605,7 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
     vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
 
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL' });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
 
     expect(bridge.registerDataframe).not.toHaveBeenCalled();
@@ -628,7 +626,7 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
     vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
 
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL' });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
 
     // Inline: magnitude positive, direction 'dispose'
@@ -650,7 +648,7 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
     vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
 
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 2 });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL', limit: 2 });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
 
     const opts = bridge.registerDataframe.mock.calls[0]![1];
@@ -672,7 +670,7 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
     vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
 
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 1 });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL', limit: 1 });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
 
     // Fetch requested the 40-filing scan floor plus the +1 sentinel, not limit*5=5.
@@ -697,7 +695,7 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
     vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
 
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 1 });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL', limit: 1 });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
 
     expect(result.filings_scanned).toBe(10);
@@ -718,7 +716,7 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
     vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
 
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 20 });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL', limit: 20 });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
 
     expect(result.filings_scanned).toBe(40);
@@ -733,7 +731,7 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
     mockApi.getRecentFilingsByForm.mockResolvedValue(filings(45));
 
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL', limit: 2 });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL', limit: 2 });
     const result = await getInsiderTransactionsTool.handler(input, ctx);
 
     expect(result.dataset).toBeUndefined();
@@ -754,7 +752,7 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
       ),
     );
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: '0001193125' });
+    const input = getInsiderTransactionsTool.input.parse({ company: '0001193125' });
 
     const err = await caught(getInsiderTransactionsTool.handler(input, ctx));
     expect(err.code).toBe(JsonRpcErrorCode.NotFound);
@@ -777,11 +775,50 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
       ),
     );
     const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
-    const input = getInsiderTransactionsTool.input.parse({ ticker_or_cik: 'AAPL' });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL' });
 
     const err = await caught(getInsiderTransactionsTool.handler(input, ctx));
     expect(err.code).toBe(JsonRpcErrorCode.NotFound);
     expect(err.data?.reason).toBeUndefined();
     expect(err.message).toContain('data.sec.gov');
+  });
+});
+
+// Through the real argument-parsing path, where `inputAliases` is applied (#115).
+describe('getInsiderTransactionsTool parameter names (#115)', () => {
+  const call = (args: Record<string, unknown>) =>
+    runToolContract(getInsiderTransactionsTool, args as never);
+
+  it.each([
+    ['company', 'AAPL'],
+    ['ticker', 'AAPL'],
+    ['cik', '320193'],
+    ['ticker_or_cik', 'AAPL'],
+  ])('accepts %s and hands its value to the handler as company', async (key, value) => {
+    const result = await call({ [key]: value });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.resolveCik).toHaveBeenCalledWith(value);
+    expect(result.structuredContent).toMatchObject({
+      issuer_name: 'Apple Inc.',
+      issuer_cik: '0000320193',
+    });
+    expect(blockText(result.content)).toContain('LEVINSON ARTHUR D');
+  });
+
+  it('still rejects an unrelated unknown key by name', async () => {
+    const result = await call({ company: 'AAPL', bogus: true });
+
+    expect(result.isError).toBe(true);
+    expect(blockText(result.content)).toContain('bogus');
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
+  });
+
+  it('rejects an alias sent alongside the canonical key rather than picking one', async () => {
+    const result = await call({ company: 'AAPL', ticker_or_cik: 'MSFT' });
+
+    expect(result.isError).toBe(true);
+    expect(blockText(result.content)).toContain('ticker_or_cik');
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
   });
 });

@@ -643,8 +643,8 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     {
       reason: 'invalid_date_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'Only one of start_date or end_date was provided',
-      recovery: 'Provide both start_date and end_date, or omit both to search all dates.',
+      when: 'Only one of filed_after or filed_before was provided',
+      recovery: 'Provide both filed_after and filed_before, or omit both to search all dates.',
     },
     {
       reason: 'unresolved_ticker',
@@ -652,6 +652,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       when: 'A ticker: targeting token in the query does not resolve to a known company',
       recovery:
         'Verify the symbol with secedgar_company_search, or target by CIK with cik:<number> instead.',
+      thrownBy: 'service',
     },
     {
       reason: 'invalid_cik',
@@ -659,6 +660,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       when: 'A cik: targeting token in the query is not a 1-10 digit number',
       recovery:
         'Pass a numeric CIK such as cik:320193 — find it with secedgar_company_search if unknown.',
+      thrownBy: 'service',
     },
     {
       reason: 'entity_not_found',
@@ -666,6 +668,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       when: 'A cik: targeting token on a pre-2001 date range names a CIK with no EDGAR submissions history',
       recovery:
         'Confirm the CIK with secedgar_company_search — an accession-number prefix names the filing agent, not the issuer.',
+      thrownBy: 'service',
     },
     {
       reason: 'missing_criteria',
@@ -680,6 +683,15 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       when: 'A date range reaching before 2001-01-01 carries free-text terms with no entity scope — no pre-2001 full-text index exists, and nothing bounds a local scan',
       recovery:
         'Add ticker: or cik: entity scope to the query, drop the text terms to browse by form and date, or start the range at 2001-01-01.',
+    },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
+      recovery:
+        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
+      retryable: true,
+      thrownBy: 'service',
     },
   ],
 
@@ -705,7 +717,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .describe(
         'Filter to specific form types (e.g., ["10-K", "10-Q", "8-K"]). Without this, searches all form types. Note: "10-K" also matches amendments filed as 10-K/A. SEC renamed the blockholder schedules on 2024-12-18 — filings before that date are "SC 13D"/"SC 13G", filings after are "SCHEDULE 13D"/"SCHEDULE 13G" — so a filter spanning that boundary must list both spellings. Ownership forms (3, 4, 5) are indexed by the reporting person (e.g., "LEVINSON ARTHUR D"), not the issuer — rows carry no transaction code, share count, or price. Use secedgar_get_insider_transactions to retrieve parsed ownership XML with person, relationship, transaction code, shares, and price.',
       ),
-    start_date: z
+    filed_after: z
       .union([
         z.literal(''),
         z
@@ -715,9 +727,9 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       ])
       .optional()
       .describe(
-        'Start of date range (YYYY-MM-DD). Both start_date and end_date must be provided for date filtering.',
+        'Only include filings filed on or after this date (YYYY-MM-DD). This tool filters by date only with both bounds — pair it with filed_before.',
       ),
-    end_date: z
+    filed_before: z
       .union([
         z.literal(''),
         z
@@ -727,7 +739,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       ])
       .optional()
       .describe(
-        'End of date range (YYYY-MM-DD). Both start_date and end_date must be provided for date filtering.',
+        'Only include filings filed on or before this date (YYYY-MM-DD). This tool filters by date only with both bounds — pair it with filed_after.',
       ),
     limit: z.number().int().min(1).max(100).default(20).describe('Results per page. Max 100.'),
     offset: z
@@ -746,6 +758,14 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         'Result ordering. "filing_date_desc" (default) returns most recent first. "filing_date_asc" returns oldest first. "relevance" returns SEC\'s native search-score order, which weights term match strength over recency. Date sorts re-order the top 100 hits returned by the search index — for broad queries with more than 100 matches and no entity targeting, date-newest filings may sit outside that window. Entity targeting (ticker:/cik:) or a narrower query keeps matches inside the window when absolute recency matters. On the no-query browse path (forms/entity only), EFTS has no relevance signal — every hit scores null — and returns filings in natural date-descending order, so all sort modes effectively yield newest-first. Pre-2001 archive results carry no relevance score either, so relevance collapses to date-descending there.',
       ),
   }),
+  // This tool's former date spellings, and other spellings in use across tools (#115).
+  inputAliases: {
+    start_date: 'filed_after',
+    date_from: 'filed_after',
+    end_date: 'filed_before',
+    date_to: 'filed_before',
+    form_types: 'forms',
+  },
 
   output: z.object({
     total: z
@@ -866,10 +886,10 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
 
   async handler(input, ctx): Promise<SearchFilingsResult> {
     // Validate date range: both or neither
-    if ((input.start_date && !input.end_date) || (!input.start_date && input.end_date)) {
+    if ((input.filed_after && !input.filed_before) || (!input.filed_after && input.filed_before)) {
       throw ctx.fail(
         'invalid_date_range',
-        'Both start_date and end_date are required when filtering by date.',
+        'Both filed_after and filed_before are required when filtering by date.',
         { ...ctx.recoveryFor('invalid_date_range') },
       );
     }
@@ -898,8 +918,8 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     // indexes filings from 2001, so a range reaching earlier is served from the
     // archives — entirely, or (when it also reaches 2001 onward) as the older half
     // of a two-source merge split at the floor (#77, #87).
-    const startDate = input.start_date || undefined;
-    const endDate = input.end_date || undefined;
+    const startDate = input.filed_after || undefined;
+    const endDate = input.filed_before || undefined;
     const hasFreeText = query.trim().length > 0;
     if (startDate && endDate && startDate < EFTS_FULLTEXT_FLOOR) {
       const straddles = endDate >= EFTS_FULLTEXT_FLOOR;
@@ -990,8 +1010,8 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
           query: hasFreeText ? query : undefined,
           entity_cik: entityCik,
           forms: input.forms,
-          start_date: startDate,
-          end_date: endDate,
+          filed_after: startDate,
+          filed_before: endDate,
           source: straddles ? 'efts+archive' : entityCik ? 'submissions' : 'full-index',
         },
         effectiveQuery: straddles
@@ -1022,8 +1042,8 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       query,
       forms: input.forms,
       ciks: entityCik ? [entityCik] : undefined,
-      startDate: input.start_date,
-      endDate: input.end_date,
+      startDate: input.filed_after,
+      endDate: input.filed_before,
       from: fetchFrom,
       size: fetchSize,
     });
@@ -1100,8 +1120,8 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         queryParams: {
           query,
           forms: input.forms,
-          start_date: input.start_date,
-          end_date: input.end_date,
+          filed_after: input.filed_after,
+          filed_before: input.filed_before,
           entity_cik: entityCik,
           source: 'efts',
         },
@@ -1129,8 +1149,8 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       if (query) criteria.push(`"${query}"`);
       if (entityCik) criteria.push(`entity CIK ${entityCik}`);
       if (input.forms?.length) criteria.push(`forms [${input.forms.join(', ')}]`);
-      if (input.start_date && input.end_date) {
-        criteria.push(`dates ${input.start_date} to ${input.end_date}`);
+      if (input.filed_after && input.filed_before) {
+        criteria.push(`dates ${input.filed_after} to ${input.filed_before}`);
       }
       const criteriaText = criteria.length > 0 ? criteria.join(', ') : 'the given criteria';
       ctx.enrich.notice(

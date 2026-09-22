@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getInstitutionalHoldingsTool } from '@/mcp-server/tools/definitions/get-institutional-holdings.tool.js';
 import type { FilingIndex, SubmissionsResponse } from '@/services/edgar/types.js';
@@ -232,7 +232,7 @@ beforeEach(() => {
 describe('getInstitutionalHoldingsTool', () => {
   it('returns holdings for a valid institution', async () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
 
     expect(result.filer_cik).toBe('0000102909');
@@ -244,7 +244,7 @@ describe('getInstitutionalHoldingsTool', () => {
 
   it('parses reporting period from primary_doc.xml in MM-DD-YYYY format', async () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
 
     // MM-DD-YYYY → YYYY-MM-DD
@@ -253,7 +253,7 @@ describe('getInstitutionalHoldingsTool', () => {
 
   it('extracts filer name from primary_doc.xml filingManager', async () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
 
     expect(result.filer_name).toBe('Vanguard Group Inc');
@@ -268,7 +268,7 @@ describe('getInstitutionalHoldingsTool', () => {
       },
     );
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
 
     expect(result.filer_name).toBe('Vanguard Group Inc'); // from resolveCik
@@ -278,7 +278,7 @@ describe('getInstitutionalHoldingsTool', () => {
   it('applies limit to holdings rows', async () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
-      ticker_or_cik: '0000102909',
+      company: '0000102909',
       limit: 1,
     });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
@@ -291,7 +291,7 @@ describe('getInstitutionalHoldingsTool', () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     // consolidate=false to assert raw-row fields (consolidation drops investment_discretion).
     const input = getInstitutionalHoldingsTool.input.parse({
-      ticker_or_cik: '0000102909',
+      company: '0000102909',
       consolidate: false,
     });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
@@ -321,7 +321,7 @@ describe('getInstitutionalHoldingsTool', () => {
     );
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
-      ticker_or_cik: '0000102909',
+      company: '0000102909',
       consolidate: false,
     });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
@@ -339,7 +339,7 @@ describe('getInstitutionalHoldingsTool', () => {
       },
     );
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
 
     expect(result.total_holdings_in_filing).toBe(3); // raw info-table rows
@@ -363,7 +363,7 @@ describe('getInstitutionalHoldingsTool', () => {
     );
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
-      ticker_or_cik: '0000102909',
+      company: '0000102909',
       consolidate: false,
     });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
@@ -386,7 +386,7 @@ describe('getInstitutionalHoldingsTool', () => {
     );
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
-      ticker_or_cik: '0000102909',
+      company: '0000102909',
       limit: 1,
     });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
@@ -419,7 +419,7 @@ describe('getInstitutionalHoldingsTool', () => {
 
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
-      ticker_or_cik: '0000102909',
+      company: '0000102909',
       quarter: '2024-Q2',
     });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
@@ -451,7 +451,7 @@ describe('getInstitutionalHoldingsTool', () => {
 
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
-      ticker_or_cik: '0000102909',
+      company: '0000102909',
       quarter: '2024-Q2',
     });
 
@@ -463,7 +463,7 @@ describe('getInstitutionalHoldingsTool', () => {
   it('throws company_not_found when resolveCik returns empty array', async () => {
     mockApi.resolveCik.mockResolvedValue([]);
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: 'XYZNOTREAL' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: 'XYZNOTREAL' });
 
     await expect(getInstitutionalHoldingsTool.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'company_not_found' },
@@ -482,7 +482,7 @@ describe('getInstitutionalHoldingsTool', () => {
       }),
     );
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });
 
     await expect(getInstitutionalHoldingsTool.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'no_filings_found' },
@@ -492,7 +492,7 @@ describe('getInstitutionalHoldingsTool', () => {
   it('throws no_info_table when filing index fetch fails', async () => {
     mockApi.tryGetFilingIndex.mockResolvedValue(null);
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });
 
     await expect(getInstitutionalHoldingsTool.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'no_info_table' },
@@ -514,7 +514,7 @@ describe('getInstitutionalHoldingsTool', () => {
       },
     });
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });
 
     await expect(getInstitutionalHoldingsTool.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'no_info_table' },
@@ -529,7 +529,7 @@ describe('getInstitutionalHoldingsTool', () => {
       },
     );
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });
 
     await expect(getInstitutionalHoldingsTool.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'no_info_table' },
@@ -545,7 +545,7 @@ describe('getInstitutionalHoldingsTool', () => {
       },
     );
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
 
     expect(result.holdings).toHaveLength(0);
@@ -582,20 +582,20 @@ describe('getInstitutionalHoldingsTool', () => {
       },
     );
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
 
     expect(result.holdings).toHaveLength(2);
   });
 
   it('default input values are applied', () => {
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });
     expect(input.limit).toBe(20);
     expect(input.quarter).toBeUndefined();
   });
 
-  it('validates ticker_or_cik must be non-empty', () => {
-    expect(() => getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '' })).toThrow();
+  it('validates company must be non-empty', () => {
+    expect(() => getInstitutionalHoldingsTool.input.parse({ company: '' })).toThrow();
   });
 
   it('formats holdings output correctly', () => {
@@ -666,7 +666,7 @@ describe('getInstitutionalHoldingsTool', () => {
     mockApi.resolveCik.mockResolvedValue([]);
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
-      ticker_or_cik: '../../../etc/passwd',
+      company: '../../../etc/passwd',
     });
     await expect(getInstitutionalHoldingsTool.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'company_not_found' },
@@ -677,7 +677,7 @@ describe('getInstitutionalHoldingsTool', () => {
   it('output does not contain EDGAR_USER_AGENT env var', async () => {
     process.env.EDGAR_USER_AGENT = 'SecretAgent secret@example.com';
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain('SecretAgent secret@example.com');
@@ -686,7 +686,7 @@ describe('getInstitutionalHoldingsTool', () => {
   // Security: limit schema capped
   it('rejects limit above 500', () => {
     expect(() =>
-      getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909', limit: 501 }),
+      getInstitutionalHoldingsTool.input.parse({ company: '0000102909', limit: 501 }),
     ).toThrow();
   });
 });
@@ -699,7 +699,7 @@ describe('quarter parameter handling', () => {
   it('rejects a malformed quarter string', async () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
-      ticker_or_cik: '0000102909',
+      company: '0000102909',
       quarter: 'badformat',
     });
 
@@ -716,7 +716,7 @@ describe('quarter parameter handling', () => {
 describe('getInstitutionalHoldingsTool — canvas registration (#39)', () => {
   it('omits dataset when the canvas is unavailable', async () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
 
     expect(result.dataset).toBeUndefined();
@@ -727,7 +727,7 @@ describe('getInstitutionalHoldingsTool — canvas registration (#39)', () => {
     vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
-      ticker_or_cik: '0000102909',
+      company: '0000102909',
       limit: 1,
     });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
@@ -757,7 +757,7 @@ describe('getInstitutionalHoldingsTool — canvas registration (#39)', () => {
     vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
-      ticker_or_cik: '0000102909',
+      company: '0000102909',
       consolidate: false,
     });
     await getInstitutionalHoldingsTool.handler(input, ctx);
@@ -777,7 +777,7 @@ describe('getInstitutionalHoldingsTool — canvas registration (#39)', () => {
     const bridge = stubBridge();
     vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
 
     expect(bridge.registerDataframe).not.toHaveBeenCalled();
@@ -797,7 +797,7 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
       { cik: '0000102909', name: 'VANGUARD GROUP INC' },
     ]);
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: 'vanguard group inc' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: 'vanguard group inc' });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
 
     expect(mockApi.resolveEntityByName).toHaveBeenCalledWith('vanguard group inc');
@@ -813,7 +813,7 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
       { cik: '0000102909', name: 'VANGUARD GROUP INC' },
     ]);
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: 'vanguard group' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: 'vanguard group' });
 
     const err = await caught(getInstitutionalHoldingsTool.handler(input, ctx));
     expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
@@ -832,7 +832,7 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
       { cik: '0000222222', name: 'CAPITAL GROUP B', ticker: 'CGB' },
     ]);
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: 'capital group' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: 'capital group' });
 
     const err = await caught(getInstitutionalHoldingsTool.handler(input, ctx));
     expect(err.data.reason).toBe('ambiguous_entity');
@@ -851,7 +851,7 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
       ),
     );
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0001193125' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0001193125' });
 
     const err = await caught(getInstitutionalHoldingsTool.handler(input, ctx));
     expect(err.data.reason).toBe('company_not_found');
@@ -872,7 +872,7 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
       ),
     );
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000102909' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });
 
     const err = await caught(getInstitutionalHoldingsTool.handler(input, ctx));
     expect(err.code).toBe(JsonRpcErrorCode.NotFound);
@@ -908,7 +908,7 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
       }),
     );
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0000789019' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0000789019' });
 
     const err = await caught(getInstitutionalHoldingsTool.handler(input, ctx));
     expect(err.data.reason).toBe('no_filings_found');
@@ -937,7 +937,7 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
       }),
     );
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
-    const input = getInstitutionalHoldingsTool.input.parse({ ticker_or_cik: '0001193125' });
+    const input = getInstitutionalHoldingsTool.input.parse({ company: '0001193125' });
 
     const err = await caught(getInstitutionalHoldingsTool.handler(input, ctx));
     expect(err.data.reason).toBe('no_filings_found');
@@ -990,7 +990,7 @@ describe('getInstitutionalHoldingsTool offset pagination (#94)', () => {
     const run = async (offset: number, limit: number) => {
       const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
       const input = getInstitutionalHoldingsTool.input.parse({
-        ticker_or_cik: '0000102909',
+        company: '0000102909',
         limit,
         offset,
       });
@@ -1011,7 +1011,7 @@ describe('getInstitutionalHoldingsTool offset pagination (#94)', () => {
   it('omits next_offset on the last page', async () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
-      ticker_or_cik: '0000102909',
+      company: '0000102909',
       limit: 5,
       offset: 10,
     });
@@ -1024,7 +1024,7 @@ describe('getInstitutionalHoldingsTool offset pagination (#94)', () => {
   it('explains an offset past the end instead of claiming an empty information table', async () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
-      ticker_or_cik: '0000102909',
+      company: '0000102909',
       limit: 5,
       offset: 50,
     });
@@ -1039,7 +1039,7 @@ describe('getInstitutionalHoldingsTool offset pagination (#94)', () => {
   it('renders both paging controls in format() so content[] matches structuredContent', async () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
-      ticker_or_cik: '0000102909',
+      company: '0000102909',
       limit: 5,
       offset: 5,
     });
@@ -1055,7 +1055,7 @@ describe('getInstitutionalHoldingsTool offset pagination (#94)', () => {
     vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({
-      ticker_or_cik: '0000102909',
+      company: '0000102909',
       limit: 5,
       offset: 5,
     });
@@ -1070,7 +1070,7 @@ describe('getInstitutionalHoldingsTool offset pagination (#94)', () => {
       vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
       const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
       const input = getInstitutionalHoldingsTool.input.parse({
-        ticker_or_cik: '0000102909',
+        company: '0000102909',
         limit: 5,
       });
       await getInstitutionalHoldingsTool.handler(input, ctx);
@@ -1088,7 +1088,7 @@ describe('getInstitutionalHoldingsTool offset pagination (#94)', () => {
       vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
       const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
       const input = getInstitutionalHoldingsTool.input.parse({
-        ticker_or_cik: '0000102909',
+        company: '0000102909',
         limit: 500,
       });
       await getInstitutionalHoldingsTool.handler(input, ctx);
@@ -1102,7 +1102,7 @@ describe('getInstitutionalHoldingsTool offset pagination (#94)', () => {
       vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
       const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
       const input = getInstitutionalHoldingsTool.input.parse({
-        ticker_or_cik: '0000102909',
+        company: '0000102909',
         offset: 999,
       });
       const result = await getInstitutionalHoldingsTool.handler(input, ctx);
@@ -1118,7 +1118,7 @@ describe('getInstitutionalHoldingsTool offset pagination (#94)', () => {
       vi.mocked(getCanvasBridge).mockReturnValue(undefined);
       const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
       const input = getInstitutionalHoldingsTool.input.parse({
-        ticker_or_cik: '0000102909',
+        company: '0000102909',
         limit: 5,
       });
       const result = await getInstitutionalHoldingsTool.handler(input, ctx);
@@ -1127,5 +1127,45 @@ describe('getInstitutionalHoldingsTool offset pagination (#94)', () => {
       expect(getEnrichment(ctx).truncated).toBe(true);
       expect(String(getEnrichment(ctx).notice ?? '')).not.toContain('secedgar_dataframe_describe');
     });
+  });
+});
+
+// Through the real argument-parsing path, where `inputAliases` is applied (#115).
+describe('getInstitutionalHoldingsTool parameter names (#115)', () => {
+  const call = (args: Record<string, unknown>) =>
+    runToolContract(getInstitutionalHoldingsTool, args as never);
+
+  it.each([
+    ['company', '0000102909'],
+    ['cik', '0000102909'],
+    ['ticker', '0000102909'],
+    ['ticker_or_cik', '0000102909'],
+  ])('accepts %s and hands its value to the handler as company', async (key, value) => {
+    const result = await call({ [key]: value });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.resolveCik).toHaveBeenCalledWith(value);
+    expect(result.structuredContent).toMatchObject({
+      filer_cik: '0000102909',
+      accession_number: '0000102909-24-000001',
+    });
+    expect(blockText(result.content)).toContain('13F-HR Holdings');
+    expect(blockText(result.content)).toContain('CIK 0000102909');
+  });
+
+  it('still rejects an unrelated unknown key by name', async () => {
+    const result = await call({ company: '0000102909', bogus: true });
+
+    expect(result.isError).toBe(true);
+    expect(blockText(result.content)).toContain('bogus');
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
+  });
+
+  it('keeps issuer out of the alias set — it names the other direction', async () => {
+    const result = await call({ issuer: 'AAPL' });
+
+    expect(result.isError).toBe(true);
+    expect(blockText(result.content)).toContain('issuer');
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
   });
 });

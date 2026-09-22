@@ -87,13 +87,13 @@ const FILING_TYPES = [
 export const filingTypesResource = resource('secedgar://filing-types', {
   name: 'SEC Filing Types',
   description:
-    'Reference list of common SEC filing types with descriptions, cadence, and typical use cases, plus the full 8-K item-code decode tables for both numbering regimes. Helps choose the forms parameter for secedgar_search_filings, the form_types filter for secedgar_company_search, or the items filter for secedgar_get_material_events.',
+    'Reference list of common SEC filing types with descriptions, cadence, and typical use cases, plus the full 8-K item-code decode tables for both numbering regimes. Helps choose the forms parameter for secedgar_search_filings and secedgar_company_search, or the items filter for secedgar_get_material_events.',
   mimeType: 'text/markdown',
 
   handler(_params, _ctx) {
     const lines: string[] = ['# SEC Filing Types', ''];
     lines.push(
-      'Use these form types with `secedgar_company_search` (form_types filter) and `secedgar_search_filings` (forms filter).',
+      'Use these form types in the `forms` filter of `secedgar_search_filings` and `secedgar_company_search`.',
       '',
     );
     lines.push('| Form | Cadence | Description | Use Cases |');

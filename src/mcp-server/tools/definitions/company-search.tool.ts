@@ -72,7 +72,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       .string()
       .optional()
       .describe(
-        'Guidance when include_filings=true but no filings matched the form_types filter, or when filing_limit withheld some.',
+        'Guidance when include_filings=true but no filings matched the forms filter, or when filing_limit withheld some.',
       ),
     truncated: z
       .boolean()
@@ -96,6 +96,15 @@ export const companySearchTool = tool('secedgar_company_search', {
       when: 'Query is ambiguous and matches several companies',
       recovery: 'Specify a ticker symbol for an exact match instead of a name fragment.',
     },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
+      recovery:
+        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
 
   input: z.object({
@@ -112,11 +121,11 @@ export const companySearchTool = tool('secedgar_company_search', {
       .describe(
         'Include recent filings in the response. Set to false for entity-info-only lookups.',
       ),
-    form_types: z
+    forms: z
       .array(z.string())
       .optional()
       .describe(
-        'Filter filings to specific form types (e.g., ["10-K", "10-Q", "8-K"]). Without this, returns all form types.',
+        'Filter filings to specific form types (e.g., ["10-K", "10-Q", "8-K"]), matched exactly (case-insensitive) — list an amendment such as "10-K/A" to include it. Without this, returns all form types.',
       ),
     filing_limit: z
       .number()
@@ -150,6 +159,14 @@ export const companySearchTool = tool('secedgar_company_search', {
         'Only include filings filed on or before this date (YYYY-MM-DD). Use alone or with filed_after; together they bound the archive-page scan.',
       ),
   }),
+  // Other spellings of the form and filing-date parameters in use across tools (#115).
+  inputAliases: {
+    form_types: 'forms',
+    start_date: 'filed_after',
+    date_from: 'filed_after',
+    end_date: 'filed_before',
+    date_to: 'filed_before',
+  },
 
   output: z.object({
     cik: z.string().describe('Central Index Key, zero-padded to 10 digits.'),
@@ -208,7 +225,7 @@ export const companySearchTool = tool('secedgar_company_search', {
           .describe('One filing record with form type, dates, and primary document.'),
       )
       .optional()
-      .describe('Recent filings, filtered by form_types if specified.'),
+      .describe('Recent filings, filtered by forms if specified.'),
     total_filings: z
       .number()
       .optional()
@@ -317,7 +334,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       const filedAfter = input.filed_after || undefined;
       const filedBefore = input.filed_before || undefined;
       const hasDateFilter = Boolean(filedAfter || filedBefore);
-      const formTypes = input.form_types?.length ? input.form_types : undefined;
+      const formTypes = input.forms?.length ? input.forms : undefined;
 
       const matches = (f: FilingEntry) =>
         (!formTypes || formTypes.some((ft) => f.form.toUpperCase() === ft.toUpperCase())) &&
@@ -389,7 +406,7 @@ export const companySearchTool = tool('secedgar_company_search', {
           sourceTool: 'secedgar_company_search',
           queryParams: {
             cik: match.cik,
-            form_types: input.form_types,
+            forms: input.forms,
             filed_after: filedAfter,
             filed_before: filedBefore,
           },
@@ -399,9 +416,9 @@ export const companySearchTool = tool('secedgar_company_search', {
       }
     }
 
-    if (input.include_filings && input.form_types?.length && totalFilings === 0) {
+    if (input.include_filings && input.forms?.length && totalFilings === 0) {
       ctx.enrich.notice(
-        `No filings matched form types [${input.form_types.join(', ')}] for this entity. Try different form types or remove the filter.`,
+        `No filings matched form types [${input.forms.join(', ')}] for this entity. Try different form types or remove the filter.`,
       );
     } else if (
       filings !== undefined &&

@@ -74,7 +74,7 @@ SEC EDGAR filings, XBRL financials, and company ownership data, keyless aside fr
 - ETFs and mutual funds resolve by ticker via `company_tickers_mf.json`; fund results carry `series_id` and `class_id`
 - Corporate suffix form need not match the registry (`Beacon Financial Corporation` → `Beacon Financial Corp`), but `Corp`/`Inc`/`Co`/`Ltd` stay distinct — separate registrants can differ only by which one they use
 - Near-match suggestions on a zero-result name or ticker search (e.g. `Microsfot` → `MICROSOFT CORP / MSFT`)
-- Optional recent filings inline with form-type filtering; `filed_after`/`filed_before` and under-filled form filters page into the older submissions archive, reaching filings past the ~1000-entry recent window — `history_scanned_through` reports the scan depth, and the full filtered history stages as `df_<id>` when it exceeds `filing_limit`
+- Optional recent filings inline, filtered by `forms` (exact form match — list `10-K/A` to include amendments); `filed_after`/`filed_before` and under-filled form filters page into the older submissions archive, reaching filings past the ~1000-entry recent window — `history_scanned_through` reports the scan depth, and the full filtered history stages as `df_<id>` when it exceeds `filing_limit`
 - Returns entity metadata — SIC code, exchanges, fiscal year end, state of incorporation
 
 ---
@@ -85,7 +85,7 @@ SEC EDGAR filings, XBRL financials, and company ownership data, keyless aside fr
 - Browse mode (omit `query`) lists by form type and/or entity, optionally narrowed by date; a bare date range must pair with forms or entity targeting
 - Pre-2001 date ranges (back to 1993) route to the archives — entity-scoped reads the filer's full submissions history, unscoped browses the quarterly full-index; pre-2001 free-text search needs `ticker:`/`cik:` entity scope, since it works by reading up to 50 candidate documents (`scan` reports candidates/scanned/matched, costing ~5s for a full scan)
 - A range crossing 2001-01-01 is split at the boundary and merged, each row tagged with its `source` (`efts`/`submissions`/`full-index`); `period_ending`, `ticker`, `file_description`, `sic`, and `location` exist only on `efts` rows
-- Date range and form-type filtering, pagination up to 10,000 results; response includes form distribution for narrowing follow-up searches
+- Filing-date range (`filed_after` + `filed_before`, both inclusive, both required together) and form filtering (`forms`, amendments included), pagination up to 10,000 results; response includes form distribution for narrowing follow-up searches
 - The full result set stages as `df_<id>` when it exceeds the inline limit
 
 ---
@@ -136,6 +136,7 @@ SEC EDGAR filings, XBRL financials, and company ownership data, keyless aside fr
 ### `secedgar_get_insider_transactions` <sub>tool</sub>
 
 - Parses Form 4 / 4-A insider transactions from ownership XML; Form 3 initial statements and Form 5 annual statements are not covered — reach those with `secedgar_search_filings` (`forms: ["3", "5"]`) plus `secedgar_get_filing`
+- `company` is the issuer — a ticker, CIK, or company name; a name matching several companies resolves to the top-ranked match, so pass a ticker or CIK when the issuer must be exact
 - Reporting person, relationship to issuer (director, officer + title, 10% owner), and transaction date
 - Transaction code mapped to a readable type (purchase, sale, gift, award, exercise, …); shares signed by acquired/disposed, price per share, and shares owned after each transaction; covers non-derivative (open-market) and derivative (option/RSU) lines
 - Filter by `transaction_type` (`purchase`, `sale`, `all`); scans newest filings first
@@ -145,7 +146,7 @@ SEC EDGAR filings, XBRL financials, and company ownership data, keyless aside fr
 
 ### `secedgar_get_institutional_holdings` <sub>tool</sub>
 
-- Pass the institutional filer (CIK or full legal name, e.g. `0000102909` for Vanguard) to see what it holds; for the reverse direction — which managers hold a given company — use `secedgar_find_holders`, whose `filer_cik` results feed straight back into this tool
+- Pass the institutional filer as `company` (CIK, ticker, or full legal name, e.g. `0000102909` for Vanguard) to see what it holds; for the reverse direction — which managers hold a given company — use `secedgar_find_holders`, whose `filer_cik` results feed straight back into this tool
 - Each holding: issuer name, CUSIP, market value (whole USD), shares/principal, and put/call; raw rows also carry investment discretion
 - Sub-lines for the same security are consolidated into distinct positions sorted by value by default — pass `consolidate: false` for raw filing rows
 - Resolves the filing-manager name and reporting quarter from the cover page; target a specific quarter with `quarter` (e.g. `"2025-Q4"`)
@@ -257,7 +258,7 @@ SEC EDGAR filings, XBRL financials, and company ownership data, keyless aside fr
 
 - Common SEC filing types with descriptions, cadence, and typical use cases, returned as `text/markdown`
 - Includes the full 8-K item-code decode tables for both numbering regimes (the current dotted scheme and the pre-2004-08-23 legacy integers)
-- Helps choose the `forms` parameter for `secedgar_search_filings`, the `form_types` filter for `secedgar_company_search`, or the `items` filter for `secedgar_get_material_events`
+- Helps choose the `forms` filter for `secedgar_search_filings` and `secedgar_company_search`, or the `items` filter for `secedgar_get_material_events`
 
 ---
 
@@ -274,7 +275,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 EDGAR-specific:
 
-- Rate-limited HTTP client honoring SEC's 10 req/s limit with automatic inter-request delay; a 429 fails fast with a cool-down hint instead of retrying, since SEC's own block window outlasts any retry budget
+- One request queue per process paces SEC calls under the 10 req/s limit; a 429 is never retried — it stops all outbound SEC traffic for the ten-minute block (`EDGAR_RATE_LIMIT_COOLDOWN_SECONDS`), refusing calls locally with a `retryAfter` countdown so the block can clear, then sends a single probe before resuming. Reads served from the opt-in local mirror keep answering throughout
 - CIK resolution from tickers (including ETFs and mutual funds via `company_tickers_mf.json`), current and former company names, or raw CIK numbers, with local caching, corporate-suffix normalization, and near-match trigram suggestions on zero-result queries
 - Friendly XBRL concept name mapping with historical tag-change handling and a searchable, reverse-lookupable concept catalog
 - HTML-to-text conversion for filing documents, with heading detection and offset-based paging for oversized filings
@@ -285,6 +286,7 @@ Agent-friendly output:
 - In-conversation SQL analytics — data-returning tools materialize their full result as a DuckDB-backed canvas dataframe (`df_<id>`); inspect its columns with `secedgar_dataframe_describe`, then query with `secedgar_dataframe_query`
 - Discriminated outputs — `source` fields on merged filing-search rows (`efts`/`submissions`/`full-index`), typed `caveats` entries for series staleness and fiscal-Q4 gaps, and `gaps`/`failed_companies` rows instead of silent omission
 - Graceful partial failure — `secedgar_compare_companies` returns every resolved company alongside `failed_companies` and per-concept `gaps` rather than failing the whole request
+- One parameter name per concept — `company`, `filed_after`/`filed_before`, and `forms` mean the same thing on every tool that takes them, and each tool also accepts the other common spellings (`ticker`, `cik`, `ticker_or_cik`, `start_date`/`end_date`, `date_from`/`date_to`, `form_types`), so a name carried over from another tool is not rejected
 - Provenance on scan and staleness — `history_scanned_through`, `publication_lag_days`, and `dataset.truncated` let agents reason about scan depth, report lag, and completeness
 
 ## Getting started
@@ -407,6 +409,7 @@ All configuration is validated at startup via Zod schemas in `src/config/server-
 |:---|:---|:---|
 | `EDGAR_USER_AGENT` | **Required.** User-Agent header for SEC compliance. Format: `"AppName contact@email.com"`. SEC blocks IPs without a valid User-Agent. | — |
 | `EDGAR_RATE_LIMIT_RPS` | Max requests/second to SEC APIs. Do not exceed 10. | `10` |
+| `EDGAR_RATE_LIMIT_COOLDOWN_SECONDS` | Seconds to stop sending to SEC after a 429. Calls are refused locally with a `retryAfter` countdown, then one probe request goes out. SEC lifts its block only after ten quiet minutes, so a shorter value just probes into it. | `600` |
 | `EDGAR_TICKER_CACHE_TTL` | Seconds to cache the company tickers lookup file. | `3600` |
 | `EDGAR_DATASET_TTL_SECONDS` | Per-table TTL for canvas-registered dataframes. Sliding window touched on every dataframe op. | `86400` |
 | `EDGAR_DATAFRAME_DROP_ENABLED` | Set to `true` to expose `secedgar_dataframe_drop` — the only destructive tool on this server. Off by default; TTL handles cleanup, and the tool is still listed on the HTTP landing page as disabled, with the flag that enables it. | `false` |

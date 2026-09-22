@@ -60,7 +60,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     {
       reason: 'company_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The ticker or CIK does not resolve to a known company',
+      when: 'The company input does not resolve to a known company',
       recovery: 'Use secedgar_company_search to find the correct ticker or CIK.',
     },
     {
@@ -69,14 +69,23 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       when: 'No Form 4 filings exist for this company in the recent submissions window',
       recovery: 'Use secedgar_search_filings with forms=["4"] for broader historical coverage.',
     },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
+      recovery:
+        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
 
   input: z.object({
-    ticker_or_cik: z
+    company: z
       .string()
       .min(1)
       .describe(
-        'Company ticker symbol (e.g., "AAPL") or 10-digit CIK number (e.g., "0000320193"). The issuer, not the reporting person.',
+        'The issuer whose Form 4 filings to read — the company, not the reporting person. A ticker symbol (e.g., "AAPL"), a CIK with or without zero-padding (e.g., "320193" or "0000320193"), or a company name (current or former). A name matching several companies resolves to the top-ranked one — exact name first, then prefix, then substring — so pass a ticker or CIK when the issuer must be exact.',
       ),
     transaction_type: z
       .enum(['purchase', 'sale', 'all'])
@@ -94,6 +103,8 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
         'Maximum number of transactions to return across all Form 4 filings fetched. Filings are scanned newest-first. Default 20.',
       ),
   }),
+  // Other tools' spellings of the company parameter, and this tool's former one (#115).
+  inputAliases: { ticker: 'company', cik: 'company', ticker_or_cik: 'company' },
 
   output: z.object({
     issuer_name: z.string().describe('Issuer entity name (SEC-conformed).'),
@@ -218,10 +229,10 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     const api = getEdgarApiService();
 
     // Resolve company to CIK
-    const resolved = await api.resolveCik(input.ticker_or_cik);
+    const resolved = await api.resolveCik(input.company);
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
     if (!match || (Array.isArray(resolved) && resolved.length === 0)) {
-      throw ctx.fail('company_not_found', `Company '${input.ticker_or_cik}' not found.`, {
+      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`, {
         ...ctx.recoveryFor('company_not_found'),
       });
     }
@@ -265,7 +276,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     const filingsToScan = moreBeyondWindow ? filingBatch.slice(0, scanCap) : filingBatch;
 
     if (filingBatch.length === 0) {
-      throw ctx.fail('no_filings_found', `No Form 4 filings found for '${input.ticker_or_cik}'.`, {
+      throw ctx.fail('no_filings_found', `No Form 4 filings found for '${input.company}'.`, {
         ...ctx.recoveryFor('no_filings_found'),
       });
     }
@@ -360,7 +371,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
           ? ` with transaction_type="${input.transaction_type}"`
           : '';
       ctx.enrich.notice(
-        `No insider transactions found for '${input.ticker_or_cik}'${filterNote} in the ${filingsScanned} most recent Form 4 filings. ` +
+        `No insider transactions found for '${input.company}'${filterNote} in the ${filingsScanned} most recent Form 4 filings. ` +
           `Try transaction_type="all" or use secedgar_search_filings with forms=["4"] for broader coverage.`,
       );
     }
@@ -403,7 +414,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
         })),
         sourceTool: 'secedgar_get_insider_transactions',
         queryParams: {
-          ticker_or_cik: input.ticker_or_cik,
+          company: input.company,
           cik: match.cik,
           transaction_type: input.transaction_type,
         },
@@ -433,7 +444,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     });
 
     return {
-      issuer_name: match.name ?? input.ticker_or_cik,
+      issuer_name: match.name ?? input.company,
       issuer_cik: match.cik,
       issuer_ticker: issuerTicker,
       transactions: inlineTransactions,

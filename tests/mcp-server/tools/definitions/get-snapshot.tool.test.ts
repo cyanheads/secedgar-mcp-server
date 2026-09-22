@@ -4,7 +4,7 @@
  * @module tests/mcp-server/tools/definitions/get-snapshot.tool
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getSnapshotTool } from '@/mcp-server/tools/definitions/get-snapshot.tool.js';
 import type { CompanyConceptUnit, CompanyFactsResponse } from '@/services/edgar/types.js';
@@ -411,5 +411,31 @@ describe('getSnapshotTool', () => {
     expect(text).toContain('0000320193-24-000123');
     expect(text).toContain('Not reported');
     expect(text).toContain('tried: Goodwill');
+  });
+});
+
+// Through the real argument-parsing path, where `inputAliases` is applied (#115).
+describe('getSnapshotTool parameter names (#115)', () => {
+  const call = (args: Record<string, unknown>) => runToolContract(getSnapshotTool, args as never);
+
+  it.each([
+    ['ticker', 'AAPL'],
+    ['cik', '320193'],
+    ['ticker_or_cik', 'AAPL'],
+  ])('accepts %s as an alias of company', async (key, value) => {
+    const result = await call({ [key]: value });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.resolveCik).toHaveBeenCalledWith(value);
+    expect(result.structuredContent).toMatchObject({ company: 'Apple Inc.', cik: '0000320193' });
+    expect(blockText(result.content)).toContain('annual CY2024 = 391035000000');
+  });
+
+  it('still rejects an unrelated unknown key by name', async () => {
+    const result = await call({ company: 'AAPL', bogus: true });
+
+    expect(result.isError).toBe(true);
+    expect(blockText(result.content)).toContain('bogus');
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
   });
 });

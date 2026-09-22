@@ -78,6 +78,15 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
       recovery:
         'Check the filer files XBRL financial statements, or read the filings directly with secedgar_search_filings.',
     },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
+      recovery:
+        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
 
   input: z.object({
@@ -98,6 +107,8 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
         'Which duration periods to report per concept: the latest full year, the latest single quarter, or both (default). Balance-sheet and entity-info concepts are point-in-time and always report their latest instant value regardless of this setting.',
       ),
   }),
+  // Other spellings of the company parameter in use across tools (#115).
+  inputAliases: { ticker: 'company', cik: 'company', ticker_or_cik: 'company' },
 
   output: z.object({
     company: z.string().describe('Resolved entity name (SEC-conformed).'),

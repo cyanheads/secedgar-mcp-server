@@ -93,6 +93,15 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       when: 'The query is ambiguous and matches several companies',
       recovery: 'Retry with a ticker symbol or the 10-digit CIK from the matches list.',
     },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
+      recovery:
+        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
 
   input: z.object({
@@ -144,6 +153,16 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
         'Filings returned inline, newest first. The full filtered set is materialized as a dataframe when it exceeds this and a canvas is available. Default 20.',
       ),
   }),
+  // Other spellings of the company and filing-date parameters in use across tools (#115).
+  inputAliases: {
+    ticker: 'company',
+    cik: 'company',
+    ticker_or_cik: 'company',
+    start_date: 'filed_after',
+    date_from: 'filed_after',
+    end_date: 'filed_before',
+    date_to: 'filed_before',
+  },
 
   output: z.object({
     cik: z

@@ -6,10 +6,11 @@
  */
 
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getMaterialEventsTool } from '@/mcp-server/tools/definitions/get-material-events.tool.js';
 import type { FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
+import { blockText } from '../../../support/assertions.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/edgar/edgar-api-service.js')>();
@@ -432,5 +433,48 @@ describe('getMaterialEventsTool', () => {
     expect(rendered).toContain('2.02 Results of Operations and Financial Condition [current]');
     expect(rendered).toContain('Item distribution across the scanned window: 2.02: 2, 9.01: 3');
     expect(rendered).toContain('History scanned through: 2015-06-10');
+  });
+});
+
+// Through the real argument-parsing path, where `inputAliases` is applied (#115).
+describe('getMaterialEventsTool parameter names (#115)', () => {
+  const call = (args: Record<string, unknown>) =>
+    runToolContract(getMaterialEventsTool, args as never);
+
+  it.each([
+    ['ticker', 'AAPL'],
+    ['cik', '320193'],
+    ['ticker_or_cik', 'AAPL'],
+  ])('accepts %s as an alias of company', async (key, value) => {
+    const result = await call({ [key]: value });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.resolveCik).toHaveBeenCalledWith(value);
+    expect(result.structuredContent).toMatchObject({ cik: '0000320193', total_8k_scanned: 5 });
+    expect(blockText(result.content)).toContain('Apple Inc.');
+  });
+
+  it.each([
+    ['filed_after', 'filed_before'],
+    ['start_date', 'end_date'],
+    ['date_from', 'date_to'],
+  ])('bounds the filing date with %s / %s, both ends inclusive', async (after, before) => {
+    // Both bounds land exactly on a filing date, and both of those filings stay in.
+    const result = await call({ company: 'AAPL', [after]: '2026-02-24', [before]: '2026-04-20' });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ total_matched: 2 });
+    const text = blockText(result.content);
+    expect(text).toContain('0001140361-26-015711');
+    expect(text).toContain('0001140361-26-006577');
+    expect(text).not.toContain('0000320193-26-000011');
+  });
+
+  it('still rejects an unrelated unknown key by name', async () => {
+    const result = await call({ company: 'AAPL', bogus: true });
+
+    expect(result.isError).toBe(true);
+    expect(blockText(result.content)).toContain('bogus');
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
   });
 });

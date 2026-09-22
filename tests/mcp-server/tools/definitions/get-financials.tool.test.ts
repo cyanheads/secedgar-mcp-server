@@ -1477,3 +1477,29 @@ describe('dataframe registration (#72)', () => {
     });
   });
 });
+
+// Through the real argument-parsing path, where `inputAliases` is applied (#115).
+describe('getFinancialsTool parameter names (#115)', () => {
+  const call = (args: Record<string, unknown>) => runToolContract(getFinancialsTool, args as never);
+
+  it.each([
+    ['ticker', 'AAPL'],
+    ['cik', '320193'],
+    ['ticker_or_cik', 'AAPL'],
+  ])('accepts %s as an alias of company', async (key, value) => {
+    const result = await call({ [key]: value, concept: 'revenue' });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.resolveCik).toHaveBeenCalledWith(value);
+    expect(result.structuredContent).toMatchObject({ company: 'Apple Inc.', cik: '0000320193' });
+    expect(blockText(result.content)).toContain('Apple Inc.');
+  });
+
+  it('still rejects an unrelated unknown key by name', async () => {
+    const result = await call({ company: 'AAPL', concept: 'revenue', bogus: true });
+
+    expect(result.isError).toBe(true);
+    expect(blockText(result.content)).toContain('bogus');
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
+  });
+});

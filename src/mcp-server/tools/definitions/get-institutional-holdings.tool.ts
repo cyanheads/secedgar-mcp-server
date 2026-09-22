@@ -1,6 +1,6 @@
 /**
  * @fileoverview Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR
- * information table XML. Institution lookup only — `ticker_or_cik` is the 13F filer.
+ * information table XML. Institution lookup only — `company` is the 13F filer.
  * The reverse direction (which institutions hold an issuer) is secedgar_find_holders,
  * which searches the information tables by CUSIP and returns filer CIKs to feed back
  * into this tool (#81).
@@ -148,14 +148,14 @@ function recentFilingsOfForm(
 export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_holdings', {
   title: 'Get Institutional Holdings',
   description:
-    'Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR information table XML. ticker_or_cik is the institutional filer — its 10-digit CIK (e.g. 0000102909), or an entity name resolved through EDGAR entity search — and the tool returns what that institution holds. A name that matches several EDGAR filers (some legal names are shared across entities) returns those candidates so you can retry with the exact CIK, rather than guessing. For the reverse direction — which institutions hold a given portfolio company — use secedgar_find_holders, whose filer_cik results feed straight back into this tool. The 13F information table lists each position: issuer name, CUSIP, shares held, market value (in whole USD), and put/call designation for options. Sub-lines for the same security are consolidated into distinct positions sorted by value by default (set consolidate=false for raw filing rows). The inline holdings list is one page of limit rows starting at offset — pass the returned next_offset to walk further down a large information table. The full parsed holdings set is also materialized as df_<id> when a canvas is available — inspect it with secedgar_dataframe_describe, then query it with secedgar_dataframe_query to aggregate the whole filing or self-join across quarters on cusip + reporting_period. Institutions with less than $100M in 13(f) securities are exempt and may not file. Use secedgar_search_filings with forms=["13F-HR"] for broader search.',
+    'Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR information table XML. company is the institutional filer — its 10-digit CIK (e.g. 0000102909), a ticker, or an entity name (names outside EDGAR\'s ticker file resolve through EDGAR entity search) — and the tool returns what that institution holds. A name that matches several EDGAR filers (some legal names are shared across entities) returns those candidates so you can retry with the exact CIK, rather than guessing. For the reverse direction — which institutions hold a given portfolio company — use secedgar_find_holders, whose filer_cik results feed straight back into this tool. The 13F information table lists each position: issuer name, CUSIP, shares held, market value (in whole USD), and put/call designation for options. Sub-lines for the same security are consolidated into distinct positions sorted by value by default (set consolidate=false for raw filing rows). The inline holdings list is one page of limit rows starting at offset — pass the returned next_offset to walk further down a large information table. The full parsed holdings set is also materialized as df_<id> when a canvas is available — inspect it with secedgar_dataframe_describe, then query it with secedgar_dataframe_query to aggregate the whole filing or self-join across quarters on cusip + reporting_period. Institutions with less than $100M in 13(f) securities are exempt and may not file. Use secedgar_search_filings with forms=["13F-HR"] for broader search.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
     {
       reason: 'company_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The ticker or CIK does not resolve to a known company or institution',
+      when: 'The company input does not resolve to a known company or institution',
       recovery: 'Use secedgar_company_search to find the correct CIK or full entity name.',
     },
     {
@@ -178,14 +178,23 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       recovery:
         'Use secedgar_get_filing with the accession number to inspect the filing documents directly.',
     },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
+      recovery:
+        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
 
   input: z.object({
-    ticker_or_cik: z
+    company: z
       .string()
       .min(1)
       .describe(
-        'The institutional filer whose 13F to fetch — a 10-digit CIK (e.g. "0000102909" for VANGUARD GROUP INC, the most reliable form) or an entity name. Names resolve through EDGAR entity search, which covers institutional managers absent from the ticker file; a name matching several filers (some legal names are shared across entities) returns those candidates so you can retry with the exact CIK. This is NOT the portfolio company — passing an issuer ticker like "AAPL" finds that operating company\'s own filings (it files no 13F), not who holds it; use secedgar_find_holders for that direction.',
+        'The institutional filer whose 13F to fetch — a 10-digit CIK (e.g. "0000102909" for VANGUARD GROUP INC, the most reliable form), a ticker, or an entity name. A name is matched against the registrants in EDGAR\'s ticker file first (current and former names) and, when none match, resolved through EDGAR entity search, which covers institutional managers absent from that file; a name matching several filers (some legal names are shared across entities) returns those candidates so you can retry with the exact CIK. This is NOT the portfolio company — passing an issuer ticker like "AAPL" finds that operating company\'s own filings (it files no 13F), not who holds it; use secedgar_find_holders for that direction.',
       ),
     quarter: z
       .string()
@@ -217,6 +226,8 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
         'When true (default), info-table sub-lines for the same security (CUSIP + class + put/call) are summed into one position and results are sorted by market value descending, so `limit` returns the largest distinct holdings. Set false to return raw information-table rows in filing order (one per investment-discretion/manager sub-line), preserving investment_discretion.',
       ),
   }),
+  // Other tools' spellings of the company parameter, and this tool's former one (#115).
+  inputAliases: { ticker: 'company', cik: 'company', ticker_or_cik: 'company' },
 
   output: z.object({
     filer_name: z.string().describe('Name of the institutional filer (the 13F submitter).'),
@@ -341,11 +352,11 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     // institutional managers, trusts, individuals — that company_tickers.json can never
     // contain (#73). Both paths normalize to a candidate list so ambiguity is handled
     // uniformly and index 0 is never taken silently.
-    const resolved = await api.resolveCik(input.ticker_or_cik);
+    const resolved = await api.resolveCik(input.company);
     const candidates: Array<{ cik: string; name: string | undefined; ticker: string | undefined }> =
       Array.isArray(resolved)
         ? resolved.length === 0
-          ? (await api.resolveEntityByName(input.ticker_or_cik)).map((m) => ({
+          ? (await api.resolveEntityByName(input.company)).map((m) => ({
               cik: m.cik,
               name: m.name,
               ticker: undefined,
@@ -361,7 +372,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       const list = shown.map((c) => `${c.cik}${c.name ? ` (${c.name})` : ''}`).join(', ');
       throw ctx.fail(
         'ambiguous_entity',
-        `'${input.ticker_or_cik}' matches multiple EDGAR entities: ${list}. Retry with the exact 10-digit CIK.`,
+        `'${input.company}' matches multiple EDGAR entities: ${list}. Retry with the exact 10-digit CIK.`,
         {
           ...ctx.recoveryFor('ambiguous_entity'),
           matches: shown.map((c) => ({ cik: c.cik, name: c.name, ticker: c.ticker })),
@@ -370,7 +381,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     }
     const [match] = candidates;
     if (!match) {
-      throw ctx.fail('company_not_found', `Entity '${input.ticker_or_cik}' not found.`, {
+      throw ctx.fail('company_not_found', `Entity '${input.company}' not found.`, {
         ...ctx.recoveryFor('company_not_found'),
       });
     }
@@ -430,10 +441,10 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
           const tickerSuffix = submissions.tickers[0] ? ` (${submissions.tickers[0]})` : '';
           throw ctx.fail(
             'no_filings_found',
-            `No 13F-HR filings found for '${input.ticker_or_cik}' — resolves to ${submissions.name}${tickerSuffix}, an operating company (files ${operatingForms.join(', ')}), not an institutional investment manager. To find which managers hold it, use secedgar_find_holders; for financials use secedgar_get_financials.`,
+            `No 13F-HR filings found for '${input.company}' — resolves to ${submissions.name}${tickerSuffix}, an operating company (files ${operatingForms.join(', ')}), not an institutional investment manager. To find which managers hold it, use secedgar_find_holders; for financials use secedgar_get_financials.`,
             {
               recovery: {
-                hint: `${submissions.name} is an operating company, not a 13F filer. Use secedgar_find_holders with issuer "${input.ticker_or_cik}" to list its institutional holders.`,
+                hint: `${submissions.name} is an operating company, not a 13F filer. Use secedgar_find_holders with issuer "${input.company}" to list its institutional holders.`,
               },
               resolved_cik: match.cik,
               resolved_name: submissions.name,
@@ -458,14 +469,14 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
         // unknown, so keep the generic recovery.
         throw ctx.fail(
           'no_filings_found',
-          `No 13F-HR filings found for '${input.ticker_or_cik}' (resolves to ${submissions.name}). This entity is not a 13F institutional filer.`,
+          `No 13F-HR filings found for '${input.company}' (resolves to ${submissions.name}). This entity is not a 13F institutional filer.`,
           { ...ctx.recoveryFor('no_filings_found') },
         );
       }
       // 13F filings exist, but none for the requested quarter (#31) — a real 13F filer.
       throw ctx.fail(
         'no_filings_found',
-        `No 13F-HR filings found for '${input.ticker_or_cik}' for quarter "${input.quarter}".`,
+        `No 13F-HR filings found for '${input.company}' for quarter "${input.quarter}".`,
         { ...ctx.recoveryFor('no_filings_found') },
       );
     }
@@ -590,7 +601,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
         })),
         sourceTool: 'secedgar_get_institutional_holdings',
         queryParams: {
-          ticker_or_cik: input.ticker_or_cik,
+          company: input.company,
           cik: match.cik,
           quarter: input.quarter,
           consolidate: input.consolidate,
@@ -642,7 +653,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     });
 
     return {
-      filer_name: filerName ?? match.name ?? input.ticker_or_cik,
+      filer_name: filerName ?? match.name ?? input.company,
       filer_cik: match.cik,
       reporting_period: reportingPeriod,
       filing_date: filingMeta.filingDate,
