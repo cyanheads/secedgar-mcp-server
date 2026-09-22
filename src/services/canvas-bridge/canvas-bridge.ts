@@ -215,7 +215,10 @@ export class CanvasBridge {
    * `invalid_sql`; framework errors matching a declared tool-contract reason
    * (`missing_table`, `register_as_clash`, `system_catalog_access`) are rebuilt
    * with the contract recovery hint (#47, #54, #60); other structured McpErrors
-   * propagate as-is.
+   * propagate as-is — including the framework's `sql_execution_error` (a SELECT
+   * that prepared and then failed on the data), `invalid_sql`, `multi_statement`,
+   * `denied_function`, and `plan_operator_not_allowed`, each of which already
+   * carries its own recovery hint.
    */
   async query(
     ctx: Context,

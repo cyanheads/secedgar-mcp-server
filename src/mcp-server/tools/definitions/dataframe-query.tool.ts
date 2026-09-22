@@ -11,6 +11,16 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 
+/**
+ * Escape text for one Markdown table cell. Backslashes go first: a cell is
+ * inline Markdown, where a backslash before ASCII punctuation is consumed as an
+ * escape, so escaping only the pipe drops every literal backslash from the
+ * rendered text (`x\|y` would render as `x|y`) (#114).
+ */
+function escapeTableCell(text: string): string {
+  return text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
+}
+
 export const dataframeQueryTool = tool('secedgar_dataframe_query', {
   description:
     'Run a single-statement SELECT against the canvas dataframes registered by the data-returning secedgar_* tools — any tool whose response carries a `dataset` handle. Inspect a dataframe with secedgar_dataframe_describe first; its column schema is what the SQL has to match. Read-only: writes, DDL, DROP, COPY, PRAGMA, ATTACH, and external-file table functions are rejected. System catalogs (information_schema, pg_catalog, sqlite_master, duckdb_*) are denied — list dataframes via secedgar_dataframe_describe. Optional register_as chains the result as a new dataframe with a fresh TTL.',
@@ -49,6 +59,7 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       when: 'The SQL query references a denied DuckDB system catalog (information_schema, pg_catalog, sqlite_master, duckdb_*)',
       recovery:
         'Query only df_<id> tables. Use secedgar_dataframe_describe to list available dataframes.',
+      thrownBy: 'service',
     },
     {
       reason: 'missing_table',
@@ -56,13 +67,23 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       when: 'The SQL query references a df_<id> table that does not exist or has expired',
       recovery:
         'Use secedgar_dataframe_describe to list available dataframes and verify the table name.',
+      thrownBy: 'service',
     },
     {
       reason: 'invalid_sql',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The SQL statement contains a syntax or execution error not covered by a more specific reason',
+      when: 'The SELECT fails to prepare — an unknown column or an invalid expression — or hits an engine error no more specific reason covers',
       recovery:
         'Check SQL syntax, column names, and table references against secedgar_dataframe_describe.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'sql_execution_error',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The SELECT prepared but failed on the data it read — a cast or conversion that does not fit, an out-of-range value, or invalid input to a function',
+      recovery:
+        'Wrap the failing cast in TRY_CAST, or filter out the rows the error message names before converting them.',
+      thrownBy: 'service',
     },
     {
       reason: 'register_as_clash',
@@ -70,13 +91,39 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       when: 'The register_as target name already exists on the canvas',
       recovery:
         'Drop the existing dataframe with secedgar_dataframe_drop (when enabled), choose a different df_XXXXX_XXXXX name, or omit register_as.',
+      thrownBy: 'service',
     },
     {
       reason: 'non_select_statement',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The SQL is a non-SELECT statement (DROP, INSERT, UPDATE, DDL, etc.) — only read-only SELECTs run against dataframes',
+      when: 'The SQL is not a SELECT (DROP, INSERT, UPDATE, DDL, PRAGMA, EXPLAIN, etc.) or does not parse — only read-only SELECTs run against dataframes',
       recovery:
         'Query only SELECT statements against df_<id> tables. Use secedgar_dataframe_describe to inspect available dataframes.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'multi_statement',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The SQL holds more than one statement',
+      recovery:
+        'Send exactly one SELECT statement per call, and split multi-statement SQL into separate calls.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'denied_function',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The SQL calls a file-reading or external-data table function such as read_csv, read_parquet, or glob',
+      recovery:
+        'Remove the file-reading function and query only the df_<id> tables secedgar_dataframe_describe lists.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'plan_operator_not_allowed',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The query plan uses an operator outside the read-only allowlist, such as the range() or generate_series() table functions',
+      recovery:
+        'Rewrite with read-only SELECT constructs — joins, aggregates, window functions, CTEs, and unnest() are supported.',
+      thrownBy: 'service',
     },
   ],
 
@@ -242,15 +289,15 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       return [{ type: 'text', text: lines.join('\n') }];
     }
 
-    const header = `| ${result.columns.join(' | ')} |`;
+    const header = `| ${result.columns.map(escapeTableCell).join(' | ')} |`;
     const sep = `| ${result.columns.map(() => '---').join(' | ')} |`;
     lines.push(header, sep);
     for (const row of result.rows) {
       const cells = result.columns.map((c) => {
         const v = row[c];
         if (v === null || v === undefined) return '';
-        if (typeof v === 'string') return v.replace(/\|/g, '\\|');
-        if (typeof v === 'object') return JSON.stringify(v).replace(/\|/g, '\\|');
+        if (typeof v === 'string') return escapeTableCell(v);
+        if (typeof v === 'object') return escapeTableCell(JSON.stringify(v));
         return String(v);
       });
       lines.push(`| ${cells.join(' | ')} |`);

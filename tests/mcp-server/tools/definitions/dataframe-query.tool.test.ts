@@ -3,8 +3,9 @@
  * @module tests/mcp-server/tools/definitions/dataframe-query.tool
  */
 
+import { DUCKDB_ERROR_REASONS, SQL_GATE_REASONS } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
 
@@ -66,6 +67,60 @@ describe('dataframeQueryTool', () => {
     expect(entry).toBeDefined();
     expect(entry!.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(entry!.recovery).toMatch(/secedgar_dataframe_describe/);
+  });
+
+  it('declares every framework canvas reason the query path reaches the client with', () => {
+    // The gate and engine reasons pass through the bridge untouched, so the
+    // contract names them by the framework's own strings. Pinned against the
+    // exported constants so an upstream rename fails here, not on the wire.
+    const declared = new Set(dataframeQueryTool.errors?.map((e) => e.reason));
+    for (const reason of [
+      DUCKDB_ERROR_REASONS.sqlExecutionError,
+      SQL_GATE_REASONS.invalidSql,
+      SQL_GATE_REASONS.nonSelectStatement,
+      SQL_GATE_REASONS.multiStatement,
+      SQL_GATE_REASONS.deniedFunction,
+      SQL_GATE_REASONS.planOperatorNotAllowed,
+      SQL_GATE_REASONS.systemCatalogAccess,
+    ]) {
+      expect(declared, reason).toContain(reason);
+    }
+  });
+
+  it('marks every bridge- and framework-thrown reason thrownBy service', () => {
+    // Only canvas_unavailable is raised in the handler body; everything else
+    // comes up through bridge.query().
+    const handlerThrown = new Set(['canvas_unavailable']);
+    for (const entry of dataframeQueryTool.errors ?? []) {
+      const thrownBy = 'thrownBy' in entry ? entry.thrownBy : undefined;
+      expect(thrownBy, entry.reason).toBe(handlerThrown.has(entry.reason) ? undefined : 'service');
+    }
+  });
+
+  it('sql_execution_error from the canvas passes through with its reason and hint', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+    mockBridge.query.mockRejectedValue(
+      Object.assign(
+        new Error("Canvas query failed: Conversion Error: Could not convert string 'abc' to INT32"),
+        {
+          code: JsonRpcErrorCode.ValidationError,
+          data: {
+            reason: 'sql_execution_error',
+            recovery: { hint: 'Wrap the cast in TRY_CAST, or filter out the rows.' },
+          },
+        },
+      ),
+    );
+    const ctx = createMockContext({ errors: dataframeQueryTool.errors });
+    const input = dataframeQueryTool.input.parse({ sql: "SELECT CAST('abc' AS INTEGER)" });
+
+    await expect(dataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: {
+        reason: 'sql_execution_error',
+        recovery: { hint: expect.stringContaining('TRY_CAST') },
+      },
+    });
   });
 
   it('non_select_statement from the bridge surfaces reason + recovery hint on the wire (#74)', async () => {
@@ -612,6 +667,59 @@ describe('dataframeQueryTool', () => {
     expect(blocks).toHaveLength(1);
     expect(blockText(blocks)).toContain('| name | value |');
     expect(blockText(blocks)).toContain('Apple');
+  });
+
+  it('escapes pipes in string and serialized-object cells so the row keeps its columns', () => {
+    const blocks = dataframeQueryTool.format!({
+      columns: ['a', 'b'],
+      row_count: 1,
+      row_count_capped: false,
+      rows: [{ a: 'x|y', b: { k: 'p|q' } }],
+    });
+
+    expect(blockText(blocks)).toContain('| x\\|y | {"k":"p\\|q"} |');
+  });
+
+  it('escapes backslashes before pipes, so a literal backslash survives rendering (#114)', () => {
+    // Markdown consumes a backslash before ASCII punctuation as an escape, so an
+    // unescaped `x\|y` renders as `x|y` and `a\*b` as `a*b`. Each literal
+    // backslash has to reach the text doubled, ahead of the pipe escape.
+    const blocks = dataframeQueryTool.format!({
+      columns: ['a', 'b', 'c'],
+      row_count: 1,
+      row_count_capped: false,
+      rows: [{ a: 'x\\|y', b: 'a\\*b', c: { k: 'p\\|q' } }],
+    });
+
+    // `x\|y` → `x\\\|y`; `a\*b` → `a\\*b`; the JSON text `{"k":"p\\|q"}` → `{"k":"p\\\\\|q"}`.
+    expect(blockText(blocks)).toContain('| x\\\\\\|y | a\\\\*b | {"k":"p\\\\\\\\\\|q"} |');
+  });
+
+  it('keeps structuredContent raw while content[] carries the escaped cell (#114)', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+    mockBridge.query.mockResolvedValue({
+      result: { columns: ['a', 'b'], rowCount: 1, rows: [{ a: 'x\\|y', b: 'a\\*b' }] },
+      meta: undefined,
+    });
+
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: "SELECT 'x\\|y' AS a, 'a\\*b' AS b",
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ rows: [{ a: 'x\\|y', b: 'a\\*b' }] });
+    expect(blockText(result.content)).toContain('| x\\\\\\|y | a\\\\*b |');
+  });
+
+  it('escapes the header row the same way as the cells (#114)', () => {
+    const blocks = dataframeQueryTool.format!({
+      columns: ['a|b', 'c\\d'],
+      row_count: 1,
+      row_count_capped: false,
+      rows: [{ 'a|b': 1, 'c\\d': 2 }],
+    });
+
+    expect(blockText(blocks)).toContain('| a\\|b | c\\\\d |\n| --- | --- |\n| 1 | 2 |');
   });
 
   it('formats empty results with no-rows message', () => {
