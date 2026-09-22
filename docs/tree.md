@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-09-16 11:55:15
+Generated on: 2026-09-22 05:29:10
 
 ```text
 secedgar-mcp-server/
@@ -14,6 +14,8 @@ secedgar-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── workflows/
+│   │   └── codeql.yml
 │   ├── CODE_OF_CONDUCT.md
 │   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
@@ -238,6 +240,8 @@ secedgar-mcp-server/
 │   │       │   ├── security.test.ts
 │   │       │   └── tool-definitions.test.ts
 │   │       ├── dataframe-pointers.test.ts
+│   │       ├── input-aliases.test.ts
+│   │       ├── rate-limit-contract.test.ts
 │   │       └── strict-inputs.test.ts
 │   ├── scripts/
 │   │   └── bundle-entry-patterns.test.ts
@@ -257,6 +261,7 @@ secedgar-mcp-server/
 │   │       ├── edgar-api-service.efts.test.ts
 │   │       ├── edgar-api-service.full-index.test.ts
 │   │       ├── edgar-api-service.mirror.test.ts
+│   │       ├── edgar-api-service.rate-limit-block.test.ts
 │   │       ├── edgar-api-service.raw-fetch.test.ts
 │   │       ├── edgar-api-service.resolve-cik.test.ts
 │   │       ├── edgar-api-service.test.ts

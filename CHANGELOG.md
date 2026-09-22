@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.15.7](changelog/0.15.x/0.15.7.md) — 2026-09-21
+
+A 429 now closes a local rate-limit block gate instead of being retried into SEC's cool-down. company/filed_after/filed_before/forms replace ticker_or_cik/start_date/end_date/form_types, old spellings accepted as aliases. secedgar_dataframe_query fixes a backslash-escaping bug and gains a fuller SQL error contract.
+
 ## [0.15.6](changelog/0.15.x/0.15.6.md) — 2026-09-16 · 🛡️ Security
 
 Adopts mcp-ts-core through 0.13.2: HTTP sessions resolve stateless by default, shutdown closes the EDGAR mirror, and a linear-time SQL comment stripper replaces a regex a crafted query could hang on. Plugin manifests now deliver EDGAR_USER_AGENT correctly, and an empty or placeholder value fails startup instead of running blank.
