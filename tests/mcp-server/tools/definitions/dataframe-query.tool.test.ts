@@ -722,6 +722,50 @@ describe('dataframeQueryTool', () => {
     expect(blockText(blocks)).toContain('| a\\|b | c\\\\d |\n| --- | --- |\n| 1 | 2 |');
   });
 
+  it('keeps a cell holding \\n, \\r\\n, or a lone \\r on one table row (#121)', () => {
+    // Each is a CommonMark line ending, which would end the row mid-cell.
+    const blocks = dataframeQueryTool.format!({
+      columns: ['lf', 'crlf', 'cr', 'b'],
+      row_count: 1,
+      row_count_capped: false,
+      rows: [{ lf: 'line1\nline2', crlf: 'a\r\nb', cr: 'c\rd', b: 'x' }],
+    });
+
+    const lines = blockText(blocks).split('\n');
+    expect(lines.slice(-3)).toEqual([
+      '| lf | crlf | cr | b |',
+      '| --- | --- | --- | --- |',
+      '| line1<br>line2 | a<br>b | c<br>d | x |',
+    ]);
+  });
+
+  it('keeps a column name holding a line break on one header row (#121)', () => {
+    const blocks = dataframeQueryTool.format!({
+      columns: ['a\nb', 'c'],
+      row_count: 1,
+      row_count_capped: false,
+      rows: [{ 'a\nb': 1, c: 'x|y\r\nz' }],
+    });
+
+    expect(blockText(blocks)).toContain('| a<br>b | c |\n| --- | --- |\n| 1 | x\\|y<br>z |');
+  });
+
+  it('keeps structuredContent raw while content[] carries the line break as <br> (#121)', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+    mockBridge.query.mockResolvedValue({
+      result: { columns: ['a', 'b'], rowCount: 1, rows: [{ a: 'line1\nline2', b: 'x' }] },
+      meta: undefined,
+    });
+
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: "SELECT 'line1' || chr(10) || 'line2' AS a, 'x' AS b",
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ rows: [{ a: 'line1\nline2', b: 'x' }] });
+    expect(blockText(result.content)).toContain('| a | b |\n| --- | --- |\n| line1<br>line2 | x |');
+  });
+
   it('formats empty results with no-rows message', () => {
     const result = { columns: ['id'], row_count: 0, row_count_capped: false, rows: [] };
     const blocks = dataframeQueryTool.format!(result);

@@ -16,9 +16,15 @@ import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
  * inline Markdown, where a backslash before ASCII punctuation is consumed as an
  * escape, so escaping only the pipe drops a literal backslash that precedes
  * punctuation from the rendered text (`x\|y` would render as `x|y`) (#114).
+ * Line breaks become `<br>`: `\n`, `\r\n`, and a lone `\r` are each a CommonMark
+ * line ending, which would end the table row mid-cell (#121). `\r\n` is matched
+ * first so it yields one break, not two.
  */
 function escapeTableCell(text: string): string {
-  return text.replace(/\\/g, '\\\\').replace(/\|/g, '\\|');
+  return text
+    .replace(/\\/g, '\\\\')
+    .replace(/\|/g, '\\|')
+    .replace(/\r\n|\r|\n/g, '<br>');
 }
 
 export const dataframeQueryTool = tool('secedgar_dataframe_query', {
