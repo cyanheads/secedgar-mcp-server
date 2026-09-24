@@ -9,6 +9,7 @@
 import type { Element } from 'domhandler';
 import { findAll, findOne, textContent } from 'domutils';
 import { parseDocument } from 'htmlparser2';
+import { findTag, childText as nodeText } from './xml-nodes.js';
 
 /** Transaction type codes used in Form 4 nonDerivativeTransaction/derivativeTransaction. */
 const TRANSACTION_CODE_MAP: Record<string, string> = {
@@ -96,6 +97,14 @@ export interface HoldingRow {
 /** Parsed result from a 13F information table XML. */
 export interface ParsedInfoTable {
   holdings: HoldingRow[];
+}
+
+/** Identity fields from a 13F cover page (`primary_doc.xml`). */
+export interface ThirteenFCoverPage {
+  /** `coverPage/filingManager/name`, entities decoded. */
+  filerName: string | undefined;
+  /** Period of report as YYYY-MM-DD. */
+  reportingPeriod: string | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -349,4 +358,23 @@ export function parseInfoTableXml(xml: string): ParsedInfoTable {
   });
 
   return { holdings };
+}
+
+/**
+ * Parse the filer name and period of report from a 13F cover page (`primary_doc.xml`).
+ * Read through the XML parser rather than a pattern over the raw text, so the name
+ * arrives with its entities decoded (`JPMORGAN CHASE &amp; CO` → `JPMORGAN CHASE & CO`) —
+ * the five predefined entities and numeric references, with an unknown entity left as
+ * written. Tag lookups ignore a namespace prefix. The period prefers `periodOfReport`
+ * over the cover page's `reportCalendarOrQuarter`; both are MM-DD-YYYY.
+ */
+export function parseThirteenFCoverPage(xml: string): ThirteenFCoverPage {
+  const nodes = parseDocument(xml, { xmlMode: true, decodeEntities: true }).children;
+  const period = [findTag(nodes, 'periodOfReport'), findTag(nodes, 'reportCalendarOrQuarter')]
+    .map((el) => (el ? textContent(el).trim() : ''))
+    .find((text) => /^\d{2}-\d{2}-\d{4}$/.test(text));
+  return {
+    filerName: nodeText(findTag(nodes, 'filingManager'), 'name'),
+    reportingPeriod: period && `${period.slice(6)}-${period.slice(0, 2)}-${period.slice(3, 5)}`,
+  };
 }

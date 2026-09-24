@@ -15,7 +15,11 @@ import {
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import { parseInfoTableXml } from '@/services/edgar/ownership-parser.js';
+import { parseInfoTableXml, parseThirteenFCoverPage } from '@/services/edgar/ownership-parser.js';
+import {
+  ARCHIVE_PAGE_SCAN_CAP,
+  SubmissionsArchiveWalk,
+} from '@/services/edgar/submissions-archive.js';
 import type { FilingsRecent } from '@/services/edgar/types.js';
 
 /**
@@ -110,39 +114,46 @@ function findInfoTableDocument(items: Array<{ name: string }>): string | undefin
  */
 const OPERATING_COMPANY_FORMS = ['10-K', '10-K/A', '10-Q', '10-Q/A', '8-K', '8-K/A'];
 
-/** One zipped row from `FilingsRecent`'s parallel arrays, filtered by form type. */
-interface RecentFilingRow {
+/** The holdings report, and the notice a manager files instead when others report its holdings. */
+const HOLDINGS_REPORT_FORM = '13F-HR';
+const NOTICE_FORMS = new Set(['13F-NT', '13F-NT/A']);
+
+/** One 13F-HR or 13F-NT row zipped from a submissions parallel-array block. */
+interface ThirteenFRow {
   accessionNumber: string;
   filingDate: string;
-  primaryDocument: string;
+  form: string;
   reportDate: string;
 }
 
 /**
- * Zip the submissions recent-filings parallel arrays into records for the requested
- * form types, in submission order (newest first), capped at `limit`. Inlined here
- * rather than via `EdgarApiService.getRecentFilingsByForm` so this tool reads the full
- * recent-form list off the same submissions fetch for 404 handling (#76) and
- * operating-company classification (#86) — without a shared-method signature change
- * that would ripple into the insider-transactions tool.
+ * Zip a submissions block (the recent window or an archive page) into its 13F-HR and
+ * 13F-NT rows, in block order — newest filed first. Read off the submissions fetch the
+ * tool already holds, which also feeds the 404 handling (#76) and the operating-company
+ * classification (#86).
  */
-function recentFilingsOfForm(
-  recent: FilingsRecent,
-  formTypes: string[],
-  limit: number,
-): RecentFilingRow[] {
-  const out: RecentFilingRow[] = [];
-  for (let i = 0; i < recent.form.length && out.length < limit; i++) {
-    if (formTypes.includes(recent.form[i] ?? '')) {
-      out.push({
-        accessionNumber: recent.accessionNumber[i] ?? '',
-        filingDate: recent.filingDate[i] ?? '',
-        primaryDocument: recent.primaryDocument[i] ?? '',
-        reportDate: recent.reportDate[i] ?? '',
-      });
-    }
+function thirteenFRows(block: FilingsRecent): ThirteenFRow[] {
+  const out: ThirteenFRow[] = [];
+  for (let i = 0; i < block.form.length; i++) {
+    const form = block.form[i] ?? '';
+    if (form !== HOLDINGS_REPORT_FORM && !NOTICE_FORMS.has(form)) continue;
+    out.push({
+      accessionNumber: block.accessionNumber[i] ?? '',
+      filingDate: block.filingDate[i] ?? '',
+      form,
+      reportDate: block.reportDate[i] ?? '',
+    });
   }
   return out;
+}
+
+/** The newest-filed 13F-HR and 13F-NT for one period among `rows`. */
+function forPeriod(rows: ThirteenFRow[], periodEnd: string) {
+  const inPeriod = rows.filter((r) => r.reportDate === periodEnd);
+  return {
+    report: inPeriod.find((r) => r.form === HOLDINGS_REPORT_FORM),
+    notice: inPeriod.find((r) => NOTICE_FORMS.has(r.form)),
+  };
 }
 
 export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_holdings', {
@@ -167,7 +178,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     {
       reason: 'no_filings_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No 13F-HR filings found for this entity in the recent submissions window',
+      when: 'No 13F-HR matches — the entity files none, none exists for the requested quarter in the recent submissions window or the archive pages searched, or the manager filed a 13F-NT notice instead (for the requested quarter, or as its only recent 13F filing when no quarter is given)',
       recovery:
         'Use secedgar_search_filings with forms=["13F-HR"] for broader search, or check that the entity is an institutional investment manager.',
     },
@@ -200,7 +211,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       .string()
       .optional()
       .describe(
-        'Reporting quarter to target, in "YYYY-QN" format (e.g., "2025-Q4"). When omitted, returns the most recent 13F-HR available. Quarters map to the filing window: Q4 2025 = filings submitted roughly Jan–Mar 2026.',
+        'Reporting quarter to target, in "YYYY-QN" format (e.g., "2025-Q4"), matched exactly against each 13F-HR\'s period of report. When omitted, returns the most recent 13F-HR in the submissions feed\'s recent window (the last year or 1,000 filings, whichever holds more). Quarters map to the filing window: Q4 2025 = filings submitted roughly Jan–Mar 2026. A quarter older than the recent window is looked up in the archive, reading forward from the quarter end up to 10 archive pages. A quarter the manager covered with a 13F-NT notice (holdings reported by other managers) fails naming that notice.',
       ),
     limit: z
       .number()
@@ -424,14 +435,62 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     // Each 13F-HR carries a reportDate (the period-end), so a requested quarter is
     // matched exactly. No quarter → most-recent; with a quarter, a miss is reported,
     // never silently the latest filing.
-    const recentFilings = recentFilingsOfForm(submissions.filings.recent, ['13F-HR'], 80);
-    const filingMeta = periodEnd
-      ? recentFilings.find((f) => f.reportDate === periodEnd)
-      : recentFilings[0];
+    const recentRows = thirteenFRows(submissions.filings.recent);
+    // A 13F-HR or a notice either one marks a 13F manager; only an entity whose rows
+    // read hold neither gets the #86 classification below.
+    let filesThirteenF = recentRows.length > 0;
+    let filingMeta: ThirteenFRow | undefined;
+    let notice: ThirteenFRow | undefined;
+    let walk: SubmissionsArchiveWalk | undefined;
+
+    if (!periodEnd) {
+      filingMeta = recentRows.find((r) => r.form === HOLDINGS_REPORT_FORM);
+      // A manager whose recent filings are notices only: name its newest notice rather
+      // than calling it a non-filer (#133).
+      if (!filingMeta) notice = recentRows.find((r) => NOTICE_FORMS.has(r.form));
+    } else {
+      ({ report: filingMeta, notice } = forPeriod(recentRows, periodEnd));
+      // A quarter the recent window does not reach: a 13F-HR is filed after its period
+      // ends, so read the archive forward in time from the page covering the quarter
+      // end and stop on the first page holding a report or notice for it (#117, #133).
+      // A quarter ending on or after the window's oldest filing selects no page.
+      if (!filingMeta && !notice) {
+        walk = new SubmissionsArchiveWalk(api, submissions, {
+          filedAfter: periodEnd,
+          order: 'oldest-first',
+        });
+        for await (const { block } of walk) {
+          const rows = thirteenFRows(block);
+          filesThirteenF ||= rows.length > 0;
+          ({ report: filingMeta, notice } = forPeriod(rows, periodEnd));
+          if (filingMeta || notice) break;
+        }
+      }
+    }
 
     if (!filingMeta) {
-      if (recentFilings.length === 0) {
-        // Entity files no 13F-HR at all. Classify from the recent-form list (#86): an
+      if (notice) {
+        // The manager filed a notice for this quarter — or, asked for no quarter, files
+        // only notices: another manager's 13F-HR carries its holdings, so there is no
+        // information table here to read (#133).
+        const scope = input.quarter
+          ? `for quarter "${input.quarter}"`
+          : 'in its recent submissions window';
+        throw ctx.fail(
+          'no_filings_found',
+          `No 13F-HR filed by '${input.company}' (${submissions.name}) ${scope} — it filed a ${notice.form} notice (accession ${notice.accessionNumber}, period ${notice.reportDate}, filed ${notice.filingDate}) instead: its holdings for that quarter are reported by other managers in their own 13F-HR filings.`,
+          {
+            recovery: {
+              hint: `Read notice ${notice.accessionNumber} with secedgar_get_filing — its cover page lists the managers reporting these holdings — then call this tool with one of those managers' CIKs.`,
+            },
+            notice_accession_number: notice.accessionNumber,
+            notice_form: notice.form,
+            notice_period: notice.reportDate,
+          },
+        );
+      }
+      if (!filesThirteenF) {
+        // Entity files no 13F-HR or notice at all. Classify from the recent-form list (#86): an
         // entity filing 10-K/10-Q/8-K is an operating company, not an institutional
         // manager — route the caller to the tools that fit. Use the submissions identity
         // so it works for CIKs absent from the ticker cache too.
@@ -474,9 +533,13 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
         );
       }
       // 13F filings exist, but none for the requested quarter (#31) — a real 13F filer.
+      const searched =
+        walk && walk.pagesRead > 0
+          ? ` Searched the recent submissions window and ${walk.pagesRead} archive page${walk.pagesRead === 1 ? '' : 's'} filed from ${walk.scannedThrough} forward${walk.truncated ? `; the ${ARCHIVE_PAGE_SCAN_CAP}-page cap stopped the search before later pages` : ''}.`
+          : '';
       throw ctx.fail(
         'no_filings_found',
-        `No 13F-HR filings found for '${input.company}' for quarter "${input.quarter}".`,
+        `No 13F-HR filings found for '${input.company}' for quarter "${input.quarter}".${searched}`,
         { ...ctx.recoveryFor('no_filings_found') },
       );
     }
@@ -520,28 +583,14 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     // Pull reporting period and filing-manager name from the primary_doc.xml cover page.
     // The CIK resolver only knows names for ticker-listed entities, but most 13F filers
     // are investment managers that aren't listed — the cover page is the reliable source.
-    let reportingPeriod: string | undefined;
-    let filerName: string | undefined;
     const primaryXml = await api.tryGetFilingDocument(
       match.cik,
       filingMeta.accessionNumber,
       'primary_doc.xml',
     );
-    if (primaryXml) {
-      // <periodOfReport>12-31-2025</periodOfReport> or <reportCalendarOrQuarter>12-31-2025</reportCalendarOrQuarter>
-      const periodMatch =
-        primaryXml.match(/<periodOfReport>(\d{2}-\d{2}-\d{4})<\/periodOfReport>/) ??
-        primaryXml.match(/<reportCalendarOrQuarter>(\d{2}-\d{2}-\d{4})<\/reportCalendarOrQuarter>/);
-      if (periodMatch?.[1]) {
-        // Convert MM-DD-YYYY to YYYY-MM-DD
-        const [mm, dd, yyyy] = periodMatch[1].split('-');
-        reportingPeriod = `${yyyy}-${mm}-${dd}`;
-      }
-      const nameMatch = primaryXml.match(
-        /<(?:\w+:)?filingManager>[\s\S]*?<(?:\w+:)?name>([^<]+)<\/(?:\w+:)?name>/i,
-      );
-      if (nameMatch?.[1]) filerName = nameMatch[1].trim();
-    }
+    const { filerName, reportingPeriod } = primaryXml
+      ? parseThirteenFCoverPage(primaryXml)
+      : { filerName: undefined, reportingPeriod: undefined };
 
     let parsed: ReturnType<typeof parseInfoTableXml>;
     try {

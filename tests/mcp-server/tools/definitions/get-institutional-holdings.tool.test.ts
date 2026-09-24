@@ -7,7 +7,7 @@ import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getInstitutionalHoldingsTool } from '@/mcp-server/tools/definitions/get-institutional-holdings.tool.js';
-import type { FilingIndex, SubmissionsResponse } from '@/services/edgar/types.js';
+import type { FilingIndex, FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', () => ({
   getEdgarApiService: vi.fn(),
@@ -151,31 +151,39 @@ const mockFilingIndex: FilingIndex = {
  * getSubmissions path the tool now takes (#76/#86). Only the fields the handler reads
  * (filings.recent, name, tickers) carry meaningful values.
  */
+interface FilingSpec {
+  accessionNumber: string;
+  filingDate: string;
+  form: string;
+  primaryDocument?: string;
+  reportDate?: string;
+}
+
+/** A submissions parallel-array block — the recent window or one archive page. */
+function filingsBlock(filings: FilingSpec[]): FilingsRecent {
+  return {
+    accessionNumber: filings.map((f) => f.accessionNumber),
+    filingDate: filings.map((f) => f.filingDate),
+    form: filings.map((f) => f.form),
+    primaryDocDescription: filings.map(() => ''),
+    primaryDocument: filings.map((f) => f.primaryDocument ?? 'primary_doc.xml'),
+    reportDate: filings.map((f) => f.reportDate ?? ''),
+  };
+}
+
 function buildSubmissions(opts: {
   name?: string;
   tickers?: string[];
-  filings: Array<{
-    form: string;
-    accessionNumber: string;
-    filingDate: string;
-    primaryDocument?: string;
-    reportDate?: string;
-  }>;
+  filings: FilingSpec[];
+  files?: SubmissionsResponse['filings']['files'];
 }): SubmissionsResponse {
   return {
     cik: '0000102909',
     entityType: 'other',
     exchanges: [],
     filings: {
-      recent: {
-        accessionNumber: opts.filings.map((f) => f.accessionNumber),
-        filingDate: opts.filings.map((f) => f.filingDate),
-        form: opts.filings.map((f) => f.form),
-        primaryDocDescription: opts.filings.map(() => ''),
-        primaryDocument: opts.filings.map((f) => f.primaryDocument ?? 'primary_doc.xml'),
-        reportDate: opts.filings.map((f) => f.reportDate ?? ''),
-      },
-      files: [],
+      recent: filingsBlock(opts.filings),
+      files: opts.files ?? [],
     },
     fiscalYearEnd: null,
     name: opts.name ?? 'VANGUARD GROUP INC',
@@ -192,6 +200,7 @@ const mockApi = {
   searchFilings: vi.fn(),
   tryGetFilingIndex: vi.fn(),
   tryGetFilingDocument: vi.fn(),
+  fetchArchivePage: vi.fn(),
 };
 
 beforeEach(() => {
@@ -199,6 +208,8 @@ beforeEach(() => {
   // Default to no canvas — individual tests opt in by returning a stub bridge.
   vi.mocked(getCanvasBridge).mockReturnValue(undefined as never);
   vi.mocked(getEdgarApiService).mockReturnValue(mockApi as any);
+  // An archive read nobody arranged is a bug in the walk, not a fixture gap.
+  mockApi.fetchArchivePage.mockRejectedValue(new Error('unexpected archive page read'));
   mockApi.resolveCik.mockResolvedValue({
     cik: '0000102909',
     name: 'Vanguard Group Inc',
@@ -1167,5 +1178,526 @@ describe('getInstitutionalHoldingsTool parameter names (#115)', () => {
     expect(result.isError).toBe(true);
     expect(blockText(result.content)).toContain('issuer');
     expect(mockApi.resolveCik).not.toHaveBeenCalled();
+  });
+});
+
+// --- Quarters older than the recent window (#117), 13F-NT notices (#133) ---
+
+/** Vanguard-shaped recent window: begins 2025-08-27, holds two 13F-HRs and a 13F-NT. */
+const VANGUARD_RECENT: FilingSpec[] = [
+  {
+    form: '13F-NT',
+    accessionNumber: '0000102909-26-002714',
+    filingDate: '2026-08-13',
+    reportDate: '2026-06-30',
+  },
+  {
+    form: '13F-HR',
+    accessionNumber: '0000102909-26-000200',
+    filingDate: '2026-01-29',
+    reportDate: '2025-12-31',
+  },
+  {
+    form: '13F-HR',
+    accessionNumber: '0000102909-25-000900',
+    filingDate: '2025-11-07',
+    reportDate: '2025-09-30',
+  },
+  { form: 'SCHEDULE 13G/A', accessionNumber: '0000102909-25-000800', filingDate: '2025-08-27' },
+];
+
+const VANGUARD_FILES = [
+  {
+    name: 'CIK0000102909-submissions-001.json',
+    filingCount: 3000,
+    filingFrom: '2024-11-04',
+    filingTo: '2025-08-25',
+  },
+  {
+    name: 'CIK0000102909-submissions-002.json',
+    filingCount: 3000,
+    filingFrom: '2023-06-01',
+    filingTo: '2024-11-01',
+  },
+];
+
+const VANGUARD_PAGES: Record<string, FilingsRecent> = {
+  'CIK0000102909-submissions-001.json': filingsBlock([
+    { form: 'SCHEDULE 13G/A', accessionNumber: 'x-1', filingDate: '2025-08-25' },
+    {
+      form: '13F-HR',
+      accessionNumber: '0001752724-25-100000',
+      filingDate: '2025-05-12',
+      reportDate: '2025-03-31',
+    },
+    {
+      form: '13F-HR',
+      accessionNumber: '0001752724-25-022205',
+      filingDate: '2025-02-11',
+      reportDate: '2024-12-31',
+    },
+  ]),
+  'CIK0000102909-submissions-002.json': filingsBlock([
+    {
+      form: '13F-HR',
+      accessionNumber: '0001752724-24-200000',
+      filingDate: '2024-08-13',
+      reportDate: '2024-06-30',
+    },
+    {
+      form: '13F-NT',
+      accessionNumber: '0000102909-24-000111',
+      filingDate: '2024-05-14',
+      reportDate: '2024-03-31',
+    },
+  ]),
+};
+
+describe('getInstitutionalHoldingsTool — quarters older than the recent window (#117)', () => {
+  beforeEach(() => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({ filings: VANGUARD_RECENT, files: VANGUARD_FILES }),
+    );
+    mockApi.fetchArchivePage.mockImplementation(async (name: string) => {
+      const page = VANGUARD_PAGES[name];
+      if (!page) throw new Error(`unexpected archive page ${name}`);
+      return page;
+    });
+  });
+
+  const call = (args: Record<string, unknown>) =>
+    runToolContract(getInstitutionalHoldingsTool, args as never);
+
+  it('finds a quarter filed before the recent window on the page covering its end', async () => {
+    const result = await call({ ticker_or_cik: '0000102909', quarter: '2024-Q4' });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(1);
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith('CIK0000102909-submissions-001.json');
+    expect(result.structuredContent).toMatchObject({
+      accession_number: '0001752724-25-022205',
+      filing_date: '2025-02-11',
+    });
+    expect(blockText(result.content)).toContain('Accession: 0001752724-25-022205');
+    expect(mockApi.tryGetFilingIndex).toHaveBeenCalledWith('0000102909', '0001752724-25-022205');
+  });
+
+  it('reads no archive page for a quarter ending on or after the recent window’s oldest date', async () => {
+    const result = await call({ company: '0000102909', quarter: '2025-Q3' });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+    expect(result.structuredContent).toMatchObject({ accession_number: '0000102909-25-000900' });
+  });
+
+  it('reads no archive page and reports the miss for an in-window quarter with no filing', async () => {
+    const err = await caught(
+      getInstitutionalHoldingsTool.handler(
+        getInstitutionalHoldingsTool.input.parse({ company: '0000102909', quarter: '2026-Q1' }),
+        createMockContext({ errors: getInstitutionalHoldingsTool.errors }),
+      ),
+    );
+
+    expect(err.data.reason).toBe('no_filings_found');
+    expect(err.message).toContain('"2026-Q1"');
+    expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+  });
+
+  it('walks forward and reports the quarter after the pages read hold no match', async () => {
+    const err = await caught(
+      getInstitutionalHoldingsTool.handler(
+        getInstitutionalHoldingsTool.input.parse({ company: '0000102909', quarter: '2023-Q4' }),
+        createMockContext({ errors: getInstitutionalHoldingsTool.errors }),
+      ),
+    );
+
+    // Forward from the page covering 2023-12-31: page 002, then page 001.
+    expect(mockApi.fetchArchivePage.mock.calls.map(([name]) => name)).toEqual([
+      'CIK0000102909-submissions-002.json',
+      'CIK0000102909-submissions-001.json',
+    ]);
+    expect(err.data.reason).toBe('no_filings_found');
+    expect(err.message).toContain('for quarter "2023-Q4"');
+    expect(err.message).toContain('2 archive pages');
+    expect(err.message).not.toContain('operating company');
+  });
+
+  it('takes the newest-filed 13F-HR for the period within the page that holds it', async () => {
+    mockApi.fetchArchivePage.mockResolvedValue(
+      filingsBlock([
+        {
+          form: '13F-HR',
+          accessionNumber: '0001752724-25-099999',
+          filingDate: '2025-03-01',
+          reportDate: '2024-12-31',
+        },
+        {
+          form: '13F-HR',
+          accessionNumber: '0001752724-25-022205',
+          filingDate: '2025-02-11',
+          reportDate: '2024-12-31',
+        },
+      ]),
+    );
+    const result = await call({ company: '0000102909', quarter: '2024-Q4' });
+
+    expect(result.structuredContent).toMatchObject({ accession_number: '0001752724-25-099999' });
+  });
+
+  it('stops at the shared archive page cap', async () => {
+    const files = Array.from({ length: 14 }, (_, i) => ({
+      name: `CIK0000102909-submissions-${String(i + 1).padStart(3, '0')}.json`,
+      filingCount: 100,
+      filingFrom: `${2024 - i}-01-01`,
+      filingTo: `${2024 - i}-12-31`,
+    }));
+    mockApi.getSubmissions.mockResolvedValue(buildSubmissions({ filings: VANGUARD_RECENT, files }));
+    mockApi.fetchArchivePage.mockResolvedValue(
+      filingsBlock([
+        {
+          form: '13F-HR',
+          accessionNumber: 'other-period',
+          filingDate: '2000-02-01',
+          reportDate: '1999-12-31',
+        },
+      ]),
+    );
+
+    const err = await caught(
+      getInstitutionalHoldingsTool.handler(
+        getInstitutionalHoldingsTool.input.parse({ company: '0000102909', quarter: '2009-Q4' }),
+        createMockContext({ errors: getInstitutionalHoldingsTool.errors }),
+      ),
+    );
+
+    // All 14 pages end after 2009-12-31; forward from the oldest (014), 10 are read.
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(10);
+    expect(mockApi.fetchArchivePage).toHaveBeenNthCalledWith(
+      1,
+      'CIK0000102909-submissions-014.json',
+    );
+    expect(err.data.reason).toBe('no_filings_found');
+    expect(err.message).toContain('10 archive pages');
+    expect(err.message).toContain('page cap');
+  });
+
+  it('still routes an operating company to the right tools after the walk (#86)', async () => {
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0000789019',
+      name: 'MICROSOFT CORP',
+      ticker: 'MSFT',
+    });
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        name: 'MICROSOFT CORP',
+        tickers: ['MSFT'],
+        filings: [
+          {
+            form: '10-K',
+            accessionNumber: 'a',
+            filingDate: '2026-07-30',
+            reportDate: '2026-06-30',
+          },
+          { form: '8-K', accessionNumber: 'c', filingDate: '2020-08-07' },
+        ],
+        files: [
+          {
+            name: 'CIK0000789019-submissions-001.json',
+            filingCount: 2002,
+            filingFrom: '2008-08-13',
+            filingTo: '2020-08-05',
+          },
+          {
+            name: 'CIK0000789019-submissions-002.json',
+            filingCount: 1521,
+            filingFrom: '1994-02-14',
+            filingTo: '2008-08-11',
+          },
+        ],
+      }),
+    );
+    mockApi.fetchArchivePage.mockResolvedValue(
+      filingsBlock([
+        { form: '10-Q', accessionNumber: 'q', filingDate: '2020-04-29', reportDate: '2020-03-31' },
+        { form: '10-Q', accessionNumber: 'r', filingDate: '2020-01-29', reportDate: '2019-12-31' },
+      ]),
+    );
+
+    const err = await caught(
+      getInstitutionalHoldingsTool.handler(
+        getInstitutionalHoldingsTool.input.parse({ company: '789019', quarter: '2019-Q4' }),
+        createMockContext({ errors: getInstitutionalHoldingsTool.errors }),
+      ),
+    );
+
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(1);
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith('CIK0000789019-submissions-001.json');
+    expect(err.data.reason).toBe('no_filings_found');
+    expect(err.message).toContain('operating company');
+    expect(records(err.data.suggestions).map((s) => s.tool)).toContain('secedgar_find_holders');
+  });
+
+  it('walks nothing for a call without a quarter', async () => {
+    const result = await call({ company: '0000102909' });
+
+    expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+    expect(result.structuredContent).toMatchObject({ accession_number: '0000102909-26-000200' });
+  });
+});
+
+describe('getInstitutionalHoldingsTool — 13F-NT notice for the quarter (#133)', () => {
+  beforeEach(() => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({ filings: VANGUARD_RECENT, files: VANGUARD_FILES }),
+    );
+    mockApi.fetchArchivePage.mockImplementation(async (name: string) => {
+      const page = VANGUARD_PAGES[name];
+      if (!page) throw new Error(`unexpected archive page ${name}`);
+      return page;
+    });
+  });
+
+  it('says the manager filed a notice for the quarter, naming its accession', async () => {
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000102909',
+      quarter: '2026-Q2',
+    } as never);
+
+    expect(result.isError).toBe(true);
+    const text = blockText(result.content);
+    expect(text).toContain('13F-NT');
+    expect(text).toContain('0000102909-26-002714');
+    expect(text).toContain('reported by other managers');
+    expect(text).not.toContain('check that the entity is an institutional investment manager');
+    expect(text).toContain('secedgar_get_filing');
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'no_filings_found',
+          notice_accession_number: '0000102909-26-002714',
+          notice_form: '13F-NT',
+        },
+      },
+    });
+    expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+  });
+
+  it('finds a notice on an archive page and stops the walk there', async () => {
+    const err = await caught(
+      getInstitutionalHoldingsTool.handler(
+        getInstitutionalHoldingsTool.input.parse({ company: '0000102909', quarter: '2024-Q1' }),
+        createMockContext({ errors: getInstitutionalHoldingsTool.errors }),
+      ),
+    );
+
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(1);
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith('CIK0000102909-submissions-002.json');
+    expect(err.data.notice_accession_number).toBe('0000102909-24-000111');
+    expect(recoveryHint(err)).toContain('0000102909-24-000111');
+  });
+
+  it('recognizes an amended notice (13F-NT/A)', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [
+          {
+            form: '13F-NT/A',
+            accessionNumber: '0000102909-26-003000',
+            filingDate: '2026-09-01',
+            reportDate: '2026-06-30',
+          },
+          ...VANGUARD_RECENT.slice(1),
+        ],
+      }),
+    );
+    const err = await caught(
+      getInstitutionalHoldingsTool.handler(
+        getInstitutionalHoldingsTool.input.parse({ company: '0000102909', quarter: '2026-Q2' }),
+        createMockContext({ errors: getInstitutionalHoldingsTool.errors }),
+      ),
+    );
+
+    expect(err.data.notice_form).toBe('13F-NT/A');
+    expect(err.message).toContain('0000102909-26-003000');
+  });
+
+  it('prefers a 13F-HR over a notice for the same period', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [
+          ...VANGUARD_RECENT,
+          {
+            form: '13F-HR',
+            accessionNumber: '0000102909-26-002000',
+            filingDate: '2026-08-01',
+            reportDate: '2026-06-30',
+          },
+        ],
+      }),
+    );
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000102909',
+      quarter: '2026-Q2',
+    } as never);
+
+    expect(result.structuredContent).toMatchObject({ accession_number: '0000102909-26-002000' });
+  });
+
+  it('names the newest notice for a notice-only manager called without a quarter', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        name: 'NOTICE ONLY ADVISORS LLC',
+        filings: [
+          {
+            form: '13F-NT',
+            accessionNumber: '0000900000-26-000020',
+            filingDate: '2026-08-10',
+            reportDate: '2026-06-30',
+          },
+          {
+            form: '13F-NT',
+            accessionNumber: '0000900000-26-000010',
+            filingDate: '2026-05-11',
+            reportDate: '2026-03-31',
+          },
+          { form: 'SCHEDULE 13G', accessionNumber: 'x', filingDate: '2026-02-01' },
+        ],
+      }),
+    );
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000900000',
+    } as never);
+
+    expect(result.isError).toBe(true);
+    const text = blockText(result.content);
+    expect(text).toContain('13F-NT notice');
+    expect(text).toContain('0000900000-26-000020');
+    expect(text).toContain('2026-06-30');
+    expect(text).toContain('reported by other managers');
+    expect(text).not.toContain('not a 13F institutional filer');
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        data: {
+          reason: 'no_filings_found',
+          notice_accession_number: '0000900000-26-000020',
+          notice_form: '13F-NT',
+          notice_period: '2026-06-30',
+        },
+      },
+    });
+    expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+  });
+
+  it('gives a notice-only manager the quarter miss, not the not-a-13F-filer classification', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        name: 'NOTICE ONLY ADVISORS LLC',
+        filings: [
+          {
+            form: '13F-NT',
+            accessionNumber: '0000900000-26-000020',
+            filingDate: '2026-08-10',
+            reportDate: '2026-06-30',
+          },
+          { form: 'SCHEDULE 13G', accessionNumber: 'x', filingDate: '2026-02-01' },
+        ],
+      }),
+    );
+    const err = await caught(
+      getInstitutionalHoldingsTool.handler(
+        getInstitutionalHoldingsTool.input.parse({ company: '0000900000', quarter: '2025-Q4' }),
+        createMockContext({ errors: getInstitutionalHoldingsTool.errors }),
+      ),
+    );
+
+    expect(err.data.reason).toBe('no_filings_found');
+    expect(err.message).toContain('for quarter "2025-Q4"');
+    expect(err.message).not.toContain('not a 13F institutional filer');
+    expect(err.data.notice_accession_number).toBeUndefined();
+  });
+
+  it('keeps the #86 routing for an entity with neither a 13F-HR nor a 13F-NT, called without a quarter', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        name: 'MICROSOFT CORP',
+        tickers: ['MSFT'],
+        filings: [{ form: '10-K', accessionNumber: 'a', filingDate: '2026-07-30' }],
+      }),
+    );
+    const err = await caught(
+      getInstitutionalHoldingsTool.handler(
+        getInstitutionalHoldingsTool.input.parse({ company: '789019' }),
+        createMockContext({ errors: getInstitutionalHoldingsTool.errors }),
+      ),
+    );
+
+    expect(err.message).toContain('operating company');
+    expect(err.data.notice_accession_number).toBeUndefined();
+  });
+});
+
+describe('getInstitutionalHoldingsTool — filer_name entity decoding (#132)', () => {
+  const primaryDoc = (name: string, prefix = '') => `<?xml version="1.0"?>
+<${prefix}edgarSubmission>
+  <${prefix}headerData><${prefix}filerInfo><${prefix}periodOfReport>12-31-2025</${prefix}periodOfReport></${prefix}filerInfo></${prefix}headerData>
+  <${prefix}formData><${prefix}coverPage>
+    <${prefix}reportCalendarOrQuarter>12-31-2025</${prefix}reportCalendarOrQuarter>
+    <${prefix}filingManager><${prefix}name>${name}</${prefix}name><${prefix}address><${prefix}city>NEW YORK</${prefix}city></${prefix}address></${prefix}filingManager>
+  </${prefix}coverPage>
+  <${prefix}signatureBlock><${prefix}name>Jane Signer</${prefix}name></${prefix}signatureBlock></${prefix}formData>
+</${prefix}edgarSubmission>`;
+
+  function servePrimaryDoc(xml: string) {
+    mockApi.tryGetFilingDocument.mockImplementation(
+      async (_cik: string, _accn: string, docName: string) => {
+        if (docName === 'primary_doc.xml') return xml;
+        if (docName === 'infotable.xml') return INFO_TABLE_XML;
+        return null;
+      },
+    );
+  }
+
+  it('decodes &amp; in structuredContent, content, and the dataframe', async () => {
+    servePrimaryDoc(primaryDoc('JPMORGAN CHASE &amp; CO'));
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000102909',
+    } as never);
+
+    expect(result.structuredContent).toMatchObject({
+      filer_name: 'JPMORGAN CHASE & CO',
+      reporting_period: '2025-12-31',
+    });
+    expect(blockText(result.content)).toContain('**13F-HR Holdings** — JPMORGAN CHASE & CO');
+    expect(blockText(result.content)).not.toContain('&amp;');
+    const rows = bridge.registerDataframe.mock.calls[0]?.[1].rows ?? [];
+    expect(rows[0]?.filer_name).toBe('JPMORGAN CHASE & CO');
+  });
+
+  it('decodes the predefined entities and numeric references, leaving unknown ones untouched', async () => {
+    servePrimaryDoc(
+      primaryDoc('A &lt;B&gt; &quot;C&quot; &apos;D&apos; &#38; &#x26; &foo; &constructor;'),
+    );
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000102909',
+    } as never);
+
+    expect(result.structuredContent).toMatchObject({
+      filer_name: `A <B> "C" 'D' & & &foo; &constructor;`,
+    });
+  });
+
+  it('reads a namespace-prefixed cover page the same way', async () => {
+    servePrimaryDoc(primaryDoc('SMITH &amp; WESSON ADVISORS', 'ns1:'));
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000102909',
+    } as never);
+
+    expect(result.structuredContent).toMatchObject({
+      filer_name: 'SMITH & WESSON ADVISORS',
+      reporting_period: '2025-12-31',
+    });
   });
 });

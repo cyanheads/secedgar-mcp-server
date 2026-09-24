@@ -4,7 +4,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { parseForm4Xml, parseInfoTableXml } from '@/services/edgar/ownership-parser.js';
+import {
+  parseForm4Xml,
+  parseInfoTableXml,
+  parseThirteenFCoverPage,
+} from '@/services/edgar/ownership-parser.js';
 
 // ---------------------------------------------------------------------------
 // Form 4 parsing
@@ -299,5 +303,40 @@ describe('parseInfoTableXml', () => {
       '<informationTable xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable"></informationTable>',
     );
     expect(result.holdings).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 13F cover page (#132)
+// ---------------------------------------------------------------------------
+
+describe('parseThirteenFCoverPage', () => {
+  it('falls back to reportCalendarOrQuarter when periodOfReport is absent', () => {
+    const xml = `<edgarSubmission><formData><coverPage>
+      <reportCalendarOrQuarter>09-30-2020</reportCalendarOrQuarter>
+      <filingManager><name>A &amp; B CAPITAL</name></filingManager>
+    </coverPage></formData></edgarSubmission>`;
+    expect(parseThirteenFCoverPage(xml)).toEqual({
+      filerName: 'A & B CAPITAL',
+      reportingPeriod: '2020-09-30',
+    });
+  });
+
+  it('takes the filing manager name, not another name element on the page', () => {
+    const xml = `<edgarSubmission><formData>
+      <signatureBlock><name>Jane Signer</name></signatureBlock>
+      <coverPage><filingManager><name>REAL MANAGER LLC</name></filingManager></coverPage>
+    </formData></edgarSubmission>`;
+    expect(parseThirteenFCoverPage(xml).filerName).toBe('REAL MANAGER LLC');
+  });
+
+  it('leaves both fields absent on a page carrying neither, and ignores a malformed date', () => {
+    expect(parseThirteenFCoverPage('<edgarSubmission/>')).toEqual({
+      filerName: undefined,
+      reportingPeriod: undefined,
+    });
+    expect(
+      parseThirteenFCoverPage('<x><periodOfReport>2020-09-30</periodOfReport></x>').reportingPeriod,
+    ).toBeUndefined();
   });
 });
