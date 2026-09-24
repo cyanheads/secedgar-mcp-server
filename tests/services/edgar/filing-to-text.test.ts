@@ -584,3 +584,91 @@ describe('foldForHeadingMatch (#106)', () => {
     expect(foldForHeadingMatch(heading).includes(foldForHeadingMatch('item 8'))).toBe(false);
   });
 });
+
+describe('filingToExtract — nesting depth and SGML page markers (#118)', () => {
+  const ELLIPSIS = '[…]';
+  const nest = (open: string, close: string, depth: number, inner = 'x') =>
+    `<html><body>before ${open.repeat(depth)}${inner}${close.repeat(depth)} after</body></html>`;
+
+  /** A legacy SGML text document whose `<PAGE>` markers the parser never closes. */
+  const sgmlDocument = (pages: number) =>
+    `<DOCUMENT>\n<TYPE>10-K\n<TEXT>\n${Array.from(
+      { length: pages },
+      (_, i) => `page ${i + 1} text\n<PAGE>\n`,
+    ).join('')}END\n</TEXT>\n</DOCUMENT>\n`;
+
+  // Characterization: pinned against the pre-#118 conversion, which had no depth
+  // limit and parsed <PAGE> as an element — a shallow document must not move.
+  it('leaves a shallow HTML filing and its outline unchanged', () => {
+    const html =
+      '<html><body><p>PART I</p><p>Item 1. Business</p><div><span>We make <b>widgets</b>.</span></div><table><tr><td>Revenue</td><td>100</td></tr></table><p>Item 1A. Risk Factors</p><p>Risks <font>abound</font>.</p></body></html>';
+    const text = filingToExtract(html);
+
+    expect(text).toBe(
+      'PART I\n\nItem 1. Business\n\nWe make widgets.\n\nRevenue100\n\nItem 1A. Risk Factors\n\nRisks abound.',
+    );
+    expect(detectHeadings(text)).toEqual([
+      { heading: 'PART I', offset: 0 },
+      { heading: 'Item 1. Business', offset: 8 },
+      { heading: 'Item 1A. Risk Factors', offset: 56 },
+    ]);
+  });
+
+  it('leaves a short SGML text document with <PAGE> markers unchanged', () => {
+    const sgml =
+      '<DOCUMENT>\n<TYPE>10-K\n<TEXT>\nITEM 1.  BUSINESS\n\nThe company sells computers.\n<PAGE>   2\nITEM 2.  PROPERTIES\n\nHeadquarters in Cupertino.\n<PAGE>   3\nITEM 3.  LEGAL PROCEEDINGS\n\nNone.\n</TEXT>\n</DOCUMENT>\n';
+
+    expect(filingToExtract(sgml)).toBe(
+      '10-K ITEM 1. BUSINESS The company sells computers. 2 ITEM 2. PROPERTIES Headquarters in Cupertino. 3 ITEM 3. LEGAL PROCEEDINGS None.',
+    );
+  });
+
+  it('cuts 30,000 nested <span> at the depth limit instead of overflowing the stack', () => {
+    expect(filingToExtract(nest('<span>', '</span>', 30_000))).toBe(`before ${ELLIPSIS} after`);
+  });
+
+  it('cuts 30,000 nested <div> at the depth limit instead of overflowing the stack', () => {
+    expect(filingToExtract(nest('<div>', '</div>', 30_000))).toBe(`before\n${ELLIPSIS}\nafter`);
+  });
+
+  it('cuts 30,000 unclosed <font>x runs at the depth limit instead of overflowing the stack', () => {
+    const text = filingToExtract(`<html><body>before ${'<font>x'.repeat(30_000)}</body></html>`);
+
+    expect(text.startsWith('before x')).toBe(true);
+    expect(text.endsWith(ELLIPSIS)).toBe(true);
+    // One `x` per level the walk reached — the cut is a bounded depth, not a failure.
+    expect(text.length).toBeLessThan(1_000);
+  });
+
+  it('cuts 30,000 nested lists — the shape with the shallowest stack budget', () => {
+    expect(filingToExtract(nest('<ul><li>', '</li></ul>', 30_000))).toContain(ELLIPSIS);
+  });
+
+  it('keeps nesting under the limit whole, with no ellipsis', () => {
+    expect(filingToExtract(nest('<span>', '</span>', 400, 'deep'))).toBe('before deep after');
+  });
+
+  it('marks the cut once nesting passes the limit', () => {
+    expect(filingToExtract(nest('<span>', '</span>', 600, 'deep'))).toBe(
+      `before ${ELLIPSIS} after`,
+    );
+  });
+
+  it('applies the same limit through filingToText', () => {
+    const { text, truncated } = filingToText(nest('<div>', '</div>', 30_000));
+
+    expect(text).toBe(`before\n${ELLIPSIS}\nafter`);
+    expect(truncated).toBe(false);
+  });
+
+  it('converts an 800-page SGML text document whole — every page, no ellipsis', () => {
+    const text = filingToExtract(sgmlDocument(800));
+
+    for (const page of [1, 400, 511, 512, 513, 800]) {
+      expect(text).toContain(`page ${page} text`);
+    }
+    expect(text.match(/page \d+ text/g)).toHaveLength(800);
+    expect(text).toContain('END');
+    expect(text).not.toContain(ELLIPSIS);
+  });
+});

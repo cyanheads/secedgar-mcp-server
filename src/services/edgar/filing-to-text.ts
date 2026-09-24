@@ -7,6 +7,17 @@
 import type { HtmlToTextOptions } from 'html-to-text';
 import { convert } from 'html-to-text';
 
+/**
+ * html-to-text walks the DOM recursively, so markup nested deeply enough overflows
+ * the stack (#118). `maxDepth` stops the walk and prints `ellipsis` in place of
+ * what lies below. The bound has to hold on both runtimes this server ships under:
+ * a fresh Node process overflows at about 1,360 levels of nested lists (its most
+ * stack-hungry shape) and Bun near 13,000, so 512 leaves Node over 2.5× headroom
+ * while sitting far above real filings — HTML documents measure under 25 levels,
+ * and a legacy text document under 100 once its `<PAGE>` markers are neutralized
+ * (see {@link neutralizePageMarkers}). `limits` deep-merges with the library's
+ * defaults, so its 16,777,216-character `maxInputLength` still applies.
+ */
 const CONVERT_OPTIONS: HtmlToTextOptions = {
   wordwrap: false,
   selectors: [
@@ -14,7 +25,19 @@ const CONVERT_OPTIONS: HtmlToTextOptions = {
     { selector: 'img', format: 'skip' },
     { selector: 'table', options: { uppercaseHeaderCells: false } },
   ],
+  limits: { maxDepth: 512, ellipsis: '[…]' },
 };
+
+/**
+ * Replace legacy SGML `<PAGE>` markers with a line break before parsing. The
+ * parser never closes them, so each page nests one level below the last and a
+ * text document's depth grows with its page count — an 800-page document would
+ * be cut at {@link CONVERT_OPTIONS}' depth limit partway through. The marker
+ * contributes no text of its own, so the extracted text is unchanged.
+ */
+function neutralizePageMarkers(html: string): string {
+  return html.replace(/<PAGE>/gi, '\n');
+}
 
 /**
  * Bounded LRU cache for extracted filing text.
@@ -60,7 +83,7 @@ function stripInlineXbrl(html: string): string {
  * cache hit skip the document fetch as well as this conversion.
  */
 export function filingToExtract(html: string): string {
-  return convert(stripInlineXbrl(html), CONVERT_OPTIONS);
+  return convert(neutralizePageMarkers(stripInlineXbrl(html)), CONVERT_OPTIONS);
 }
 
 /** Return true if the cache has an entry for cacheKey (allows skipping the document fetch). */
@@ -351,7 +374,7 @@ export function filingToText(
   html: string,
   limit?: number,
 ): { text: string; truncated: boolean; totalLength: number } {
-  const full = convert(stripInlineXbrl(html), CONVERT_OPTIONS);
+  const full = filingToExtract(html);
   const totalLength = full.length;
 
   if (!limit || totalLength <= limit) {

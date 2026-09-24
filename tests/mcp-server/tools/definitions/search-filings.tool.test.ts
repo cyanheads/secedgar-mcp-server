@@ -9,8 +9,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
 import type { EftsResponse } from '@/services/edgar/types.js';
 
-// Preserve the real pure helpers the tool imports (quartersInRange,
-// selectArchivePages); only the service singleton getter is mocked.
+// Preserve the real pure helpers the tool imports (quartersInRange); only the
+// service singleton getter is mocked. The archive-page walk lives in its own
+// module and runs for real against the mocked `fetchArchivePage`.
 vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
   const actual = await importActual<typeof import('@/services/edgar/edgar-api-service.js')>();
   return {
@@ -1484,6 +1485,35 @@ describe('searchFilingsTool', () => {
 
     expect(result.results.map((r) => r.accession_number)).toEqual(['HERE']);
     expect(result.scan).toEqual({ candidates: 2, scanned: 2, matched: 1, capped: false });
+  });
+
+  it('completes the scan when one candidate nests 30,000 levels deep (#118)', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      submissionsWith([
+        { accession: 'DEEP', date: '1998-01-01' },
+        { accession: 'HERE', date: '1998-02-01' },
+      ]),
+    );
+    mockApi.tryGetFilingDocument = vi.fn(async (_cik: string, accession: string) =>
+      accession === 'DEEP'
+        ? `<html><body>Macintosh ${'<span>'.repeat(30_000)}x${'</span>'.repeat(30_000)}</body></html>`
+        : '<html><body>no match here</body></html>',
+    );
+
+    const result = await runToolContract(searchFilingsTool, {
+      query: 'cik:320193 Macintosh',
+      filed_after: '1998-01-01',
+      filed_before: '1998-12-31',
+    });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      results: Array<{ accession_number: string }>;
+      scan: unknown;
+    };
+    expect(structured.results.map((r) => r.accession_number)).toEqual(['DEEP']);
+    expect(structured.scan).toEqual({ candidates: 2, scanned: 2, matched: 1, capped: false });
+    expect(blockText(result.content)).toContain('DEEP');
   });
 
   it('renders the scan disclosure in format() (format-parity) (#87)', () => {
