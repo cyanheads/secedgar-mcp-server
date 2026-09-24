@@ -4,7 +4,7 @@ All notable changes to this project. Each entry links to its full per-version fi
 
 ## [0.15.8](changelog/0.15.x/0.15.8.md) — 2026-09-24
 
-secedgar_get_insider_transactions takes a filed_after / filed_before window reaching back to mid-2003, and secedgar_get_institutional_holdings finds quarters older than the recent submissions window. Fixes fund-ticker resolution after a failed or mirror-served load, deeply nested filings overflowing the stack, and archive paging.
+secedgar_get_insider_transactions takes a filed_after / filed_before window reading Form 4 history back to mid-2003, and secedgar_get_institutional_holdings finds quarters older than the recent submissions window. Fixes fund-ticker resolution after a failed or mirror-served load, deeply nested filings overflowing the stack, and archive paging.
 
 ## [0.15.7](changelog/0.15.x/0.15.7.md) — 2026-09-21
 
