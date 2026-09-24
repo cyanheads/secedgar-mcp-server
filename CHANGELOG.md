@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.15.8](changelog/0.15.x/0.15.8.md) — 2026-09-24
+
+secedgar_get_insider_transactions takes a filed_after / filed_before window reaching back to mid-2003, and secedgar_get_institutional_holdings finds quarters older than the recent submissions window. Fixes fund-ticker resolution after a failed or mirror-served load, deeply nested filings overflowing the stack, and archive paging.
+
 ## [0.15.7](changelog/0.15.x/0.15.7.md) — 2026-09-21
 
 After a 429, calls are refused locally for SEC's cool-down instead of each reaching SEC and restarting its block. company/filed_after/filed_before/forms replace ticker_or_cik/start_date/end_date/form_types, old spellings accepted as aliases. secedgar_dataframe_query fixes a backslash-escaping bug and gains a fuller SQL error contract.

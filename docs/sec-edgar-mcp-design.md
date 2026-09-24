@@ -138,7 +138,7 @@ input: z.object({
     .describe('Filter filings to specific form types (e.g., ["10-K", "10-Q", "8-K"]). '
       + 'Without this, returns all form types.'),
   filing_limit: z.number().int().min(1).max(50).default(10)
-    .describe('Maximum number of filings to return. The API has up to 1,000 recent filings per company.'),
+    .describe('Maximum number of filings to return. The API\'s recent window holds the last year or 1,000 filings per company, whichever is more.'),
 })
 
 output: z.object({
@@ -540,7 +540,7 @@ function filingToText(html: string, limit?: number): {
 
 **Why `html-to-text`:** Purpose-built for HTML→text with native table support — tables render as aligned columns. `htmlparser2` is tolerant of malformed markup (common in pre-2010 SEC filings). Lightweight, well-maintained, no browser/DOM dependency.
 
-**Known limitations:** Pre-2005 filings use deeply nested layout tables (not data tables), producing noisier output. Some filings embed data in images or PDFs within HTML — invisible to any HTML parser. Both acceptable for v1.
+**Known limitations:** Pre-2005 filings use deeply nested layout tables (not data tables), producing noisier output. Some filings embed data in images or PDFs within HTML — invisible to any HTML parser. Both acceptable for v1. The library's DOM walk is recursive, so conversion caps it at 512 levels (`limits.maxDepth`) and prints `[…]` where markup nests deeper — the stack otherwise overflows near 1,360 levels on Node. Legacy SGML `<PAGE>` markers, which the parser never closes, are replaced with line breaks first so a long text document does not reach the cap; the extracted text is unchanged. Input over the library's 16,777,216-character `maxInputLength` is truncated without an ellipsis; no measured filing reaches it.
 
 ---
 
@@ -552,7 +552,7 @@ function filingToText(html: string, limit?: number): {
 
 | Layer | Source | Store | Backs |
 |:------|:-------|:------|:------|
-| Ticker/CIK | `company_tickers.json` (~200 KB JSON) | `tickers` — PK `ticker`, index `cik` | `resolveCik`, `cikToTicker` |
+| Ticker/CIK | `company_tickers.json` (~200 KB JSON) + fund symbols from `company_tickers_mf.json` (empty name, no series/class) | `tickers` — PK `ticker`, index `cik` | `resolveCik`, `cikToTicker` |
 | XBRL company-facts | `companyfacts.zip` (~1.3 GB bulk archive) | `company_concepts` — PK `cik\|taxonomy\|tag`, `units` JSON blob, index `taxonomy,tag` | `tryGetCompanyConcept`, `tryGetFrames` |
 
 One row per `(cik, taxonomy, tag)` stores the concept's full `units` map verbatim, so a point read (`getByIds`) reconstructs the `companyconcept` API shape and a `taxonomy+tag` scan reconstructs the `frames` API shape off the same ~2.5M-row table — no separate ~10⁸-row fact-inversion table, keeping the store inside the embedded-SQLite tier.
@@ -590,7 +590,7 @@ One row per `(cik, taxonomy, tag)` stores the concept's full `units` map verbati
 | `EDGAR_USER_AGENT` | **Yes** | — | User-Agent string for SEC compliance. Format: `"AppName contact@email.com"`. SEC may block requests without this. |
 | `EDGAR_RATE_LIMIT_RPS` | No | `10` | Max requests per second to SEC APIs. Do not exceed 10. |
 | `EDGAR_RATE_LIMIT_COOLDOWN_SECONDS` | No | `600` | Seconds to stop sending to SEC after a 429 before one probe request goes out. |
-| `EDGAR_TICKER_CACHE_TTL` | No | `3600` | Seconds to cache the company_tickers.json lookup file. |
+| `EDGAR_TICKER_CACHE_TTL` | No | `3600` | Seconds to cache the ticker index (company_tickers.json + company_tickers_mf.json). A failed fund-file load is retried after 60 s, or the rate-limit cool-down, instead of standing for the TTL. |
 
 Minimal config — the API is entirely public and free.
 

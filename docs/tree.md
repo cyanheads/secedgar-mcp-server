@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-09-22 05:29:10
+Generated on: 2026-09-24 17:00:03
 
 ```text
 secedgar-mcp-server/
@@ -206,6 +206,7 @@ secedgar-mcp-server/
 │   │       ├── fiscal-periods.ts
 │   │       ├── nport-parser.ts
 │   │       ├── ownership-parser.ts
+│   │       ├── submissions-archive.ts
 │   │       ├── types.ts
 │   │       └── xml-nodes.ts
 │   └── index.ts
@@ -240,6 +241,7 @@ secedgar-mcp-server/
 │   │       │   ├── security.test.ts
 │   │       │   └── tool-definitions.test.ts
 │   │       ├── dataframe-pointers.test.ts
+│   │       ├── fund-ticker-resolution.test.ts
 │   │       ├── input-aliases.test.ts
 │   │       ├── rate-limit-contract.test.ts
 │   │       └── strict-inputs.test.ts
@@ -259,17 +261,21 @@ secedgar-mcp-server/
 │   │       ├── concept-map.test.ts
 │   │       ├── concept-series.test.ts
 │   │       ├── edgar-api-service.efts.test.ts
+│   │       ├── edgar-api-service.filing-headers.test.ts
 │   │       ├── edgar-api-service.full-index.test.ts
+│   │       ├── edgar-api-service.fund-tickers.test.ts
 │   │       ├── edgar-api-service.mirror.test.ts
 │   │       ├── edgar-api-service.rate-limit-block.test.ts
 │   │       ├── edgar-api-service.raw-fetch.test.ts
 │   │       ├── edgar-api-service.resolve-cik.test.ts
 │   │       ├── edgar-api-service.test.ts
 │   │       ├── eight-k-items.test.ts
+│   │       ├── filing-headers.test.ts
 │   │       ├── filing-to-text.test.ts
 │   │       ├── fiscal-periods.test.ts
 │   │       ├── nport-parser.test.ts
 │   │       ├── ownership-parser.test.ts
+│   │       ├── submissions-archive.test.ts
 │   │       └── xml-nodes.test.ts
 │   └── support/
 │       └── assertions.ts
