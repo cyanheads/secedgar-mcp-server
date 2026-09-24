@@ -14,6 +14,7 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
 }));
 
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+import type { FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
 
 // Partial mock: the canvas accessors are stubbed, but `dataframeGuidance` stays
 // real so the staged-dataframe pointer is asserted against the shipped wording.
@@ -136,6 +137,8 @@ const mockApi = {
   resolveCik: vi.fn(),
   getRecentFilingsByForm: vi.fn(),
   tryGetFilingDocument: vi.fn(),
+  getSubmissions: vi.fn(),
+  fetchArchivePage: vi.fn(),
 };
 
 beforeEach(() => {
@@ -143,6 +146,10 @@ beforeEach(() => {
   // Default to no canvas — individual tests opt in by returning a stub bridge.
   vi.mocked(getCanvasBridge).mockReturnValue(undefined as never);
   vi.mocked(getEdgarApiService).mockReturnValue(mockApi as any);
+  // Window-less calls read only the recent Form 4 list; a submissions or archive
+  // read nobody arranged fails loudly.
+  mockApi.getSubmissions.mockRejectedValue(new Error('unexpected submissions read'));
+  mockApi.fetchArchivePage.mockRejectedValue(new Error('unexpected archive page read'));
   mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
   mockApi.getRecentFilingsByForm.mockResolvedValue([
     {
@@ -820,5 +827,342 @@ describe('getInsiderTransactionsTool parameter names (#115)', () => {
     expect(result.isError).toBe(true);
     expect(blockText(result.content)).toContain('ticker_or_cik');
     expect(mockApi.resolveCik).not.toHaveBeenCalled();
+  });
+});
+
+// --- filed_after / filed_before window (#127) ---
+
+interface Form4Spec {
+  accession: string;
+  date: string;
+  doc?: string;
+  form?: string;
+}
+
+function form4Block(rows: Form4Spec[]): FilingsRecent {
+  return {
+    accessionNumber: rows.map((r) => r.accession),
+    filingDate: rows.map((r) => r.date),
+    form: rows.map((r) => r.form ?? '4'),
+    primaryDocDescription: rows.map(() => ''),
+    primaryDocument: rows.map((r) => r.doc ?? 'xslF345X05/form4.xml'),
+    reportDate: rows.map(() => ''),
+  };
+}
+
+/** `n` Form 4 rows filed one a day, newest first, ending at `newest`. */
+function dailyRows(n: number, newest: string, tag: string): Form4Spec[] {
+  const start = Date.parse(`${newest}T00:00:00Z`);
+  return Array.from({ length: n }, (_, i) => ({
+    accession: `${tag}-${String(i).padStart(3, '0')}`,
+    date: new Date(start - i * 86_400_000).toISOString().slice(0, 10),
+  }));
+}
+
+function submissionsWith(
+  recent: Form4Spec[],
+  files: SubmissionsResponse['filings']['files'] = [],
+): SubmissionsResponse {
+  return {
+    cik: '0000320193',
+    entityType: 'operating',
+    exchanges: ['Nasdaq'],
+    filings: { recent: form4Block(recent), files },
+    fiscalYearEnd: '0930',
+    name: 'Apple Inc.',
+    sic: '3571',
+    sicDescription: 'ELECTRONIC COMPUTERS',
+    tickers: ['AAPL'],
+  };
+}
+
+const page = (name: string, filingFrom: string, filingTo: string) => ({
+  name,
+  filingCount: 100,
+  filingFrom,
+  filingTo,
+});
+
+/** Serve archive pages by name; any other page read fails the test. */
+function servePages(pages: Record<string, Form4Spec[]>) {
+  mockApi.fetchArchivePage.mockImplementation(async (name: string) => {
+    const rows = pages[name];
+    if (!rows) throw new Error(`unexpected archive page ${name}`);
+    return form4Block(rows);
+  });
+}
+
+describe('getInsiderTransactionsTool — filed_after / filed_before window (#127)', () => {
+  const call = (args: Record<string, unknown>) =>
+    runToolContract(getInsiderTransactionsTool, args as never);
+
+  it('parses every in-window filing from the recent window alone, with no archive page', async () => {
+    // Recent reaches back to 2020-12-02; 30 Form 4s sit in 2021-Q1 among a 10-K and a 4/A.
+    mockApi.getSubmissions.mockResolvedValue(
+      submissionsWith(
+        [
+          ...dailyRows(10, '2026-09-10', 'new'),
+          { accession: '10k', date: '2021-04-02', form: '10-K', doc: 'msft-10k.htm' },
+          ...dailyRows(29, '2021-03-31', 'q1'),
+          { accession: 'q1-amend', date: '2021-03-02', form: '4/A' },
+          ...dailyRows(10, '2020-12-11', 'old'),
+        ],
+        [page('CIK0000320193-submissions-001.json', '2008-08-13', '2020-08-05')],
+      ),
+    );
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+
+    const result = await call({
+      company: 'MSFT',
+      filed_after: '2021-01-01',
+      filed_before: '2021-03-31',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.getRecentFilingsByForm).not.toHaveBeenCalled();
+    expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledTimes(30);
+    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledWith(
+      '0000320193',
+      'q1-amend',
+      'form4.xml',
+    );
+    expect(result.structuredContent).toMatchObject({
+      filings_scanned: 30,
+      history_scanned_through: '2021-03-02',
+      dataset: { row_count: 30, truncated: false },
+    });
+    const opts = bridge.registerDataframe.mock.calls[0]?.[1];
+    expect(opts?.truncated).toBe(false);
+    expect(blockText(result.content)).toContain('History scanned through: 2021-03-02');
+  });
+
+  it('reads only the archive pages overlapping the window, newest first', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      submissionsWith(dailyRows(5, '2026-09-24', 'recent'), [
+        page('p039', '2021-04-20', '2021-06-10'),
+        page('p040', '2021-02-19', '2021-04-18'),
+        page('p041', '2020-12-15', '2021-02-17'),
+        page('p042', '2020-10-01', '2020-12-14'),
+      ]),
+    );
+    servePages({
+      // 18 April rows, then 41 rows 2021-03-31 → 2021-02-19 (all in window).
+      p040: [...dailyRows(18, '2021-04-18', 'apr'), ...dailyRows(41, '2021-03-31', 'p40')],
+      // 48 rows 2021-02-17 → 2021-01-01, then December rows outside the window.
+      p041: [...dailyRows(48, '2021-02-17', 'p41'), ...dailyRows(10, '2020-12-31', 'dec')],
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+
+    const result = await call({
+      company: '0000019617',
+      filed_after: '2021-01-01',
+      filed_before: '2021-03-31',
+    });
+
+    expect(mockApi.fetchArchivePage.mock.calls.map(([name]) => name)).toEqual(['p040', 'p041']);
+    expect(result.structuredContent).toMatchObject({
+      filings_scanned: 89,
+      history_scanned_through: '2021-01-01',
+      dataset: { truncated: false },
+    });
+  });
+
+  it('parses up to 100 filings and flags truncation when a sentinel row is in hand', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      submissionsWith(dailyRows(120, '2021-06-30', 'q'), [
+        page('p001', '2015-01-01', '2020-12-31'),
+      ]),
+    );
+    vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+
+    const result = await call({ company: 'AAPL', filed_after: '2021-01-01', limit: 5 });
+
+    expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledTimes(100);
+    expect(result.structuredContent).toMatchObject({
+      filings_scanned: 100,
+      dataset: { truncated: true },
+    });
+    expect((result.structuredContent as { transactions: unknown[] }).transactions).toHaveLength(5);
+  });
+
+  it('stops paging on the page that brings in the scan budget plus one sentinel row', async () => {
+    const files = Array.from({ length: 5 }, (_, i) =>
+      page(`p${i + 1}`, `${2014 - i}-01-01`, `${2014 - i}-12-31`),
+    );
+    mockApi.getSubmissions.mockResolvedValue(
+      submissionsWith(dailyRows(3, '2026-01-10', 'recent'), files),
+    );
+    servePages(
+      Object.fromEntries(files.map((f, i) => [f.name, dailyRows(60, `${2014 - i}-12-31`, f.name)])),
+    );
+    vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+
+    const result = await call({ company: 'AAPL', filed_before: '2014-12-31' });
+
+    // Page 1 brings 60 candidates, page 2 brings 120 ≥ 101: the walk ends there, and
+    // the 100th filing parsed is page 2's 40th row.
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(2);
+    expect(result.structuredContent).toMatchObject({
+      filings_scanned: 100,
+      history_scanned_through: '2013-11-22',
+      dataset: { truncated: true },
+    });
+  });
+
+  it('flags truncation when the page cap ends the walk before the window’s lower bound', async () => {
+    const files = Array.from({ length: 14 }, (_, i) =>
+      page(`p${String(i + 1).padStart(3, '0')}`, `${2014 - i}-01-01`, `${2014 - i}-12-31`),
+    );
+    mockApi.getSubmissions.mockResolvedValue(
+      submissionsWith(dailyRows(3, '2026-01-10', 'recent'), files),
+    );
+    servePages(
+      Object.fromEntries(files.map((f, i) => [f.name, dailyRows(1, `${2014 - i}-06-30`, f.name)])),
+    );
+    vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+
+    const result = await call({
+      company: 'AAPL',
+      filed_after: '1990-01-01',
+      filed_before: '2015-12-31',
+    });
+
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(10);
+    expect(result.structuredContent).toMatchObject({
+      filings_scanned: 10,
+      history_scanned_through: '2005-06-30',
+      dataset: { truncated: true },
+    });
+  });
+
+  it('answers an empty window with a notice naming it, not no_filings_found', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      submissionsWith(dailyRows(5, '2026-01-10', 'recent'), [
+        page('p001', '1994-01-26', '2015-07-24'),
+      ]),
+    );
+    servePages({
+      p001: [
+        ...dailyRows(3, '2004-02-01', 'xml'),
+        // Form 4 before EDGAR's ownership XML: an HTML primary document, never parsed.
+        { accession: 'html-4', date: '2003-03-21', doc: 'j8739_4.htm' },
+        { accession: '10k', date: '2002-12-19', form: '10-K', doc: 'a10k.htm' },
+      ],
+    });
+
+    const result = await call({
+      company: 'AAPL',
+      start_date: '1995-01-01',
+      end_date: '2003-04-30',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.tryGetFilingDocument).not.toHaveBeenCalled();
+    expect(result.structuredContent).toMatchObject({ transactions: [], filings_scanned: 0 });
+    const notice = String((result.structuredContent as { notice?: string }).notice);
+    expect(notice).toContain('No Form 4 filings filed between 1995-01-01 and 2003-04-30');
+    expect(notice).toContain('begin in mid-2003');
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain(notice);
+  });
+
+  it('names an unread page-cap stretch in the empty-window notice, without the pre-2003 note', async () => {
+    // Twenty yearly pages, 2020 back to 2001; with the one-day drift allowance (#137)
+    // thirteen overlap 2005–2015 (2004 and 2016 are a day away), ten are read.
+    const files = Array.from({ length: 20 }, (_, i) =>
+      page(`p${String(i + 1).padStart(3, '0')}`, `${2020 - i}-01-01`, `${2020 - i}-12-31`),
+    );
+    mockApi.getSubmissions.mockResolvedValue(
+      submissionsWith(dailyRows(3, '2026-01-10', 'recent'), files),
+    );
+    servePages(Object.fromEntries(files.map((f) => [f.name, []])));
+
+    const result = await call({
+      company: 'AAPL',
+      filed_after: '2005-01-01',
+      filed_before: '2015-12-31',
+    });
+
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(10);
+    const notice = String((result.structuredContent as { notice?: string }).notice);
+    expect(notice).toContain('No Form 4 filings filed between 2005-01-01 and 2015-12-31');
+    expect(notice).toContain('stopped after 10 pages, at filings from 2007-01-01');
+    expect(notice).not.toContain('mid-2003');
+    expect(result.structuredContent).not.toHaveProperty(
+      'history_scanned_through',
+      expect.anything(),
+    );
+  });
+
+  it.each([
+    ['filed_after', 'filed_before'],
+    ['start_date', 'end_date'],
+    ['date_from', 'date_to'],
+  ])('bounds the window with %s / %s, both ends inclusive', async (after, before) => {
+    mockApi.getSubmissions.mockResolvedValue(submissionsWith(dailyRows(10, '2024-03-20', 'd')));
+
+    const result = await call({ company: 'AAPL', [after]: '2024-03-12', [before]: '2024-03-15' });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.tryGetFilingDocument.mock.calls.map(([, accn]) => accn)).toEqual([
+      'd-005',
+      'd-006',
+      'd-007',
+      'd-008',
+    ]);
+    expect(result.structuredContent).toMatchObject({ history_scanned_through: '2024-03-12' });
+  });
+
+  it('keeps the no-canvas fast path inside a window: stops once limit transactions are in', async () => {
+    mockApi.getSubmissions.mockResolvedValue(submissionsWith(dailyRows(10, '2024-03-20', 'd')));
+
+    const result = await call({ company: 'AAPL', filed_before: '2024-03-18', limit: 2 });
+
+    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledTimes(2);
+    expect(result.structuredContent).toMatchObject({
+      filings_scanned: 2,
+      history_scanned_through: '2024-03-17',
+    });
+    expect((result.structuredContent as { dataset?: unknown }).dataset).toBeUndefined();
+  });
+
+  it('rejects a malformed bound at the schema', async () => {
+    const result = await call({ company: 'AAPL', filed_after: '2021/01/01' });
+
+    expect(result.isError).toBe(true);
+    expect(blockText(result.content)).toContain('filed_after');
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
+  });
+
+  it('converts a bare-CIK 404 on the windowed submissions read to company_not_found', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0001193125' });
+    mockApi.getSubmissions.mockRejectedValue(
+      notFound(
+        'SEC EDGAR API returned 404 for https://data.sec.gov/submissions/CIK0001193125.json',
+      ),
+    );
+    const err = await caught(
+      getInsiderTransactionsTool.handler(
+        getInsiderTransactionsTool.input.parse({
+          company: '0001193125',
+          filed_after: '2021-01-01',
+        }),
+        createMockContext({ errors: getInsiderTransactionsTool.errors }),
+      ),
+    );
+
+    expect(err.data.reason).toBe('company_not_found');
+    expect(err.message).not.toContain('data.sec.gov');
+  });
+
+  it('leaves a window-less call on the recent Form 4 list, with no scan-depth field', async () => {
+    const result = await call({ company: 'AAPL' });
+
+    expect(mockApi.getRecentFilingsByForm).toHaveBeenCalledWith('0000320193', ['4', '4/A'], 101);
+    expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+    expect(result.structuredContent).not.toHaveProperty('history_scanned_through');
   });
 });

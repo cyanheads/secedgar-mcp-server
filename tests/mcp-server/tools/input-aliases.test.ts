@@ -54,6 +54,8 @@ describe('parameter names across tools (#115)', () => {
       'secedgar_company_search.forms',
       'secedgar_get_financials.company',
       'secedgar_get_insider_transactions.company',
+      'secedgar_get_insider_transactions.filed_after',
+      'secedgar_get_insider_transactions.filed_before',
       'secedgar_get_institutional_holdings.company',
       'secedgar_get_material_events.company',
       'secedgar_get_material_events.filed_after',

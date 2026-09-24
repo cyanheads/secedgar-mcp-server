@@ -17,6 +17,8 @@ import {
   parseForm4Xml,
   type ReportingOwner,
 } from '@/services/edgar/ownership-parser.js';
+import { SubmissionsArchiveWalk } from '@/services/edgar/submissions-archive.js';
+import type { FilingsRecent } from '@/services/edgar/types.js';
 
 /** Transaction type filter → SEC transaction codes. */
 const PURCHASE_CODES = new Set(['P']);
@@ -30,6 +32,44 @@ const SALE_CODES = new Set(['S']);
  * is met — no extra latency.
  */
 const INSIDER_CANVAS_FILING_SCAN = 40;
+
+/** Most Form 4 filings one call parses — one rate-limited document request each. */
+const INSIDER_FILING_SCAN_CAP = 100;
+
+/** Structured Form 4 XML became mandatory for filings on and after this date. */
+const STRUCTURED_FORM4_START = '2003-06-30';
+
+/** Form 4 metadata the scan needs, from the recent Form 4 list or a submissions block. */
+interface Form4Filing {
+  accessionNumber: string;
+  filingDate: string;
+  primaryDocument: string;
+}
+
+/**
+ * The Form 4 / 4-A rows of a submissions block filed inside the window, in block order
+ * (newest first). Only rows whose primary document is ownership XML — EDGAR's
+ * structured Form 4 began in mid-2003, and an earlier HTML or text filing has nothing
+ * this tool can parse, so fetching it would spend a request on an empty result.
+ */
+function windowForm4Rows(block: FilingsRecent, inWindow: (date: string) => boolean): Form4Filing[] {
+  const rows: Form4Filing[] = [];
+  for (let i = 0; i < block.form.length; i++) {
+    const form = block.form[i];
+    const filingDate = block.filingDate[i] ?? '';
+    const primaryDocument = block.primaryDocument[i] ?? '';
+    if ((form !== '4' && form !== '4/A') || !inWindow(filingDate)) continue;
+    if (!/\.xml$/i.test(primaryDocument)) continue;
+    rows.push({ accessionNumber: block.accessionNumber[i] ?? '', filingDate, primaryDocument });
+  }
+  return rows;
+}
+
+/** "between A and B" / "on or after A" / "on or before B" for notices. */
+function describeWindow(filedAfter: string | undefined, filedBefore: string | undefined): string {
+  if (filedAfter && filedBefore) return `between ${filedAfter} and ${filedBefore}`;
+  return filedAfter ? `on or after ${filedAfter}` : `on or before ${filedBefore}`;
+}
 
 function matchesFilter(tx: InsiderTransaction, filter: 'purchase' | 'sale' | 'all'): boolean {
   if (filter === 'all') return true;
@@ -53,7 +93,7 @@ function ownerRelationship(owner: ReportingOwner): string {
 export const getInsiderTransactionsTool = tool('secedgar_get_insider_transactions', {
   title: 'Get Insider Transactions',
   description:
-    'Fetch Form 4 insider transactions (purchases, sales, grants, exercises) for a company by parsing SEC EDGAR ownership XML. Returns the reporting person, their relationship to the issuer, transaction date, type, shares traded (absolute magnitude), direction (acquire/dispose), price per share, and shares owned after the transaction. Covers nonDerivative transactions (open-market buys/sells, gifts) and derivative transactions (option exercises, RSU vests). When a canvas is available, the full set of transactions parsed from the scanned recent filings is materialized as df_<id> (the inline list is a preview capped at limit) — inspect it with secedgar_dataframe_describe, then query it with secedgar_dataframe_query to aggregate net buy/sell by insider: SUM(CASE WHEN direction=\'dispose\' THEN -shares_traded ELSE shares_traded END). Use secedgar_search_filings with forms=["4"] for broader date-range queries or to search across all companies.',
+    'Fetch Form 4 insider transactions (purchases, sales, grants, exercises) for a company by parsing SEC EDGAR ownership XML. Returns the reporting person, their relationship to the issuer, transaction date, type, shares traded (absolute magnitude), direction (acquire/dispose), price per share, and shares owned after the transaction. Covers nonDerivative transactions (open-market buys/sells, gifts) and derivative transactions (option exercises, RSU vests). Without a date window it reads the newest Form 4 filings; filed_after / filed_before read any period since mid-2003, reaching past the recent submissions window into the archive (e.g. insider trades in the quarter before an earnings miss). When a canvas is available, the full set of transactions parsed from the scanned filings is materialized as df_<id> (the inline list is a preview capped at limit) — inspect it with secedgar_dataframe_describe, then query it with secedgar_dataframe_query to aggregate net buy/sell by insider: SUM(CASE WHEN direction=\'dispose\' THEN -shares_traded ELSE shares_traded END). Use secedgar_search_filings with forms=["4"] to search Form 4 filings across all companies.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -66,8 +106,9 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     {
       reason: 'no_filings_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No Form 4 filings exist for this company in the recent submissions window',
-      recovery: 'Use secedgar_search_filings with forms=["4"] for broader historical coverage.',
+      when: 'A call without a date window finds no Form 4 filings in the recent submissions window',
+      recovery:
+        'Pass filed_after / filed_before to read an older period, or use secedgar_search_filings with forms=["4"] to find the filings.',
     },
     {
       reason: 'rate_limited',
@@ -102,9 +143,42 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       .describe(
         'Maximum number of transactions to return across all Form 4 filings fetched. Filings are scanned newest-first. Default 20.',
       ),
+    filed_after: z
+      .union([
+        z.literal(''),
+        z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD')
+          .describe('YYYY-MM-DD'),
+      ])
+      .optional()
+      .describe(
+        'Only read Form 4 filings filed on or after this date (YYYY-MM-DD). A date window reaches filings older than the recent submissions window by paging into the archive, and with a canvas every Form 4 filed inside it is parsed, up to 100. Structured Form 4 XML begins in mid-2003, so an earlier window finds nothing.',
+      ),
+    filed_before: z
+      .union([
+        z.literal(''),
+        z
+          .string()
+          .regex(/^\d{4}-\d{2}-\d{2}$/, 'Expected YYYY-MM-DD')
+          .describe('YYYY-MM-DD'),
+      ])
+      .optional()
+      .describe(
+        'Only read Form 4 filings filed on or before this date (YYYY-MM-DD). Use alone or with filed_after. Without either bound the tool reads the newest Form 4 filings.',
+      ),
   }),
-  // Other tools' spellings of the company parameter, and this tool's former one (#115).
-  inputAliases: { ticker: 'company', cik: 'company', ticker_or_cik: 'company' },
+  // Other tools' spellings of the company and filing-date parameters, and this tool's
+  // former company name (#115).
+  inputAliases: {
+    ticker: 'company',
+    cik: 'company',
+    ticker_or_cik: 'company',
+    start_date: 'filed_after',
+    date_from: 'filed_after',
+    end_date: 'filed_before',
+    date_to: 'filed_before',
+  },
 
   output: z.object({
     issuer_name: z.string().describe('Issuer entity name (SEC-conformed).'),
@@ -189,6 +263,12 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
         'Insider transactions, newest filing first. Preview capped at `limit` — the full scanned set lives on the canvas dataframe (see `dataset`).',
       ),
     filings_scanned: z.number().describe('Number of Form 4 filings scanned to produce the result.'),
+    history_scanned_through: z
+      .string()
+      .optional()
+      .describe(
+        'Filing date of the oldest Form 4 parsed (YYYY-MM-DD). Present only when a date window was given; absent when the window held no Form 4 filing.',
+      ),
     dataset: z
       .object({
         name: z
@@ -201,7 +281,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
         truncated: z
           .boolean()
           .describe(
-            'True when more recent Form 4 filings exist beyond the scanned window — the dataframe is a recent sample, not the issuer\'s full Form 4 history. Use secedgar_search_filings with forms=["4"] for exhaustive coverage.',
+            'True when Form 4 filings exist beyond those parsed — past the newest-filings sample, or, with a date window, inside the window beyond the 100-filing cap or past the 10 archive pages read. Narrow the window to reach the rest.',
           ),
       })
       .optional()
@@ -237,19 +317,30 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       });
     }
 
+    const filedAfter = input.filed_after || undefined;
+    const filedBefore = input.filed_before || undefined;
+    const dateWindow = filedAfter || filedBefore ? { filedAfter, filedBefore } : undefined;
+
     // With a canvas available, scan deeper than the inline `limit` so the dataframe
     // holds a useful window for aggregation; without one, stop as soon as the inline
-    // limit is met (preserves the fast, low-fetch path).
+    // limit is met (preserves the fast, low-fetch path). A date window already bounds
+    // the set, so with a canvas every filing inside it is parsed, up to the cap (#127).
     const bridge = getCanvasBridge();
-    const scanFloor = bridge ? INSIDER_CANVAS_FILING_SCAN : 0;
+    const scanFloor = bridge
+      ? dateWindow
+        ? INSIDER_FILING_SCAN_CAP
+        : INSIDER_CANVAS_FILING_SCAN
+      : 0;
 
-    // Fetch recent Form 4 filing metadata from the submissions API. Over-fetch by 5x
-    // to account for multi-transaction filings and filter losses; with a canvas, also
-    // fetch at least the scan floor so a small inline `limit` doesn't under-scan the
-    // dataframe window (#63). Capped at 100; the +1 sentinel row (metadata only, one
-    // submissions fetch regardless) detects Form 4 filings beyond the scan window so
+    // Over-fetch Form 4 metadata by 5x to account for multi-transaction filings and
+    // filter losses; with a canvas, also fetch at least the scan floor so a small inline
+    // `limit` doesn't under-scan the dataframe window (#63). Capped at 100; the +1
+    // sentinel row (metadata only) detects Form 4 filings beyond the scan window so
     // `dataset.truncated` is truthful.
-    const scanCap = Math.min(bridge ? Math.max(input.limit * 5, scanFloor) : input.limit * 5, 100);
+    const scanCap = Math.min(
+      bridge ? Math.max(input.limit * 5, scanFloor) : input.limit * 5,
+      INSIDER_FILING_SCAN_CAP,
+    );
 
     // Bare-CIK fallback: a numeric CIK absent from the ticker cache resolves to { cik }
     // with no name/ticker. The submissions feed 404s for such a CIK — it's a
@@ -258,24 +349,58 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     // A cache-hit or ticker-resolved match that 404s signals an EDGAR-side problem,
     // not a bad query — propagate unchanged, same reasoning as #55 and #76.
     const isBareCikFallback = !match.name && !match.ticker;
-    let filingBatch: Awaited<ReturnType<typeof api.getRecentFilingsByForm>>;
-    try {
-      filingBatch = await api.getRecentFilingsByForm(match.cik, ['4', '4/A'], scanCap + 1);
-    } catch (err) {
-      if (isBareCikFallback && err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
-        ctx.log.debug('CIK has no submissions feed', { cik: match.cik });
-        throw ctx.fail(
-          'company_not_found',
-          `No issuer found for CIK ${match.cik}. If this looks like an accession-number prefix, it's the filing agent, not the issuer — use secedgar_company_search to find the company.`,
-          { ...ctx.recoveryFor('company_not_found') },
-        );
+    const readSubmissionsFeed = async <T>(read: Promise<T>): Promise<T> => {
+      try {
+        return await read;
+      } catch (err) {
+        if (
+          isBareCikFallback &&
+          err instanceof McpError &&
+          err.code === JsonRpcErrorCode.NotFound
+        ) {
+          ctx.log.debug('CIK has no submissions feed', { cik: match.cik });
+          throw ctx.fail(
+            'company_not_found',
+            `No issuer found for CIK ${match.cik}. If this looks like an accession-number prefix, it's the filing agent, not the issuer — use secedgar_company_search to find the company.`,
+            { ...ctx.recoveryFor('company_not_found') },
+          );
+        }
+        throw err;
       }
-      throw err;
-    }
-    const moreBeyondWindow = filingBatch.length > scanCap;
-    const filingsToScan = moreBeyondWindow ? filingBatch.slice(0, scanCap) : filingBatch;
+    };
 
-    if (filingBatch.length === 0) {
+    let filingBatch: Form4Filing[];
+    let walk: SubmissionsArchiveWalk | undefined;
+    if (dateWindow) {
+      // In-window Form 4 rows, newest first: the recent window, then the archive pages
+      // overlapping the window, read until the scan budget plus one sentinel row is in
+      // hand or the shared page cap ends the walk.
+      const submissions = await readSubmissionsFeed(api.getSubmissions(match.cik));
+      const inWindow = (date: string) =>
+        (!filedAfter || date >= filedAfter) && (!filedBefore || date <= filedBefore);
+      filingBatch = windowForm4Rows(submissions.filings.recent, inWindow);
+      walk = new SubmissionsArchiveWalk(api, submissions, {
+        filedAfter,
+        filedBefore,
+        order: 'newest-first',
+      });
+      if (filingBatch.length <= scanCap) {
+        for await (const { block } of walk) {
+          filingBatch.push(...windowForm4Rows(block, inWindow));
+          if (filingBatch.length > scanCap) break;
+        }
+      }
+    } else {
+      filingBatch = await readSubmissionsFeed(
+        api.getRecentFilingsByForm(match.cik, ['4', '4/A'], scanCap + 1),
+      );
+    }
+    // Form 4 filings exist past the scan: the sentinel row turned up, or — in a date
+    // window — archive pages overlapping it went unread.
+    const moreBeyondWindow = filingBatch.length > scanCap || Boolean(walk?.truncated);
+    const filingsToScan = filingBatch.slice(0, scanCap);
+
+    if (filingBatch.length === 0 && !dateWindow) {
       throw ctx.fail('no_filings_found', `No Form 4 filings found for '${input.company}'.`, {
         ...ctx.recoveryFor('no_filings_found'),
       });
@@ -302,6 +427,8 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     }> = [];
 
     let filingsScanned = 0;
+    /** Filing date of the last filing parsed — the oldest, since filings run newest first. */
+    let oldestParsed: string | undefined;
     let scannedWholeWindow = true;
 
     for (const filing of filingsToScan) {
@@ -316,6 +443,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       if (!xmlText) continue;
 
       filingsScanned++;
+      oldestParsed = filing.filingDate;
 
       let parsed: ReturnType<typeof parseForm4Xml>;
       try {
@@ -365,13 +493,28 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       }
     }
 
-    if (transactions.length === 0) {
+    const windowText = dateWindow && describeWindow(filedAfter, filedBefore);
+    if (windowText && filingBatch.length === 0) {
+      const walkNote = walk?.truncated
+        ? ` The archive scan stopped after ${walk.pagesRead} pages, at filings from ${walk.scannedThrough}; narrow the window to reach older ones.`
+        : '';
+      const eraNote =
+        filedBefore && filedBefore < STRUCTURED_FORM4_START
+          ? ' Structured Form 4 filings begin in mid-2003, so an earlier window finds none.'
+          : '';
+      ctx.enrich.notice(
+        `No Form 4 filings filed ${windowText} for '${input.company}'.${walkNote}${eraNote}`,
+      );
+    } else if (transactions.length === 0) {
       const filterNote =
         input.transaction_type !== 'all'
           ? ` with transaction_type="${input.transaction_type}"`
           : '';
+      const scope = windowText
+        ? `the ${filingsScanned} Form 4 filings filed ${windowText}`
+        : `the ${filingsScanned} most recent Form 4 filings`;
       ctx.enrich.notice(
-        `No insider transactions found for '${input.company}'${filterNote} in the ${filingsScanned} most recent Form 4 filings. ` +
+        `No insider transactions found for '${input.company}'${filterNote} in ${scope}. ` +
           `Try transaction_type="all" or use secedgar_search_filings with forms=["4"] for broader coverage.`,
       );
     }
@@ -417,6 +560,8 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
           company: input.company,
           cik: match.cik,
           transaction_type: input.transaction_type,
+          filed_after: filedAfter,
+          filed_before: filedBefore,
         },
         truncated,
       });
@@ -449,6 +594,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       issuer_ticker: issuerTicker,
       transactions: inlineTransactions,
       filings_scanned: filingsScanned,
+      ...(dateWindow && { history_scanned_through: oldestParsed }),
       dataset,
     };
   },
@@ -500,9 +646,13 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       );
     }
 
+    if (result.history_scanned_through) {
+      lines.push(`\nHistory scanned through: ${result.history_scanned_through}`);
+    }
+
     if (result.dataset) {
       const truncatedNote = result.dataset.truncated
-        ? ' (truncated — more recent Form 4 filings exist beyond the scanned window)'
+        ? ' (truncated — more Form 4 filings exist beyond those scanned)'
         : '';
       lines.push(
         `\nDataset: ${result.dataset.name} (${result.dataset.row_count} rows, expires ${result.dataset.expires_at})${truncatedNote} — query with secedgar_dataframe_query.`,
