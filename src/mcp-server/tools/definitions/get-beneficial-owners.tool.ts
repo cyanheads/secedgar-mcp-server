@@ -156,7 +156,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     legacy_filings_before_coverage: z
       .number()
       .describe(
-        "Legacy SC 13D / SC 13G filings in the issuer's recent submissions window — pre-2024-12-18 stakes this tool cannot parse. Reach them with secedgar_search_filings and read them with secedgar_get_filing. A floor, not a lifetime count: the submissions window holds roughly the last thousand filings of every type.",
+        "Legacy SC 13D / SC 13G filings in the issuer's recent submissions window — pre-2024-12-18 stakes this tool cannot parse. Reach them with secedgar_search_filings and read them with secedgar_get_filing. A floor, not a lifetime count: the submissions window holds the last year or 1,000 filings of every type, whichever is more.",
       ),
     filings: z
       .array(

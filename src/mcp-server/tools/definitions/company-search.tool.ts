@@ -11,11 +11,8 @@ import {
   getCanvasBridge,
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
-import {
-  getEdgarApiService,
-  selectArchivePages,
-  suggestCompanies,
-} from '@/services/edgar/edgar-api-service.js';
+import { getEdgarApiService, suggestCompanies } from '@/services/edgar/edgar-api-service.js';
+import { SubmissionsArchiveWalk } from '@/services/edgar/submissions-archive.js';
 import type { FilingsRecent } from '@/services/edgar/types.js';
 
 interface FilingEntry {
@@ -26,14 +23,6 @@ interface FilingEntry {
   primary_document: string;
   report_date?: string | undefined;
 }
-
-/**
- * Cap on submissions archive pages fetched in one call — bounds latency and the
- * rate-limited request budget for prolific multi-decade filers. Hitting the cap
- * sets the dataframe's `truncated` flag (#78). Most filers have 0–3 archive pages,
- * so the cap rarely binds.
- */
-const ARCHIVE_PAGE_SCAN_CAP = 10;
 
 /** Format SEC's MMDD fiscal year end string as MM-DD (e.g., "0926" → "09-26"). */
 function formatFiscalYearEnd(raw: string): string {
@@ -144,7 +133,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       ])
       .optional()
       .describe(
-        "Only include filings filed on or after this date (YYYY-MM-DD). A date filter routes the scan into the older submissions archive pages, so it reaches filings that predate the ~1000-filing recent window (e.g. a company's 2005 10-K).",
+        "Only include filings filed on or after this date (YYYY-MM-DD). A date filter routes the scan into the older submissions archive pages, so it reaches filings that predate the recent window — the last year or 1,000 filings, whichever holds more (e.g. a company's 2005 10-K).",
       ),
     filed_before: z
       .union([
@@ -236,7 +225,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       .string()
       .optional()
       .describe(
-        'Oldest filing date reached by the scan (YYYY-MM-DD). Filings older than this were not examined: the recent window caps at ~1000 filings, and older filings live in archive pages fetched only when a date filter or an under-filled form filter requires them. Absent when no filings were scanned.',
+        'Oldest filing date reached by the scan (YYYY-MM-DD). Filings older than this were not examined: the recent window holds the last year or 1,000 filings, whichever is more, and older filings live in archive pages fetched only when a date filter or an under-filled form filter requires them. Absent when no filings were scanned.',
       ),
     dataset: z
       .object({
@@ -343,30 +332,21 @@ export const companySearchTool = tool('secedgar_company_search', {
 
       const recentRows = zipFilings(submissions.filings.recent);
       const recentMatched = recentRows.filter(matches);
-      // Oldest date scanned so far — the recent window's tail (newest-first, so last).
-      historyScannedThrough = recentRows.at(-1)?.filing_date;
 
       // Walk the older archive pages when the caller targets a date range (which may
       // predate the recent window) or when a form filter under-fills that window (#78).
-      const files = submissions.filings.files;
       const underFill = Boolean(formTypes) && recentMatched.length < input.filing_limit;
       const bridge = getCanvasBridge();
 
       const archiveMatched: FilingEntry[] = [];
-      let scannedBeyondRecent = false;
-      let archiveTruncated = false;
+      const walk = new SubmissionsArchiveWalk(api, submissions, {
+        filedAfter,
+        filedBefore,
+        order: 'newest-first',
+      });
 
-      if (files.length > 0 && (hasDateFilter || underFill)) {
-        const pages = selectArchivePages(files, filedAfter, filedBefore);
-        const pageLimit = Math.min(pages.length, ARCHIVE_PAGE_SCAN_CAP);
-        archiveTruncated = pages.length > pageLimit;
-
-        for (let i = 0; i < pageLimit; i++) {
-          const page = pages[i];
-          if (!page) break;
-          const block = await api.fetchArchivePage(page.name);
-          scannedBeyondRecent = true;
-          historyScannedThrough = page.filingFrom;
+      if (hasDateFilter || underFill) {
+        for await (const { block } of walk) {
           archiveMatched.push(...zipFilings(block).filter(matches));
 
           // Under-fill fallback with no canvas: stop once the inline limit is filled —
@@ -381,6 +361,10 @@ export const companySearchTool = tool('secedgar_company_search', {
           }
         }
       }
+      const scannedBeyondRecent = walk.pagesRead > 0;
+      // Oldest date reached — the deepest archive page read, else the recent window's tail.
+      historyScannedThrough = walk.scannedThrough ?? recentRows.at(-1)?.filing_date;
+      const archiveTruncated = walk.truncated;
 
       const fullMatched = [...recentMatched, ...archiveMatched].sort((a, b) =>
         b.filing_date.localeCompare(a.filing_date),

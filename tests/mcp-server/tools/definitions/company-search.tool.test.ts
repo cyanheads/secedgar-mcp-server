@@ -11,8 +11,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { companySearchTool } from '@/mcp-server/tools/definitions/company-search.tool.js';
 import type { CikMatch, FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
 
-// Keep the real module (so the pure `selectArchivePages` used by the archive-paging
-// path runs for real) and override only the service accessor + suggestions.
+// Keep the real module and override only the service accessor + suggestions. The
+// archive-page walk lives in its own module and runs for real against the mocked
+// `fetchArchivePage`.
 vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
   const actual = await importActual<typeof import('@/services/edgar/edgar-api-service.js')>();
   return {
@@ -797,5 +798,73 @@ describe('companySearchTool parameter names (#115)', () => {
     expect(result.isError).toBe(true);
     expect(blockText(result.content)).toContain('bogus');
     expect(mockApi.resolveCik).not.toHaveBeenCalled();
+  });
+});
+
+// Manifest page bounds can sit a day off the page's own rows; page selection
+// tolerates it and rows are still filtered by their own dates (#137).
+describe('companySearchTool — one-day manifest drift (#137)', () => {
+  const block = (rows: Array<[accession: string, date: string]>): FilingsRecent => ({
+    accessionNumber: rows.map(([a]) => a),
+    filingDate: rows.map(([, d]) => d),
+    form: rows.map(() => '424B2'),
+    primaryDocDescription: rows.map(() => ''),
+    primaryDocument: rows.map(([a]) => `${a}.htm`),
+    reportDate: rows.map(() => ''),
+  });
+
+  /** JPMorgan-shaped: page 041 is listed to 2021-02-17 but its newest rows are 2021-02-18. */
+  const jpm: SubmissionsResponse = {
+    ...mockPagedSubmissions,
+    cik: '0000019617',
+    name: 'JPMORGAN CHASE & CO',
+    filings: {
+      recent: block([
+        ['recent-1', '2026-09-24'],
+        ['recent-2', '2025-09-24'],
+      ]),
+      files: [
+        { name: 'p040', filingCount: 2, filingFrom: '2021-02-19', filingTo: '2021-04-18' },
+        { name: 'p041', filingCount: 3, filingFrom: '2020-12-15', filingTo: '2021-02-17' },
+      ],
+    },
+  };
+  const pages: Record<string, FilingsRecent> = {
+    p040: block([
+      ['apr', '2021-04-18'],
+      ['feb19', '2021-02-19'],
+    ]),
+    p041: block([
+      ['feb18-a', '2021-02-18'],
+      ['feb18-b', '2021-02-18'],
+      ['feb17', '2021-02-17'],
+    ]),
+  };
+
+  beforeEach(() => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000019617', name: 'JPMORGAN CHASE & CO' });
+    mockApi.getSubmissions.mockResolvedValue(jpm);
+    mockApi.fetchArchivePage.mockImplementation(async (name: string) => {
+      const page = pages[name];
+      if (!page) throw new Error(`unexpected archive page ${name}`);
+      return page;
+    });
+  });
+
+  it('reads the page holding a one-day window its listed end trails, returning only that day', async () => {
+    const result = await runToolContract(companySearchTool, {
+      query: '0000019617',
+      filed_after: '2021-02-18',
+      filed_before: '2021-02-18',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith('p041');
+    expect(result.structuredContent).toMatchObject({ total_filings: 2 });
+    const text = blockText(result.content);
+    expect(text).toContain('[feb18-a]');
+    expect(text).toContain('[feb18-b]');
+    expect(text).not.toContain('[feb17]');
+    expect(text).not.toContain('[feb19]');
   });
 });

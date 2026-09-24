@@ -22,9 +22,9 @@ import {
   cleanDisplayName,
   getEdgarApiService,
   quartersInRange,
-  selectArchivePages,
 } from '@/services/edgar/edgar-api-service.js';
 import { filingToExtract } from '@/services/edgar/filing-to-text.js';
+import { SubmissionsArchiveWalk } from '@/services/edgar/submissions-archive.js';
 import type { EftsHit, FilingSource, FilingsRecent } from '@/services/edgar/types.js';
 
 /**
@@ -37,14 +37,6 @@ const EFTS_FULLTEXT_FLOOR = '2001-01-01';
 
 /** Last day the archive arms serve when a range is split at {@link EFTS_FULLTEXT_FLOOR}. */
 const ARCHIVE_ERA_END = '2000-12-31';
-
-/**
- * Cap on submissions archive pages fetched in one call (pre-2001 entity-scoped
- * arm) — bounds latency and the rate-limited request budget. Mirrors the same
- * constant in company-search.tool.ts. Pre-2001 pages are a filer's oldest, so
- * the cap rarely binds; when it does, `dataset.truncated` discloses it.
- */
-const ARCHIVE_PAGE_SCAN_CAP = 10;
 
 /**
  * Cap on quarterly full-index files fetched in one unscoped pre-2001 browse.
@@ -411,8 +403,8 @@ async function finishAssembledResult(
 /**
  * Pre-2001 entity-scoped rows: the CIK's full submissions history (the `recent`
  * window plus the `filings.files[]` archive pages reused from #78) filtered by
- * form + date. Reuses `getSubmissions`/`selectArchivePages`/`fetchArchivePage`
- * as-is. Rows are tagged `source: 'submissions'`; the EFTS-only fields
+ * form + date, read through the shared archive walk (`SubmissionsArchiveWalk`,
+ * newest-first, page cap included). Rows are tagged `source: 'submissions'`; the EFTS-only fields
  * (period_ending, ticker, file_description, sic, location) are left null for a
  * uniform archive-row shape.
  */
@@ -481,16 +473,14 @@ async function collectSubmissionsRows(
   pushBlock(submissions.filings.recent);
 
   // Older filings live in the archive pages covering the requested pre-2001 range.
-  const pages = selectArchivePages(submissions.filings.files, args.startDate, args.endDate);
-  const pageLimit = Math.min(pages.length, ARCHIVE_PAGE_SCAN_CAP);
-  const scanTruncated = pages.length > pageLimit;
-  for (let i = 0; i < pageLimit; i++) {
-    const page = pages[i];
-    if (!page) break;
-    pushBlock(await api.fetchArchivePage(page.name));
-  }
+  const walk = new SubmissionsArchiveWalk(api, submissions, {
+    filedAfter: args.startDate,
+    filedBefore: args.endDate,
+    order: 'newest-first',
+  });
+  for await (const { block } of walk) pushBlock(block);
 
-  return { rows, scanTruncated };
+  return { rows, scanTruncated: walk.truncated };
 }
 
 /**
