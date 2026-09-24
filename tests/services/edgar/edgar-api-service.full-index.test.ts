@@ -119,6 +119,7 @@ describe('quartersInRange', () => {
 describe('EdgarApiService.fetchFullIndexQuarter', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('unmocked fetch')));
     initEdgarApiService();
   });
 

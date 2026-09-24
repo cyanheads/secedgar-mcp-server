@@ -40,8 +40,10 @@ const MF_TICKERS_URL = 'https://www.sec.gov/files/company_tickers_mf.json';
  *
  * Mirror schema carries only {ticker, cik, name} — no series/class columns.
  * Fund entries are ingested with an empty name (the name field is absent from
- * company_tickers_mf.json). They resolve by ticker on the mirror path just as
- * they do on the live path; seriesId/classId enrichment is live-path-only.
+ * company_tickers_mf.json), which is how the ticker index tells them from
+ * operating companies. They resolve by ticker to their registrant CIK; seriesId
+ * and classId come only from the live fund file, which supersedes these rows
+ * when `EDGAR_MIRROR_FALLBACK_LIVE` merges it in.
  */
 export function makeTickersSync(opts: { userAgent: string }): SyncGenerator {
   return async function* tickersSync(ctx: SyncContext): AsyncGenerator<SyncPage> {

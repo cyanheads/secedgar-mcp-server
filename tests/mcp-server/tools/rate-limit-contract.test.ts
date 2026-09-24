@@ -65,6 +65,7 @@ describe('rate_limited on the tool contracts (#116)', () => {
 describe('a call during SEC’s rate-limit block (#116)', () => {
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('unmocked fetch')));
     initEdgarApiService();
   });
 
@@ -90,23 +91,24 @@ describe('a call during SEC’s rate-limit block (#116)', () => {
     expect(upstream.isError).toBe(true);
     expect(envelope(upstream)).toMatchObject({
       code: JsonRpcErrorCode.RateLimited,
-      data: { reason: 'rate_limited', retryAfter: 600, status: 429 },
+      data: { reason: 'rate_limited', retryable: true, retryAfter: 600, status: 429 },
     });
     const upstreamText = blockText(upstream.content);
     expect(upstreamText).toContain('HTTP 429');
     expect(upstreamText).toContain('Recovery: SEC is rate-limiting');
     expect(upstreamText).toContain('retry in 600 seconds');
-    expect(upstreamText).toContain('(reason rate_limited)');
+    // The thrown error carries the `retryable` its contract entry declares (#122).
+    expect(upstreamText.trimEnd()).toMatch(/\(reason rate_limited · retryable\)$/);
 
     expect(refused.isError).toBe(true);
     expect(envelope(refused)).toMatchObject({
       code: JsonRpcErrorCode.RateLimited,
-      data: { reason: 'rate_limited', retryAfter: 510 },
+      data: { reason: 'rate_limited', retryable: true, retryAfter: 510 },
     });
     expect(envelope(refused).data?.status).toBeUndefined();
     const refusedText = blockText(refused.content);
     expect(refusedText).toContain('request not sent');
     expect(refusedText).toContain('retry in 510 seconds');
-    expect(refusedText).toContain('(reason rate_limited)');
+    expect(refusedText.trimEnd()).toMatch(/\(reason rate_limited · retryable\)$/);
   });
 });

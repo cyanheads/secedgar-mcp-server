@@ -4,7 +4,7 @@
  * @module tests/mcp-server/tools/definitions/get-filing.tool
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getFilingTool } from '@/mcp-server/tools/definitions/get-filing.tool.js';
 import type { FilingIndex, SubmissionsResponse } from '@/services/edgar/types.js';
@@ -96,6 +96,7 @@ const mockApi = {
   tryGetFilingIndex: vi.fn(),
   tryGetFilingDocument: vi.fn(),
   tryGetFilingHeaders: vi.fn(),
+  tryGetSubmissionHeader: vi.fn(),
   getSubmissions: vi.fn(),
 };
 
@@ -121,14 +122,18 @@ beforeEach(() => {
   mockApi.findFilingCiks.mockResolvedValue([CIK]);
   mockApi.tryGetFilingIndex.mockResolvedValue(mockIndex);
   mockApi.tryGetFilingDocument.mockResolvedValue('<html><body><p>Filing content</p></body></html>');
-  mockApi.tryGetFilingHeaders.mockResolvedValue(
-    new Map([
+  mockApi.tryGetFilingHeaders.mockResolvedValue({
+    documents: new Map([
       ['aapl-20230930.htm', { type: '10-K', sequence: '1', description: '10-K' }],
       ['ex-21.htm', { type: 'EX-21', sequence: '2', description: 'EX-21' }],
       ['R1.htm', { type: 'XML', sequence: '99' }],
     ]),
-  );
+    submission: {},
+  });
   mockApi.getSubmissions.mockResolvedValue(mockSubmissions);
+  // `.hdr.sgml` is read only for a filing outside the recent window whose
+  // index-headers page 404s (#126); anything else reaching it fails loudly.
+  mockApi.tryGetSubmissionHeader.mockRejectedValue(new Error('unexpected .hdr.sgml read'));
 
   // Default: cache miss
   vi.mocked(getExtractCache).mockReturnValue(undefined);
@@ -666,14 +671,15 @@ describe('binary documents (#96)', () => {
 
   beforeEach(() => {
     mockApi.tryGetFilingIndex.mockResolvedValue(scanHeavyIndex);
-    mockApi.tryGetFilingHeaders.mockResolvedValue(
-      new Map([
+    mockApi.tryGetFilingHeaders.mockResolvedValue({
+      documents: new Map([
         ['stt-20241231.htm', { type: '10-K', sequence: '1', description: '10-K' }],
         ['stt-20241231_g1.jpg', { type: 'GRAPHIC', sequence: '2' }],
         ['ex-99pdf.pdf', { type: 'EX-99.6', sequence: '3' }],
         ['ex-21.htm', { type: 'EX-21', sequence: '4' }],
       ]),
-    );
+      submission: {},
+    });
   });
 
   it('rejects a scanned image instead of returning its decoded bytes as content', async () => {
@@ -1564,5 +1570,122 @@ describe('format()', () => {
     };
     const blocks = getFilingTool.format!(output);
     expect(blockText(blocks)).not.toContain('Outline:');
+  });
+});
+
+// ── Metadata for filings outside the recent window (#126) ────────────────────
+
+describe('metadata for filings outside the recent window (#126)', () => {
+  const OLD_ACCN = '0000019617-25-000270';
+  const JPM_HEADER = { form: '10-K', filingDate: '2025-02-14', periodOfReport: '2024-12-31' };
+  const documents = new Map([
+    ['aapl-20230930.htm', { type: '10-K', sequence: '1', description: '10-K' }],
+  ]);
+  const call = (accession: string) =>
+    runToolContract(getFilingTool, { accession_number: accession, cik: '19617' });
+  const allText = (result: Awaited<ReturnType<typeof call>>) =>
+    result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+
+  it('fills form, filing date, and period from the index-headers page already fetched', async () => {
+    mockApi.tryGetFilingHeaders.mockResolvedValue({ documents, submission: JPM_HEADER });
+
+    const result = await call(OLD_ACCN);
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      form: '10-K',
+      filing_date: '2025-02-14',
+      period_ending: '2024-12-31',
+    });
+    expect(allText(result)).toContain('**10-K** — Apple Inc.');
+    expect(allText(result)).toContain('Filed: 2025-02-14 | Period: 2024-12-31');
+    expect(mockApi.tryGetSubmissionHeader).not.toHaveBeenCalled();
+    expect(mockApi.tryGetFilingHeaders).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads .hdr.sgml when the index-headers page is missing', async () => {
+    mockApi.tryGetFilingHeaders.mockResolvedValue(null);
+    mockApi.tryGetSubmissionHeader.mockResolvedValue({
+      form: '10-K',
+      filingDate: '2005-12-01',
+      periodOfReport: '2005-09-24',
+    });
+
+    const result = await call('0001104659-05-058421');
+
+    expect(mockApi.tryGetSubmissionHeader).toHaveBeenCalledExactlyOnceWith(
+      '0000019617',
+      '0001104659-05-058421',
+    );
+    expect(result.structuredContent).toMatchObject({
+      form: '10-K',
+      filing_date: '2005-12-01',
+      period_ending: '2005-09-24',
+    });
+    expect(allText(result)).toContain('Filed: 2005-12-01 | Period: 2005-09-24');
+  });
+
+  it('leaves period_ending absent for a header with no period', async () => {
+    mockApi.tryGetFilingHeaders.mockResolvedValue(null);
+    mockApi.tryGetSubmissionHeader.mockResolvedValue({ form: 'S-8', filingDate: '2014-04-25' });
+
+    const result = await call('0001193125-14-160171');
+
+    expect(result.structuredContent).toMatchObject({ form: 'S-8', filing_date: '2014-04-25' });
+    expect((result.structuredContent as { period_ending?: string }).period_ending).toBeUndefined();
+    expect(allText(result)).not.toContain('Period:');
+  });
+
+  it('keeps the recent-window values for an in-window accession and reads no .hdr.sgml', async () => {
+    mockApi.tryGetFilingHeaders.mockResolvedValue(null);
+
+    const result = await call(ACCN);
+
+    expect(mockApi.tryGetSubmissionHeader).not.toHaveBeenCalled();
+    expect(result.structuredContent).toMatchObject({
+      form: '10-K',
+      filing_date: '2023-11-03',
+      period_ending: '2023-09-30',
+    });
+  });
+
+  it('prefers the recent window over the header for an in-window accession', async () => {
+    mockApi.tryGetFilingHeaders.mockResolvedValue({
+      documents,
+      submission: { form: '10-K405', filingDate: '1999-01-01', periodOfReport: '1998-12-31' },
+    });
+
+    const result = await call(ACCN);
+
+    expect(result.structuredContent).toMatchObject({
+      form: '10-K',
+      filing_date: '2023-11-03',
+      period_ending: '2023-09-30',
+    });
+  });
+
+  it('succeeds with the fields absent when neither header source exists', async () => {
+    mockApi.tryGetFilingHeaders.mockResolvedValue(null);
+    mockApi.tryGetSubmissionHeader.mockResolvedValue(null);
+
+    const result = await call(OLD_ACCN);
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ form: undefined, filing_date: undefined });
+    expect(allText(result)).toContain('Filed: Unknown');
+  });
+
+  it('fills the fields on the extract-cache hit path too', async () => {
+    vi.mocked(getExtractCache).mockReturnValueOnce('cached extracted text');
+    mockApi.tryGetFilingHeaders.mockResolvedValue({ documents, submission: JPM_HEADER });
+
+    const result = await call(OLD_ACCN);
+
+    expect(mockApi.tryGetFilingDocument).not.toHaveBeenCalled();
+    expect(result.structuredContent).toMatchObject({
+      form: '10-K',
+      filing_date: '2025-02-14',
+      period_ending: '2024-12-31',
+    });
   });
 });

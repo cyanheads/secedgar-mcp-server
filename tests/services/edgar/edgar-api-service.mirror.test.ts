@@ -45,6 +45,7 @@ describe('EdgarApiService — mirror routing', () => {
     config.mirrorFallbackLive = true;
     mirrorRef.current = undefined;
     vi.clearAllMocks();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('unmocked fetch')));
     initEdgarApiService();
   });
 

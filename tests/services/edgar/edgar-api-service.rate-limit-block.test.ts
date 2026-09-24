@@ -95,6 +95,7 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
     vi.clearAllMocks();
     vi.useFakeTimers();
     vi.setSystemTime(T0);
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('unmocked fetch')));
     initEdgarApiService();
   });
 
@@ -156,7 +157,11 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       const error = await closeGateWith429();
 
       expect(error?.code).toBe(JsonRpcErrorCode.RateLimited);
-      expect(data(error)).toMatchObject({ reason: 'rate_limited', retryAfter: 600 });
+      expect(data(error)).toMatchObject({
+        reason: 'rate_limited',
+        retryable: true,
+        retryAfter: 600,
+      });
       expect(hint(error)).toContain('10 minutes');
       expect(hint(error)).toContain('600 seconds');
     });
@@ -171,7 +176,11 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       expect(refused).toBeInstanceOf(McpError);
       expect(refused?.code).toBe(JsonRpcErrorCode.RateLimited);
       expect(refused?.message).toContain('not sent');
-      expect(data(refused)).toMatchObject({ reason: 'rate_limited', retryAfter: 600 });
+      expect(data(refused)).toMatchObject({
+        reason: 'rate_limited',
+        retryable: true,
+        retryAfter: 600,
+      });
       expect(hint(refused)).toContain('10 minutes');
     });
 

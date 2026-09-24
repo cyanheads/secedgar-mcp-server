@@ -65,6 +65,7 @@ const mockApi = {
   tryGetFilingIndex: vi.fn(),
   tryGetFilingDocument: vi.fn(),
   tryGetFilingHeaders: vi.fn(),
+  tryGetSubmissionHeader: vi.fn(),
   tryGetCompanyConcept: vi.fn(),
   tryGetCompanyFacts: vi.fn(),
   tryGetFrames: vi.fn(),
@@ -317,6 +318,8 @@ describe('getFilingTool — input validation', () => {
     });
     mockApi.tryGetFilingDocument.mockResolvedValue('<html>SEC filing content</html>');
     mockApi.tryGetFilingHeaders.mockResolvedValue(null);
+    // Outside the recent window with no index-headers page, the tool reads `.hdr.sgml` (#126).
+    mockApi.tryGetSubmissionHeader.mockResolvedValue(null);
     vi.mocked(filingToExtract).mockReturnValue('SEC filing content');
     const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({ accession_number: '0000320193-23-000106' });

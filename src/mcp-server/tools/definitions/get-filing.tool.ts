@@ -247,7 +247,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .string()
       .optional()
       .describe(
-        'Form type (e.g., "10-K", "10-Q"). Absent for filings older than the last ~1,000 the company has filed (SEC does not surface metadata for those without a separate fetch).',
+        'Form type (e.g., "10-K", "10-Q"). From the company\'s submissions feed for a recent filing, else from the filing\'s own SEC header. Absent only when neither source carries it.',
       ),
     filing_date: z
       .string()
@@ -264,7 +264,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .string()
       .optional()
       .describe(
-        'Period the filing reports on (YYYY-MM-DD). Absent under the same conditions as form.',
+        'Period the filing reports on (YYYY-MM-DD), from the same source as form. Absent for forms with no period of report (S-8, Form 4, proxy statements) and when neither source carries it.',
       ),
     primary_document: z
       .string()
@@ -525,19 +525,24 @@ export const getFilingTool = tool('secedgar_get_filing', {
     const documents = categorizeDocuments(
       index.directory.item,
       filingPrimaryName,
-      headers,
+      headers?.documents ?? null,
       input.include_xbrl,
     );
 
-    // Enrich with metadata from the recent-submissions window — not every accession lands here
-    // (older filings live in paginated archive files), so these fields remain optional.
-    const recentAccns = submissions.filings.recent.accessionNumber;
-    const idx = recentAccns.indexOf(accn);
+    // Form, filing date, and period come from the submissions feed's recent window when
+    // the accession sits in it. An older filing takes them from its own SEC header: the
+    // index-headers page already fetched above, or — only when that page is missing —
+    // the bare `.hdr.sgml` header, the one extra request this path can cost (#126).
+    const recent = submissions.filings.recent;
+    const idx = recent.accessionNumber.indexOf(accn);
+    const header =
+      idx >= 0
+        ? undefined
+        : (headers?.submission ?? (await api.tryGetSubmissionHeader(resolvedCik, accn)));
 
-    const form = idx >= 0 ? submissions.filings.recent.form[idx] : undefined;
-    const filingDate = idx >= 0 ? submissions.filings.recent.filingDate[idx] : undefined;
-    const periodEnding =
-      idx >= 0 ? submissions.filings.recent.reportDate[idx] || undefined : undefined;
+    const form = idx >= 0 ? recent.form[idx] : header?.form;
+    const filingDate = idx >= 0 ? recent.filingDate[idx] : header?.filingDate;
+    const periodEnding = idx >= 0 ? recent.reportDate[idx] : header?.periodOfReport;
 
     ctx.log.info('Filing retrieved', {
       accessionNumber: accn,
@@ -558,7 +563,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       filing_date: filingDate || undefined,
       company_name: submissions.name || undefined,
       cik: resolvedCik,
-      period_ending: periodEnding,
+      period_ending: periodEnding || undefined,
       primary_document: filingPrimaryName,
       requested_document: requestedDocument,
       documents,

@@ -34,11 +34,15 @@ export function lastModifiedToIso(httpDate: string | null | undefined): string {
   return new Date().toISOString();
 }
 
-/** One row of the `tickers` table — a single entry from company_tickers.json. */
+/** One row of the `tickers` table — a single entry from company_tickers.json or company_tickers_mf.json. */
 export interface TickerRow {
   /** Zero-padded 10-digit CIK. */
   cik: string;
-  /** SEC-conformed entity name (the `title` field). */
+  /**
+   * SEC-conformed entity name (the `title` field). Empty for a fund symbol from
+   * company_tickers_mf.json, which carries none — the one marker in this schema
+   * that tells a fund row from an operating company's.
+   */
   name: string;
   /** Uppercased ticker symbol — primary key (e.g. "AAPL", "BRK-A"). */
   ticker: string;

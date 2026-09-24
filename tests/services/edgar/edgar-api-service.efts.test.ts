@@ -33,6 +33,7 @@ const jsonResponse = (body: unknown) =>
 describe('EdgarApiService.searchFilings — EFTS shape guard (#61)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('unmocked fetch')));
     initEdgarApiService();
   });
 
@@ -117,6 +118,7 @@ describe('EdgarApiService.searchFilings — EFTS shape guard (#61)', () => {
 describe('EdgarApiService.resolveEntityByName — EFTS entity-autocomplete (#73)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('unmocked fetch')));
     initEdgarApiService();
   });
 

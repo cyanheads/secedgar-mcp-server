@@ -5,18 +5,25 @@
  * @module services/edgar/edgar-api-service
  */
 
+import { McpError, notFound, rateLimited, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import {
-  type McpError,
-  notFound,
-  rateLimited,
-  serviceUnavailable,
-} from '@cyanheads/mcp-ts-core/errors';
-import { createPacer, httpErrorFromResponse, type Pacer } from '@cyanheads/mcp-ts-core/utils';
+  createPacer,
+  httpErrorFromResponse,
+  logger,
+  type Pacer,
+  requestContextService,
+  withExtra,
+} from '@cyanheads/mcp-ts-core/utils';
 import { parseDocument } from 'htmlparser2';
 import { getServerConfig } from '@/config/server-config.js';
 import { getEdgarMirror } from '@/services/edgar/mirror/index.js';
 import formerNamesData from './data/former-names.json' with { type: 'json' };
-import { type FilingDocumentHeader, parseFilingHeaders } from './filing-headers.js';
+import {
+  type FilingHeaders,
+  parseFilingHeaders,
+  parseSubmissionHeader,
+  type SubmissionHeader,
+} from './filing-headers.js';
 import type {
   CikMatch,
   CompanyConceptResponse,
@@ -45,7 +52,9 @@ const RETRYABLE_STATUSES = new Set([500, 502, 503, 504]);
 /**
  * `data.reason` on every SEC rate-limit failure — the upstream 429 and a call
  * refused locally while the cool-down after one runs — so a caller branches the
- * same way on either (#116).
+ * same way on either (#116). Both also set `data.retryable: true`: the tools
+ * declare the reason retryable, but only `ctx.fail` copies that onto `data`, so
+ * a service-thrown error has to carry it itself (#122).
  */
 const RATE_LIMITED_REASON = 'rate_limited';
 
@@ -85,6 +94,14 @@ function rateLimitHint(retryAfterSeconds: number): string {
 /** URL for SEC's mutual-fund ticker file (ETFs and open-end funds). */
 const MF_TICKERS_URL = 'https://www.sec.gov/files/company_tickers_mf.json';
 
+/**
+ * How long a failed load of the fund-ticker file stands before one resolution
+ * refetches it (#119). A window rather than every resolution: against a
+ * persistent 5xx, a per-lookup retry would add three requests and ~3s of backoff
+ * to each one. After a rate-limit failure the window stretches to the cool-down.
+ */
+const FUND_SLICE_RETRY_MS = 60_000;
+
 /** Trigram similarity threshold — minimum Dice score to include a candidate suggestion. */
 const TRIGRAM_THRESHOLD = 0.3;
 /** Maximum number of near-match suggestions to include. */
@@ -96,13 +113,53 @@ interface MfTickerFile {
   fields: string[];
 }
 
+/** An operating-company ticker, from company_tickers.json or a mirror row carrying a name. */
+interface EquityRow {
+  cik: string;
+  kind: 'equity';
+  name: string;
+  ticker: string;
+}
+
+/**
+ * An ETF or mutual-fund ticker. Its CIK is the registrant trust, which is 1:many
+ * with the series it holds, so a fund row never maps the CIK back to one symbol.
+ * The live fund file carries series and class; the mirror stores the bare ticker → CIK.
+ */
+interface FundRow {
+  cik: string;
+  classId?: string;
+  kind: 'fund';
+  seriesId?: string;
+  ticker: string;
+}
+
+type TickerIndexRow = EquityRow | FundRow;
+
+/**
+ * The live fund-ticker file's contribution to the index. A failed load holds no
+ * rows and a `retryAt` — the earliest instant a resolution refetches the file.
+ */
+interface FundSlice {
+  retryAt: number | undefined;
+  rows: FundRow[];
+}
+
+/** The fund slice where nothing is read live: strict mirror mode. */
+const NO_LIVE_FUNDS: FundSlice = { retryAt: undefined, rows: [] };
+
 /** Indexed ticker data for O(1) lookups. */
 interface TickerCache {
   allEntries: CikMatch[];
+  /** The rows the index was built from, bar the live fund slice — a fund-slice retry rebuilds on them without refetching. */
+  baseRows: TickerIndexRow[];
   byCik: Map<string, CikMatch>;
   /** Fund series ID → registrant. Built from company_tickers_mf.json, so it covers only series with a listed share class. */
   bySeriesId: Map<string, CikMatch>;
   byTicker: Map<string, CikMatch>;
+  /** Set while the live fund slice is missing after a failed load: when a resolution may refetch it (#119). */
+  fundRetryAt: number | undefined;
+  /** When `baseRows` loaded. The index expires a TTL after it; a fund-slice retry leaves it alone. */
   loadedAt: number;
 }
 
@@ -498,8 +555,9 @@ class EdgarApiService {
   // --- SEC API Methods ---
 
   /**
-   * Fetch a filer's submissions document (entity metadata + the ~1000-filing
-   * `recent` window + the `files[]` archive-page manifest). Cached per CIK within
+   * Fetch a filer's submissions document (entity metadata + the `recent` window —
+   * the last year or 1,000 filings, whichever holds more — + the `files[]`
+   * archive-page manifest). Cached per CIK within
    * the ticker-cache TTL — the doc is large and re-read on every archive-paging
    * scan (#78). A 404 throws (uncached) so a bad CIK still surfaces.
    */
@@ -517,7 +575,7 @@ class EdgarApiService {
   /**
    * Fetch a submissions archive page (`filings.files[].name`, e.g.
    * `CIK0000320193-submissions-001.json`) — the older filings that don't fit the
-   * ~1000-entry `recent` window. The page body is a flat parallel-array object
+   * `recent` window. Read through `SubmissionsArchiveWalk`. The page body is a flat parallel-array object
    * field-compatible with `FilingsRecent`. Cached per page within the ticker-cache
    * TTL (pages are large and effectively immutable once archived).
    */
@@ -638,21 +696,36 @@ class EdgarApiService {
   }
 
   /**
-   * Fetch the SEC submission header (`<accession>-index-headers.html`) and parse
-   * it into a `filename → metadata` map. Returns `null` if the file is absent.
-   * The header page exposes canonical SEC document TYPE values (e.g. "EX-21.1")
-   * that the directory listing JSON does not.
+   * Fetch the SEC submission header page (`<accession>-index-headers.html`) and parse
+   * it into the `filename → metadata` map plus the submission's own form, filing date,
+   * and period. Returns `null` if the page is absent. The page exposes canonical SEC
+   * document TYPE values (e.g. "EX-21.1") that the directory listing JSON does not.
    */
-  async tryGetFilingHeaders(
-    cik: string,
-    accessionNumber: string,
-  ): Promise<Map<string, FilingDocumentHeader> | null> {
+  async tryGetFilingHeaders(cik: string, accessionNumber: string): Promise<FilingHeaders | null> {
     const padded = cik.padStart(10, '0');
     const noDashes = accessionNumber.replace(/-/g, '');
     const text = await this.tryFetchText(
       `https://www.sec.gov/Archives/edgar/data/${padded}/${noDashes}/${accessionNumber}-index-headers.html`,
     );
     return text ? parseFilingHeaders(text) : null;
+  }
+
+  /**
+   * Fetch the bare SGML submission header (`<accession>.hdr.sgml`, under 1 KB) and read
+   * its form, filing date, and period. Returns `null` if the file is absent. The
+   * fallback for filings whose index-headers page is missing — common among filings
+   * made before 2014; it lists no documents.
+   */
+  async tryGetSubmissionHeader(
+    cik: string,
+    accessionNumber: string,
+  ): Promise<SubmissionHeader | null> {
+    const padded = cik.padStart(10, '0');
+    const noDashes = accessionNumber.replace(/-/g, '');
+    const text = await this.tryFetchText(
+      `https://www.sec.gov/Archives/edgar/data/${padded}/${noDashes}/${accessionNumber}.hdr.sgml`,
+    );
+    return text ? parseSubmissionHeader(text) : null;
   }
 
   getFilingDocument(cik: string, accessionNumber: string, document: string): Promise<string> {
@@ -901,6 +974,7 @@ class EdgarApiService {
         // send() closed the gate on this response, so the wait is the full cool-down.
         const retryAfter = this.cooldownSecondsRemaining();
         data.reason = RATE_LIMITED_REASON;
+        data.retryable = true;
         data.retryAfter = retryAfter;
         data.recovery = { hint: rateLimitHint(retryAfter) };
       }
@@ -981,7 +1055,12 @@ class EdgarApiService {
     const retryAfter = this.cooldownSecondsRemaining();
     return rateLimited(
       `SEC EDGAR request not sent: SEC is rate-limiting this server's IP, and requests are held for another ${retryAfter}s so the block can clear.`,
-      { reason: RATE_LIMITED_REASON, retryAfter, recovery: { hint: rateLimitHint(retryAfter) } },
+      {
+        reason: RATE_LIMITED_REASON,
+        retryable: true,
+        retryAfter,
+        recovery: { hint: rateLimitHint(retryAfter) },
+      },
     );
   }
 
@@ -993,58 +1072,61 @@ class EdgarApiService {
   }
 
   private getTickerCache(): Promise<TickerCache> {
-    const config = getServerConfig();
-    const now = Date.now();
-
-    if (this.tickerCache && now - this.tickerCache.loadedAt < config.tickerCacheTtl * 1000) {
-      return Promise.resolve(this.tickerCache);
+    const cache = this.tickerCache;
+    if (cache && this.isFresh(cache.loadedAt)) {
+      if (cache.fundRetryAt === undefined || Date.now() < cache.fundRetryAt) {
+        return Promise.resolve(cache);
+      }
+      // The live fund slice failed and its retry window has passed: refetch it
+      // onto the cached base, which keeps its own load time and TTL (#119).
+      return this.loadTickerCacheOnce(() => this.reloadFundSlice(cache));
     }
+    return this.loadTickerCacheOnce(() => this.loadTickerCache());
+  }
 
-    // Singleflight: concurrent first-time callers (e.g. fetch-frames enriching
-    // ~5k reporters in parallel) share one in-flight load instead of each
-    // queuing their own SEC fetch through the 10 req/s throttle.
-    this.tickerCacheLoad ??= this.loadTickerCache().finally(() => {
+  /**
+   * Singleflight: concurrent callers (e.g. fetch-frames enriching ~5k reporters
+   * in parallel) share one in-flight load instead of each queuing its own SEC
+   * fetch through the pacer.
+   */
+  private loadTickerCacheOnce(load: () => Promise<TickerCache>): Promise<TickerCache> {
+    this.tickerCacheLoad ??= load().finally(() => {
       this.tickerCacheLoad = undefined;
     });
     return this.tickerCacheLoad;
   }
 
-  /**
-   * Load the ticker index, preferring the local mirror when enabled and synced.
-   * The live directory is the cold-start / not-ready fallback (and the only path
-   * when the mirror is off).
-   *
-   * In addition to company_tickers.json (operating companies), also loads
-   * company_tickers_mf.json (ETFs and mutual funds) and merges fund symbols into
-   * the byTicker index so fund tickers like VOO, SCHD, and JEPI resolve correctly.
-   *
-   * Mirror path (#43): when `mirrorFallbackLive` is true, a live MF fetch is merged
-   * into the mirror-served equity base so fund tickers resolve even if the mirror
-   * was synced before MF ingestion was added. When `mirrorFallbackLive` is false
-   * (strict offline), the mirror's own MF rows are the sole source.
-   */
+  /** Load the whole ticker index: its base, then the live fund slice when the base calls for one. */
   private async loadTickerCache(): Promise<TickerCache> {
+    const base = await this.loadTickerBase();
+    const funds = base.liveFunds ? await this.loadMfTickers() : NO_LIVE_FUNDS;
+    return this.buildTickerCache(base.rows, funds, Date.now());
+  }
+
+  /** Refetch a failed live fund slice and rebuild the index on the cached base. */
+  private async reloadFundSlice(cache: TickerCache): Promise<TickerCache> {
+    return this.buildTickerCache(cache.baseRows, await this.loadMfTickers(), cache.loadedAt);
+  }
+
+  /**
+   * Everything the ticker index holds but the live fund slice, preferring the local
+   * mirror when it is enabled and synced; company_tickers.json is the cold-start /
+   * not-ready fallback and the only source when the mirror is off. `liveFunds` says
+   * whether company_tickers_mf.json supplements it: always on the live path, and on
+   * the mirror path under `mirrorFallbackLive`, where it covers a mirror synced
+   * before fund ingestion (#43) and is the only source of series and class IDs,
+   * since the mirror stores a fund symbol as a bare ticker → CIK row. Strict mirror
+   * mode reads nothing live, so the mirror's fund rows are its only fund tickers.
+   */
+  private async loadTickerBase(): Promise<{ liveFunds: boolean; rows: TickerIndexRow[] }> {
     const mirror = getEdgarMirror();
     if (mirror && (await mirror.tickersReady())) {
       const rows = await mirror.getTickerRows();
       if (rows.length > 0) {
-        const config = getServerConfig();
-        const allEntries: Array<{
-          cik: string;
-          name: string;
-          ticker: string;
-          seriesId?: string;
-          classId?: string;
-        }> = [...rows];
-
-        // When mirrorFallbackLive is enabled, supplement with a live MF fetch so
-        // fund tickers (VOO, SCHD, JEPI…) resolve even if the mirror predates MF
-        // ingestion. Failure is non-fatal — equity resolution still works.
-        if (config.mirrorFallbackLive) {
-          const mfEntries = await this.loadMfTickers();
-          allEntries.push(...mfEntries);
-        }
-        return this.buildTickerCache(allEntries, buildFormerNameEntries());
+        return {
+          liveFunds: getServerConfig().mirrorFallbackLive,
+          rows: rows.map(mirrorIndexRow),
+        };
       }
     } else if (mirror && !getServerConfig().mirrorFallbackLive) {
       throw serviceUnavailable(
@@ -1053,135 +1135,171 @@ class EdgarApiService {
       );
     }
 
-    // Fetch operating-company tickers (company_tickers.json)
     const raw = await this.fetchJson<Record<string, TickerEntry>>(
       'https://www.sec.gov/files/company_tickers.json',
     );
-    const entries: Array<{ cik: string; name: string; ticker: string }> = Object.values(raw).map(
-      (entry) => ({
-        cik: String(entry.cik_str).padStart(10, '0'),
-        name: entry.title,
-        ticker: entry.ticker,
+    return {
+      liveFunds: true,
+      rows: Object.values(raw).map(
+        (entry): EquityRow => ({
+          cik: String(entry.cik_str).padStart(10, '0'),
+          kind: 'equity',
+          name: entry.title,
+          ticker: entry.ticker,
+        }),
+      ),
+    };
+  }
+
+  /**
+   * Fetch company_tickers_mf.json (ETFs and mutual funds) as fund rows carrying
+   * series and class IDs. Never throws: operating-company resolution must not
+   * depend on the fund file. A failed load — any HTTP failure, a malformed body,
+   * or the block gate's local refusal — returns no rows and a `retryAt`, so the
+   * index without funds stands for the retry window rather than the whole TTL
+   * (#119). The window is at least the error's `retryAfter`, so a load refused
+   * by the rate-limit gate is not retried until the cool-down ends.
+   */
+  private async loadMfTickers(): Promise<FundSlice> {
+    let retryAfterMs = 0;
+    let cause: Record<string, unknown> = { reason: 'malformed_body' };
+    try {
+      const rows = parseMfTickerFile(await this.fetchJson<MfTickerFile>(MF_TICKERS_URL));
+      if (rows) return { retryAt: undefined, rows };
+    } catch (error) {
+      const data = error instanceof McpError ? error.data : undefined;
+      if (typeof data?.retryAfter === 'number') retryAfterMs = data.retryAfter * 1000;
+      cause = {
+        ...(typeof data?.status === 'number' && { status: data.status }),
+        ...(typeof data?.reason === 'string' && { reason: data.reason }),
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+    const retryMs = Math.max(FUND_SLICE_RETRY_MS, retryAfterMs);
+    // Background index maintenance with no request of its own to attach to, so the
+    // global logger carries it (#43).
+    logger.warning(
+      'Fund-ticker file (company_tickers_mf.json) failed to load; ETF and mutual-fund tickers stay unresolved until it is retried.',
+      withExtra(requestContextService.createRequestContext({ operation: 'loadMfTickers' }), {
+        url: MF_TICKERS_URL,
+        retryInSeconds: Math.ceil(retryMs / 1000),
+        ...cause,
       }),
     );
-
-    // Fetch ETF/mutual-fund tickers (company_tickers_mf.json).
-    // 404 or any error is non-fatal — degrade gracefully with operating-company-only index.
-    const mfEntries = await this.loadMfTickers();
-    entries.push(...mfEntries);
-
-    // Merge the committed former-names asset.
-    const formerEntries = buildFormerNameEntries();
-
-    return this.buildTickerCache(entries, formerEntries);
+    return { retryAt: Date.now() + retryMs, rows: [] };
   }
 
   /**
-   * Fetch and parse company_tickers_mf.json. Returns an empty array on failure
-   * so a SEC file outage does not break company resolution entirely.
-   * Entries are MF-only: they carry seriesId/classId and no `name` field.
-   * These merge into byTicker only (not byCik) since one registrant trust
-   * holds many fund series.
-   */
-  private async loadMfTickers(): Promise<
-    Array<{ cik: string; name: string; ticker: string; seriesId: string; classId: string }>
-  > {
-    try {
-      const mfRaw = await this.fetchJson<MfTickerFile>(MF_TICKERS_URL);
-      if (!Array.isArray(mfRaw?.fields) || !Array.isArray(mfRaw?.data)) return [];
-
-      const fieldIdx = {
-        cik: mfRaw.fields.indexOf('cik'),
-        seriesId: mfRaw.fields.indexOf('seriesId'),
-        classId: mfRaw.fields.indexOf('classId'),
-        symbol: mfRaw.fields.indexOf('symbol'),
-      };
-      if (fieldIdx.cik < 0 || fieldIdx.symbol < 0) return [];
-
-      return mfRaw.data
-        .filter((row) => row[fieldIdx.symbol])
-        .map((row) => ({
-          cik: String(row[fieldIdx.cik]).padStart(10, '0'),
-          name: '',
-          ticker: String(row[fieldIdx.symbol]),
-          seriesId: fieldIdx.seriesId >= 0 ? String(row[fieldIdx.seriesId]) : '',
-          classId: fieldIdx.classId >= 0 ? String(row[fieldIdx.classId]) : '',
-        }));
-    } catch {
-      // Degrade gracefully — fund tickers won't resolve, but operating companies still work.
-      // Note: no service-layer logger is available here; a request-scoped ctx.log would require
-      // plumbing ctx through the ticker-cache lifecycle. The failure is visible via no fund
-      // resolution rather than a silent cache poison (#43).
-      return [];
-    }
-  }
-
-  /**
-   * Build the in-memory CIK index from normalized entries (live JSON or mirror rows).
-   * MF entries (with seriesId/classId) go into byTicker only — not byCik — because
-   * a registrant trust (e.g. CIK 36405 = Vanguard Index Funds) holds many series.
-   * Former-name entries go into allEntries only (name search only, no ticker/CIK index).
+   * Build the in-memory index. Equity rows fill `byTicker`, `byCik`, and — when they
+   * carry a name — `allEntries` for name search. Fund rows fill `byTicker` only,
+   * never `byCik`, because a registrant trust (CIK 36405 = Vanguard Index Funds)
+   * holds many series; live fund rows also fill `bySeriesId`. On a shared symbol the
+   * first to claim it wins, in the order equity, live fund, mirror fund: a fund
+   * symbol never overrides an operating-company ticker on the rare cross-file
+   * collision (SPCX), and a live fund entry, carrying series and class, supersedes
+   * the mirror's bare row for the same symbol (#135). Former names from the
+   * committed asset go into `allEntries` only.
    */
   private buildTickerCache(
-    entries: Array<{
-      cik: string;
-      name: string;
-      ticker: string;
-      seriesId?: string;
-      classId?: string;
-    }>,
-    formerEntries: Array<{ cik: string; name: string }> = [],
+    baseRows: TickerIndexRow[],
+    funds: FundSlice,
+    loadedAt: number,
   ): TickerCache {
     const byTicker = new Map<string, CikMatch>();
     const byCik = new Map<string, CikMatch>();
     const bySeriesId = new Map<string, CikMatch>();
     const allEntries: CikMatch[] = [];
+    const mirrorFunds: FundRow[] = [];
 
-    for (const entry of entries) {
-      const isMf = Boolean(entry.seriesId !== undefined && entry.seriesId !== '');
-      const hasName = Boolean(entry.name);
+    for (const row of baseRows) {
+      if (row.kind === 'fund') {
+        mirrorFunds.push(row);
+        continue;
+      }
       const match: CikMatch = {
-        cik: entry.cik,
-        ticker: entry.ticker,
-        ...(hasName ? { name: entry.name } : {}),
-        ...(isMf && entry.seriesId ? { seriesId: entry.seriesId } : {}),
-        ...(isMf && entry.classId ? { classId: entry.classId } : {}),
+        cik: row.cik,
+        ticker: row.ticker,
+        ...(row.name ? { name: row.name } : {}),
       };
+      byTicker.set(row.ticker.toUpperCase(), match);
+      const existing = byCik.get(match.cik);
+      byCik.set(match.cik, existing ? pickPreferredTicker(existing, match) : match);
+      if (match.name) allEntries.push(match);
+    }
 
-      // Operating-company tickers take precedence: a fund symbol must not override an
-      // existing equity ticker on the rare cross-file symbol collision (e.g. SPCX).
-      const tickerKey = entry.ticker.toUpperCase();
-      if (!isMf || !byTicker.has(tickerKey)) {
-        byTicker.set(tickerKey, match);
-      }
+    for (const row of [...funds.rows, ...mirrorFunds]) {
+      const match: CikMatch = {
+        cik: row.cik,
+        ticker: row.ticker,
+        ...(row.seriesId ? { seriesId: row.seriesId } : {}),
+        ...(row.classId ? { classId: row.classId } : {}),
+      };
+      const tickerKey = row.ticker.toUpperCase();
+      if (!byTicker.has(tickerKey)) byTicker.set(tickerKey, match);
 
-      // A series has one entry per listed share class, so the first class registers the
+      // A series has one row per listed share class, so the first class registers the
       // series; later classes of the same series would only re-point it at the same trust.
-      if (isMf && entry.seriesId && !bySeriesId.has(entry.seriesId.toUpperCase())) {
-        bySeriesId.set(entry.seriesId.toUpperCase(), match);
-      }
-
-      // MF entries must not overwrite byCik — the trust CIK is 1:many with fund series.
-      if (!isMf) {
-        const existing = byCik.get(match.cik);
-        byCik.set(match.cik, existing ? pickPreferredTicker(existing, match) : match);
-      }
-
-      // Only push to allEntries if the entry has a name (for name search).
-      // MF entries have no name, so they're ticker-only.
-      if (match.name) {
-        allEntries.push(match);
-      }
+      const seriesKey = row.seriesId?.toUpperCase();
+      if (seriesKey && !bySeriesId.has(seriesKey)) bySeriesId.set(seriesKey, match);
     }
 
-    // Former-name entries: allEntries only (name search + trigram), no ticker/CIK index.
-    for (const fn of formerEntries) {
-      allEntries.push({ cik: fn.cik, name: fn.name });
+    for (const former of buildFormerNameEntries()) {
+      allEntries.push({ cik: former.cik, name: former.name });
     }
 
-    this.tickerCache = { byTicker, byCik, bySeriesId, allEntries, loadedAt: Date.now() };
+    this.tickerCache = {
+      allEntries,
+      baseRows,
+      byCik,
+      bySeriesId,
+      byTicker,
+      fundRetryAt: funds.retryAt,
+      loadedAt,
+    };
     return this.tickerCache;
   }
+}
+
+/**
+ * Classify a mirror ticker row. The mirror schema has no series or class column:
+ * tickers-sync stores a fund symbol from company_tickers_mf.json with an empty
+ * name, and every operating-company row with its registrant title, so the empty
+ * name is what marks a fund (#135).
+ */
+function mirrorIndexRow(row: { cik: string; name: string; ticker: string }): TickerIndexRow {
+  return row.name
+    ? { cik: row.cik, kind: 'equity', name: row.name, ticker: row.ticker }
+    : { cik: row.cik, kind: 'fund', ticker: row.ticker };
+}
+
+/**
+ * Parse company_tickers_mf.json — columnar, with a `fields` header naming each
+ * column — into fund rows. Returns `undefined` when the body lacks that shape or
+ * the `cik` and `symbol` columns, which the caller treats as a failed load.
+ */
+function parseMfTickerFile(raw: MfTickerFile | null | undefined): FundRow[] | undefined {
+  if (!Array.isArray(raw?.fields) || !Array.isArray(raw?.data)) return;
+  const column = {
+    cik: raw.fields.indexOf('cik'),
+    classId: raw.fields.indexOf('classId'),
+    seriesId: raw.fields.indexOf('seriesId'),
+    symbol: raw.fields.indexOf('symbol'),
+  };
+  if (column.cik < 0 || column.symbol < 0) return;
+
+  return raw.data
+    .filter((row) => row[column.symbol])
+    .map((row) => {
+      const seriesId = column.seriesId >= 0 ? String(row[column.seriesId] ?? '') : '';
+      const classId = column.classId >= 0 ? String(row[column.classId] ?? '') : '';
+      return {
+        cik: String(row[column.cik]).padStart(10, '0'),
+        kind: 'fund',
+        ticker: String(row[column.symbol]),
+        ...(seriesId ? { seriesId } : {}),
+        ...(classId ? { classId } : {}),
+      };
+    });
 }
 
 /**
@@ -1204,28 +1322,6 @@ export function cleanDisplayName(displayName: string): string {
     .replace(/\s*\([A-Z0-9,\s.-]+\)\s*$/, '')
     .replace(/\s+/g, ' ')
     .trim();
-}
-
-/**
- * Range-based selection of submissions archive-page manifest entries (`filings.files[]`),
- * returned newest-first (by `filingTo` descending). A page's [filingFrom, filingTo]
- * window is kept unless it lies entirely before `filedAfter` or entirely after
- * `filedBefore`; with no bounds, every page is returned. Routes company_search's
- * older-filings scan directly to the pages covering a requested date range, or walks
- * all pages newest-first when a form filter under-fills the recent window (#78).
- */
-export function selectArchivePages(
-  files: SubmissionsResponse['filings']['files'],
-  filedAfter?: string,
-  filedBefore?: string,
-): SubmissionsResponse['filings']['files'] {
-  return files
-    .filter((page) => {
-      if (filedAfter && page.filingTo < filedAfter) return false;
-      if (filedBefore && page.filingFrom > filedBefore) return false;
-      return true;
-    })
-    .sort((a, b) => b.filingTo.localeCompare(a.filingTo));
 }
 
 /**
@@ -1303,8 +1399,8 @@ export function rawDocumentName(primaryDocument: string | undefined): string {
 
 /**
  * Enumerate the calendar quarters overlapping the inclusive [startDate, endDate]
- * range (both YYYY-MM-DD), returned NEWEST-first to mirror `selectArchivePages`
- * — a capped scan then keeps the most recent quarters, consistent with the
+ * range (both YYYY-MM-DD), returned NEWEST-first like the archive-page walk's
+ * default order — a capped scan then keeps the most recent quarters, consistent with the
  * default filing-date-descending sort. Routes search_filings' pre-2001
  * full-index browse to the `master.idx` files it must fetch (#77).
  */

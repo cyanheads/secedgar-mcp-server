@@ -30,7 +30,9 @@ const ServerConfigSchema = z.object({
     .int()
     .min(60)
     .default(3600)
-    .describe('Seconds to cache company_tickers.json'),
+    .describe(
+      'Seconds to cache the ticker index (company_tickers.json + company_tickers_mf.json). A failed fund-file load is retried after 60 seconds, or the rate-limit cool-down, instead of standing for this long.',
+    ),
   datasetTtlSeconds: z.coerce
     .number()
     .int()
