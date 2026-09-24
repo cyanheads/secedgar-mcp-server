@@ -436,6 +436,159 @@ describe('getMaterialEventsTool', () => {
   });
 });
 
+// With no date filter the archive walk runs only to fill `limit`, and stops on the
+// page that fills it rather than reading every page up to the cap (#134).
+describe('getMaterialEventsTool — under-filled archive walk (#134)', () => {
+  /** Fourteen archive pages, newest first, all older than the recent block. */
+  const FILES = Array.from({ length: 14 }, (_, i) => ({
+    name: `CIK0000320193-submissions-${String(i + 1).padStart(3, '0')}.json`,
+    filingCount: 10,
+    filingFrom: `${2014 - i}-01-01`,
+    filingTo: `${2014 - i}-12-31`,
+  }));
+
+  /** Ten 8-Ks per page, dated inside the page's own year. */
+  function pageOf(name: string, items = '8.01') {
+    const n = Number(name.slice(-8, -5));
+    const year = 2014 - (n - 1);
+    return block(
+      Array.from({ length: 10 }, (_, j) => ({
+        accession: `${name}-${j}`,
+        date: `${year}-${String(12 - j).padStart(2, '0')}-01`,
+        items,
+      })),
+    );
+  }
+
+  beforeEach(() => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({ filings: RECENT_FILINGS, files: FILES }),
+    );
+    mockApi.fetchArchivePage.mockImplementation(async (name: string) => pageOf(name));
+  });
+
+  it('stops after the page that fills limit and flags the unread pages truncated', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+    // 5 recent 8-Ks + 10 on page 001 = 15 < 20; page 002 fills it.
+    const result = await runToolContract(getMaterialEventsTool, { company: 'AAPL', limit: 20 });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(2);
+    expect(mockApi.fetchArchivePage).toHaveBeenLastCalledWith('CIK0000320193-submissions-002.json');
+    expect(result.structuredContent).toMatchObject({
+      total_matched: 25,
+      history_scanned_through: '2013-01-01',
+      dataset: { truncated: true },
+    });
+    const text = blockText(result.content);
+    expect(text).toContain('History scanned through: 2013-01-01');
+    expect(text).toContain('truncated — older filings exist beyond the scanned history');
+  });
+
+  it('counts only rows passing the items filter toward limit', async () => {
+    // Pages 001–003 carry 8.01 only; page 004 onward reports 5.02.
+    mockApi.fetchArchivePage.mockImplementation(async (name: string) =>
+      pageOf(name, Number(name.slice(-8, -5)) >= 4 ? '5.02' : '8.01'),
+    );
+    const result = await runToolContract(getMaterialEventsTool, {
+      company: 'AAPL',
+      items: ['5.02'],
+      limit: 11,
+    });
+
+    // Recent holds one 5.02; page 004 brings ten more → 11 fills the limit there.
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(4);
+    expect(result.structuredContent).toMatchObject({
+      total_matched: 11,
+      history_scanned_through: '2011-01-01',
+    });
+  });
+
+  it('reads to the page cap when the history never fills limit', async () => {
+    mockApi.fetchArchivePage.mockImplementation(async (name: string) =>
+      block([{ accession: `${name}-0`, date: '2000-01-01', items: '8.01' }]),
+    );
+    const result = await runToolContract(getMaterialEventsTool, { company: 'AAPL', limit: 16 });
+
+    // 5 recent + one per page never reaches 16, so the cap ends the walk at page 010.
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(10);
+    expect(result.structuredContent).toMatchObject({
+      total_matched: 15,
+      history_scanned_through: '2005-01-01',
+    });
+  });
+
+  it('is not truncated when the walk exhausts every page before the cap', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({ filings: RECENT_FILINGS, files: FILES.slice(0, 3) }),
+    );
+    mockApi.fetchArchivePage.mockImplementation(async (name: string) =>
+      block([
+        { accession: `${name}-0`, date: '2000-01-01', items: '8.01' },
+        { accession: `${name}-1`, date: '2000-01-01', items: '8.01' },
+      ]),
+    );
+    vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+    const result = await runToolContract(getMaterialEventsTool, { company: 'AAPL', limit: 10 });
+
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(3);
+    expect(result.structuredContent).toMatchObject({
+      total_matched: 11,
+      dataset: { truncated: false },
+    });
+  });
+
+  it('sends no archive request when the recent block already fills limit', async () => {
+    const result = await runToolContract(getMaterialEventsTool, { company: 'AAPL', limit: 5 });
+
+    expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+    expect(result.structuredContent).toMatchObject({
+      total_matched: 5,
+      history_scanned_through: '2025-10-30',
+    });
+  });
+
+  it('flags a dataframe built from the recent block alone truncated while pages go unread', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+    const result = await runToolContract(getMaterialEventsTool, { company: 'AAPL', limit: 4 });
+
+    expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+    expect(result.structuredContent).toMatchObject({
+      total_matched: 5,
+      dataset: { row_count: 5, truncated: true },
+    });
+  });
+
+  it('sends no archive request for a window starting on or after the recent block’s oldest date', async () => {
+    const result = await runToolContract(getMaterialEventsTool, {
+      company: 'AAPL',
+      filed_after: '2025-10-30',
+      limit: 50,
+    });
+
+    expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+    expect(result.structuredContent).toMatchObject({ total_matched: 5 });
+  });
+
+  it('keeps reading every page overlapping a date window, past a filled limit', async () => {
+    const result = await runToolContract(getMaterialEventsTool, {
+      company: 'AAPL',
+      filed_after: '2010-01-01',
+      filed_before: '2012-12-31',
+      limit: 5,
+    });
+
+    // Pages 003–005 cover 2010–2012, and 002 (from 2013-01-01) and 006 (to 2009-12-31)
+    // sit a day outside it, kept for manifest drift (#137). A date window reads all five
+    // though limit fills early, and the out-of-window rows are filtered out.
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(5);
+    expect(result.structuredContent).toMatchObject({
+      total_matched: 30,
+      history_scanned_through: '2009-01-01',
+    });
+  });
+});
+
 // Through the real argument-parsing path, where `inputAliases` is applied (#115).
 describe('getMaterialEventsTool parameter names (#115)', () => {
   const call = (args: Record<string, unknown>) =>

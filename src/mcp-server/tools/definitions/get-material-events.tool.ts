@@ -12,11 +12,7 @@ import {
   getCanvasBridge,
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
-import {
-  getEdgarApiService,
-  selectArchivePages,
-  suggestCompanies,
-} from '@/services/edgar/edgar-api-service.js';
+import { getEdgarApiService, suggestCompanies } from '@/services/edgar/edgar-api-service.js';
 import {
   type DecodedEightKItem,
   decodeEightKItem,
@@ -24,15 +20,8 @@ import {
   EIGHT_K_RENUMBERING_DATE,
   parseEightKItems,
 } from '@/services/edgar/eight-k-items.js';
+import { SubmissionsArchiveWalk } from '@/services/edgar/submissions-archive.js';
 import type { FilingsRecent } from '@/services/edgar/types.js';
-
-/**
- * Cap on submissions archive pages fetched in one call — bounds latency and the
- * rate-limited request budget. Mirrors the same constant in company-search and
- * search-filings; hitting it sets `dataset.truncated` and is disclosed by
- * `history_scanned_through`.
- */
-const ARCHIVE_PAGE_SCAN_CAP = 10;
 
 /** One 8-K filing with its item codes decoded. */
 interface EventRow {
@@ -76,7 +65,7 @@ function zipEightKs(block: FilingsRecent): EventRow[] {
 export const getMaterialEventsTool = tool('secedgar_get_material_events', {
   title: 'Get Material Events',
   description:
-    "Retrieve a company's 8-K filings with their item codes decoded, optionally filtered to specific items. 8-K item codes are how material events are actually scoped — 1.01 material agreements, 2.02 results of operations, 4.02 non-reliance on previously issued financials, 5.02 officer and director departures — and filtering by them is narrower than any form-level filter in secedgar_search_filings or secedgar_company_search, neither of which can see items. Each row carries the accession number and primary document for secedgar_get_filing; press releases usually ride as EX-99 exhibits rather than in the primary document. Two numbering regimes exist: filings from 2004-08-23 onward use the x.xx codes, earlier ones use single integers (12 was the old results-of-operations item, 9 the old Regulation FD item), and both are accepted as filters and decoded in the response. A date window reaches filings older than the recent submissions window by paging into the archive. The full filtered set is materialized as df_<id> for item-distribution analysis over time — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query.",
+    "Retrieve a company's 8-K filings with their item codes decoded, optionally filtered to specific items. 8-K item codes are how material events are actually scoped — 1.01 material agreements, 2.02 results of operations, 4.02 non-reliance on previously issued financials, 5.02 officer and director departures — and filtering by them is narrower than any form-level filter in secedgar_search_filings or secedgar_company_search, neither of which can see items. Each row carries the accession number and primary document for secedgar_get_filing; press releases usually ride as EX-99 exhibits rather than in the primary document. Two numbering regimes exist: filings from 2004-08-23 onward use the x.xx codes, earlier ones use single integers (12 was the old results-of-operations item, 9 the old Regulation FD item), and both are accepted as filters and decoded in the response. A date window reaches filings older than the recent submissions window by reading every archive page it overlaps, up to 10; without one, the scan reads back only as far as it needs to fill limit. Every scanned filing that passes the filter is materialized as df_<id> for item-distribution analysis over time (pass a date window to cover a longer span) — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -129,7 +118,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       ])
       .optional()
       .describe(
-        'Only include filings filed on or after this date (YYYY-MM-DD). A date filter routes the scan into the older submissions archive pages, so it reaches 8-K filings that predate the ~1000-filing recent window.',
+        'Only include filings filed on or after this date (YYYY-MM-DD). A date filter routes the scan into the older submissions archive pages, so it reaches 8-K filings that predate the recent window (the last year or 1,000 filings of every form, whichever holds more).',
       ),
     filed_before: z
       .union([
@@ -150,7 +139,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       .max(100)
       .default(20)
       .describe(
-        'Filings returned inline, newest first. The full filtered set is materialized as a dataframe when it exceeds this and a canvas is available. Default 20.',
+        'Filings returned inline, newest first. Every scanned filing that passes the filter is materialized as a dataframe when there are more than this and a canvas is available. Default 20.',
       ),
   }),
   // Other spellings of the company and filing-date parameters in use across tools (#115).
@@ -192,7 +181,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       .string()
       .optional()
       .describe(
-        'Oldest filing date reached by the scan (YYYY-MM-DD). Older filings were not examined: the recent window caps at ~1000 filings, and archive pages are fetched only when a date filter or an under-filled result requires them. Absent when no filings were scanned.',
+        'Oldest filing date reached by the scan (YYYY-MM-DD). Older filings were not examined: the recent window holds the last year or 1,000 filings of every form, whichever is more, and archive pages are read only for a date filter (every page overlapping it, up to 10) or to fill limit (stopping on the page that fills it). Absent when no filings were scanned.',
       ),
     filings: z
       .array(
@@ -260,12 +249,12 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
         truncated: z
           .boolean()
           .describe(
-            'True when the archive scan hit its page cap before exhausting the history — older matching filings exist beyond the dataframe.',
+            'True when archive pages in range went unread — the 10-page cap ended the scan, or an undated call stopped once limit was filled, which is before any archive page when the recent window alone fills it — so older matching filings may exist beyond the dataframe. Pass filed_after / filed_before to reach them.',
           ),
       })
       .optional()
       .describe(
-        "Canvas dataframe holding the full filtered 8-K set. Item codes ride as a comma-separated `item_codes` column, so item-frequency-over-time queries split it (`unnest(string_split(item_codes, ','))`). Absent when the result fits inline, canvas is unavailable, or materialization failed.",
+        "Canvas dataframe holding every scanned 8-K that passes the filter. Item codes ride as a comma-separated `item_codes` column, so item-frequency-over-time queries split it (`unnest(string_split(item_codes, ','))`). Absent when the result fits inline, canvas is unavailable, or materialization failed.",
       ),
   }),
 
@@ -340,27 +329,34 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       (!filedAfter || row.filing_date >= filedAfter) &&
       (!filedBefore || row.filing_date <= filedBefore);
 
+    const passesItems = (row: EventRow) =>
+      !itemsFilter || row.item_codes.some((code) => itemsFilter.includes(code));
+
     const scanned: EventRow[] = zipEightKs(submissions.filings.recent).filter(inWindow);
-    // Oldest date scanned so far — the recent window's tail (newest-first, so last).
-    let historyScannedThrough = submissions.filings.recent.filingDate.at(-1);
 
     // Page into the older archive when the caller targets a date range that may
     // predate the recent window, or when that window under-fills the inline list.
-    const files = submissions.filings.files;
-    const underFill = scanned.length < input.limit;
-    let archiveTruncated = false;
-    if (files.length > 0 && (hasDateFilter || underFill)) {
-      const pages = selectArchivePages(files, filedAfter, filedBefore);
-      const pageLimit = Math.min(pages.length, ARCHIVE_PAGE_SCAN_CAP);
-      archiveTruncated = pages.length > pageLimit;
-      for (let i = 0; i < pageLimit; i++) {
-        const page = pages[i];
-        if (!page) break;
-        const block = await api.fetchArchivePage(page.name);
-        historyScannedThrough = page.filingFrom;
-        scanned.push(...zipEightKs(block).filter(inWindow));
+    // A date window reads every page overlapping it, up to the cap; the under-fill
+    // walk stops on the page that fills `limit` with rows passing the items filter,
+    // since an undated call asks for the newest `limit` and nothing older (#134).
+    const walk = new SubmissionsArchiveWalk(api, submissions, {
+      filedAfter,
+      filedBefore,
+      order: 'newest-first',
+    });
+    if (hasDateFilter || scanned.length < input.limit) {
+      let matchedSoFar = scanned.filter(passesItems).length;
+      for await (const { block } of walk) {
+        const rows = zipEightKs(block).filter(inWindow);
+        scanned.push(...rows);
+        matchedSoFar += rows.filter(passesItems).length;
+        if (!hasDateFilter && matchedSoFar >= input.limit) break;
       }
     }
+    // Oldest date reached — the deepest archive page read, else the recent window's tail.
+    const historyScannedThrough =
+      walk.scannedThrough ?? submissions.filings.recent.filingDate.at(-1);
+    const archiveTruncated = walk.truncated;
 
     scanned.sort((a, b) => b.filing_date.localeCompare(a.filing_date));
 
@@ -371,9 +367,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       }
     }
 
-    const matched = itemsFilter
-      ? scanned.filter((row) => row.item_codes.some((code) => itemsFilter.includes(code)))
-      : scanned;
+    const matched = scanned.filter(passesItems);
 
     let dataset:
       | { name: string; row_count: number; expires_at: string; truncated: boolean }
@@ -494,7 +488,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
     }
     if (result.dataset) {
       const truncatedNote = result.dataset.truncated
-        ? ' (truncated — older filings exist beyond the scanned pages)'
+        ? ' (truncated — older filings exist beyond the scanned history)'
         : '';
       lines.push(
         `Dataset: ${result.dataset.name} (${result.dataset.row_count} rows, expires ${result.dataset.expires_at})${truncatedNote} — query with secedgar_dataframe_query.`,
