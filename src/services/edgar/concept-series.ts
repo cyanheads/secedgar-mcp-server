@@ -93,7 +93,7 @@ const QUARTERLY_FRAME = /^CY\d{4}Q\d/;
  * already be scoped to the holder's tag and unit key — a
  * multi-currency filer frames one period under two units.
  */
-export function reportingFormTwin<T extends CompanyConceptUnit>(
+function reportingFormTwin<T extends CompanyConceptUnit>(
   holder: T,
   sameSeries: readonly T[],
 ): T | undefined {
