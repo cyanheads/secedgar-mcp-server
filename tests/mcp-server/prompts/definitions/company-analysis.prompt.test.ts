@@ -5,6 +5,10 @@
 
 import { describe, expect, it } from 'vitest';
 import { companyAnalysisPrompt } from '@/mcp-server/prompts/definitions/company-analysis.prompt.js';
+import { compareCompaniesTool } from '@/mcp-server/tools/definitions/compare-companies.tool.js';
+import { fetchFramesTool } from '@/mcp-server/tools/definitions/fetch-frames.tool.js';
+import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials.tool.js';
+import { getSnapshotTool } from '@/mcp-server/tools/definitions/get-snapshot.tool.js';
 import { at } from '../../../support/assertions.js';
 
 /** Parse args and flatten the generated messages to a single searchable string. */
@@ -116,5 +120,88 @@ describe('companyAnalysisPrompt', () => {
   it('leaves the blockholder step out of an insider-only focus (#83)', () => {
     const text = generatedText({ company: 'AAPL', focus_areas: 'insider selling' });
     expect(text).not.toContain('secedgar_get_beneficial_owners');
+  });
+});
+
+describe('companyAnalysisPrompt — profile and peer steps (#129)', () => {
+  /** The numbered step whose bold title is `title`, from the baseline prompt. */
+  function step(
+    title: string,
+    args: { company: string; focus_areas?: string } = { company: 'AAPL' },
+  ) {
+    const [message] = companyAnalysisPrompt.generate(
+      companyAnalysisPrompt.args!.parse(args),
+    ) as Array<{
+      content: { text: string };
+    }>;
+    const line = message?.content.text.split('\n').find((l) => l.includes(`**${title}**`));
+    if (!line) throw new Error(`No ${title} step in the prompt.`);
+    return line;
+  }
+
+  /** Backticked argument names in a step — every one must be a real input of the tool it names. */
+  const argNames = (line: string) =>
+    [...line.matchAll(/`([a-z_]+)`/g)].map((m) => m[1]).filter((n) => !n?.startsWith('secedgar_'));
+
+  it('profiles the company with get_snapshot, then trends with get_financials', () => {
+    const line = step('Financial Trends');
+    expect(line.indexOf('secedgar_get_snapshot')).toBeGreaterThan(-1);
+    expect(line.indexOf('secedgar_get_financials')).toBeGreaterThan(
+      line.indexOf('secedgar_get_snapshot'),
+    );
+    // get_snapshot reads every catalog concept and takes no concept list.
+    expect(Object.keys(getSnapshotTool.input.shape)).not.toContain('concepts');
+    for (const name of argNames(line)) {
+      expect(
+        [
+          ...Object.keys(getSnapshotTool.input.shape),
+          ...Object.keys(getFinancialsTool.input.shape),
+        ],
+        name,
+      ).toContain(name);
+    }
+  });
+
+  it('compares named peers with compare_companies, keeping fetch_frames for a market-wide ranking', () => {
+    const line = step('Industry Context');
+    expect(line).toContain('secedgar_compare_companies');
+    expect(line).toContain('secedgar_fetch_frames');
+    const names = argNames(line);
+    expect(names).toContain('companies');
+    for (const name of names) {
+      expect(
+        [
+          ...Object.keys(compareCompaniesTool.input.shape),
+          ...Object.keys(fetchFramesTool.input.shape),
+        ],
+        name,
+      ).toContain(name);
+    }
+    // The prompt takes one company; the peers are the model's to choose.
+    expect(Object.keys(companyAnalysisPrompt.args!.shape)).toEqual(['company', 'focus_areas']);
+  });
+
+  it('keeps Industry Context last, after the ownership steps', () => {
+    const text = generatedText({ company: 'AAPL', focus_areas: 'ownership' });
+    const order = [
+      'Insider Activity',
+      'Institutional Ownership',
+      'Blockholders',
+      'Industry Context',
+    ].map((t) => text.indexOf(`**${t}**`));
+    expect(order.every((i) => i > -1)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
+  it('names all four financial tools in the baseline workflow', () => {
+    const text = generatedText({ company: 'AAPL' });
+    for (const name of [
+      'secedgar_get_snapshot',
+      'secedgar_get_financials',
+      'secedgar_compare_companies',
+      'secedgar_fetch_frames',
+    ]) {
+      expect(text).toContain(name);
+    }
   });
 });

@@ -3,7 +3,7 @@
  * @module tests/mcp-server/tools/definitions/search-concepts.tool
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
 import { searchConceptsTool } from '@/mcp-server/tools/definitions/search-concepts.tool.js';
 import { blockAt, blockText } from '../../../support/assertions.js';
@@ -125,6 +125,36 @@ describe('searchConceptsTool', () => {
     expect(result.concepts.find((c) => c.name === 'notes_payable')?.ifrs_tags).toBeUndefined();
   });
 
+  it('lists the per-share group with EPS and the diluted share count (#130)', async () => {
+    const result = await runToolContract(searchConceptsTool, { group: 'per_share' });
+    expect(result.isError).toBeFalsy();
+    const output = searchConceptsTool.output.parse(result.structuredContent);
+    expect(output.concepts.map((c) => c.name)).toEqual([
+      'eps_basic',
+      'eps_diluted',
+      'shares_diluted',
+    ]);
+    const text = blockText(result.content);
+    expect(text).toContain('shares_diluted');
+    expect(text).toContain('WeightedAverageNumberOfDilutedSharesOutstanding');
+  });
+
+  it('finds ppe_net and pretax_income by name and surfaces the PP&E related tag (#130)', async () => {
+    const ctx = createMockContext();
+    const ppe = await searchConceptsTool.handler(
+      searchConceptsTool.input.parse({ search: 'ppe_net' }),
+      ctx,
+    );
+    expect(ppe.concepts.find((c) => c.name === 'ppe_net')?.related_tags?.[0]?.tag).toBe(
+      'PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization',
+    );
+    const pretax = await searchConceptsTool.handler(
+      searchConceptsTool.input.parse({ search: 'pretax' }),
+      ctx,
+    );
+    expect(pretax.concepts.map((c) => c.name)).toContain('pretax_income');
+  });
+
   it('renders the ifrs-full line in format text (#99)', async () => {
     const ctx = createMockContext();
     const input = searchConceptsTool.input.parse({ search: 'inventory' });
@@ -132,5 +162,24 @@ describe('searchConceptsTool', () => {
     const blocks = searchConceptsTool.format!(result);
 
     expect(blockText(blocks)).toContain('ifrs-full: `Inventories`');
+  });
+});
+
+describe('searchConceptsTool — the tools its names feed (#129)', () => {
+  const conceptTools = [
+    'secedgar_get_financials',
+    'secedgar_compare_companies',
+    'secedgar_fetch_frames',
+  ];
+
+  it('names every tool that takes a friendly name, and not get_snapshot, in its description', () => {
+    for (const name of conceptTools) expect(searchConceptsTool.description).toContain(name);
+    expect(searchConceptsTool.description).not.toContain('secedgar_get_snapshot');
+  });
+
+  it('names the same three tools on the name output field', () => {
+    const description = searchConceptsTool.output.shape.concepts.element.shape.name.description;
+    for (const name of conceptTools) expect(description).toContain(name);
+    expect(description).not.toContain('secedgar_get_snapshot');
   });
 });

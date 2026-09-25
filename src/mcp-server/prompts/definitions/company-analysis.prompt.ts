@@ -32,7 +32,7 @@ export const companyAnalysisPrompt = prompt('secedgar_company_analysis', {
 
     const steps: string[] = [
       '**Company Identification** — Use `secedgar_company_search` to resolve the company and review recent filings.',
-      '**Financial Trends** — Use `secedgar_get_financials` to pull key metrics (revenue, net_income, eps_diluted, assets, debt, operating_cash_flow) and identify trends over the last 3-5 years.',
+      '**Financial Trends** — Use `secedgar_get_snapshot` for the latest value of every supported concept in one call, then `secedgar_get_financials` for the 3-5 year trend of the lines that matter most (for example revenue, net_income, eps_diluted, debt, operating_cash_flow).',
       '**Recent Filings Review** — Use `secedgar_get_filing` to read the most recent 10-K or 10-Q for qualitative insights (risk factors, MD&A, business overview).',
       '**Material Events** — Use `secedgar_get_material_events` to surface recent 8-K filings with their item codes decoded, narrowing to the events that matter (`items: ["1.01"]` for material agreements, `["2.02"]` for results, `["5.02"]` for officer changes, `["4.02"]` for non-reliance).',
     ];
@@ -52,7 +52,7 @@ export const companyAnalysisPrompt = prompt('secedgar_company_analysis', {
       );
     }
     steps.push(
-      '**Industry Context** — Use `secedgar_fetch_frames` to compare key metrics against peers.',
+      '**Industry Context** — Choose a few comparable companies and use `secedgar_compare_companies` with this company and those peers as `companies` (2-10 in all) and the key metrics as `concepts` (up to 8), aligned on calendar periods. To see where one metric ranks across every reporting company in a single period, use `secedgar_fetch_frames`.',
     );
 
     const findings: string[] = [

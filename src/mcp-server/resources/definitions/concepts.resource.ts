@@ -1,6 +1,7 @@
 /**
  * @fileoverview Reference list of common XBRL financial concepts grouped by financial statement.
- * The "menu" an agent reads before calling secedgar_get_financials.
+ * The "menu" an agent reads before calling secedgar_get_financials, secedgar_compare_companies,
+ * or secedgar_fetch_frames — the three tools that take a friendly name as concept input.
  * @module mcp-server/resources/definitions/concepts
  */
 
@@ -20,7 +21,7 @@ const GROUP_LABELS: Record<ConceptGroup, string> = {
 export const conceptsResource = resource('secedgar://concepts', {
   name: 'XBRL Financial Concepts',
   description:
-    'Reference list of common XBRL financial concepts grouped by financial statement, mapping friendly names accepted by secedgar_get_financials and secedgar_fetch_frames to their XBRL tags.',
+    'Reference list of common XBRL financial concepts grouped by financial statement, mapping friendly names accepted by secedgar_get_financials, secedgar_compare_companies, and secedgar_fetch_frames to their XBRL tags.',
   mimeType: 'text/markdown',
 
   handler(_params, _ctx) {
@@ -33,11 +34,11 @@ export const conceptsResource = resource('secedgar://concepts', {
 
     const lines: string[] = ['# XBRL Financial Concepts', ''];
     lines.push(
-      'Use these friendly names with `secedgar_get_financials` and `secedgar_fetch_frames`.',
+      'Use these friendly names with `secedgar_get_financials`, `secedgar_compare_companies`, and `secedgar_fetch_frames`.',
       '',
     );
     lines.push(
-      'Raw XBRL tags are also accepted as an escape hatch for concepts not listed here.',
+      'Raw XBRL tags (UpperCamelCase element names such as `NetIncomeLoss`) are also accepted as an escape hatch for concepts not listed here.',
       '',
     );
 

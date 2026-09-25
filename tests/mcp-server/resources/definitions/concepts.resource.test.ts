@@ -46,6 +46,22 @@ describe('conceptsResource', () => {
     expect(text).toContain('alt (different definition');
   });
 
+  it('lists ppe_net, pretax_income, and shares_diluted with their tags (#130)', () => {
+    const ctx = createMockContext();
+    const text = conceptsResource.handler({}, ctx) as string;
+    for (const needle of [
+      '`ppe_net`',
+      '`pretax_income`',
+      '`shares_diluted`',
+      'PropertyPlantAndEquipmentNet',
+      'ProfitLossBeforeTax',
+      'WeightedAverageNumberOfDilutedSharesOutstanding',
+      'PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization',
+    ]) {
+      expect(text).toContain(needle);
+    }
+  });
+
   it('lists resources correctly', async () => {
     const listing = await listResources(conceptsResource.list!);
     expect(listing.resources).toHaveLength(1);
@@ -54,5 +70,25 @@ describe('conceptsResource', () => {
       name: 'XBRL Financial Concepts',
       mimeType: 'text/markdown',
     });
+  });
+});
+
+describe('conceptsResource — the tools its names feed (#129)', () => {
+  const conceptTools = [
+    'secedgar_get_financials',
+    'secedgar_compare_companies',
+    'secedgar_fetch_frames',
+  ];
+
+  it('names every tool that takes a friendly name in the markdown intro, and not get_snapshot', () => {
+    const text = conceptsResource.handler({}, createMockContext()) as string;
+    const intro = text.slice(0, text.indexOf('\n## '));
+    for (const name of conceptTools) expect(intro).toContain(`\`${name}\``);
+    expect(intro).not.toContain('secedgar_get_snapshot');
+  });
+
+  it('names the same three tools in its description', () => {
+    for (const name of conceptTools) expect(conceptsResource.description).toContain(name);
+    expect(conceptsResource.description).not.toContain('secedgar_get_snapshot');
   });
 });
