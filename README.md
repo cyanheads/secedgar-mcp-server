@@ -98,14 +98,15 @@ SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only 
 ### `secedgar_get_financials` <sub>tool</sub>
 
 - `company` (ticker or CIK) plus `concept` as a friendly name or raw XBRL tag; `taxonomy` `us-gaap` (default), `ifrs-full`, or `dei`; `period_type` `annual`, `quarterly`, or `all`, defaulting to annual with a fallback to the full series for instant concepts; `limit` 1–100 trims the inline series
-- A deduplicated series, newest first, one value per calendar period with its source `form`, `filed` date, and `accession_number`; `tags_tried` names the tags walked, and an empty result fails as `no_concept_data`, `no_frame_data`, or `no_period_data`
+- A deduplicated series, newest first, one value per calendar period with its source `form`, `filed` date, `accession_number`, and `tag`; `tags_tried` names the tags walked, and an empty result fails as `no_concept_data`, `no_frame_data`, or `no_period_data`
+- A `concept` that is neither a friendly name nor an UpperCamelCase tag fails as `unknown_concept` before any SEC request, with a formula for standard combinations (`free_cash_flow`, `ebitda`, `working_capital`) or up to three closest friendly names
 
 ---
 
 ### `secedgar_get_snapshot` <sub>tool</sub>
 
 - `company`, `taxonomy` `us-gaap` (default) or `ifrs-full`, and `period_type` `annual`, `quarterly`, or `both` (default); one companyfacts read covers every supported concept, and nothing is staged as a dataframe
-- Each `lines` entry reports the latest `annual` and `quarterly` value for a duration concept, or the latest `instant` value for balance-sheet and entity-info concepts, with the `tag` and `taxonomy` it came from; concepts the filer doesn't report land in `gaps` with `tags_tried`
+- Each `lines` entry reports the latest `annual` and `quarterly` value for a duration concept, or the latest `instant` value for balance-sheet and entity-info concepts, each with the `tag` it came from, under the line's `taxonomy`; concepts the filer doesn't report land in `gaps` with `tags_tried`
 
 ---
 
@@ -160,14 +161,18 @@ SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only 
 
 - `concept` as a friendly name or raw tag, `period` as `CY2023`, `CY2024Q2`, or `CY2023Q4I`, `unit` (default `USD`), `sort` `desc` / `asc`; `limit` 1–100 (default 25) with `offset` / `next_offset` down the ranking
 - One call queries one tag: `unqueried_tags` lists same-meaning variants to fetch separately, and `related_tags` lists alternate-definition tags some filers report instead
-- `value_distribution.max_to_p95_ratio` flags scale-factor outliers, `period_end_range` shows fiscal-year mixing, and `caveats` names the fiscal-Q4 gap in quarterly frames
+- `value_distribution.max_to_p95_ratio` flags scale-factor outliers, `period_end_range` shows fiscal-year mixing, and `caveats` names the fiscal-Q4 gap in quarterly frames, the proxy-statement rows in annual `NetIncomeLoss` frames, and the 10-Q trailing-twelve-month rows an annual frame can hold while its year is still open
+- SEC publishes frames for us-gaap and dei tags only: `taxonomy` `us-gaap` (default) or `dei` picks the namespace for a raw tag (`EntityCommonStockSharesOutstanding` is dei), a friendly name keeps its own mapped taxonomy (`shares_outstanding` reads dei), and an explicit `dei` reads a friendly name's tags from dei, as in `secedgar_get_financials`; IFRS filers are read per company with `taxonomy` `ifrs-full`
+- A `concept` that is neither a friendly name nor an UpperCamelCase tag fails as `unknown_concept` before the frames request, with the same formula or closest-name hint as `secedgar_get_financials`; a well-formed tag with no frame is `no_data`
 
 ---
 
 ### `secedgar_compare_companies` <sub>tool</sub>
 
 - 2–10 `companies` × 1–8 `concepts`; `taxonomy` `us-gaap` (default) or `ifrs-full`; `period_type` `annual` (default) or `quarterly`; `periods` 1–12 (default 4), trimmed further when the inline matrix gets too large
-- `cells` align each value on a calendar `period` and keep its `frame` and `period_end`; `failed_companies` (reason `not_found`, `ambiguous`, or `no_company_facts`) and `gaps` report what's missing, and `caveats` flag differing period ends and unit mismatches
+- `cells` align each value on a calendar `period` and keep its `frame`, `period_end`, and source `tag`; `failed_companies` (reason `not_found`, `ambiguous`, or `no_company_facts`) and `gaps` (no value in any period) report what's missing, and `caveats` flag differing period ends, unit mismatches, and, once per concept, the companies whose values all predate the inline window, each with its newest period
+- A concept that is neither a friendly name nor an UpperCamelCase tag is listed once in `unknown_concepts` with its hint, never as a gap per company; the call fails as `unknown_concept` only when every concept is one
+- Inputs naming the same concept (`revenue` and `Revenue`, or one raw tag spelled twice) are compared once under the first spelling, with a caveat naming the merged inputs; a friendly name and a raw tag it maps to (`revenue` and `Revenues`) stay separate
 
 ---
 
@@ -217,7 +222,7 @@ SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only 
 ### `secedgar_company_analysis` <sub>prompt</sub>
 
 - Arguments: `company` required; `focus_areas` optional free text
-- Returns one user message with a numbered workflow (company search, financial trends, filing review, material events, peer comparison via `secedgar_fetch_frames`) and a findings template; insider, institutional, or blockholder terms in `focus_areas` add those ownership steps, and "ownership" adds all three
+- Returns one user message with a numbered workflow (company search, a financial profile via `secedgar_get_snapshot` with trends via `secedgar_get_financials`, filing review, material events, and a peer comparison via `secedgar_compare_companies` with `secedgar_fetch_frames` for a market-wide ranking) and a findings template; insider, institutional, or blockholder terms in `focus_areas` add those ownership steps, and "ownership" adds all three
 
 ## Features
 
@@ -227,7 +232,7 @@ EDGAR-specific:
 
 - One process-wide queue paces SEC requests under the 10 req/s limit. A 429 is never retried: every SEC call is refused locally as `rate_limited` with a `retryAfter` countdown for `EDGAR_RATE_LIMIT_COOLDOWN_SECONDS`, then a single probe goes out. Reads served from the local mirror keep answering
 - CIK resolution from tickers (fund tickers included), current and former company names, or raw CIKs, with corporate-suffix normalization and near-match suggestions on a miss
-- Friendly XBRL concept names that handle historical tag changes. `secedgar_get_financials`, `secedgar_get_snapshot`, and `secedgar_compare_companies` share one frame dedup and tag priority, so their numbers agree, and each reports `caveats` for calendar quarters missing from the frame-tagged series (SEC files fiscal Q4 only as the 10-K residual) and for series that stop years short
+- Friendly XBRL concept names that handle historical tag changes. `secedgar_get_financials`, `secedgar_get_snapshot`, and `secedgar_compare_companies` share one frame dedup and tag priority, so their numbers agree; a period whose frame SEC assigned to a proxy statement's pay-versus-performance figure is answered from the filer's own report instead, an annual frame holding a 10-Q's trailing-twelve-month figure is left out of the annual series, and each reports `caveats` for calendar quarters missing from the frame-tagged series (SEC files fiscal Q4 only as the 10-K residual) and for series that stop years short
 - Filing documents converted from HTML to text, with heading detection and offset paging for oversized filings
 - Opt-in local SQLite mirror of company tickers and XBRL company-facts (`EDGAR_MIRROR_ENABLED`) that serves CIK resolution and financials from disk
 

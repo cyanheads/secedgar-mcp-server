@@ -6,19 +6,21 @@
 
 ### Tools
 
+The core tools designed below. The full shipped surface — snapshot, comparison, ownership, fund-holdings, concept-search, and dataframe tools included — is the MCP Surface table in `CLAUDE.md`.
+
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
 | `secedgar_company_search` | Find companies and retrieve entity info with optional recent filings. Entry point for most workflows. | `query`, `include_filings?`, `forms?`, `filing_limit?` | `readOnlyHint`, `openWorldHint` |
 | `secedgar_search_filings` | Search EDGAR filings since 1993 — EFTS full-text for 2001-present, archive-backed browse (submissions history / quarterly full-index) for pre-2001 ranges. | `query`, `forms?`, `filed_after?`, `filed_before?`, `limit?`, `offset?` | `readOnlyHint`, `openWorldHint` |
 | `secedgar_get_filing` | Fetch a specific filing's metadata and document content by accession number. | `accession_number`, `cik?`, `content_limit?`, `document?` | `readOnlyHint`, `idempotentHint` |
 | `secedgar_get_financials` | Get historical XBRL financial data for a company. Accepts friendly concept names. | `company`, `concept`, `taxonomy?`, `period_type?` | `readOnlyHint`, `idempotentHint` |
-| `secedgar_compare_metric` | Compare a financial metric across all reporting companies for a specific period. | `concept`, `period`, `unit?`, `limit?`, `sort?` | `readOnlyHint`, `openWorldHint` |
+| `secedgar_fetch_frames` | Compare a financial metric across all reporting companies for a specific period. | `concept`, `period`, `taxonomy?`, `unit?`, `limit?`, `offset?`, `sort?` | `readOnlyHint`, `openWorldHint` |
 
 ### Resources
 
 | URI Template | Description | Pagination |
 |:-------------|:------------|:-----------|
-| `secedgar://concepts` | Reference list of common XBRL financial concepts grouped by financial statement, mapping friendly names to XBRL tags. The "menu" an agent reads before calling `secedgar_get_financials`. | No |
+| `secedgar://concepts` | Reference list of common XBRL financial concepts grouped by financial statement, mapping friendly names to XBRL tags. The "menu" an agent reads before calling `secedgar_get_financials`, `secedgar_compare_companies`, or `secedgar_fetch_frames`. | No |
 | `secedgar://filing-types` | Reference list of common SEC filing types with descriptions, cadence, and typical use cases. | No |
 
 ### Prompts
@@ -329,7 +331,7 @@ input: z.object({
 output: z.object({
   company: z.string(),
   cik: z.string(),
-  concept: z.string().describe('XBRL tag name used.'),
+  concept: z.string().describe('XBRL tag behind the newest value.'),
   label: z.string().describe('Human-readable label for the concept.'),
   description: z.string().optional().describe('XBRL taxonomy description.'),
   unit: z.string().describe('Unit of measure (e.g., "USD", "shares", "USD/shares").'),
@@ -338,11 +340,12 @@ output: z.object({
     value: z.number(),
     start: z.string().optional().describe('Period start date (duration items only).'),
     end: z.string().describe('Period end date.'),
-    fiscal_year: z.number(),
-    fiscal_period: z.string(),
+    fiscal_year: z.number().nullable(),
+    fiscal_period: z.string().nullable(),
     form: z.string().describe('Source filing type (10-K, 10-Q, etc.).'),
     filed: z.string().describe('Date the source filing was submitted.'),
     accession_number: z.string().describe('Source filing accession number for secedgar_get_filing.'),
+    tag: z.string().describe('XBRL tag this value was reported under.'),
   })).describe('Deduplicated time series, newest first.'),
   tags_tried: z.array(z.string()).optional()
     .describe('XBRL tags that were attempted (shown when using friendly names that map to multiple tags).'),
@@ -350,42 +353,69 @@ output: z.object({
 ```
 
 **Handler flow:**
-1. Resolve `company` to CIK (via ticker lookup)
-2. Map friendly `concept` name to XBRL tag(s) — some map to multiple tags (e.g., "revenue" → 3 possible tags)
-3. For each mapped tag, fetch `data.sec.gov/api/xbrl/companyconcept/CIK{padded}/{taxonomy}/{tag}.json`
-4. Merge results if multiple tags returned data (union, dedup by period)
-5. Deduplicate: keep only entries with `frame` field (one value per standard calendar period)
-6. Filter by `period_type` (FY vs Q1-Q4)
-7. Sort newest first
+1. Reject a `concept` that is neither a friendly name nor tag-shaped (`unknown_concept`, see below) before any other step
+2. Resolve `company` to CIK (via ticker lookup)
+3. Map friendly `concept` name to XBRL tag(s) — some map to multiple tags (e.g., "revenue" → 5 tags)
+4. For each mapped tag, fetch `data.sec.gov/api/xbrl/companyconcept/CIK{padded}/{taxonomy}/{tag}.json`; a unit served as anything but an array is dropped at the service edge, and a tag left with no values is answered from one companyfacts read
+5. Merge results if multiple tags returned data; each value keeps its source tag and unit key
+6. Deduplicate: keep only entries with `frame` field (one value per standard calendar period); a frame held by a proxy statement takes the latest fact another form reports for the same tag, unit, and period; an annual frame held by a 10-Q takes the same-period fact from the 10-K, stays when it covers a closed fiscal year, and otherwise drops out (a trailing-twelve-month figure); same-frame collisions go to the lower tag index, then the later filing
+7. Filter by `period_type` (FY vs Q1-Q4)
+8. Sort newest first
 
-**Friendly name → XBRL tag mapping:**
+**Friendly name → XBRL tag mapping** (36 concepts; `src/services/edgar/concept-map.ts` is the source of truth):
 
-| Friendly Name | XBRL Tags (tried in order) | Taxonomy | Unit |
-|:------|:------------|:---------|:-----|
-| `revenue` | `RevenueFromContractWithCustomerExcludingAssessedTax`, `Revenues`, `SalesRevenueNet`, `SalesRevenueGoodsNet` | us-gaap | USD |
-| `net_income` | `NetIncomeLoss` | us-gaap | USD |
-| `operating_income` | `OperatingIncomeLoss` | us-gaap | USD |
-| `gross_profit` | `GrossProfit` | us-gaap | USD |
-| `eps_basic` | `EarningsPerShareBasic` | us-gaap | USD/shares |
-| `eps_diluted` | `EarningsPerShareDiluted` | us-gaap | USD/shares |
-| `assets` | `Assets` | us-gaap | USD |
-| `liabilities` | `Liabilities` | us-gaap | USD |
-| `equity` | `StockholdersEquity` | us-gaap | USD |
-| `cash` | `CashAndCashEquivalentsAtCarryingValue` | us-gaap | USD |
-| `debt` | `LongTermDebt`, `LongTermDebtNoncurrent` | us-gaap | USD |
-| `shares_outstanding` | `EntityCommonStockSharesOutstanding` | dei | shares |
-| `operating_cash_flow` | `NetCashProvidedByUsedInOperatingActivities` | us-gaap | USD |
-| `capex` | `PaymentsToAcquirePropertyPlantAndEquipment` | us-gaap | USD |
+| Friendly Name | XBRL Tags (tried in order) | IFRS Tags (`ifrs-full`) | Taxonomy | Unit |
+|:------|:------------|:------------|:---------|:-----|
+| `accounts_payable` | `AccountsPayableCurrent` | `TradeAndOtherCurrentPayables` | us-gaap | USD |
+| `accounts_receivable` | `AccountsReceivableNetCurrent`, `ReceivablesNetCurrent`, `AccountsReceivableGrossCurrent` | `CurrentTradeReceivables`, `TradeAndOtherCurrentReceivables` | us-gaap | USD |
+| `assets` | `Assets` | `Assets` | us-gaap | USD |
+| `cash` | `CashAndCashEquivalentsAtCarryingValue` | `CashAndCashEquivalents` | us-gaap | USD |
+| `current_assets` | `AssetsCurrent` | `CurrentAssets` | us-gaap | USD |
+| `current_liabilities` | `LiabilitiesCurrent` | `CurrentLiabilities` | us-gaap | USD |
+| `debt` | `LongTermDebt`, `LongTermDebtNoncurrent` | `LongtermBorrowings` | us-gaap | USD |
+| `equity` | `StockholdersEquity` | `EquityAttributableToOwnersOfParent`, `Equity` | us-gaap | USD |
+| `goodwill` | `Goodwill` | `Goodwill` | us-gaap | USD |
+| `intangible_assets` | `FiniteLivedIntangibleAssetsNet`, `IntangibleAssetsNetExcludingGoodwill` | `IntangibleAssetsOtherThanGoodwill` | us-gaap | USD |
+| `inventory` | `InventoryNet`, `InventoryGross` | `Inventories` | us-gaap | USD |
+| `liabilities` | `Liabilities` | `Liabilities` | us-gaap | USD |
+| `notes_payable` | `LongTermNotesPayable`, `NotesPayable`, `LongTermDebt` | — | us-gaap | USD |
+| `ppe_net` | `PropertyPlantAndEquipmentNet` | `PropertyPlantAndEquipment` | us-gaap | USD |
+| `capex` | `PaymentsToAcquirePropertyPlantAndEquipment`, `PaymentsToAcquireProductiveAssets` | `PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities` | us-gaap | USD |
+| `depreciation_amortization` | `DepreciationDepletionAndAmortization`, `DepreciationAndAmortization`, `Depreciation` | `DepreciationAndAmortisationExpense`, `DepreciationAmortisationAndImpairmentLossReversalOfImpairmentLossRecognisedInProfitOrLoss`, `DepreciationExpense` | us-gaap | USD |
+| `dividends_paid` | `PaymentsOfDividends`, `PaymentsOfDividendsCommonStock` | `DividendsPaid`, `DividendsPaidClassifiedAsFinancingActivities` | us-gaap | USD |
+| `financing_cash_flow` | `NetCashProvidedByUsedInFinancingActivities` | `CashFlowsFromUsedInFinancingActivities` | us-gaap | USD |
+| `investing_cash_flow` | `NetCashProvidedByUsedInInvestingActivities` | `CashFlowsFromUsedInInvestingActivities` | us-gaap | USD |
+| `operating_cash_flow` | `NetCashProvidedByUsedInOperatingActivities` | `CashFlowsFromUsedInOperatingActivities` | us-gaap | USD |
+| `share_repurchases` | `PaymentsForRepurchaseOfCommonStock`, `PaymentsForRepurchaseOfEquity`, `StockRepurchasedAndRetiredDuringPeriodValue` | `PaymentsToAcquireOrRedeemEntitysShares`, `PurchaseOfTreasuryShares` | us-gaap | USD |
+| `shares_outstanding` | `EntityCommonStockSharesOutstanding` | — | dei | shares |
+| `cogs` | `CostOfGoodsAndServicesSold`, `CostOfRevenue`, `CostOfGoodsSold` | `CostOfSales` | us-gaap | USD |
+| `gross_profit` | `GrossProfit` | `GrossProfit` | us-gaap | USD |
+| `interest_expense` | `InterestExpense`, `InterestExpenseDebt`, `InterestExpenseNonoperating` | `InterestExpense`, `FinanceCosts` | us-gaap | USD |
+| `net_income` | `NetIncomeLoss` | `ProfitLoss` | us-gaap | USD |
+| `operating_income` | `OperatingIncomeLoss` | `ProfitLossFromOperatingActivities` | us-gaap | USD |
+| `pretax_income` | `IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest`, `IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments` | `ProfitLossBeforeTax` | us-gaap | USD |
+| `rd_expense` | `ResearchAndDevelopmentExpense` | `ResearchAndDevelopmentExpense` | us-gaap | USD |
+| `revenue` | `RevenueFromContractWithCustomerExcludingAssessedTax`, `Revenues`, `RevenueFromContractWithCustomerIncludingAssessedTax`, `SalesRevenueNet`, `SalesRevenueGoodsNet` | `Revenue`, `RevenueFromContractsWithCustomers` | us-gaap | USD |
+| `sga_expense` | `SellingGeneralAndAdministrativeExpense` | `SellingGeneralAndAdministrativeExpense` | us-gaap | USD |
+| `stock_based_compensation` | `ShareBasedCompensation`, `AllocatedShareBasedCompensationExpense` | `ExpenseFromSharebasedPaymentTransactionsWithEmployees`, `ExpenseFromSharebasedPaymentTransactionsInWhichGoodsOrServicesReceivedDidNotQualifyForRecognitionAsAssets` (picked per filer by coverage) | us-gaap | USD |
+| `tax_expense` | `IncomeTaxExpenseBenefit` | `IncomeTaxExpenseContinuingOperations` | us-gaap | USD |
+| `eps_basic` | `EarningsPerShareBasic` | `BasicEarningsLossPerShare` | us-gaap | USD/shares |
+| `eps_diluted` | `EarningsPerShareDiluted` | `DilutedEarningsLossPerShare` | us-gaap | USD/shares |
+| `shares_diluted` | `WeightedAverageNumberOfDilutedSharesOutstanding` | `AdjustedWeightedAverageShares` | us-gaap | shares |
+
+Alternate-definition tags (`cash` incl. restricted cash, `equity` incl. noncontrolling interests, the continuing-operations cash-flow variants, `ppe_net` incl. finance-lease right-of-use assets) are `relatedTags` — surfaced as hints, never walked as fallbacks.
 
 Revenue is the most complex: companies switched from `SalesRevenueNet` to `RevenueFromContractWithCustomerExcludingAssessedTax` around 2017-2018 (ASC 606 adoption). The handler tries all variants and merges for full history.
 
 **Error guidance:**
-- Unknown friendly name → `"Unknown concept '{name}'. Use a friendly name (revenue, net_income, assets, etc.) or a raw XBRL tag. See secedgar://concepts for the full list."`
+- Neither a friendly name nor tag-shaped (`/^[A-Z][A-Za-z0-9]*$/` after trimming) → `unknown_concept` (`NotFound`) before company resolution or any SEC request: `"'{name}' is neither a supported concept name nor an XBRL tag."`, with a recovery hint carrying a formula for a standard combination (`free_cash_flow` → `operating_cash_flow − capex`, `ebitda` → `operating_income + depreciation_amortization`, `working_capital` → `current_assets − current_liabilities`) or up to three closest catalog names (Dice trigram ≥ 0.3 against name and label), then a pointer to `secedgar_search_concepts`. Shared by `get_financials`, `compare_companies` (which fails only when every concept is unknown and otherwise lists them in `unknown_concepts`), and `fetch_frames`.
+  - *Decision:* the tag-shape test is the rejection line because every item element in us-gaap, ifrs-full, dei, and srt matches it and SEC matches tags case-sensitively, so nothing that could return data is rejected; it also keeps path-shaped input out of the request URL, where the tag is a path segment.
+  - *Decision:* `total_debt` has no formula — `debt` is long-term only and the catalog has no current-portion concept, so any formula would understate.
 - No data for concept → `"No XBRL data for '{tag}' under {taxonomy} for this company. This company may use a different tag or taxonomy. Try 'ifrs-full' for foreign filers."`
 
 ---
 
-### 5. `secedgar_compare_metric`
+### 5. `secedgar_fetch_frames`
 
 **Workflow:** "Which companies had the highest revenue in 2023?" / "Rank companies by total assets in Q1 2024"
 
@@ -396,6 +426,9 @@ input: z.object({
   concept: z.string()
     .describe('Financial concept — same friendly names as secedgar_get_financials '
       + '(e.g., "revenue", "assets", "eps_basic") or raw XBRL tag.'),
+  taxonomy: z.enum(['us-gaap', 'dei']).default('us-gaap')
+    .describe('Frames namespace a raw XBRL tag is read from. A friendly name keeps its own '
+      + 'mapped taxonomy unless dei is passed.'),
   period: z.string()
     .describe('Calendar period. Formats:\n'
       + '  "CY2023" — full year 2023 (duration, for income statement items)\n'
@@ -407,6 +440,8 @@ input: z.object({
     .describe('Unit of measure. Use "USD-per-shares" for EPS, "shares" for share counts, "pure" for ratios.'),
   limit: z.number().int().min(1).max(100).default(25)
     .describe('Number of companies to return. Results are sorted by value.'),
+  offset: z.number().int().min(0).default(0)
+    .describe('Rank to start the page at, 0-based. Pass next_offset from the previous response.'),
   sort: z.enum(['desc', 'asc']).default('desc')
     .describe('Sort direction. "desc" for highest values first (typical for revenue, assets). '
       + '"asc" for lowest values (useful for finding companies with losses or small positions).'),
@@ -432,19 +467,23 @@ output: z.object({
 ```
 
 **Handler flow:**
-1. Map friendly concept name to XBRL tag (same mapping as `secedgar_get_financials`)
-2. Fetch `data.sec.gov/api/xbrl/frames/{taxonomy}/{tag}/{unit}/{period}.json`
-3. Sort by value (desc or asc)
-4. Slice to `limit`
-5. Enrich with ticker symbols from cached `company_tickers.json`
+1. Reject a `concept` that is neither a friendly name nor tag-shaped (`unknown_concept`, as in `secedgar_get_financials`) before the frames request, which interpolates the tag into its path
+2. Resolve the concept and `taxonomy` to a namespace and XBRL tag through `resolveConceptTarget`, the resolution `secedgar_get_financials` uses: a raw tag reads from the requested namespace, a friendly name keeps its mapped taxonomy under the `us-gaap` default (`shares_outstanding` → `dei`), and an explicit `dei` reads a friendly name's tags from `dei`
+3. Fetch `data.sec.gov/api/xbrl/frames/{taxonomy}/{tag}/{unit}/{period}.json`
+4. Sort by value (desc or asc)
+5. Slice the page from `offset` to `offset + limit`
+6. Enrich with ticker symbols from cached `company_tickers.json`
 
 **Key constraints:**
 - Frames only cover standard calendar periods (±30 day tolerance from exact calendar boundaries)
 - Companies with non-standard fiscal years may not appear (e.g., Apple's September FY end sometimes falls outside tolerance for CY annual frames)
 - Annual data starts ~2009 (SEC XBRL mandate)
+- SEC publishes frames under `us-gaap` and `dei` only, so `taxonomy` offers exactly those two
+  - *Decision:* a friendly name paired with an explicit `dei` reads its tags from `dei` rather than keeping the mapping's taxonomy, because that is the rule `get_financials` already applies through `resolveConceptTarget`; one rule across tools beats a frames-only exception, and the `no_data` hint names the mapping's taxonomy for that case.
+- A frame row is the latest-filed fact for the period, and the live frames API carries no form: an annual `NetIncomeLoss` row can be a DEF 14A pay-versus-performance figure, and an annual row for a year still open or inside its 10-K window can be a 10-Q trailing-twelve-month figure, so both carry a caveat. Frames assembled from the local mirror read each fact's form and apply the per-filer holder rules instead (`holderFormsResolved`), with no caveat.
 
 **Error guidance:**
-- 404 → `"No data for {concept}/{unit}/{period}. Check: duration vs. instant period (add 'I' for balance sheet items), correct unit (USD-per-shares for EPS), and period exists (data starts ~CY2009)."`
+- 404 → `"No data for {concept}/{unit}/{period} in the {taxonomy} frames."`, with a hint to check duration vs. instant period (add 'I' for balance sheet items), the unit (USD-per-shares for EPS), and that the period exists (data starts ~CY2009), plus a namespace note: for a raw tag, which namespace was read and when to switch (`dei` for cover-page tags such as `EntityCommonStockSharesOutstanding`); for a friendly name read outside its mapped taxonomy, to omit `taxonomy`.
 
 ---
 
@@ -459,18 +498,21 @@ output: z.object({
 | EFTS search | `https://efts.sec.gov/LATEST/search-index?q=...` | `secedgar_search_filings` |
 | Filing archive | `https://www.sec.gov/Archives/edgar/data/{cik}/{accn}/` | `secedgar_get_filing` |
 | Company concept | `https://data.sec.gov/api/xbrl/companyconcept/CIK{cik}/{taxonomy}/{tag}.json` | `secedgar_get_financials` |
-| Frames | `https://data.sec.gov/api/xbrl/frames/{taxonomy}/{tag}/{unit}/{period}.json` | `secedgar_compare_metric` |
+| Company facts | `https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json` | `secedgar_get_snapshot`, `secedgar_compare_companies`, `secedgar_get_financials` (tags companyconcept serves empty, and the no-data probe) |
+| Frames | `https://data.sec.gov/api/xbrl/frames/{taxonomy}/{tag}/{unit}/{period}.json` | `secedgar_fetch_frames` |
 
 ### API Quirks
 
 | Quirk | Impact | Mitigation |
 |:------|:-------|:-----------|
 | CIK must be 10-digit zero-padded in URLs | Bare integers from ticker lookup fail | `String(cik).padStart(10, '0')` |
-| EFTS `entity` param is ignored server-side | Can't filter by company name via param | Embed `cik:NNNNNN` or `ticker:XXX` in the `q` query string |
+| EFTS `entity` param is ignored server-side | Can't filter by company name via param | Resolve `cik:` / `ticker:` targeting to a CIK and pass it in the plural `ciks` param |
 | EFTS `dateRange` must be `"custom"` to activate | Passing just `startdt`/`enddt` silently does nothing | Always set `dateRange=custom` when dates provided |
-| EFTS `size` is capped at 100 | Requesting 200 returns 100 | Enforce max 100 in schema |
+| EFTS ignores `size` | Every request answers with 100 hits | Page with `from` and slice to `limit` locally |
 | EFTS total hits capped at 10,000 | Can't paginate beyond 10K | Break large queries into date sub-ranges |
 | XBRL data contains duplicates | Prior-period comparatives appear in multiple filings | Filter to entries with `frame` field for one-per-period |
+| A frame goes to the latest-filed fact for its period | A DEF 14A's pay-versus-performance `NetIncomeLoss`, or a 10-Q's trailing-twelve-month figure, can hold an annual frame | Answer a proxy-held frame with the filer's own report of the period; drop a 10-Q-held annual frame unless it covers a closed fiscal year |
+| companyconcept serves some units as an empty object (`"units":{"USD":{}}`) | Iterating the unit as a list throws | Drop non-array units at the service edge; answer the tag from companyfacts |
 | Revenue tag changed ~2017-2018 | `SalesRevenueNet` → `RevenueFromContractWithCustomerExcludingAssessedTax` | Try multiple tags, merge results |
 | Frames ±30 day tolerance | Non-standard fiscal years may not appear | Document as known limitation |
 | Submissions returns parallel arrays | Not standard array-of-objects | Zip into objects in handler |
@@ -482,7 +524,7 @@ output: z.object({
 | Module | Type | Purpose | Used By |
 |:-------|:-----|:--------|:--------|
 | `EdgarApiService` | Service | Rate-limited HTTP client for all SEC EDGAR APIs | All tools |
-| `concept-map` | Static data | Friendly name → XBRL tag mapping | `secedgar_get_financials`, `secedgar_compare_metric` |
+| `concept-map` | Static data | Friendly name → XBRL tag mapping | `secedgar_get_financials`, `secedgar_get_snapshot`, `secedgar_compare_companies`, `secedgar_fetch_frames`, `secedgar_search_concepts` |
 | `filing-to-text` | Utility | Filing HTML → readable plain text | `secedgar_get_filing` |
 
 ### `EdgarApiService`
@@ -524,6 +566,7 @@ interface ConceptMapping {
 const CONCEPT_MAP: Record<string, ConceptMapping> = { /* ... */ };
 
 function resolveConcept(input: string): ConceptMapping | undefined;
+function findUnknownConcept(input: string): UnknownConcept | undefined;  // neither a catalog name nor tag-shaped
 ```
 
 ### `filing-to-text`
@@ -553,7 +596,7 @@ function filingToText(html: string, limit?: number): {
 | Layer | Source | Store | Backs |
 |:------|:-------|:------|:------|
 | Ticker/CIK | `company_tickers.json` (~200 KB JSON) + fund symbols from `company_tickers_mf.json` (empty name, no series/class) | `tickers` — PK `ticker`, index `cik` | `resolveCik`, `cikToTicker` |
-| XBRL company-facts | `companyfacts.zip` (~1.3 GB bulk archive) | `company_concepts` — PK `cik\|taxonomy\|tag`, `units` JSON blob, index `taxonomy,tag` | `tryGetCompanyConcept`, `tryGetFrames` |
+| XBRL company-facts | `companyfacts.zip` (~1.3 GB bulk archive) | `company_concepts` — PK `cik\|taxonomy\|tag`, `units` JSON blob, indexes `taxonomy,tag` and `cik` | `tryGetCompanyConcept`, `tryGetCompanyFacts`, `tryGetFrames` |
 
 One row per `(cik, taxonomy, tag)` stores the concept's full `units` map verbatim, so a point read (`getByIds`) reconstructs the `companyconcept` API shape and a `taxonomy+tag` scan reconstructs the `frames` API shape off the same ~2.5M-row table — no separate ~10⁸-row fact-inversion table, keeping the store inside the embedded-SQLite tier.
 
@@ -568,7 +611,7 @@ One row per `(cik, taxonomy, tag)` stores the concept's full `units` map verbati
 
 ### Routing
 
-`resolveCik`, `tryGetCompanyConcept`, and `tryGetFrames` check the mirror first when enabled and ready (`tryGetFrames` requires the stricter completeness gate above); on a miss they fall back to the live API when `EDGAR_MIRROR_FALLBACK_LIVE` (default `true`) — covering filings newer than the last refresh — or return empty/throw under strict mirror-only mode. Frames are assembled from the company-facts store and therefore carry no `loc` (business location); the live frames endpoint adds it, and the tool treats an empty value as absent.
+`resolveCik`, `tryGetCompanyConcept`, `tryGetCompanyFacts`, and `tryGetFrames` check the mirror first when enabled and ready (`tryGetFrames` requires the stricter completeness gate above); on a miss they fall back to the live API when `EDGAR_MIRROR_FALLBACK_LIVE` (default `true`) — covering filings newer than the last refresh — or return empty/throw under strict mirror-only mode. Frames are assembled from the company-facts store and therefore carry no `loc` (business location); the live frames endpoint adds it, and the tool treats an empty value as absent.
 
 ### Config
 
@@ -604,7 +647,7 @@ Minimal config — the API is entirely public and free.
 4. **`secedgar_get_financials`** — Highest-value tool, exercises XBRL + concept mapping + dedup
 5. **`secedgar_search_filings`** — EFTS integration
 6. **`secedgar_get_filing`** — Filing content retrieval + HTML-to-text
-7. **`secedgar_compare_metric`** — Frames API
+7. **`secedgar_fetch_frames`** — Frames API
 8. **Resources** — `secedgar://concepts`, `secedgar://filing-types`
 9. **Prompt** — `company_analysis`
 
@@ -616,15 +659,15 @@ Each step is independently testable. Steps 3-7 can be parallelized once the serv
 
 ### Why friendly concept names?
 
-The raw XBRL tag for revenue is `RevenueFromContractWithCustomerExcludingAssessedTax` (55 characters). No LLM will reliably produce this, and even if it does, the tag changed from `SalesRevenueNet` in 2017. Friendly names (`"revenue"`) hide this complexity and automatically handle tag evolution. The tradeoff: supporting ~15 common concepts covers 90%+ of financial analysis workflows. Raw tags are accepted as an escape hatch.
+The raw XBRL tag for revenue is `RevenueFromContractWithCustomerExcludingAssessedTax` (55 characters). No LLM will reliably produce this, and even if it does, the tag changed from `SalesRevenueNet` in 2017. Friendly names (`"revenue"`) hide this complexity and automatically handle tag evolution. The tradeoff: a catalog of a few dozen common concepts (36 today) covers most financial analysis workflows. Raw tags are accepted as an escape hatch.
 
 ### Why deduplicate with the `frame` field?
 
 Every 10-K filing includes prior-year comparatives. Apple's 2023 10-K reports 2023, 2022, and 2021 revenue — all three appear in the API response under that filing's accession number. Without deduplication, the agent sees 3x the data with conflicting signals. The `frame` field marks the "canonical" value for each calendar period.
 
-### Why not parse Form 4 XML?
+### Why Form 4 XML parsing came later
 
-Insider trading (Form 4) is a common workflow, but Form 4 documents are structured XML requiring dedicated parsing — transaction codes, derivative vs. non-derivative tables, footnotes. This adds significant complexity for a niche use case. The initial design serves insider trading through the general-purpose tools: filter company filings to `forms: ["4"]`, then read individual filings. A dedicated `secedgar_insider_trades` tool with XML parsing is a natural Phase 2 addition.
+Insider trading (Form 4) is a common workflow, but Form 4 documents are structured XML requiring dedicated parsing — transaction codes, derivative vs. non-derivative tables, footnotes. The first release served insider trading through the general-purpose tools: filter company filings to `forms: ["4"]`, then read individual filings. `secedgar_get_insider_transactions` later added the dedicated parser, and the same approach carried over to 13F information tables, SCHEDULE 13D/13G, and NPORT-P.
 
 ### Why not wrap an existing npm package?
 
@@ -636,10 +679,6 @@ Insider trading (Form 4) is a common workflow, but Form 4 documents are structur
 
 | Feature | Complexity | Value | Notes |
 |:--------|:-----------|:------|:------|
-| `secedgar_insider_trades` tool | Medium | High | Parse Form 4 XML for structured buy/sell/grant data |
-| 13F holdings parsing | Medium | High | Parse 13F XML for institutional portfolio positions |
-| Filing section extraction | High | High | Parse 10-K/10-Q into named sections (Risk Factors, MD&A, etc.) |
-| Company financial snapshot | Low | Medium | Composite tool: revenue + net income + assets + cash in one call |
 | SIC-based industry search | Low | Medium | Filter company_tickers by SIC code |
 | Filing diff | Medium | Medium | Compare two filings of the same type for changes |
 | RSS/Atom feed monitoring | Low | Low | Poll for new filings from specific companies |
