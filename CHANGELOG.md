@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.15.9](changelog/0.15.x/0.15.9.md) — 2026-09-25
+
+Annual XBRL values no longer come from a proxy statement's pay-versus-performance figure or a 10-Q's trailing-twelve-month total. Adds ppe_net, pretax_income, and shares_diluted, successor tags for capex and interest_expense, early unknown_concept errors with suggestions, and a taxonomy input on secedgar_fetch_frames.
+
 ## [0.15.8](changelog/0.15.x/0.15.8.md) — 2026-09-24
 
 secedgar_get_insider_transactions takes a filed_after / filed_before window reading Form 4 history back to mid-2003, and secedgar_get_institutional_holdings finds quarters older than the recent submissions window. Fixes fund-ticker resolution after a failed or mirror-served load, deeply nested filings overflowing the stack, and archive paging.

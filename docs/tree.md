@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-09-24 17:00:03
+Generated on: 2026-09-25 11:49:39
 
 ```text
 secedgar-mcp-server/
@@ -207,6 +207,7 @@ secedgar-mcp-server/
 │   │       ├── nport-parser.ts
 │   │       ├── ownership-parser.ts
 │   │       ├── submissions-archive.ts
+│   │       ├── trigram-similarity.ts
 │   │       ├── types.ts
 │   │       └── xml-nodes.ts
 │   └── index.ts
@@ -269,6 +270,7 @@ secedgar-mcp-server/
 │   │       ├── edgar-api-service.raw-fetch.test.ts
 │   │       ├── edgar-api-service.resolve-cik.test.ts
 │   │       ├── edgar-api-service.test.ts
+│   │       ├── edgar-api-service.xbrl-units.test.ts
 │   │       ├── eight-k-items.test.ts
 │   │       ├── filing-headers.test.ts
 │   │       ├── filing-to-text.test.ts
