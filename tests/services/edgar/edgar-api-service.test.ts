@@ -13,8 +13,8 @@ import {
   parseSeriesFilingFeed,
   pickPreferredTicker,
   suggestCompanies,
-  trigramSimilarity,
 } from '@/services/edgar/edgar-api-service.js';
+import { trigramSimilarity } from '@/services/edgar/trigram-similarity.js';
 import type { CikMatch } from '@/services/edgar/types.js';
 
 const match = (ticker: string, cik = '0000000001', name?: string): CikMatch => ({

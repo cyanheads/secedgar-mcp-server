@@ -15,13 +15,27 @@ import {
   getCanvasBridge,
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
-import { resolveConcept } from '@/services/edgar/concept-map.js';
+import {
+  describeUnknownConcepts,
+  findUnknownConcept,
+  resolveConcept,
+  resolveConceptTarget,
+} from '@/services/edgar/concept-map.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { fiscalQ4Caveats } from '@/services/edgar/fiscal-periods.js';
 
+/**
+ * A frame row's business location, or `undefined` when SEC has none. SEC writes
+ * `loc` as `<country>-<state>` and a bare `-` when it knows neither; the mirror
+ * writes an empty string.
+ */
+function businessLocation(loc: string): string | undefined {
+  return loc && loc !== '-' ? loc : undefined;
+}
+
 export const fetchFramesTool = tool('secedgar_fetch_frames', {
   description:
-    'Fetch SEC XBRL frames for one concept × one period across all reporting companies. Inline response returns a page of the ranked companies — start at the top or pass offset/next_offset to walk further down the ranking; the full frames response (all reporters) is materialized as df_<id> when a canvas is available — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query. Accepts friendly names like "revenue" or "assets" (discover via secedgar_search_concepts) or raw XBRL tags. One call hits one XBRL tag — when a friendly name maps to multiple same-meaning tags, the response\'s `unqueried_tags` lists the others; call again per tag and UNION/COALESCE in SQL with an analysis-specific priority (e.g. SalesRevenueGoodsNet is goods-only). The response\'s `related_tags` separately flags alternate-DEFINITION tags a meaningful share of filers use as their primary line (e.g. cash incl. restricted cash, equity incl. noncontrolling interest) — a whole-universe screen on the base tag silently omits those filers; query them separately, but do not blindly union (the semantics differ). Response includes `value_distribution` and `period_end_range` to flag XBRL scale-factor anomalies and fiscal-year mixing.',
+    'Fetch SEC XBRL frames for one concept × one period across all reporting companies. Inline response returns a page of the ranked companies — start at the top or pass offset/next_offset to walk further down the ranking; the full frames response (all reporters) is materialized as df_<id> when a canvas is available — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query. Accepts friendly names like "revenue" or "assets" (discover via secedgar_search_concepts) or raw XBRL tags. One call hits one XBRL tag — when a friendly name maps to multiple same-meaning tags, the response\'s `unqueried_tags` lists the others; call again per tag and UNION/COALESCE in SQL with an analysis-specific priority (e.g. SalesRevenueGoodsNet is goods-only). The response\'s `related_tags` separately flags alternate-DEFINITION tags a meaningful share of filers use as their primary line (e.g. cash incl. restricted cash, equity incl. noncontrolling interest) — a whole-universe screen on the base tag silently omits those filers; query them separately, but do not blindly union (the semantics differ). Response includes `value_distribution` and `period_end_range` to flag XBRL scale-factor anomalies and fiscal-year mixing. SEC publishes frames for us-gaap and dei tags only, and `taxonomy` picks which of the two a raw tag is read from (dei for cover-page tags such as EntityCommonStockSharesOutstanding); a friendly name keeps its own mapped taxonomy. There are no ifrs-full frames, so IFRS (20-F) filers are absent from every frame; read them per company with secedgar_get_financials or secedgar_compare_companies under taxonomy ifrs-full.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   enrichment: {
@@ -38,7 +52,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     {
       reason: 'unknown_concept',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The concept input does not match a friendly name and SEC frames returned no data',
+      when: 'The concept input is neither a supported friendly name nor shaped like an XBRL tag, so no request is sent',
       recovery: 'Use a friendly name from secedgar_search_concepts or a valid raw XBRL tag.',
     },
     {
@@ -64,6 +78,12 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       .min(1)
       .describe(
         'Financial concept — same friendly names as secedgar_get_financials (e.g., "revenue", "assets", "eps_basic") or raw XBRL tag.',
+      ),
+    taxonomy: z
+      .enum(['us-gaap', 'dei'])
+      .default('us-gaap')
+      .describe(
+        'Frames namespace a raw XBRL tag is read from: us-gaap for financial-statement tags, dei for cover-page entity tags such as EntityCommonStockSharesOutstanding. SEC publishes frames for no other taxonomy. A friendly name keeps its own mapped taxonomy (shares_outstanding reads dei) unless dei is passed, which reads its tags from dei instead — the same rule as secedgar_get_financials.',
       ),
     period: z
       .string()
@@ -100,6 +120,11 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       .string()
       .describe(
         'XBRL tag the data was actually fetched against (after resolving any friendly name).',
+      ),
+    taxonomy: z
+      .string()
+      .describe(
+        'Frames namespace the tag was read from (us-gaap or dei) — a friendly name mapped to dei reads dei under the us-gaap default.',
       ),
     period: z.string().describe('Calendar period the data was fetched for, echoed from input.'),
     unit: z
@@ -199,50 +224,73 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     caveats: z
       .array(z.string())
       .describe(
-        "Data-completeness warnings specific to this query. Currently populated for duration periods 'CY####Q[1-4]', where SEC XBRL omits filers' fiscal Q4 (reported only as the 10-K residual) — affected filers are silently absent from the frame. Empty for annual ('CY####') and instant ('CY####Q#I') periods, where the underlying facts exist and the frame is complete.",
+        "Data-completeness warnings specific to this query. Populated for duration periods 'CY####Q[1-4]', where SEC XBRL omits filers' fiscal Q4 (reported only as the 10-K residual) — affected filers are silently absent from the frame. Populated for annual ('CY####') NetIncomeLoss frames, where a filer's row can be its proxy statement's pay-versus-performance figure rather than the 10-K's. Populated for an annual frame whose calendar year is still open or inside its 10-K filing window, where a filer's row can be a trailing-twelve-month figure from a 10-Q rather than a fiscal year. Also flags a value distribution whose top rows look like split or scale-factor artifacts. Otherwise empty.",
       ),
   }),
 
   async handler(input, ctx) {
+    /**
+     * A name that is neither a catalog entry nor tag-shaped fails before the
+     * frames request, which interpolates the tag into its path (#128). What
+     * passes is a friendly name or a well-formed tag, so a 404 below is always
+     * `no_data` — a deprecated or unreported tag, never a malformed one (#45).
+     */
+    const unknown = findUnknownConcept(input.concept);
+    if (unknown) {
+      const { message, hint } = describeUnknownConcepts([unknown]);
+      throw ctx.fail('unknown_concept', message, {
+        recovery: { hint },
+        concept: unknown.concept,
+        suggestions: unknown.suggestions,
+        ...(unknown.derivation ? { derivation: unknown.derivation } : {}),
+      });
+    }
+
     const api = getEdgarApiService();
 
-    const mapping = resolveConcept(input.concept);
-    const tag = mapping?.tags[0] ?? input.concept;
-    const taxonomy = mapping?.taxonomy ?? 'us-gaap';
-    const label = mapping?.label ?? input.concept;
-    const unit = (mapping?.unit ?? input.unit).replace('/', '-per-');
+    const concept = input.concept.trim();
+    const mapping = resolveConcept(concept);
+    /**
+     * The taxonomy rule `get_financials` applies: a catalog name keeps its own
+     * mapped taxonomy under the `us-gaap` default (`dei` for shares_outstanding),
+     * an explicit `dei` reads its tags from `dei`, and a raw tag reads from the
+     * requested namespace (#143).
+     */
+    const target = resolveConceptTarget(concept, input.taxonomy);
+    const tag = target.tags[0] ?? concept;
+    const { label, taxonomy } = target;
+    const unit = (target.unit ?? input.unit).replace('/', '-per-');
 
     const framesResponse = await api.tryGetFrames(taxonomy, tag, unit, input.period);
     if (!framesResponse) {
-      /**
-       * Distinguish between malformed input and valid-but-empty XBRL tags (#45).
-       *
-       * A well-formed XBRL tag (letter followed by alphanumerics — e.g. `SalesRevenueNet`,
-       * `RevenueFromContractsWithCustomers`) may return 404 because the tag is deprecated or
-       * has no data for the requested period/unit. This is `no_data`, not `unknown_concept`.
-       * `unknown_concept` is reserved for genuinely malformed input (e.g. "foo bar", "123abc").
-       */
-      if (!mapping && !/^[A-Za-z][A-Za-z0-9]*$/.test(input.concept)) {
-        throw ctx.fail('unknown_concept', `Unknown concept '${input.concept}'.`, {
-          ...ctx.recoveryFor('unknown_concept'),
-          concept: input.concept,
-        });
-      }
-      throw ctx.fail('no_data', `No data for ${label}/${unit}/${input.period}.`, {
-        recovery: {
-          hint: 'Check duration vs. instant period (add "I" for balance sheet items), correct unit (USD-per-shares for EPS), and period exists (data starts ~CY2009).',
+      /** A tag SEC frames only in the other namespace 404s here too, so say which one was read. */
+      const namespaceNote = mapping
+        ? mapping.taxonomy === taxonomy
+          ? ''
+          : ` '${concept}' maps to ${mapping.taxonomy} tags; omit taxonomy to read them from ${mapping.taxonomy}.`
+        : taxonomy === 'dei'
+          ? ' This read the dei frames; a financial-statement tag needs taxonomy: us-gaap.'
+          : ' This read the us-gaap frames; a cover-page tag such as EntityCommonStockSharesOutstanding needs taxonomy: dei.';
+      throw ctx.fail(
+        'no_data',
+        `No data for ${label}/${unit}/${input.period} in the ${taxonomy} frames.`,
+        {
+          recovery: {
+            hint: `Check duration vs. instant period (add "I" for balance sheet items), correct unit (USD-per-shares for EPS), and period exists (data starts ~CY2009).${namespaceNote}`,
+          },
+          concept: tag,
+          taxonomy,
+          period: input.period,
+          unit,
         },
-        concept: tag,
-        period: input.period,
-        unit,
-      });
+      );
     }
 
     const enriched = await Promise.all(
       framesResponse.data.map(async (entry) => {
         const cik = String(entry.cik).padStart(10, '0');
         const ticker = await api.cikToTicker(cik);
-        return { entry, cik, ticker };
+        return { entry, cik, ticker, location: businessLocation(entry.loc) };
       }),
     );
 
@@ -256,13 +304,13 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     const pageEnd = input.offset + input.limit;
     const sliced = sorted.slice(input.offset, pageEnd);
     const nextOffset = pageEnd < sorted.length ? pageEnd : undefined;
-    const data = sliced.map(({ entry, cik, ticker }, i) => ({
+    const data = sliced.map(({ entry, cik, ticker, location }, i) => ({
       rank: input.offset + i + 1,
       company_name: entry.entityName,
       cik,
       ticker: ticker || undefined,
       value: entry.val,
-      location: entry.loc || undefined,
+      location,
       period_end: entry.end,
       accession_number: entry.accn,
     }));
@@ -270,12 +318,12 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     let dataset: { name: string; row_count: number; expires_at: string } | undefined;
     const bridge = getCanvasBridge();
     if (bridge) {
-      const allRows = enriched.map(({ entry, cik, ticker }) => ({
+      const allRows = enriched.map(({ entry, cik, ticker, location }) => ({
         cik,
         entity_name: entry.entityName,
         ticker: ticker ?? null,
         value: entry.val,
-        location: entry.loc || null,
+        location: location ?? null,
         period_start: entry.start ?? null,
         period_end: entry.end,
         accession_number: entry.accn,
@@ -331,9 +379,44 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       max: sortedEnds[sortedEnds.length - 1] ?? '',
     };
 
-    const unqueriedTags = mapping ? mapping.tags.slice(1) : [];
+    const unqueriedTags = target.tags.slice(1);
     const relatedTags = mapping?.relatedTags ?? [];
     const caveats = fiscalQ4Caveats(input.period);
+
+    /**
+     * SEC frames the latest-filed fact for a period, and since the
+     * pay-versus-performance rule a DEF 14A re-tags five years of annual
+     * `NetIncomeLoss` — so the frame row is often the proxy's figure, and the
+     * frames API carries no form to detect it by. The mirror's assembly reads the
+     * form and has already answered those rows with the 10-K (#123).
+     */
+    const annualYear = /^CY(\d{4})$/.exec(input.period)?.[1];
+    if (tag === 'NetIncomeLoss' && annualYear && !framesResponse.holderFormsResolved) {
+      caveats.push(
+        "SEC assigns an annual NetIncomeLoss frame to the latest-filed fact for the period, and since the pay-versus-performance rule a filer's DEF 14A proxy statement re-tags five years of net income — so for many filers this frame row is the proxy's figure, often rounded and sometimes mis-scaled or sign-flipped, not the 10-K's. The frames endpoint does not say which form a row came from; check a company's value with secedgar_get_financials, which answers the period from the filer's own report, before relying on a ranking.",
+      );
+    }
+
+    /**
+     * SEC frames any year-long duration as `CY####`, including the
+     * trailing-twelve-month figure a 10-Q discloses, and the frames API carries
+     * no form to tell one apart. That row holds a filer's annual frame while its
+     * fiscal year for the calendar year is still open — through the year itself
+     * and the 10-K deadline after it (90 days, plus SEC's framing lag), so until
+     * the end of April. Closed years are left alone: a TTM row survives there
+     * only in rare non-statement tags, and a caveat on every annual frame would
+     * drown the ones that matter. The mirror reads the form and drops those rows
+     * itself (#142).
+     */
+    if (
+      annualYear &&
+      !framesResponse.holderFormsResolved &&
+      new Date().toISOString().slice(0, 10) < `${Number(annualYear) + 1}-05-01`
+    ) {
+      caveats.push(
+        `${input.period} has not closed for every filer: until a filer files its annual report for the calendar year, its row can be a trailing-twelve-month figure from a quarterly report (10-Q) rather than a fiscal year, and the frames endpoint does not say which. Check a company's annual value with secedgar_get_financials, which leaves a 10-Q trailing-twelve-month figure out of the annual series.`,
+      );
+    }
 
     /**
      * Artifact caveat (#49): when max/p95 ratio is suspiciously high, warn that
@@ -359,6 +442,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
 
     return {
       concept: tag,
+      taxonomy,
       period: input.period,
       unit,
       label: framesResponse.label || label,
@@ -377,7 +461,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
 
   format: (result) => {
     const lines = [
-      `**${result.label}** [XBRL: ${result.concept}] — ${result.period} (${result.unit}, ${result.total_companies} companies)`,
+      `**${result.label}** [XBRL: ${result.taxonomy}:${result.concept}] — ${result.period} (${result.unit}, ${result.total_companies} companies)`,
     ];
     lines.push(`Page offset: ${result.offset} (${result.data.length} shown)`);
     if (result.next_offset !== undefined) {

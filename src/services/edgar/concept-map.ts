@@ -3,6 +3,7 @@
  * @module services/edgar/concept-map
  */
 
+import { trigramSimilarity } from './trigram-similarity.js';
 import type { ConceptMapping, ConceptTaxonomy, TagSelection } from './types.js';
 
 /**
@@ -96,6 +97,17 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     unit: 'USD/shares',
     label: 'Earnings Per Share (Diluted)',
   },
+  shares_diluted: {
+    group: 'per_share',
+    // The EPS denominator, so it sits with the EPS lines it divides. A duration
+    // concept (the period's weighted average), reported in the `shares` unit.
+    tags: ['WeightedAverageNumberOfDilutedSharesOutstanding'],
+    // Confirmed in the 20-F companyfacts of Spotify (SPOT) and SAP.
+    ifrsTags: ['AdjustedWeightedAverageShares'],
+    taxonomy: 'us-gaap',
+    unit: 'shares',
+    label: 'Weighted-Average Diluted Shares',
+  },
   assets: {
     group: 'balance_sheet',
     tags: ['Assets'],
@@ -183,7 +195,15 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   },
   capex: {
     group: 'cash_flow',
-    tags: ['PaymentsToAcquirePropertyPlantAndEquipment'],
+    /**
+     * `PaymentsToAcquireProductiveAssets` is the successor several large filers
+     * moved to (NVIDIA, Amazon, and Visa report capex only under it). It sits
+     * behind the PP&E tag, not ahead of it: it also counts software and other
+     * intangibles, and of the 75 filers reporting both for CY2025, 36 report a
+     * larger productive-assets figure. Behind the leader it only fills frames the
+     * PP&E-only tag does not report (#125, the #98 precedent).
+     */
+    tags: ['PaymentsToAcquirePropertyPlantAndEquipment', 'PaymentsToAcquireProductiveAssets'],
     ifrsTags: ['PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities'],
     taxonomy: 'us-gaap',
     unit: 'USD',
@@ -264,7 +284,15 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   },
   interest_expense: {
     group: 'income_statement',
-    tags: ['InterestExpense', 'InterestExpenseDebt'],
+    /**
+     * `InterestExpenseNonoperating` is the income-statement caption filers moved
+     * to (NVIDIA and Microsoft report interest expense only under it). It sits
+     * last: it disagrees with `InterestExpense` for 26 of 53 CY2025 filers
+     * reporting both and with `InterestExpenseDebt` for 47 of 67, so behind them
+     * it only fills frames neither covers and moves no value either resolves
+     * (#125, the #98 precedent).
+     */
+    tags: ['InterestExpense', 'InterestExpenseDebt', 'InterestExpenseNonoperating'],
     /**
      * `InterestExpense` leads because it is the exact counterpart of the us-gaap
      * tag. `FinanceCosts` is the IAS 1 income-statement caption and is broader —
@@ -276,6 +304,24 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Interest Expense',
+  },
+  pretax_income: {
+    group: 'income_statement',
+    /**
+     * A priority ladder. The first tag is the face-of-statement pre-tax line; the
+     * second excludes equity-method income, and 217 of the 381 CY2025 filers
+     * reporting it report only it. Of the 164 reporting both, 108 agree, so the
+     * statement line leads and the narrower one fills the frames it lacks.
+     */
+    tags: [
+      'IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest',
+      'IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments',
+    ],
+    // Confirmed in the 20-F companyfacts of Spotify (SPOT) and SAP.
+    ifrsTags: ['ProfitLossBeforeTax'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Pre-Tax Income (Loss)',
   },
   tax_expense: {
     group: 'income_statement',
@@ -386,6 +432,32 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     unit: 'USD',
     label: 'Accounts Payable',
   },
+  ppe_net: {
+    group: 'balance_sheet',
+    tags: ['PropertyPlantAndEquipmentNet'],
+    /**
+     * The finance-lease-inclusive total is the primary line for 390 CY2025Q4I
+     * filers that report no `PropertyPlantAndEquipmentNet` (Alphabet, Meta, and
+     * Tesla among them), but it adds finance-lease right-of-use assets — a
+     * different definition, so it stays out of `tags` (#36).
+     */
+    relatedTags: [
+      {
+        tag: 'PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization',
+        note: 'Net PP&E plus finance-lease right-of-use assets; the primary line for filers that present the two together.',
+      },
+    ],
+    /**
+     * Confirmed in the 20-F companyfacts of Spotify (SPOT) and SAP. The IFRS
+     * right-of-use-inclusive element is the counterpart of the related tag above,
+     * not of `PropertyPlantAndEquipmentNet`, so it stays out for the same reason;
+     * a filer that moved to it (SAP, after CY2022) reads as a stopped series.
+     */
+    ifrsTags: ['PropertyPlantAndEquipment'],
+    taxonomy: 'us-gaap',
+    unit: 'USD',
+    label: 'Property, Plant & Equipment (Net)',
+  },
   goodwill: {
     group: 'balance_sheet',
     tags: ['Goodwill'],
@@ -463,13 +535,151 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   },
 };
 
+/** The catalog key an input compares as: trimmed, lowercased, `-` and spaces as `_`. */
+function catalogKey(input: string): string {
+  return input.trim().toLowerCase().replace(/[- ]/g, '_');
+}
+
 /**
- * Resolve a concept input to its mapping. Accepts friendly names or raw XBRL tags.
- * Returns undefined if the input is not a known friendly name (caller should treat it as a raw tag).
+ * Resolve a concept input to its mapping. Accepts friendly names in any case or
+ * separator form (`Net Income`, `NET_INCOME`), with surrounding whitespace ignored.
+ * Returns undefined if the input is not a known friendly name.
  */
 export function resolveConcept(input: string): ConceptMapping | undefined {
-  const normalized = input.toLowerCase().replace(/[- ]/g, '_');
-  return CONCEPT_MAP[normalized];
+  return CONCEPT_MAP[catalogKey(input)];
+}
+
+/**
+ * The shape of every item element in the us-gaap, ifrs-full, dei, and srt
+ * taxonomies — the only elements that carry facts. SEC matches tags
+ * case-sensitively (`netincomeloss` 404s where `NetIncomeLoss` answers), so an
+ * input of any other shape can name nothing SEC holds, and it never reaches a
+ * request URL, where tags are interpolated as path segments (#128).
+ */
+const XBRL_TAG_SHAPE = /^[A-Z][A-Za-z0-9]*$/;
+
+/**
+ * Standard combinations of catalog concepts, keyed like the catalog. Each is
+ * answered with its formula rather than near-name suggestions, which for these
+ * names are noise (`free_cash_flow` scores highest against the other two
+ * cash-flow totals) or empty (`ebitda`). `total_debt` is deliberately absent:
+ * `debt` is long-term debt only and the catalog has no current-portion concept,
+ * so any formula would understate it. A catalog name is resolved before this
+ * table is read, so a future catalog entry of the same name wins.
+ */
+const DERIVATIONS: Record<string, string> = {
+  free_cash_flow: 'operating_cash_flow − capex',
+  ebitda: 'operating_income + depreciation_amortization',
+  working_capital: 'current_assets − current_liabilities',
+};
+
+/** Minimum Dice score for a catalog name to be suggested — the company-name threshold. */
+const SUGGESTION_THRESHOLD = 0.3;
+/** Maximum number of catalog names suggested for one unknown input. */
+const SUGGESTION_LIMIT = 3;
+
+/**
+ * Up to three catalog names nearest an input's catalog key, each scored on its
+ * friendly name and on its label (words, not underscores) and kept at the higher
+ * of the two, ties broken by name. The label is what reaches `capex` from
+ * `capital_expenditures`, which scores 0.21 against the name alone.
+ */
+function nearestConcepts(key: string): string[] {
+  const words = key.replace(/_/g, ' ');
+  return Object.entries(CONCEPT_MAP)
+    .map(([name, mapping]) => ({
+      name,
+      score: Math.max(
+        trigramSimilarity(key, name),
+        trigramSimilarity(words, mapping.label.toLowerCase()),
+      ),
+    }))
+    .filter((candidate) => candidate.score >= SUGGESTION_THRESHOLD)
+    .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+    .slice(0, SUGGESTION_LIMIT)
+    .map((candidate) => candidate.name);
+}
+
+/** Closing sentence of every unknown-concept hint. */
+const UNKNOWN_CONCEPT_TAIL =
+  'List every supported name with secedgar_search_concepts; a raw XBRL tag is an element name in UpperCamelCase, such as NetIncomeLoss.';
+
+/** A concept input that is neither a catalog name nor shaped like an XBRL element name. */
+export interface UnknownConcept {
+  /** The input as supplied, trimmed. */
+  concept: string;
+  /** How to build it from catalog concepts, when it is a standard combination of them. */
+  derivation?: string | undefined;
+  /** Up to three nearest catalog names. Empty when a derivation applies or nothing is close. */
+  suggestions: string[];
+}
+
+/** The concept-specific part of a hint, lowercase-first so it can follow a concept name. */
+function unknownConceptDetail({ derivation, suggestions }: UnknownConcept): string {
+  const parts = [
+    ...(derivation ? [`derive it as ${derivation} from those concepts`] : []),
+    ...(suggestions.length === 1 ? [`the closest supported name is ${suggestions[0]}`] : []),
+    ...(suggestions.length > 1 ? [`closest supported names are ${suggestions.join(', ')}`] : []),
+  ];
+  return parts.join('; ') || 'no supported name is close';
+}
+
+/**
+ * Recovery text for one unknown concept: its derivation or its suggestions,
+ * then the pointer to secedgar_search_concepts. Every surface that reports an
+ * unknown concept words it with this.
+ */
+export function unknownConceptHint(unknown: UnknownConcept): string {
+  if (!unknown.derivation && unknown.suggestions.length === 0) return UNKNOWN_CONCEPT_TAIL;
+  const detail = unknownConceptDetail(unknown);
+  return `${detail[0]?.toUpperCase()}${detail.slice(1)}. ${UNKNOWN_CONCEPT_TAIL}`;
+}
+
+/**
+ * Classify a concept input before any company resolution or SEC request.
+ * Returns undefined for a catalog name (any case or separator form) and for
+ * anything shaped like an XBRL element name — a well-formed tag the filer does
+ * not report stays the tool's own no-data answer (#45). Everything else is
+ * unknown, with its derivation or nearest catalog names (#128).
+ */
+export function findUnknownConcept(input: string): UnknownConcept | undefined {
+  if (resolveConcept(input)) return;
+  const concept = input.trim();
+  const key = catalogKey(input);
+  /**
+   * Read before the tag-shape test so `EBITDA` gets its formula: no us-gaap,
+   * ifrs-full, dei, or srt element is named like any derivation key, so a
+   * tag-shaped spelling of one could only ever 404.
+   */
+  const derivation = DERIVATIONS[key];
+  if (!derivation && XBRL_TAG_SHAPE.test(concept)) return;
+
+  const suggestions = derivation ? [] : nearestConcepts(key);
+  return { concept, ...(derivation ? { derivation } : {}), suggestions };
+}
+
+/**
+ * Message and recovery hint for failing on one or more unknown concepts, so
+ * every tool words the failure the same way. One concept carries its own hint;
+ * several name each concept's detail in turn, then the shared closing sentence.
+ */
+export function describeUnknownConcepts(unknowns: readonly UnknownConcept[]): {
+  hint: string;
+  message: string;
+} {
+  const [only] = unknowns;
+  if (only && unknowns.length === 1) {
+    return {
+      message: `${only.concept ? `'${only.concept}'` : 'An empty concept'} is neither a supported concept name nor an XBRL tag.`,
+      hint: unknownConceptHint(only),
+    };
+  }
+  return {
+    message: `None of the requested concepts is a supported concept name or an XBRL tag: ${unknowns
+      .map((u) => `'${u.concept}'`)
+      .join(', ')}.`,
+    hint: `${unknowns.map((u) => `${u.concept} — ${unknownConceptDetail(u)}`).join('; ')}. ${UNKNOWN_CONCEPT_TAIL}`,
+  };
 }
 
 /** What a caller-supplied concept resolves to before any lookup runs. */
@@ -491,8 +701,9 @@ export interface ConceptTarget {
  * list to query. A friendly name that prefers its own taxonomy (`dei` for
  * shares_outstanding) keeps it unless the caller asked for something other than
  * the `us-gaap` default; `ifrs-full` uses the mapping's confirmed IFRS variants
- * when it has them and falls back to the standard tags otherwise. Unknown input
- * passes through as a raw XBRL tag under the requested taxonomy.
+ * when it has them and falls back to the standard tags otherwise. Any other
+ * input passes through, trimmed, as a raw XBRL tag under the requested
+ * taxonomy — callers reject what `findUnknownConcept` flags before this runs.
  */
 export function resolveConceptTarget(
   input: string,
@@ -500,7 +711,8 @@ export function resolveConceptTarget(
 ): ConceptTarget {
   const mapping = resolveConcept(input);
   if (!mapping) {
-    return { label: input, tagSelection: 'priority', tags: [input], taxonomy: requestedTaxonomy };
+    const tag = input.trim();
+    return { label: tag, tagSelection: 'priority', tags: [tag], taxonomy: requestedTaxonomy };
   }
 
   const taxonomy = requestedTaxonomy === 'us-gaap' ? mapping.taxonomy : requestedTaxonomy;

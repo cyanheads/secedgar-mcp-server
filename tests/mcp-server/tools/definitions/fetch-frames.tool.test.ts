@@ -3,9 +3,11 @@
  * @module tests/mcp-server/tools/definitions/fetch-frames.tool
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetchFramesTool } from '@/mcp-server/tools/definitions/fetch-frames.tool.js';
+import { resolveConceptTarget } from '@/services/edgar/concept-map.js';
 import type { FramesResponse } from '@/services/edgar/types.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', () => ({
@@ -24,7 +26,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import { at, blockText } from '../../../support/assertions.js';
+import { at, blockText, wireError } from '../../../support/assertions.js';
 
 const mockFramesResponse: FramesResponse = {
   ccp: 'CY2023',
@@ -119,6 +121,43 @@ describe('fetchFramesTool', () => {
       'USD',
       'CY2023Q4I',
     );
+  });
+
+  // Characterization: the catalog name reached the dei frames before `taxonomy` existed.
+  it('queries shares_outstanding under its own dei namespace in the shares unit', async () => {
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const input = fetchFramesTool.input.parse({
+      concept: 'shares_outstanding',
+      period: 'CY2024Q4I',
+    });
+    await fetchFramesTool.handler(input, ctx);
+
+    expect(mockApi.tryGetFrames).toHaveBeenCalledWith(
+      'dei',
+      'EntityCommonStockSharesOutstanding',
+      'shares',
+      'CY2024Q4I',
+    );
+  });
+
+  // Characterization: the no_data recovery text before the namespace note existed.
+  it('keeps the period/unit guidance in the no_data recovery hint', async () => {
+    mockApi.tryGetFrames.mockResolvedValue(null);
+    const result = await runToolContract(fetchFramesTool, {
+      concept: 'AccountsPayableCurrent',
+      period: 'CY2023Q4I',
+    });
+
+    const error = wireError(result);
+    expect(error.data).toMatchObject({
+      reason: 'no_data',
+      concept: 'AccountsPayableCurrent',
+      period: 'CY2023Q4I',
+      unit: 'USD',
+    });
+    const text = blockText(result.content);
+    expect(text).toContain('Check duration vs. instant period');
+    expect(text).toContain('period exists (data starts ~CY2009)');
   });
 
   it('sorts ascending when requested', async () => {
@@ -475,6 +514,7 @@ describe('fetchFramesTool', () => {
   it('formats USD values in billions', () => {
     const output = {
       concept: 'Revenues',
+      taxonomy: 'us-gaap',
       period: 'CY2023',
       unit: 'USD',
       label: 'Revenue',
@@ -501,6 +541,7 @@ describe('fetchFramesTool', () => {
     expect(blocks).toHaveLength(1);
     expect(blockText(blocks)).toContain('Revenue');
     expect(blockText(blocks)).toContain('5000 companies');
+    expect(blockText(blocks)).toContain('[XBRL: us-gaap:Revenues]');
     expect(blockText(blocks)).toContain('AMZN');
     expect(blockText(blocks)).toMatch(/\$574\.7[89]B/);
   });
@@ -508,6 +549,7 @@ describe('fetchFramesTool', () => {
   it('formats USD-per-shares values with dollar sign', () => {
     const output = {
       concept: 'EarningsPerShareDiluted',
+      taxonomy: 'us-gaap',
       period: 'CY2023',
       unit: 'USD-per-shares',
       label: 'EPS (Diluted)',
@@ -536,6 +578,7 @@ describe('fetchFramesTool', () => {
   it('renders dataset hint when present', () => {
     const output = {
       concept: 'Revenues',
+      taxonomy: 'us-gaap',
       period: 'CY2023',
       unit: 'USD',
       label: 'Revenue',
@@ -562,6 +605,7 @@ describe('fetchFramesTool', () => {
   it('renders coverage, value dispersion, and period range in format text', () => {
     const output = {
       concept: 'Revenues',
+      taxonomy: 'us-gaap',
       period: 'CY2023',
       unit: 'USD',
       label: 'Revenue',
@@ -589,6 +633,7 @@ describe('fetchFramesTool', () => {
   it('renders related_tags hint in format text (#36)', () => {
     const output = {
       concept: 'CashAndCashEquivalentsAtCarryingValue',
+      taxonomy: 'us-gaap',
       period: 'CY2024Q4I',
       unit: 'USD',
       label: 'Cash and Cash Equivalents',
@@ -663,6 +708,171 @@ describe('fetchFramesTool', () => {
     expect(result.caveats).toEqual([]);
   });
 
+  // ---- #123: proxy-held annual NetIncomeLoss frames ----
+
+  describe('proxy-statement caveat on annual NetIncomeLoss (#123)', () => {
+    const netIncomeFrame: FramesResponse = {
+      ...mockFramesResponse,
+      ccp: 'CY2024',
+      label: 'Net Income (Loss) Attributable to Parent',
+      tag: 'NetIncomeLoss',
+    };
+
+    it.each([
+      ['net_income', 'CY2024'],
+      ['NetIncomeLoss', 'CY2025'],
+    ])('flags live %s %s frames as possibly proxy-held', async (concept, period) => {
+      mockApi.tryGetFrames.mockResolvedValue(netIncomeFrame);
+      const result = await runToolContract(fetchFramesTool, { concept, period });
+
+      expect(result.isError).toBeFalsy();
+      const output = fetchFramesTool.output.parse(result.structuredContent);
+      const proxy = output.caveats.filter((c) => c.includes('DEF 14A'));
+      expect(proxy).toHaveLength(1);
+      expect(proxy[0]).toContain('pay-versus-performance');
+      expect(proxy[0]).toContain('secedgar_get_financials');
+      expect(blockText(result.content)).toContain('Caveat: ');
+      expect(blockText(result.content)).toContain('pay-versus-performance');
+    });
+
+    it('stays silent on quarterly NetIncomeLoss frames, which no proxy holds', async () => {
+      mockApi.tryGetFrames.mockResolvedValue({ ...netIncomeFrame, ccp: 'CY2024Q3' });
+      const ctx = createMockContext({ errors: fetchFramesTool.errors });
+      const result = await fetchFramesTool.handler(
+        fetchFramesTool.input.parse({ concept: 'net_income', period: 'CY2024Q3' }),
+        ctx,
+      );
+      expect(result.caveats.some((c) => c.includes('DEF 14A'))).toBe(false);
+    });
+
+    it('stays silent on annual frames of other tags', async () => {
+      const ctx = createMockContext({ errors: fetchFramesTool.errors });
+      const result = await fetchFramesTool.handler(
+        fetchFramesTool.input.parse({ concept: 'eps_diluted', period: 'CY2024' }),
+        ctx,
+      );
+      expect(result.caveats.some((c) => c.includes('DEF 14A'))).toBe(false);
+    });
+
+    it('stays silent when the local mirror assembled the frame, which already resolves proxy rows', async () => {
+      mockApi.tryGetFrames.mockResolvedValue({ ...netIncomeFrame, holderFormsResolved: true });
+      const ctx = createMockContext({ errors: fetchFramesTool.errors });
+      const result = await fetchFramesTool.handler(
+        fetchFramesTool.input.parse({ concept: 'net_income', period: 'CY2024' }),
+        ctx,
+      );
+      expect(result.caveats.some((c) => c.includes('DEF 14A'))).toBe(false);
+    });
+
+    it('keeps the caveat on an empty page past the end of the ranking', async () => {
+      mockApi.tryGetFrames.mockResolvedValue(netIncomeFrame);
+      const ctx = createMockContext({ errors: fetchFramesTool.errors });
+      const result = await fetchFramesTool.handler(
+        fetchFramesTool.input.parse({ concept: 'net_income', period: 'CY2024', offset: 50 }),
+        ctx,
+      );
+      expect(result.data).toEqual([]);
+      expect(result.caveats.some((c) => c.includes('DEF 14A'))).toBe(true);
+    });
+  });
+
+  // ---- #142: live annual frames for a year that has not closed ----
+
+  describe('open-year caveat on live annual frames (#142)', () => {
+    const ttmCaveat = (caveats: string[]) =>
+      caveats.filter((c) => c.includes('trailing-twelve-month'));
+    const runAt = async (now: string, period: string, extra: Partial<FramesResponse> = {}) => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date(now));
+      try {
+        mockApi.tryGetFrames.mockResolvedValue({ ...mockFramesResponse, ccp: period, ...extra });
+        return await runToolContract(fetchFramesTool, { concept: 'revenue', period });
+      } finally {
+        vi.useRealTimers();
+      }
+    };
+
+    it('flags an annual frame for the current calendar year, on both surfaces', async () => {
+      const result = await runAt('2026-09-25T00:00:00Z', 'CY2026');
+      const output = fetchFramesTool.output.parse(result.structuredContent);
+      expect(ttmCaveat(output.caveats)).toHaveLength(1);
+      expect(ttmCaveat(output.caveats)[0]).toContain('CY2026');
+      expect(ttmCaveat(output.caveats)[0]).toContain('secedgar_get_financials');
+      expect(blockText(result.content)).toContain('trailing-twelve-month');
+    });
+
+    it('still flags last year while its 10-Ks are due', async () => {
+      const result = await runAt('2026-03-15T00:00:00Z', 'CY2025');
+      expect(
+        ttmCaveat(fetchFramesTool.output.parse(result.structuredContent).caveats),
+      ).toHaveLength(1);
+    });
+
+    it('stays silent once the year and its filing window have closed', async () => {
+      const result = await runAt('2026-09-25T00:00:00Z', 'CY2025');
+      expect(ttmCaveat(fetchFramesTool.output.parse(result.structuredContent).caveats)).toEqual([]);
+    });
+
+    it('stays silent on quarterly and instant frames of the open year', async () => {
+      for (const period of ['CY2026Q2', 'CY2026Q2I']) {
+        const result = await runAt('2026-09-25T00:00:00Z', period);
+        expect(ttmCaveat(fetchFramesTool.output.parse(result.structuredContent).caveats)).toEqual(
+          [],
+        );
+      }
+    });
+
+    it('stays silent when the mirror assembled the frame, which drops those rows itself', async () => {
+      const result = await runAt('2026-09-25T00:00:00Z', 'CY2026', { holderFormsResolved: true });
+      expect(ttmCaveat(fetchFramesTool.output.parse(result.structuredContent).caveats)).toEqual([]);
+    });
+  });
+
+  // ---- #125 / #130: catalog additions as fetch_frames sees them ----
+
+  it('lists the capex and interest_expense successors in unqueried_tags (#125)', async () => {
+    const run = async (concept: string) => {
+      const ctx = createMockContext({ errors: fetchFramesTool.errors });
+      return fetchFramesTool.handler(
+        fetchFramesTool.input.parse({ concept, period: 'CY2025' }),
+        ctx,
+      );
+    };
+    const capex = await run('capex');
+    expect(capex.concept).toBe('PaymentsToAcquirePropertyPlantAndEquipment');
+    expect(capex.unqueried_tags).toEqual(['PaymentsToAcquireProductiveAssets']);
+    const interest = await run('interest_expense');
+    expect(interest.concept).toBe('InterestExpense');
+    expect(interest.unqueried_tags).toEqual(['InterestExpenseDebt', 'InterestExpenseNonoperating']);
+  });
+
+  it('queries shares_diluted in the shares unit (#130)', async () => {
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    await fetchFramesTool.handler(
+      fetchFramesTool.input.parse({ concept: 'shares_diluted', period: 'CY2025' }),
+      ctx,
+    );
+    expect(mockApi.tryGetFrames).toHaveBeenCalledWith(
+      'us-gaap',
+      'WeightedAverageNumberOfDilutedSharesOutstanding',
+      'shares',
+      'CY2025',
+    );
+  });
+
+  it('flags the finance-lease-inclusive PP&E tag in related_tags for ppe_net (#130)', async () => {
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const result = await fetchFramesTool.handler(
+      fetchFramesTool.input.parse({ concept: 'ppe_net', period: 'CY2025Q4I' }),
+      ctx,
+    );
+    expect(result.concept).toBe('PropertyPlantAndEquipmentNet');
+    expect(result.unqueried_tags).toEqual([]);
+    expect(result.related_tags.map((r) => r.tag)).toEqual([
+      'PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization',
+    ]);
+  });
+
   // ---- #49: artifact caveat for high max/p95 ratio ----
 
   it('appends artifact caveat when max/p95 ratio > 50 for per-share unit (#49)', async () => {
@@ -711,6 +921,7 @@ describe('fetchFramesTool', () => {
   it('surfaces caveats in format text', () => {
     const output = {
       concept: 'Revenues',
+      taxonomy: 'us-gaap',
       period: 'CY2024Q3',
       unit: 'USD',
       label: 'Revenue',
@@ -835,5 +1046,316 @@ describe('fetchFramesTool offset pagination (#89)', () => {
 
     expect(text).toContain('Page offset: 5');
     expect(text).toContain('Next offset: 10');
+  });
+});
+
+// Through the real tool pipeline, so both client surfaces are asserted (#143).
+describe('taxonomy selects the frames namespace (#143)', () => {
+  const deiFrame: FramesResponse = {
+    ccp: 'CY2024Q4I',
+    label: 'Entity Common Stock, Shares Outstanding',
+    tag: 'EntityCommonStockSharesOutstanding',
+    taxonomy: 'dei',
+    uom: 'shares',
+    pts: 2,
+    data: [
+      {
+        accn: '0000789019-25-000010',
+        cik: 789019,
+        end: '2025-01-21',
+        entityName: 'MICROSOFT CORPORATION',
+        loc: 'US-WA',
+        val: 7_434_880_776,
+      },
+      {
+        accn: '0000320193-25-000008',
+        cik: 320193,
+        end: '2025-01-17',
+        entityName: 'Apple Inc.',
+        loc: 'US-CA',
+        val: 15_037_874_000,
+      },
+    ],
+  };
+
+  /** SEC serves the cover-page tag only under dei, and a financial tag only under us-gaap. */
+  beforeEach(() => {
+    mockApi.tryGetFrames.mockImplementation(async (taxonomy: string, tag: string) => {
+      const isDeiTag = tag.startsWith('Entity');
+      if (taxonomy === 'dei') return isDeiTag ? deiFrame : null;
+      return isDeiTag ? null : mockFramesResponse;
+    });
+  });
+
+  it('defaults to us-gaap', () => {
+    const input = fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2023' });
+    expect(input.taxonomy).toBe('us-gaap');
+  });
+
+  it.each(['ifrs-full', 'srt', 'invest'])(
+    'rejects %s, a namespace SEC publishes no frames for',
+    (taxonomy) => {
+      const parsed = fetchFramesTool.input.safeParse({
+        concept: 'Revenue',
+        period: 'CY2023',
+        taxonomy,
+      });
+      // Rejected as a value outside the enum, not as a key the schema lacks.
+      expect(parsed.error?.issues).toEqual([
+        expect.objectContaining({ code: 'invalid_value', path: ['taxonomy'] }),
+      ]);
+    },
+  );
+
+  it('answers a raw dei tag from the dei frames on both surfaces', async () => {
+    const result = await runToolContract(fetchFramesTool, {
+      concept: 'EntityCommonStockSharesOutstanding',
+      period: 'CY2024Q4I',
+      unit: 'shares',
+      taxonomy: 'dei',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.tryGetFrames).toHaveBeenCalledWith(
+      'dei',
+      'EntityCommonStockSharesOutstanding',
+      'shares',
+      'CY2024Q4I',
+    );
+    const output = fetchFramesTool.output.parse(result.structuredContent);
+    expect(output).toMatchObject({
+      concept: 'EntityCommonStockSharesOutstanding',
+      taxonomy: 'dei',
+      unit: 'shares',
+      total_companies: 2,
+      unqueried_tags: [],
+      related_tags: [],
+    });
+    expect(output.data.map((d) => [d.rank, d.company_name, d.value])).toEqual([
+      [1, 'Apple Inc.', 15_037_874_000],
+      [2, 'MICROSOFT CORPORATION', 7_434_880_776],
+    ]);
+    const text = blockText(result.content);
+    expect(text).toContain('[XBRL: dei:EntityCommonStockSharesOutstanding]');
+    expect(text).toContain('1. Apple Inc. (AAPL)');
+  });
+
+  it('stages the dei frame with its namespace in the dataframe provenance', async () => {
+    const registerDataframe = vi.fn().mockResolvedValue({
+      tableName: 'df_DEI_FRAME1',
+      rowCount: 2,
+      expiresAt: '2026-05-18T00:00:00.000Z',
+      columnSchema: [],
+    });
+    vi.mocked(getCanvasBridge).mockReturnValueOnce({ registerDataframe } as never);
+    await runToolContract(fetchFramesTool, {
+      concept: 'EntityCommonStockSharesOutstanding',
+      period: 'CY2024Q4I',
+      unit: 'shares',
+      taxonomy: 'dei',
+    });
+
+    const [, registration] = at(registerDataframe.mock.calls);
+    expect(registration.queryParams).toMatchObject({
+      concept: 'EntityCommonStockSharesOutstanding',
+      taxonomy: 'dei',
+    });
+    expect(registration.rows).toHaveLength(2);
+  });
+
+  it('still reads a raw tag from us-gaap by default, and says where to find a dei one', async () => {
+    const result = await runToolContract(fetchFramesTool, {
+      concept: 'EntityCommonStockSharesOutstanding',
+      period: 'CY2024Q4I',
+      unit: 'shares',
+    });
+
+    const error = wireError(result);
+    expect(error.data).toMatchObject({ reason: 'no_data', taxonomy: 'us-gaap' });
+    expect(mockApi.tryGetFrames).toHaveBeenCalledWith(
+      'us-gaap',
+      'EntityCommonStockSharesOutstanding',
+      'shares',
+      'CY2024Q4I',
+    );
+    const text = blockText(result.content);
+    expect(text).toContain('us-gaap');
+    expect(text).toContain('taxonomy: dei');
+  });
+
+  it('points a financial raw tag sent to dei back at us-gaap', async () => {
+    const result = await runToolContract(fetchFramesTool, {
+      concept: 'AccountsPayableCurrent',
+      period: 'CY2023Q4I',
+      taxonomy: 'dei',
+    });
+
+    expect(wireError(result).data).toMatchObject({ reason: 'no_data', taxonomy: 'dei' });
+    expect(blockText(result.content)).toContain('taxonomy: us-gaap');
+  });
+
+  // The rule secedgar_get_financials applies through resolveConceptTarget: a
+  // catalog name keeps its own taxonomy under the us-gaap default, and an
+  // explicit dei reads its tags from dei.
+  it.each([
+    ['shares_outstanding', 'us-gaap', 'dei', 'EntityCommonStockSharesOutstanding', 'shares'],
+    ['shares_outstanding', 'dei', 'dei', 'EntityCommonStockSharesOutstanding', 'shares'],
+    ['revenue', 'us-gaap', 'us-gaap', 'RevenueFromContractWithCustomerExcludingAssessedTax', 'USD'],
+    ['revenue', 'dei', 'dei', 'RevenueFromContractWithCustomerExcludingAssessedTax', 'USD'],
+  ] as const)(
+    'reads catalog name %s under taxonomy %s from %s:%s, as secedgar_get_financials resolves it',
+    async (concept, taxonomy, expectedTaxonomy, tag, unit) => {
+      await runToolContract(fetchFramesTool, { concept, period: 'CY2024Q4I', taxonomy });
+
+      expect(resolveConceptTarget(concept, taxonomy).taxonomy).toBe(expectedTaxonomy);
+      expect(mockApi.tryGetFrames).toHaveBeenCalledWith(expectedTaxonomy, tag, unit, 'CY2024Q4I');
+    },
+  );
+
+  it('echoes the mapped namespace for shares_outstanding on both surfaces', async () => {
+    const result = await runToolContract(fetchFramesTool, {
+      concept: 'shares_outstanding',
+      period: 'CY2024Q4I',
+    });
+
+    expect(fetchFramesTool.output.parse(result.structuredContent).taxonomy).toBe('dei');
+    expect(blockText(result.content)).toContain('[XBRL: dei:EntityCommonStockSharesOutstanding]');
+  });
+
+  it('tells a catalog name sent to the other namespace where its tags live', async () => {
+    const result = await runToolContract(fetchFramesTool, {
+      concept: 'revenue',
+      period: 'CY2023',
+      taxonomy: 'dei',
+    });
+
+    expect(wireError(result).data).toMatchObject({ reason: 'no_data', taxonomy: 'dei' });
+    const text = blockText(result.content);
+    expect(text).toContain("'revenue' maps to us-gaap tags");
+    expect(text).toContain('omit taxonomy');
+  });
+});
+
+// Through the real tool pipeline, so both client surfaces are asserted (#128).
+describe('concept names that are neither a friendly name nor an XBRL tag (#128)', () => {
+  // SEC matches frame tags case-sensitively and answers an unreported one with a 404.
+  beforeEach(() => {
+    mockApi.tryGetFrames.mockImplementation(async (_tax: string, tag: string) =>
+      /^[A-Z][A-Za-z0-9]*$/.test(tag) ? mockFramesResponse : null,
+    );
+  });
+
+  const edgarCalls = () =>
+    mockApi.tryGetFrames.mock.calls.length + mockApi.cikToTicker.mock.calls.length;
+
+  it.each([
+    ['free_cash_flow', 'operating_cash_flow − capex'],
+    ['ebitda', 'operating_income + depreciation_amortization'],
+    ['total_debt', 'debt'],
+    ['capital_expenditures', 'capex'],
+  ])('fails %s as unknown_concept before the frames request', async (concept, needle) => {
+    const result = await runToolContract(fetchFramesTool, { concept, period: 'CY2024' });
+
+    const error = wireError(result);
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data).toMatchObject({ reason: 'unknown_concept', concept });
+    const text = blockText(result.content);
+    expect(text).toContain(needle);
+    expect(text).toContain('secedgar_search_concepts');
+    expect(text).toContain('reason unknown_concept');
+    expect(edgarCalls()).toBe(0);
+  });
+
+  it.each(['../submissions/CIK0000320193', 'netincomeloss', 'fcf', '  '])(
+    'fails %j as unknown_concept without building a frames URL',
+    async (concept) => {
+      const result = await runToolContract(fetchFramesTool, { concept, period: 'CY2024' });
+
+      expect(wireError(result).data.reason).toBe('unknown_concept');
+      expect(edgarCalls()).toBe(0);
+    },
+  );
+
+  it('trims surrounding whitespace, so " revenue" queries the revenue tag', async () => {
+    const result = await runToolContract(fetchFramesTool, {
+      concept: ' revenue',
+      period: 'CY2023',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.tryGetFrames).toHaveBeenCalledWith(
+      'us-gaap',
+      'RevenueFromContractWithCustomerExcludingAssessedTax',
+      'USD',
+      'CY2023',
+    );
+  });
+
+  // Characterization: these shapes reached SEC before the check existed.
+  it.each([
+    ['Net Income', 'NetIncomeLoss'],
+    ['NET_INCOME', 'NetIncomeLoss'],
+    ['NetIncomeLoss', 'NetIncomeLoss'],
+    ['Revenues', 'Revenues'],
+    ['EntityCommonStockSharesOutstanding', 'EntityCommonStockSharesOutstanding'],
+  ])('still queries %s as %s', async (concept, tag) => {
+    await runToolContract(fetchFramesTool, { concept, period: 'CY2023' });
+
+    expect(mockApi.tryGetFrames).toHaveBeenCalledWith(
+      expect.any(String),
+      tag,
+      expect.any(String),
+      'CY2023',
+    );
+  });
+
+  it('keeps a well-formed tag that 404s as no_data (#45)', async () => {
+    mockApi.tryGetFrames.mockResolvedValue(null);
+    const result = await runToolContract(fetchFramesTool, {
+      concept: 'SalesRevenueNet',
+      period: 'CY2024',
+    });
+
+    expect(wireError(result).data.reason).toBe('no_data');
+    expect(mockApi.tryGetFrames).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('business location', () => {
+  /** SEC writes `loc` as `<country>-<state>`, and a bare "-" when it has neither. */
+  const withLocations = (locs: string[]): FramesResponse => ({
+    ...mockFramesResponse,
+    data: mockFramesResponse.data.map((entry, i) => ({ ...entry, loc: locs[i] ?? '' })),
+  });
+
+  it('treats SEC’s bare "-" and an empty loc as no location, on both surfaces', async () => {
+    mockApi.tryGetFrames.mockResolvedValue(withLocations(['US-CA', '-', '']));
+    const result = await runToolContract(fetchFramesTool, { concept: 'revenue', period: 'CY2023' });
+
+    const output = fetchFramesTool.output.parse(result.structuredContent);
+    expect(output.data.map((d) => [d.company_name, d.location])).toEqual([
+      ['AMAZON COM INC', undefined],
+      ['Apple Inc.', 'US-CA'],
+      ['Alphabet Inc.', undefined],
+    ]);
+    const text = blockText(result.content);
+    expect(text).toContain('| period end 2023-09-30 | US-CA [0000320193-23-000106]');
+    expect(text).toContain('| period end 2023-12-31 [0001018724-24-000007]');
+    expect(text).toContain('| period end 2023-12-31 [0001652044-24-000022]');
+    expect(text).not.toContain('| -');
+  });
+
+  it('stages no location for those rows in the dataframe either', async () => {
+    mockApi.tryGetFrames.mockResolvedValue(withLocations(['US-CA', '-', '']));
+    const registerDataframe = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(getCanvasBridge).mockReturnValueOnce({ registerDataframe } as never);
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    await fetchFramesTool.handler(
+      fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2023' }),
+      ctx,
+    );
+
+    const { rows } = at(registerDataframe.mock.calls, 0)[1];
+    expect(rows.map((r: { location: string | null }) => r.location)).toEqual(['US-CA', null, null]);
   });
 });

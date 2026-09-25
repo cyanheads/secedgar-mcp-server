@@ -11,18 +11,22 @@ import {
   getCanvasBridge,
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
-import { resolveConceptTarget } from '@/services/edgar/concept-map.js';
 import {
+  describeUnknownConcepts,
+  findUnknownConcept,
+  resolveConceptTarget,
+} from '@/services/edgar/concept-map.js';
+import {
+  describingTag,
   type FramedUnit,
   matchesPeriodType,
-  preferredTagIndex,
   resolveFrameSeries,
   seriesStalenessCaveats,
   type TagPrioritizedUnit,
 } from '@/services/edgar/concept-series.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { missingQuarterCaveats } from '@/services/edgar/fiscal-periods.js';
-import type { CompanyConceptUnit } from '@/services/edgar/types.js';
+import type { CompanyConceptUnit, CompanyFactsResponse } from '@/services/edgar/types.js';
 
 export const getFinancialsTool = tool('secedgar_get_financials', {
   description:
@@ -57,6 +61,12 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'The company input resolves to multiple entities and the target is ambiguous',
       recovery: 'Use a ticker symbol or 10-digit CIK from the matches list for an exact match.',
+    },
+    {
+      reason: 'unknown_concept',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The concept input is neither a supported friendly name nor shaped like an XBRL tag, so no request is sent',
+      recovery: 'Use a friendly name from secedgar_search_concepts or a valid raw XBRL tag.',
     },
     {
       reason: 'no_concept_data',
@@ -126,15 +136,21 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
   output: z.object({
     company: z.string().describe('Resolved entity name (SEC-conformed).'),
     cik: z.string().describe('Resolved CIK, zero-padded to 10 digits.'),
-    concept: z.string().describe('XBRL tag name used.'),
-    label: z.string().describe('Human-readable label for the concept.'),
+    concept: z
+      .string()
+      .describe(
+        'XBRL tag behind the newest value. A friendly name can walk several tags, so each row names its own.',
+      ),
+    label: z.string().describe('Human-readable taxonomy label of the concept tag.'),
     description: z
       .string()
       .optional()
       .describe(
-        'XBRL taxonomy description for this concept. Often absent for company-extension tags or older concepts.',
+        'XBRL taxonomy description of the concept tag. Often absent for company-extension tags or older concepts.',
       ),
-    unit: z.string().describe('Unit of measure (e.g., "USD", "shares", "USD/shares").'),
+    unit: z
+      .string()
+      .describe('Unit of measure of the newest value (e.g., "USD", "shares", "USD/shares").'),
     data: z
       .array(
         z
@@ -163,10 +179,19 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
             accession_number: z
               .string()
               .describe('Source filing accession number for secedgar_get_filing.'),
+            tag: z
+              .string()
+              .describe(
+                'XBRL tag this value was reported under — differs from concept when an older or successor tag in the friendly name answers this period.',
+              ),
           })
-          .describe('One reported value with its period, fiscal context, and source filing.'),
+          .describe(
+            'One reported value with its period, fiscal context, source filing, and source tag.',
+          ),
       )
-      .describe('Deduplicated time series, newest first.'),
+      .describe(
+        "Deduplicated time series, newest first — one value per calendar period. Where SEC's period frame sits on a proxy statement's figure (the pay-versus-performance table re-tags net income), the value comes from the filer's own report of the same period; an annual period SEC framed on a 10-Q's trailing-twelve-month figure is left out, since the filer has not closed that year.",
+      ),
     tags_tried: z
       .array(z.string())
       .optional()
@@ -196,6 +221,22 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
   }),
 
   async handler(input, ctx) {
+    /**
+     * A name that is neither a catalog entry nor tag-shaped can match nothing
+     * SEC holds, so it fails here — before company resolution, and before the
+     * tag is interpolated into a request path (#128).
+     */
+    const unknown = findUnknownConcept(input.concept);
+    if (unknown) {
+      const { message, hint } = describeUnknownConcepts([unknown]);
+      throw ctx.fail('unknown_concept', message, {
+        recovery: { hint },
+        concept: unknown.concept,
+        suggestions: unknown.suggestions,
+        ...(unknown.derivation ? { derivation: unknown.derivation } : {}),
+      });
+    }
+
     const api = getEdgarApiService();
 
     // Resolve company to CIK
@@ -237,72 +278,106 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     // Resolve concept to taxonomy + XBRL tag(s). The mapping's own taxonomy wins
     // over the `us-gaap` default (e.g. `dei` for shares_outstanding); ifrs-full
     // uses the confirmed IFRS variants when the mapping has them.
-    const {
-      label,
-      tagSelection,
-      tags,
-      taxonomy,
-      unit: mappedUnit,
-    } = resolveConceptTarget(input.concept, input.taxonomy);
+    const { label, tagSelection, tags, taxonomy } = resolveConceptTarget(
+      input.concept,
+      input.taxonomy,
+    );
 
     // Default to "annual" for unset period_type; post-fetch fallback handles instant concepts (#48).
     const effectivePeriodType = input.period_type ?? 'annual';
 
     // Try each tag until we get data. `tryGetCompanyConcept` returns null for 404
     // (tag not reported by this company); other errors propagate.
-    /** Responding tags keyed by array position, in declared order. */
-    const responses = new Map<
-      number,
-      {
-        units: Record<string, CompanyConceptUnit[]>;
-        label: string;
-        description: string | undefined;
-        tag: string;
-      }
-    >();
+    /** Taxonomy metadata of every tag that carried values, keyed by tag. */
+    const responses = new Map<string, { label: string; description: string | undefined }>();
     const tagsTried: string[] = [];
     /**
-     * Each unit is augmented with its source-tag index so the frame dedup can
-     * resolve collisions by tag priority (#44). Index 0 = preferred total.
+     * Each value is augmented with its source tag, the tag's array position, and
+     * its unit key: the position resolves collisions by tag priority (#44, index
+     * 0 = preferred total), the tag and unit key are the value's provenance and
+     * scope the proxy-frame swap (#123, #125).
      */
     const allUnits: TagPrioritizedUnit[] = [];
+    const collect = (
+      tag: string,
+      tagIndex: number,
+      units: Record<string, CompanyConceptUnit[]>,
+      meta: { label: string; description: string | undefined },
+    ) => {
+      responses.set(tag, meta);
+      for (const [unit, values] of Object.entries(units)) {
+        for (const value of values) allUnits.push({ ...value, tag, tagIndex, unit });
+      }
+    };
+    /**
+     * Tags whose companyconcept payload named the tag but carried no values. SEC
+     * serves some filers' units as an object where an array belongs, and the
+     * service edge drops those; a well-formed payload always carries a unit, since
+     * SEC answers an unreported tag with a 404 (#141).
+     */
+    const servedEmpty: Array<{ tag: string; tagIndex: number }> = [];
 
     for (const [tagIndex, tag] of tags.entries()) {
       tagsTried.push(tag);
       const resp = await api.tryGetCompanyConcept(match.cik, taxonomy, tag);
       if (!resp) continue;
-      responses.set(tagIndex, {
-        units: resp.units,
+      if (Object.keys(resp.units).length === 0) {
+        servedEmpty.push({ tag, tagIndex });
+        continue;
+      }
+      collect(tag, tagIndex, resp.units, {
         label: resp.label,
         description: resp.description ?? undefined,
-        tag: resp.tag,
       });
-      for (const units of Object.values(resp.units)) {
-        for (const u of units) {
-          allUnits.push({ ...u, tagIndex });
-        }
+    }
+
+    /**
+     * The filer's companyfacts payload, read at most once: it answers every tag
+     * companyconcept served empty — the same filer's companyfacts carries those
+     * facts well-formed — and backs the no-data probe below. `undefined` until read.
+     */
+    let facts: CompanyFactsResponse | null | undefined;
+    if (servedEmpty.length > 0) {
+      facts = await api.tryGetCompanyFacts(match.cik);
+      const namespace = facts?.facts[taxonomy];
+      for (const { tag, tagIndex } of servedEmpty) {
+        const concept = namespace?.[tag];
+        if (!concept) continue;
+        // An absent label falls back to the concept's own at the return below.
+        collect(tag, tagIndex, concept.units, {
+          label: concept.label ?? '',
+          description: concept.description,
+        });
       }
     }
 
     /**
-     * The concept is described by the tag that won for this filer, which under a
-     * `coverage` selection is not the first one to respond (#101).
+     * Collapse to one value per standard calendar period — frame-bearing entries
+     * only, a proxy-held frame answered by the filer's reporting-form fact,
+     * same-frame collisions resolved by tag priority then latest `filed` (#44,
+     * #123). An empty map means the concept exists but has no frame-aligned entries.
      */
-    const winningTagIndex = preferredTagIndex(allUnits, tagSelection);
-    const conceptResponse =
-      winningTagIndex !== undefined ? responses.get(winningTagIndex) : undefined;
+    const byFrameClean = resolveFrameSeries(allUnits, tagSelection);
+    /**
+     * The concept is described by the tag behind its newest value: a successor
+     * behind an older leader answers the recent frames (#125), and under a
+     * `coverage` selection only the winner contributes at all (#101).
+     */
+    const conceptTag = describingTag([...byFrameClean.values()], allUnits, tagSelection);
+    const conceptResponse = conceptTag !== undefined ? responses.get(conceptTag) : undefined;
 
-    if (!conceptResponse || allUnits.length === 0) {
+    if (conceptTag === undefined || !conceptResponse) {
       // Probe companyfacts to discover what namespaces and tags this filer actually reports.
       // Only on the error path — one extra request, never on the happy path.
-      const facts = await api.tryGetCompanyFacts(match.cik);
+      if (facts === undefined) facts = await api.tryGetCompanyFacts(match.cik);
       const availableNamespaces = facts ? Object.keys(facts.facts) : [];
 
       let hint: string;
       if (facts && availableNamespaces.length > 0) {
+        const { facts: namespaces } = facts;
         const namespaceSummary = availableNamespaces
           .map((ns) => {
-            const nsTags = Object.keys(facts.facts[ns] ?? {});
+            const nsTags = Object.keys(namespaces[ns] ?? {});
             const searchTerm = tagsTried[0]?.toLowerCase().replace(/_/g, '') ?? '';
             // Surface a few matching tags when the requested concept overlaps with this namespace
             const matchingTags = searchTerm
@@ -335,18 +410,22 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     }
 
     /**
-     * Collapse to one value per standard calendar period — frame-bearing entries
-     * only, same-frame collisions resolved by tag priority then latest `filed`
-     * (#44). An empty map means the concept exists but has no frame-aligned entries.
+     * Read from the full deduped set, not the period-filtered slice: an annual
+     * view that stops a year behind a still-current quarterly series is a
+     * property of the filter, not of the concept. Undefined exactly when no
+     * value carried a frame.
      */
-    const byFrameClean = resolveFrameSeries(allUnits, tagSelection);
-    if (byFrameClean.size === 0) {
+    const newestFramed = [...byFrameClean.values()].reduce<FramedUnit | undefined>(
+      (newest, unit) => (!newest || unit.end > newest.end ? unit : newest),
+      undefined,
+    );
+    if (!newestFramed) {
       throw ctx.fail(
         'no_frame_data',
-        `'${conceptResponse.tag}' exists for this company but has no standard-period data.`,
+        `'${conceptTag}' exists for this company but has no standard-period data.`,
         {
           ...ctx.recoveryFor('no_frame_data'),
-          tag: conceptResponse.tag,
+          tag: conceptTag,
         },
       );
     }
@@ -378,30 +457,16 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
           : effectivePeriodType === 'annual'
             ? 'No annual data found — try period_type: "quarterly" or "all".'
             : 'No quarterly data found — try period_type: "annual" or "all".';
-        throw ctx.fail(
-          'no_period_data',
-          `No ${effectivePeriodType} data for '${conceptResponse.tag}'.`,
-          {
-            recovery: { hint },
-            tag: conceptResponse.tag,
-            period_type: effectivePeriodType,
-          },
-        );
+        throw ctx.fail('no_period_data', `No ${effectivePeriodType} data for '${conceptTag}'.`, {
+          recovery: { hint },
+          tag: conceptTag,
+          period_type: effectivePeriodType,
+        });
       }
     }
 
     // Sort newest first
     filtered.sort((a, b) => b.end.localeCompare(a.end));
-
-    /**
-     * Read from the full deduped set, not the period-filtered slice: an annual
-     * view that stops a year behind a still-current quarterly series is a
-     * property of the filter, not of the concept.
-     */
-    const newestFramed = [...byFrameClean.values()].reduce<FramedUnit | undefined>(
-      (newest, unit) => (!newest || unit.end > newest.end ? unit : newest),
-      undefined,
-    );
 
     /**
      * Off-calendar filers lose a whole calendar quarter from the frame-tagged
@@ -422,14 +487,14 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
        * today is the signal — one companyconcept payload is all this tool reads,
        * and it holds no filer-wide period to compare against (#102).
        */
-      ...seriesStalenessCaveats(conceptResponse.tag, conceptResponse.label, newestFramed, {
+      ...seriesStalenessCaveats(conceptTag, conceptResponse.label, newestFramed, {
         date: new Date().toISOString().slice(0, 10),
         kind: 'current-date',
       }),
     ];
 
-    // Determine unit string
-    const unitKey = Object.keys(conceptResponse.units)[0] ?? mappedUnit ?? 'USD';
+    /** The newest value's unit key, alongside its tag describing the line. */
+    const unitKey = newestFramed.unit;
 
     const data = filtered.map((u) => ({
       period: u.frame,
@@ -441,29 +506,31 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       form: u.form,
       filed: u.filed,
       accession_number: u.accn,
+      tag: u.tag,
     }));
 
     let dataset: { name: string; row_count: number; expires_at: string } | undefined;
     const bridge = getCanvasBridge();
     if (bridge && data.length > 0) {
-      const rows = data.map((d) => ({
+      const rows = filtered.map((u) => ({
         cik: match.cik,
         entity_name: match.name ?? null,
-        concept: conceptResponse.tag,
+        concept: conceptTag,
+        tag: u.tag,
         taxonomy,
-        unit: unitKey,
-        period: d.period,
-        value: d.value,
-        period_start: d.start ?? null,
-        period_end: d.end,
+        unit: u.unit,
+        period: u.frame,
+        value: u.val,
+        period_start: u.start || null,
+        period_end: u.end,
         // Named for what they are — the SOURCE FILING's fy/fp, not the data
         // period. Bare fiscal_year/fiscal_period invited ORDER BY/GROUP BY
         // against the wrong key; period_end is the time key (#72).
-        source_filing_fy: d.fiscal_year,
-        source_filing_fp: d.fiscal_period,
-        form: d.form,
-        filed: d.filed,
-        accession_number: d.accession_number,
+        source_filing_fy: u.fy,
+        source_filing_fp: u.fp,
+        form: u.form,
+        filed: u.filed,
+        accession_number: u.accn,
       }));
       const registered = await bridge.registerDataframe(ctx, {
         rows,
@@ -471,7 +538,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
         queryParams: {
           company: input.company,
           cik: match.cik,
-          concept: conceptResponse.tag,
+          concept: conceptTag,
           taxonomy,
           period_type: resolvedPeriodType,
         },
@@ -496,7 +563,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
 
     ctx.log.info('Financials retrieved', {
       company: match.cik,
-      concept: conceptResponse.tag,
+      concept: conceptTag,
       dataPoints: data.length,
       datasetName: dataset?.name,
     });
@@ -504,7 +571,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     return {
       company: match.name || input.company,
       cik: match.cik,
-      concept: conceptResponse.tag,
+      concept: conceptTag,
       label: conceptResponse.label || label,
       description: conceptResponse.description || undefined,
       unit: unitKey,
@@ -537,7 +604,9 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       const filingCtx = fiscalCtx
         ? `${d.form} (${fiscalCtx}) filed ${d.filed} [${d.accession_number}]`
         : `${d.form} filed ${d.filed} [${d.accession_number}]`;
-      lines.push(`${d.period}: ${formatted} (raw ${d.value}) | ${range} | ${filingCtx}`);
+      // Rows from the concept tag carry it in the header line above.
+      const tagCtx = d.tag === result.concept ? '' : ` | tag ${d.tag}`;
+      lines.push(`${d.period}: ${formatted} (raw ${d.value}) | ${range} | ${filingCtx}${tagCtx}`);
     }
     if (result.dataset) {
       const sliceNote =

@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { strToU8, zipSync } from 'fflate';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { seriesFromCompanyFacts } from '@/services/edgar/concept-series.js';
 import type { CompanyFactsFile } from '@/services/edgar/mirror/companyfacts-sync.js';
 import { EdgarMirror } from '@/services/edgar/mirror/index.js';
 
@@ -93,6 +94,163 @@ const msft: CompanyFactsFile = {
           ],
         },
       },
+      // A June fiscal year: SEC frames FY2026 (July 2025 → June 2026) as CY2026.
+      NetIncomeLoss: {
+        label: 'Net Income (Loss)',
+        units: {
+          USD: [
+            {
+              start: '2025-07-01',
+              end: '2026-06-30',
+              val: 104000000000,
+              frame: 'CY2026',
+              accn: 'msft-fy2026',
+              fy: 2026,
+              fp: 'FY',
+              form: '10-K',
+              filed: '2026-07-29',
+            },
+          ],
+        },
+      },
+    },
+  },
+};
+
+/**
+ * Amazon's shape (#142): FY2025 from the 10-K, then its Q2-2026 10-Q's
+ * trailing-twelve-month figure holding the CY2026 frame.
+ */
+const amazon: CompanyFactsFile = {
+  cik: 1018724,
+  entityName: 'AMAZON COM INC',
+  facts: {
+    'us-gaap': {
+      NetIncomeLoss: {
+        label: 'Net Income (Loss)',
+        units: {
+          USD: [
+            {
+              start: '2025-01-01',
+              end: '2025-12-31',
+              val: 77670000000,
+              frame: 'CY2025',
+              accn: 'amzn-10k',
+              fy: 2025,
+              fp: 'FY',
+              form: '10-K',
+              filed: '2026-02-06',
+            },
+            {
+              start: '2025-07-01',
+              end: '2026-06-30',
+              val: 135281000000,
+              frame: 'CY2026',
+              accn: '0001018724-26-000026',
+              fy: 2026,
+              fp: 'Q2',
+              form: '10-Q',
+              filed: '2026-07-31',
+            },
+          ],
+        },
+      },
+    },
+  },
+};
+
+/**
+ * Merck's shape (#123): the DEF 14A pay-versus-performance fact holds the
+ * CY2021 frame at a rounded figure; the 10-K reporting the same period carries
+ * no frame. `Assets` is served the malformed way SEC serves some filers' units
+ * (#141) — an object where an array belongs.
+ */
+const merck: CompanyFactsFile = {
+  cik: 310158,
+  entityName: 'Merck & Co., Inc.',
+  facts: {
+    'us-gaap': {
+      NetIncomeLoss: {
+        label: 'Net Income (Loss) Attributable to Parent',
+        units: {
+          USD: [
+            {
+              start: '2021-01-01',
+              end: '2021-12-31',
+              val: 12345000000,
+              frame: 'CY2021',
+              accn: '0001193125-26-147704',
+              fy: null,
+              fp: null,
+              form: 'DEF 14A',
+              filed: '2026-04-08',
+            },
+            {
+              start: '2021-01-01',
+              end: '2021-12-31',
+              val: 13049000000,
+              accn: '0000310158-22-000010',
+              fy: 2021,
+              fp: 'FY',
+              form: '10-K',
+              filed: '2022-02-25',
+            },
+          ],
+        },
+      },
+      Revenues: {
+        label: 'Revenues',
+        units: { USD: {} as never },
+      },
+      // SEC serves some tags with no label; the ingester stores the tag in its place.
+      InterestExpenseNonoperating: {
+        units: {
+          USD: [
+            {
+              start: '2025-01-01',
+              end: '2025-12-31',
+              val: 1100000000,
+              frame: 'CY2025',
+              accn: 'mrk-int',
+              fy: 2025,
+              fp: 'FY',
+              form: '10-K',
+              filed: '2026-02-24',
+            },
+          ],
+        },
+      },
+      // A closed year only a later 10-Q frames (#142): CY2020 sits in the Q3-2021
+      // 10-Q alone, and ends on the fiscal-year end the 10-K's CY2019 shows.
+      AccountsReceivableSale: {
+        label: 'Accounts Receivable, Sale',
+        units: {
+          USD: [
+            {
+              start: '2019-01-01',
+              end: '2019-12-31',
+              val: 1,
+              frame: 'CY2019',
+              accn: 'mrk-10k-2019',
+              fy: 2019,
+              fp: 'FY',
+              form: '10-K',
+              filed: '2020-02-26',
+            },
+            {
+              start: '2020-01-01',
+              end: '2020-12-31',
+              val: 2,
+              frame: 'CY2020',
+              accn: 'mrk-q3-2021',
+              fy: 2021,
+              fp: 'Q3',
+              form: '10-Q',
+              filed: '2021-11-05',
+            },
+          ],
+        },
+      },
     },
   },
 };
@@ -106,6 +264,8 @@ function makeFetchMock() {
   const zip = zipSync({
     'CIK0000320193.json': strToU8(JSON.stringify(apple)),
     'CIK0000789019.json': strToU8(JSON.stringify(msft)),
+    'CIK0000310158.json': strToU8(JSON.stringify(merck)),
+    'CIK0001018724.json': strToU8(JSON.stringify(amazon)),
   });
   return vi.fn(async (url: string, init?: RequestInit) => {
     const u = String(url);
@@ -213,6 +373,85 @@ describe('EdgarMirror — init + read helpers', () => {
     expect(frame?.pts).toBe(1);
     expect(frame?.data[0]?.val).toBe(6.13);
     expect(frame?.uom).toBe('USD-per-shares');
+  });
+
+  it('answers a proxy-held frame with the latest fact from another form (#123)', async () => {
+    const frame = await mirror.getFrames('us-gaap', 'NetIncomeLoss', 'USD', 'CY2021');
+    expect(frame?.data).toEqual([
+      {
+        accn: '0000310158-22-000010',
+        cik: 310158,
+        end: '2021-12-31',
+        entityName: 'Merck & Co., Inc.',
+        loc: '',
+        start: '2021-01-01',
+        val: 13049000000,
+      },
+    ]);
+    // The tool reads this to skip the live-frames caveats.
+    expect(frame?.holderFormsResolved).toBe(true);
+  });
+
+  it('leaves a 10-Q trailing-twelve-month row out of an annual frame, keeping a June fiscal year (#142)', async () => {
+    const frame = await mirror.getFrames('us-gaap', 'NetIncomeLoss', 'USD', 'CY2026');
+    expect(frame?.data.map((d) => [d.cik, d.val, d.end])).toEqual([
+      [789019, 104000000000, '2026-06-30'],
+    ]);
+    expect(frame?.pts).toBe(1);
+    // The same filer's closed year stays in its own frame.
+    const prior = await mirror.getFrames('us-gaap', 'NetIncomeLoss', 'USD', 'CY2025');
+    expect(prior?.data.map((d) => [d.cik, d.val])).toEqual([[1018724, 77670000000]]);
+  });
+
+  it('reads a label the ingester filled with the tag as no label', async () => {
+    const concept = await mirror.getCompanyConcept(
+      '310158',
+      'us-gaap',
+      'InterestExpenseNonoperating',
+    );
+    expect(concept?.tag).toBe('InterestExpenseNonoperating');
+    expect(concept?.label).toBe('');
+    const facts = await mirror.getCompanyFacts('310158');
+    const reported = facts?.facts['us-gaap']?.InterestExpenseNonoperating;
+    expect(reported?.units.USD).toHaveLength(1);
+    expect(reported).not.toHaveProperty('label');
+    // A real label still reads through.
+    expect(facts?.facts['us-gaap']?.NetIncomeLoss?.label).toBe(
+      'Net Income (Loss) Attributable to Parent',
+    );
+  });
+
+  it('resolves that tag with an empty label, so callers fall back to the concept label', async () => {
+    const facts = await mirror.getCompanyFacts('310158');
+    if (!facts) throw new Error('Expected mirrored company facts for 310158.');
+    const series = seriesFromCompanyFacts(facts, 'us-gaap', ['InterestExpenseNonoperating']);
+    expect(series?.tag).toBe('InterestExpenseNonoperating');
+    expect(series?.label).toBe('');
+  });
+
+  it('keeps a real frame label, including a one-word tag’s own name', async () => {
+    const frame = await mirror.getFrames('us-gaap', 'Revenues', 'USD', 'CY2023');
+    expect(frame?.label).toBe('Revenues');
+  });
+
+  it('answers a frame for a tag SEC serves without a label with an empty label, as the live API does', async () => {
+    // Live frames/us-gaap/InterestExpenseNonoperating/USD/CY2025.json carries `"label":""`.
+    const frame = await mirror.getFrames('us-gaap', 'InterestExpenseNonoperating', 'USD', 'CY2025');
+    expect(frame?.data.map((d) => d.cik)).toEqual([310158]);
+    expect(frame?.label).toBe('');
+  });
+
+  it('keeps a closed fiscal year that only a later 10-Q frames (#142)', async () => {
+    const frame = await mirror.getFrames('us-gaap', 'AccountsReceivableSale', 'USD', 'CY2020');
+    expect(frame?.data).toEqual([
+      expect.objectContaining({ cik: 310158, accn: 'mrk-q3-2021', end: '2020-12-31', val: 2 }),
+    ]);
+  });
+
+  it('skips a unit served as an object instead of an array (#141)', async () => {
+    // Merck's Revenues row carries `{"USD":{}}`; the other two filers still answer.
+    const frame = await mirror.getFrames('us-gaap', 'Revenues', 'USD', 'CY2023');
+    expect(frame?.data.map((d) => d.cik).sort()).toEqual([320193, 789019]);
   });
 
   it('returns null when no company reports the requested frame', async () => {

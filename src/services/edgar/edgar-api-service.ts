@@ -24,9 +24,11 @@ import {
   parseSubmissionHeader,
   type SubmissionHeader,
 } from './filing-headers.js';
+import { trigramSimilarity } from './trigram-similarity.js';
 import type {
   CikMatch,
   CompanyConceptResponse,
+  CompanyConceptUnit,
   CompanyFactsResponse,
   EftsEntityAutocompleteResponse,
   EftsResponse,
@@ -234,38 +236,8 @@ export function normalizeCompanySuffix(name: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Trigram (Dice-coefficient) similarity
+// Near-match company suggestions
 // ---------------------------------------------------------------------------
-
-/**
- * Build the set of trigrams for a string.
- * Pads with two spaces on each side so edge characters are covered.
- */
-function trigramSet(s: string): Set<string> {
-  const padded = `  ${s}  `;
-  const grams = new Set<string>();
-  for (let i = 0; i < padded.length - 2; i++) {
-    grams.add(padded.slice(i, i + 3));
-  }
-  return grams;
-}
-
-/**
- * Dice-coefficient trigram similarity between two strings.
- * Returns a value in [0, 1]; 1 means identical.
- */
-export function trigramSimilarity(a: string, b: string): number {
-  if (a === b) return 1;
-  const ga = trigramSet(a);
-  const gb = trigramSet(b);
-  if (ga.size === 0 && gb.size === 0) return 1;
-  if (ga.size === 0 || gb.size === 0) return 0;
-  let intersection = 0;
-  for (const g of ga) {
-    if (gb.has(g)) intersection++;
-  }
-  return (2 * intersection) / (ga.size + gb.size);
-}
 
 /**
  * Run a trigram similarity scan over the in-memory entry set. Each entry is scored
@@ -850,11 +822,12 @@ class EdgarApiService {
    * no-data error path, which surfaces the namespaces and tags a filer uses.
    * Served from the local mirror when enabled and synced — the mirror stores one
    * row per (cik, taxonomy, tag) and reassembles the API shape off a `cik` point
-   * lookup; the live API is the fallback.
+   * lookup; the live API is the fallback. A concept unit that arrives as
+   * anything but an array is dropped (#141).
    */
-  tryGetCompanyFacts(cik: string): Promise<CompanyFactsResponse | null> {
+  async tryGetCompanyFacts(cik: string): Promise<CompanyFactsResponse | null> {
     const padded = cik.padStart(10, '0');
-    return this.mirrorOrLive(
+    const facts = await this.mirrorOrLive(
       (m) => m.companyFactsReady(),
       (m) => m.getCompanyFacts(cik),
       () =>
@@ -862,20 +835,26 @@ class EdgarApiService {
           `https://data.sec.gov/api/xbrl/companyfacts/CIK${padded}.json`,
         ),
     );
+    for (const namespace of Object.values(facts?.facts ?? {})) {
+      for (const concept of Object.values(namespace)) concept.units = arrayUnits(concept.units);
+    }
+    return facts;
   }
 
   /**
    * Fetch XBRL data for a concept. Returns `null` if the company does not report this tag.
    * Served from the local mirror when enabled and synced; the live API is the
    * fallback (and covers filings newer than the last refresh when `mirrorFallbackLive`).
+   * A payload whose every unit arrives malformed comes back with no units — the
+   * tag is named but carries nothing (#141).
    */
-  tryGetCompanyConcept(
+  async tryGetCompanyConcept(
     cik: string,
     taxonomy: string,
     tag: string,
   ): Promise<CompanyConceptResponse | null> {
     const padded = cik.padStart(10, '0');
-    return this.mirrorOrLive(
+    const concept = await this.mirrorOrLive(
       (m) => m.companyFactsReady(),
       (m) => m.getCompanyConcept(cik, taxonomy, tag),
       () =>
@@ -883,6 +862,8 @@ class EdgarApiService {
           `https://data.sec.gov/api/xbrl/companyconcept/CIK${padded}/${taxonomy}/${tag}.json`,
         ),
     );
+    if (concept) concept.units = arrayUnits(concept.units);
+    return concept;
   }
 
   /**
@@ -1258,6 +1239,24 @@ class EdgarApiService {
     };
     return this.tickerCache;
   }
+}
+
+/**
+ * The units of an XBRL concept, keeping only those whose value is an array.
+ * SEC's companyconcept endpoint serves some filers' units as an empty object —
+ * `"units":{"USD":{}}` for Visa's and Coca-Cola's NetIncomeLoss — and the mirror
+ * stores payloads as served, while every reader iterates a unit as a list of
+ * facts. Dropped here, at the edge, a malformed unit reads as one the filer
+ * reported nothing under (#141).
+ */
+function arrayUnits(
+  units: Record<string, unknown> | undefined,
+): Record<string, CompanyConceptUnit[]> {
+  const kept: Record<string, CompanyConceptUnit[]> = {};
+  for (const [unit, values] of Object.entries(units ?? {})) {
+    if (Array.isArray(values)) kept[unit] = values;
+  }
+  return kept;
 }
 
 /**

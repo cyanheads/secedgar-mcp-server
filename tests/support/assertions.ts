@@ -10,6 +10,7 @@
 import type { ContentBlock } from '@cyanheads/mcp-ts-core';
 import { McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { ListExtra } from '@cyanheads/mcp-ts-core/resources';
+import type { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 
 /**
  * Element at `index`, asserting the array is long enough.
@@ -89,6 +90,24 @@ export function bag(value: unknown): Record<string, unknown> {
     throw new Error(`Expected an object, got ${Array.isArray(value) ? 'array' : typeof value}.`);
   }
   return value as Record<string, unknown>;
+}
+
+/**
+ * The `structuredContent.error` envelope of a failed tool result, as
+ * `runToolContract` returns it — asserting the call failed and the envelope
+ * carries a numeric code, a message, and a `data` bag.
+ */
+export function wireError(result: Awaited<ReturnType<typeof runToolContract>>): {
+  code: number;
+  message: string;
+  data: Record<string, unknown>;
+} {
+  if (result.isError !== true) throw new Error('Expected a failed tool result.');
+  const error = bag(bag(result.structuredContent).error);
+  if (typeof error.code !== 'number' || typeof error.message !== 'string') {
+    throw new Error('Expected structuredContent.error to carry a numeric code and a message.');
+  }
+  return { code: error.code, message: error.message, data: bag(error.data) };
 }
 
 /** The `data.recovery.hint` an error carries, asserting the contract populated it. */

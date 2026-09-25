@@ -8,6 +8,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   type FramedUnit,
+  isProxyForm,
+  isQuarterlyForm,
   matchesPeriodType,
   newestReportedPeriod,
   preferredTagIndex,
@@ -19,6 +21,7 @@ import {
 import type { CompanyFactsResponse } from '@/services/edgar/types.js';
 
 function unit(overrides: Partial<TagPrioritizedUnit>): TagPrioritizedUnit {
+  const tagIndex = overrides.tagIndex ?? 0;
   return {
     accn: '0000320193-24-000001',
     end: '2024-09-28',
@@ -26,7 +29,9 @@ function unit(overrides: Partial<TagPrioritizedUnit>): TagPrioritizedUnit {
     form: '10-K',
     fp: 'FY',
     fy: 2024,
-    tagIndex: 0,
+    tag: `Tag${tagIndex}`,
+    tagIndex,
+    unit: 'USD',
     val: 1,
     ...overrides,
   };
@@ -73,6 +78,33 @@ describe('resolveFrameSeries', () => {
   it('strips the internal tag index from resolved values', () => {
     const resolved = resolveFrameSeries([unit({ frame: 'CY2024' })]);
     expect(resolved.get('CY2024')).not.toHaveProperty('tagIndex');
+  });
+
+  it('passes every reported field of the winning fact through unchanged', () => {
+    const resolved = resolveFrameSeries([
+      unit({
+        accn: '0000320193-24-000123',
+        end: '2024-09-28',
+        filed: '2024-11-01',
+        form: '10-K',
+        fp: 'FY',
+        frame: 'CY2024',
+        fy: 2024,
+        start: '2023-10-01',
+        val: 391_035_000_000,
+      }),
+    ]);
+    expect(resolved.get('CY2024')).toMatchObject({
+      accn: '0000320193-24-000123',
+      end: '2024-09-28',
+      filed: '2024-11-01',
+      form: '10-K',
+      fp: 'FY',
+      frame: 'CY2024',
+      fy: 2024,
+      start: '2023-10-01',
+      val: 391_035_000_000,
+    });
   });
 });
 
@@ -157,6 +189,332 @@ describe('resolveFrameSeries under coverage selection (#101)', () => {
     );
     expect(resolved.get('CY2024')?.val).toBe(200);
   });
+});
+
+/**
+ * Since the pay-versus-performance rule a DEF 14A re-tags five fiscal years of
+ * `NetIncomeLoss`, and SEC frames the latest-filed fact for a period — so the
+ * proxy row holds the annual frame, often rounded, mis-scaled, or sign-flipped.
+ */
+describe('resolveFrameSeries — proxy-held frames (#123)', () => {
+  const FY2021 = { start: '2021-01-01', end: '2021-12-31' };
+
+  /** Merck's CY2021 shape: the DEF 14A holds the frame, two 10-Ks carry the period. */
+  const merckShaped = (): TagPrioritizedUnit[] => [
+    unit({
+      ...FY2021,
+      accn: '0001193125-26-147704',
+      filed: '2026-04-08',
+      form: 'DEF 14A',
+      fp: null,
+      frame: 'CY2021',
+      fy: null,
+      val: 12_345_000_000,
+    }),
+    unit({
+      ...FY2021,
+      accn: '0000310158-22-000010',
+      filed: '2022-02-25',
+      form: '10-K',
+      fp: 'FY',
+      fy: 2021,
+      val: 13_049_000_000,
+    }),
+    unit({
+      ...FY2021,
+      accn: '0000310158-24-000009',
+      filed: '2024-02-27',
+      form: '10-K',
+      fp: 'FY',
+      fy: 2023,
+      val: 13_049_000_000,
+    }),
+  ];
+
+  it('swaps a proxy frame holder for the latest-filed fact from another form, keeping the frame', () => {
+    const resolved = resolveFrameSeries(merckShaped());
+    expect(resolved.get('CY2021')).toMatchObject({
+      ...FY2021,
+      accn: '0000310158-24-000009',
+      filed: '2024-02-27',
+      form: '10-K',
+      fp: 'FY',
+      frame: 'CY2021',
+      fy: 2023,
+      val: 13_049_000_000,
+    });
+  });
+
+  it('never replaces a frame held by any other form — an 8-K recast carries the restatement', () => {
+    // Bank of America CY2013: the 2016 8-K recast differs from the 10-K before it.
+    const resolved = resolveFrameSeries([
+      unit({
+        start: '2013-01-01',
+        end: '2013-12-31',
+        filed: '2016-11-01',
+        form: '8-K',
+        frame: 'CY2013',
+        val: 10_539_000_000,
+      }),
+      unit({
+        start: '2013-01-01',
+        end: '2013-12-31',
+        filed: '2016-02-24',
+        form: '10-K',
+        val: 11_431_000_000,
+      }),
+    ]);
+    expect(resolved.get('CY2013')).toMatchObject({ form: '8-K', val: 10_539_000_000 });
+  });
+
+  it('matches the twin on tag, unit key, start, and end — keeping the proxy value when none qualifies', () => {
+    const proxy = unit({ ...FY2021, form: 'DEF 14A', frame: 'CY2021', val: 1 });
+    const resolved = resolveFrameSeries([
+      proxy,
+      unit({ ...FY2021, unit: 'EUR', val: 2 }), // other unit key
+      unit({ ...FY2021, tagIndex: 1, val: 3 }), // other tag
+      unit({ ...FY2021, start: '2021-04-01', val: 4 }), // other start
+      unit({ ...FY2021, end: '2021-12-30', val: 5 }), // other end
+      unit({ ...FY2021, form: 'PRE 14A', filed: '2026-05-01', val: 6 }), // another proxy
+    ]);
+    expect(resolved.get('CY2021')).toMatchObject({ form: 'DEF 14A', val: 1 });
+  });
+
+  it('corrects a proxy-held frame within its own tag before cross-tag priority runs', () => {
+    const resolved = resolveFrameSeries([
+      unit({ ...FY2021, form: 'DEF 14A', frame: 'CY2021', val: 12_345 }),
+      unit({ ...FY2021, form: '10-K', filed: '2022-02-25', val: 13_049 }),
+      unit({ ...FY2021, tagIndex: 1, form: '10-K', frame: 'CY2021', val: 99 }),
+    ]);
+    expect(resolved.get('CY2021')).toMatchObject({ tag: 'Tag0', form: '10-K', val: 13_049 });
+  });
+
+  it('never hands a proxy-held frame to a lower tag when its own tag has no twin', () => {
+    const resolved = resolveFrameSeries([
+      unit({ ...FY2021, form: 'DEF 14A', frame: 'CY2021', val: 12_345 }),
+      unit({ ...FY2021, tagIndex: 1, form: '10-K', frame: 'CY2021', val: 99 }),
+    ]);
+    expect(resolved.get('CY2021')).toMatchObject({ tag: 'Tag0', val: 12_345 });
+  });
+
+  it('leaves quarterly and instant frames held by periodic forms untouched', () => {
+    const resolved = resolveFrameSeries([
+      unit({ start: '2024-07-01', end: '2024-09-30', form: '10-Q', frame: 'CY2024Q3', val: 5 }),
+      unit({ start: '2024-07-01', end: '2024-09-30', form: '10-K', filed: '2025-02-01', val: 6 }),
+      unit({ end: '2024-12-31', form: '10-K', frame: 'CY2024Q4I', val: 7 }),
+      unit({ end: '2024-12-31', form: '10-K/A', filed: '2025-06-01', val: 8 }),
+    ]);
+    expect(resolved.get('CY2024Q3')?.val).toBe(5);
+    expect(resolved.get('CY2024Q4I')?.val).toBe(7);
+  });
+
+  it('applies inside the winning tag under coverage selection too', () => {
+    const resolved = resolveFrameSeries(
+      [...merckShaped(), unit({ tagIndex: 1, frame: 'CY2019', val: 1 })],
+      'coverage',
+    );
+    expect(resolved.get('CY2021')?.val).toBe(13_049_000_000);
+  });
+});
+
+describe('isProxyForm (#123)', () => {
+  it.each(['DEF 14A', 'PRE 14A', 'DEFA14A', 'DEFR14A', 'DEFM14A', 'PRER14A', 'DEF 14C', 'PRE 14C'])(
+    'treats %s as a Schedule 14A/14C proxy form',
+    (form) => {
+      expect(isProxyForm(form)).toBe(true);
+    },
+  );
+
+  it.each(['10-K', '10-K/A', '10-Q', '8-K', '20-F', '40-F', '6-K', 'S-1', '10-KT'])(
+    'treats %s as a reporting form',
+    (form) => {
+      expect(isProxyForm(form)).toBe(false);
+    },
+  );
+});
+
+/**
+ * SEC frames any roughly year-long duration as `CY####`, including a
+ * trailing-twelve-month figure a 10-Q discloses; when that 10-Q fact is the
+ * latest filed, it holds the annual frame for a year the filer has not closed.
+ */
+describe('resolveFrameSeries — quarterly-report-held annual frames (#142)', () => {
+  /** Amazon's shape: FY2025 from the 10-K, then a Q2-2026 10-Q TTM framed CY2026. */
+  const fy2025 = unit({
+    start: '2025-01-01',
+    end: '2025-12-31',
+    filed: '2026-02-06',
+    form: '10-K',
+    frame: 'CY2025',
+    val: 77_670_000_000,
+  });
+  const ttm2026 = unit({
+    start: '2025-07-01',
+    end: '2026-06-30',
+    filed: '2026-07-31',
+    form: '10-Q',
+    fp: 'Q2',
+    fy: 2026,
+    frame: 'CY2026',
+    val: 135_281_000_000,
+  });
+
+  it('leaves a 10-Q trailing-twelve-month frame out of the annual series', () => {
+    const resolved = resolveFrameSeries([fy2025, ttm2026]);
+    expect([...resolved.keys()]).toEqual(['CY2025']);
+    expect(resolved.get('CY2025')?.val).toBe(77_670_000_000);
+  });
+
+  it('treats a 10-QT the same way', () => {
+    const resolved = resolveFrameSeries([fy2025, { ...ttm2026, form: '10-QT' }]);
+    expect(resolved.has('CY2026')).toBe(false);
+  });
+
+  it('answers the frame with a same-period fact from an annual report when one exists', () => {
+    // Walmart CY2012: a 10-Q repeats the fiscal-year dividend the 10-K reported.
+    const resolved = resolveFrameSeries([
+      unit({
+        start: '2012-02-01',
+        end: '2013-01-31',
+        filed: '2013-06-07',
+        form: '10-Q',
+        fp: 'Q1',
+        frame: 'CY2012',
+        val: 1.59,
+      }),
+      unit({
+        start: '2012-02-01',
+        end: '2013-01-31',
+        filed: '2013-03-26',
+        form: '10-K',
+        val: 1.59,
+      }),
+    ]);
+    expect(resolved.get('CY2012')).toMatchObject({ form: '10-K', filed: '2013-03-26' });
+  });
+
+  it('keeps a closed fiscal year that only a later 10-Q reports', () => {
+    // Merck's AccountsReceivableSale CY2020 sits in its Q3-2021 10-Q alone; the
+    // period ends on the filer's fiscal-year end, so it is a real annual value.
+    const resolved = resolveFrameSeries([
+      unit({ start: '2019-01-01', end: '2019-12-31', form: '10-K', frame: 'CY2019', val: 1 }),
+      unit({
+        start: '2020-01-01',
+        end: '2020-12-31',
+        filed: '2021-11-05',
+        form: '10-Q',
+        fp: 'Q3',
+        frame: 'CY2020',
+        val: 2,
+      }),
+    ]);
+    expect(resolved.get('CY2020')).toMatchObject({ form: '10-Q', val: 2 });
+  });
+
+  it('keeps a 10-Q-held year when the series shows no fiscal-year end to test it against', () => {
+    const resolved = resolveFrameSeries([
+      unit({
+        start: '2020-01-01',
+        end: '2020-12-31',
+        filed: '2021-11-05',
+        form: '10-Q',
+        frame: 'CY2020',
+        val: 2,
+      }),
+    ]);
+    expect(resolved.get('CY2020')?.val).toBe(2);
+  });
+
+  it('matches a 52/53-week fiscal-year end within a week', () => {
+    // Costco closes its year on the Sunday nearest August 31.
+    const resolved = resolveFrameSeries([
+      unit({ start: '2023-09-04', end: '2024-09-01', form: '10-K', frame: 'CY2024', val: 1 }),
+      unit({
+        start: '2022-08-29',
+        end: '2023-09-03',
+        filed: '2024-03-13',
+        form: '10-Q',
+        frame: 'CY2023',
+        val: 2,
+      }),
+    ]);
+    expect(resolved.get('CY2023')?.val).toBe(2);
+  });
+
+  it('leaves out a 10-Q full-year figure for a year that had not ended when it was filed', () => {
+    const resolved = resolveFrameSeries([
+      fy2025,
+      unit({
+        start: '2026-01-01',
+        end: '2026-12-31',
+        filed: '2026-07-31',
+        form: '10-Q',
+        frame: 'CY2026',
+        val: 9,
+      }),
+    ]);
+    expect(resolved.has('CY2026')).toBe(false);
+  });
+
+  it('keeps a June fiscal-year 10-K framed CY2026', () => {
+    const resolved = resolveFrameSeries([
+      unit({
+        start: '2025-07-01',
+        end: '2026-06-30',
+        filed: '2026-07-29',
+        form: '10-K',
+        frame: 'CY2026',
+        val: 104,
+      }),
+    ]);
+    expect(resolved.get('CY2026')).toMatchObject({ form: '10-K', val: 104 });
+  });
+
+  it('leaves 10-Q quarterly and instant frames alone', () => {
+    const resolved = resolveFrameSeries([
+      fy2025,
+      unit({
+        start: '2026-04-01',
+        end: '2026-06-30',
+        filed: '2026-07-31',
+        form: '10-Q',
+        frame: 'CY2026Q2',
+        val: 3,
+      }),
+      unit({ end: '2026-06-30', filed: '2026-07-31', form: '10-Q', frame: 'CY2026Q2I', val: 4 }),
+    ]);
+    expect(resolved.get('CY2026Q2')?.val).toBe(3);
+    expect(resolved.get('CY2026Q2I')?.val).toBe(4);
+  });
+
+  it('lets a lower tag fill the frame once the leader’s TTM is left out', () => {
+    const resolved = resolveFrameSeries([
+      fy2025,
+      ttm2026,
+      unit({
+        start: '2025-07-01',
+        end: '2026-06-30',
+        filed: '2026-07-29',
+        form: '10-K',
+        frame: 'CY2026',
+        tagIndex: 1,
+        val: 5,
+      }),
+    ]);
+    expect(resolved.get('CY2026')).toMatchObject({ tag: 'Tag1', val: 5 });
+  });
+});
+
+describe('isQuarterlyForm (#142)', () => {
+  it.each(['10-Q', '10-Q/A', '10-QT', '10-QT/A'])('treats %s as a quarterly report', (form) => {
+    expect(isQuarterlyForm(form)).toBe(true);
+  });
+  it.each(['10-K', '10-KT', '8-K', 'DEF 14A', '20-F', '6-K'])(
+    'treats %s as another form',
+    (form) => {
+      expect(isQuarterlyForm(form)).toBe(false);
+    },
+  );
 });
 
 describe('preferredTagIndex', () => {
@@ -267,6 +625,159 @@ describe('seriesFromCompanyFacts', () => {
 
   it('returns undefined for an unknown taxonomy', () => {
     expect(seriesFromCompanyFacts(facts, 'ifrs-full', ['Revenue'])).toBeUndefined();
+  });
+
+  it('lets a lower tag fill the frames the leader does not report (priority ladder)', () => {
+    const ladder: CompanyFactsResponse = {
+      facts: {
+        'us-gaap': {
+          Revenues: {
+            label: 'Revenues',
+            units: { USD: [unit({ frame: 'CY2024', end: '2024-12-31', val: 500 })] },
+          },
+          SalesRevenueNet: {
+            label: 'Sales Revenue, Net',
+            units: {
+              USD: [
+                unit({ frame: 'CY2023', end: '2023-12-31', val: 400 }),
+                unit({ frame: 'CY2024', end: '2024-12-31', val: 499 }),
+              ],
+            },
+          },
+        },
+      },
+    };
+    const resolved = seriesFromCompanyFacts(ladder, 'us-gaap', ['Revenues', 'SalesRevenueNet']);
+    expect(resolved?.series.map((s) => [s.frame, s.val])).toEqual([
+      ['CY2024', 500],
+      ['CY2023', 400],
+    ]);
+  });
+
+  it('resolves a proxy-held annual frame to the 10-K fact (#123)', () => {
+    const proxyHeld: CompanyFactsResponse = {
+      facts: {
+        'us-gaap': {
+          NetIncomeLoss: {
+            label: 'Net Income (Loss) Attributable to Parent',
+            units: {
+              USD: [
+                unit({
+                  start: '2021-01-01',
+                  end: '2021-12-31',
+                  accn: '0001193125-26-147704',
+                  filed: '2026-04-08',
+                  form: 'DEF 14A',
+                  frame: 'CY2021',
+                  val: 12_345_000_000,
+                }),
+                unit({
+                  start: '2021-01-01',
+                  end: '2021-12-31',
+                  accn: '0000310158-22-000010',
+                  filed: '2022-02-25',
+                  form: '10-K',
+                  val: 13_049_000_000,
+                }),
+              ],
+            },
+          },
+        },
+      },
+    };
+    const resolved = seriesFromCompanyFacts(proxyHeld, 'us-gaap', ['NetIncomeLoss']);
+    expect(resolved?.series[0]).toMatchObject({
+      frame: 'CY2021',
+      form: '10-K',
+      accn: '0000310158-22-000010',
+      val: 13_049_000_000,
+    });
+  });
+
+  it('names each value’s tag and lets the line follow the newest value (#125)', () => {
+    /** NVIDIA's capex shape: the PP&E tag stops in 2020, the successor runs on. */
+    const successor: CompanyFactsResponse = {
+      facts: {
+        'us-gaap': {
+          PaymentsToAcquirePropertyPlantAndEquipment: {
+            label: 'Payments to Acquire Property, Plant, and Equipment',
+            description: 'PP&E only.',
+            units: {
+              USD: [
+                unit({ frame: 'CY2019', end: '2020-01-26', val: 489_000_000 }),
+                unit({ frame: 'CY2020', end: '2021-01-31', val: 1_128_000_000 }),
+              ],
+            },
+          },
+          PaymentsToAcquireProductiveAssets: {
+            label: 'Payments to Acquire Productive Assets',
+            description: 'Capex, software, and other intangibles.',
+            units: {
+              USD: [
+                unit({ frame: 'CY2020', end: '2021-01-31', val: 1_130_000_000 }),
+                unit({ frame: 'CY2025', end: '2026-01-25', val: 6_042_000_000 }),
+              ],
+            },
+          },
+        },
+      },
+    };
+    const resolved = seriesFromCompanyFacts(successor, 'us-gaap', [
+      'PaymentsToAcquirePropertyPlantAndEquipment',
+      'PaymentsToAcquireProductiveAssets',
+    ]);
+    expect(resolved?.series.map((s) => [s.frame, s.val, s.tag])).toEqual([
+      ['CY2025', 6_042_000_000, 'PaymentsToAcquireProductiveAssets'],
+      ['CY2020', 1_128_000_000, 'PaymentsToAcquirePropertyPlantAndEquipment'],
+      ['CY2019', 489_000_000, 'PaymentsToAcquirePropertyPlantAndEquipment'],
+    ]);
+    expect(resolved).toMatchObject({
+      tag: 'PaymentsToAcquireProductiveAssets',
+      label: 'Payments to Acquire Productive Assets',
+      description: 'Capex, software, and other intangibles.',
+      unit: 'USD',
+    });
+  });
+
+  it('leaves the label empty when SEC serves the tag without one, never the raw tag', () => {
+    const unlabeled: CompanyFactsResponse = {
+      facts: {
+        'us-gaap': {
+          InterestExpenseNonoperating: {
+            units: { USD: [unit({ frame: 'CY2025', end: '2025-12-31', val: 259 })] },
+          },
+        },
+      },
+    };
+    const resolved = seriesFromCompanyFacts(unlabeled, 'us-gaap', ['InterestExpenseNonoperating']);
+    expect(resolved?.tag).toBe('InterestExpenseNonoperating');
+    expect(resolved?.label).toBe('');
+  });
+
+  it('resolves a frame reported under two unit keys to the later filing', () => {
+    // SAP's shape: PP&E framed at CY2017Q4I in EUR (the reporting currency,
+    // filed 2019) and in USD (a convenience translation, filed 2018).
+    const twoUnits: CompanyFactsResponse = {
+      facts: {
+        'ifrs-full': {
+          PropertyPlantAndEquipment: {
+            label: 'Property, plant and equipment',
+            units: {
+              EUR: [
+                unit({ frame: 'CY2017Q4I', end: '2017-12-31', filed: '2019-02-28', val: 2_967 }),
+              ],
+              USD: [
+                unit({ frame: 'CY2017Q4I', end: '2017-12-31', filed: '2018-02-28', val: 3_567 }),
+              ],
+            },
+          },
+        },
+      },
+    };
+    const resolved = seriesFromCompanyFacts(twoUnits, 'ifrs-full', ['PropertyPlantAndEquipment']);
+    expect(resolved?.series).toHaveLength(1);
+    expect(resolved?.series[0]?.val).toBe(2_967);
+    expect(resolved?.unit).toBe('EUR');
   });
 
   it('returns undefined when no candidate tag is reported', () => {

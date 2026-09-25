@@ -5,11 +5,14 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  describeUnknownConcepts,
+  findUnknownConcept,
   getAllConcepts,
   listConcepts,
   resolveConcept,
   resolveConceptTarget,
   searchConcepts,
+  unknownConceptHint,
 } from '@/services/edgar/concept-map.js';
 
 describe('resolveConcept', () => {
@@ -228,6 +231,89 @@ describe('resolveConcept — IFRS tag variants', () => {
   });
 });
 
+describe('successor tags behind the current leaders (#125)', () => {
+  it('appends the productive-assets successor behind the PP&E-only capex tag', () => {
+    // The successor also counts software and intangibles, so it only fills the
+    // frames the PP&E tag does not report.
+    expect(resolveConcept('capex')?.tags).toEqual([
+      'PaymentsToAcquirePropertyPlantAndEquipment',
+      'PaymentsToAcquireProductiveAssets',
+    ]);
+  });
+
+  it('appends the nonoperating interest caption behind both existing interest tags', () => {
+    expect(resolveConcept('interest_expense')?.tags).toEqual([
+      'InterestExpense',
+      'InterestExpenseDebt',
+      'InterestExpenseNonoperating',
+    ]);
+  });
+
+  it('leaves the capex IFRS counterpart unchanged (interest_expense is pinned under #99)', () => {
+    expect(resolveConcept('capex')?.ifrsTags).toEqual([
+      'PurchaseOfPropertyPlantAndEquipmentClassifiedAsInvestingActivities',
+    ]);
+  });
+});
+
+describe('ppe_net, pretax_income, and shares_diluted (#130)', () => {
+  it('maps net PP&E as an instant balance-sheet line, keeping the lease-inclusive total out of tags', () => {
+    expect(resolveConcept('ppe_net')).toMatchObject({
+      group: 'balance_sheet',
+      tags: ['PropertyPlantAndEquipmentNet'],
+      ifrsTags: ['PropertyPlantAndEquipment'],
+      taxonomy: 'us-gaap',
+      unit: 'USD',
+    });
+    expect(resolveConcept('ppe_net')?.relatedTags?.map((r) => r.tag)).toEqual([
+      'PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization',
+    ]);
+    expect(resolveConcept('ppe_net')?.relatedTags?.[0]?.note).toMatch(/finance-lease/i);
+  });
+
+  it('maps pre-tax income as a two-tag ladder, the equity-method-inclusive caption first', () => {
+    expect(resolveConcept('pretax_income')).toMatchObject({
+      group: 'income_statement',
+      tags: [
+        'IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest',
+        'IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments',
+      ],
+      ifrsTags: ['ProfitLossBeforeTax'],
+      unit: 'USD',
+    });
+  });
+
+  it('maps the diluted share count beside the EPS it divides, in the shares unit', () => {
+    expect(resolveConcept('shares_diluted')).toMatchObject({
+      group: 'per_share',
+      tags: ['WeightedAverageNumberOfDilutedSharesOutstanding'],
+      ifrsTags: ['AdjustedWeightedAverageShares'],
+      taxonomy: 'us-gaap',
+      unit: 'shares',
+    });
+  });
+
+  it('lists all three under ifrs-full and resolves them to their IFRS leads', () => {
+    const names = searchConcepts('', 'ifrs-full').map((r) => r.name);
+    for (const concept of ['ppe_net', 'pretax_income', 'shares_diluted']) {
+      expect(names).toContain(concept);
+    }
+    expect(resolveConceptTarget('ppe_net', 'ifrs-full').tags).toEqual([
+      'PropertyPlantAndEquipment',
+    ]);
+    expect(resolveConceptTarget('pretax_income', 'ifrs-full').tags).toEqual([
+      'ProfitLossBeforeTax',
+    ]);
+    expect(resolveConceptTarget('shares_diluted', 'ifrs-full').tags).toEqual([
+      'AdjustedWeightedAverageShares',
+    ]);
+  });
+
+  it('brings the catalog to 36 concepts', () => {
+    expect(listConcepts()).toHaveLength(36);
+  });
+});
+
 describe('resolveConceptTarget — tag selection (#101)', () => {
   it('gives stock_based_compensation both IFRS elements, employee first', () => {
     // Seven of twelve sampled 20-F filers report the employee element as their
@@ -399,5 +485,177 @@ describe('getAllConcepts', () => {
       expect(mapping.taxonomy, `${name} missing taxonomy`).toBeTruthy();
       expect(mapping.unit, `${name} missing unit`).toBeTruthy();
     }
+  });
+});
+
+describe('findUnknownConcept (#128)', () => {
+  it('passes every catalog name in any case, separator, or padding form', () => {
+    for (const { name } of listConcepts()) {
+      const spaced = name.replace(/_/g, ' ');
+      for (const form of [
+        name,
+        name.toUpperCase(),
+        spaced,
+        name.replace(/_/g, '-'),
+        ` ${spaced.toUpperCase()}\t`,
+      ]) {
+        expect(findUnknownConcept(form), JSON.stringify(form)).toBeUndefined();
+      }
+    }
+  });
+
+  it('passes anything shaped like an XBRL element name, under any taxonomy and deprecated ones too', () => {
+    for (const tag of [
+      'NetIncomeLoss',
+      'Revenues',
+      'SalesRevenueNet',
+      'ProfitLoss',
+      'EntityCommonStockSharesOutstanding',
+      'A',
+      'Tag2024',
+      ' NetIncomeLoss ',
+    ]) {
+      expect(findUnknownConcept(tag), tag).toBeUndefined();
+    }
+  });
+
+  it('flags lowercase, prefixed, punctuated, path-shaped, and blank input', () => {
+    for (const input of [
+      'netincomeloss',
+      'us-gaap:NetIncomeLoss',
+      'Net Income!',
+      '../submissions/CIK0000320193',
+      'NetIncome/Loss',
+      '2024Revenue',
+      '',
+      '   ',
+    ]) {
+      expect(findUnknownConcept(input), JSON.stringify(input)).toBeDefined();
+    }
+  });
+
+  it('echoes the input trimmed', () => {
+    expect(findUnknownConcept('  total_debt ')?.concept).toBe('total_debt');
+  });
+
+  it('answers a standard combination with its formula instead of suggestions', () => {
+    expect(findUnknownConcept('free_cash_flow')).toMatchObject({
+      derivation: 'operating_cash_flow − capex',
+      suggestions: [],
+    });
+    expect(findUnknownConcept('Free Cash Flow')?.derivation).toBe('operating_cash_flow − capex');
+    expect(findUnknownConcept('EBITDA')?.derivation).toBe(
+      'operating_income + depreciation_amortization',
+    );
+    expect(findUnknownConcept('working-capital')?.derivation).toBe(
+      'current_assets − current_liabilities',
+    );
+    const fcf = findUnknownConcept('free_cash_flow');
+    expect(fcf && unknownConceptHint(fcf)).toMatch(
+      /^Derive it as operating_cash_flow − capex from those concepts\. .*secedgar_search_concepts/,
+    );
+  });
+
+  it('builds every formula from catalog names, and no formula shadows one', () => {
+    const catalog = new Set(listConcepts().map((c) => c.name));
+    for (const name of ['free_cash_flow', 'ebitda', 'working_capital']) {
+      expect(catalog.has(name), `${name} is a catalog name`).toBe(false);
+      const operands = findUnknownConcept(name)?.derivation?.split(/ [−+] /) ?? [];
+      expect(operands).toHaveLength(2);
+      for (const operand of operands) expect(catalog.has(operand), operand).toBe(true);
+    }
+  });
+
+  it('carries no formula for total_debt, whose parts the catalog cannot cover', () => {
+    expect(findUnknownConcept('total_debt')?.derivation).toBeUndefined();
+    expect(findUnknownConcept('total_debt')?.suggestions).toContain('debt');
+  });
+
+  it('suggests capex for capital_expenditures, reached through its label', () => {
+    expect(findUnknownConcept('capital_expenditures')?.suggestions).toEqual(['capex']);
+    expect(findUnknownConcept('long_term_debt')?.suggestions).toEqual(['debt']);
+  });
+
+  it('suggests nothing below the threshold, and still names secedgar_search_concepts', () => {
+    const fcf = findUnknownConcept('fcf');
+    expect(fcf?.suggestions).toEqual([]);
+    expect(fcf && unknownConceptHint(fcf)).toMatch(
+      /^List every supported name with secedgar_search_concepts/,
+    );
+    expect(findUnknownConcept('../submissions/CIK0000320193')?.suggestions).toEqual([]);
+  });
+
+  it('caps suggestions at three, highest score first, ties broken by name', () => {
+    // The three cash-flow totals score identically against "cash_flow".
+    expect(findUnknownConcept('cash_flow')?.suggestions).toEqual([
+      'financing_cash_flow',
+      'investing_cash_flow',
+      'operating_cash_flow',
+    ]);
+    expect(findUnknownConcept('netincomeloss')?.suggestions).toEqual([
+      'net_income',
+      'operating_income',
+      'pretax_income',
+    ]);
+  });
+
+  it('suggests the newest catalog entries like any other (#130)', () => {
+    expect(findUnknownConcept('pretax')?.suggestions).toEqual(['pretax_income']);
+    expect(findUnknownConcept('ppe')?.suggestions).toEqual(['ppe_net']);
+    expect(findUnknownConcept('diluted_shares')?.suggestions[0]).toBe('shares_diluted');
+  });
+});
+
+describe('describeUnknownConcepts (#128)', () => {
+  it('words one concept with its own hint', () => {
+    const unknown = findUnknownConcept('total_debt');
+    expect(unknown).toBeDefined();
+    expect(describeUnknownConcepts(unknown ? [unknown] : [])).toEqual({
+      message: "'total_debt' is neither a supported concept name nor an XBRL tag.",
+      hint: 'Closest supported names are assets, debt, liabilities. List every supported name with secedgar_search_concepts; a raw XBRL tag is an element name in UpperCamelCase, such as NetIncomeLoss.',
+    });
+  });
+
+  it('names each concept in turn when several are unknown', () => {
+    const unknowns = ['free_cash_flow', 'total_debt', 'fcf'].flatMap((c) => {
+      const u = findUnknownConcept(c);
+      return u ? [u] : [];
+    });
+    const { message, hint } = describeUnknownConcepts(unknowns);
+    expect(message).toBe(
+      "None of the requested concepts is a supported concept name or an XBRL tag: 'free_cash_flow', 'total_debt', 'fcf'.",
+    );
+    expect(hint).toBe(
+      'free_cash_flow — derive it as operating_cash_flow − capex from those concepts; total_debt — closest supported names are assets, debt, liabilities; fcf — no supported name is close. List every supported name with secedgar_search_concepts; a raw XBRL tag is an element name in UpperCamelCase, such as NetIncomeLoss.',
+    );
+  });
+});
+
+describe('trimming (#128)', () => {
+  it('resolves a padded friendly name', () => {
+    expect(resolveConcept(' revenue\n')).toBe(resolveConcept('revenue'));
+  });
+
+  it('trims a raw tag before it becomes the lookup key', () => {
+    expect(resolveConceptTarget('  NetIncomeLoss ', 'us-gaap')).toMatchObject({
+      label: 'NetIncomeLoss',
+      tags: ['NetIncomeLoss'],
+    });
+  });
+});
+
+describe('unknown-concept wording (#128)', () => {
+  it('names a single suggestion in the singular', () => {
+    const unknown = findUnknownConcept('capital_expenditures');
+    expect(unknown && unknownConceptHint(unknown)).toMatch(
+      /^The closest supported name is capex\. List every supported name/,
+    );
+  });
+
+  it('says an empty concept is empty rather than quoting nothing', () => {
+    const unknown = findUnknownConcept('   ');
+    expect(describeUnknownConcepts(unknown ? [unknown] : []).message).toBe(
+      'An empty concept is neither a supported concept name nor an XBRL tag.',
+    );
   });
 });

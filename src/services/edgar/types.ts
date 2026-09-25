@@ -177,9 +177,11 @@ export interface CompanyConceptUnit {
   end: string;
   filed: string;
   form: string;
-  fp: string;
+  /** Fiscal period of the source filing. Null on filings that encode none (a DEF 14A). */
+  fp: string | null;
   frame?: string;
-  fy: number;
+  /** Fiscal year of the source filing. Null on filings that encode none (a DEF 14A). */
+  fy: number | null;
   start?: string;
   val: number;
 }
@@ -211,6 +213,14 @@ export interface FramesResponse {
   ccp: string;
   data: FrameEntry[];
   description?: string;
+  /**
+   * Set by the local mirror's frame assembly, which reads each fact's form and
+   * applies the per-filer holder-form rules: a proxy-held frame answers with the
+   * filer's reporting-form fact (#123), and a 10-Q's trailing-twelve-month row
+   * drops out of an annual frame (#142). SEC's frames endpoint carries no form,
+   * so a live response leaves it unset.
+   */
+  holderFormsResolved?: boolean;
   label: string;
   pts: number;
   tag: string;

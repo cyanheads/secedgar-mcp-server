@@ -3,6 +3,7 @@
  * @module tests/mcp-server/tools/definitions/get-financials.tool
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials.tool.js';
@@ -24,7 +25,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import { at, blockText, caught, records } from '../../../support/assertions.js';
+import { at, bag, blockText, caught, records, wireError } from '../../../support/assertions.js';
 
 const mockConceptResponse: CompanyConceptResponse = {
   cik: 320193,
@@ -200,6 +201,37 @@ describe('getFinancialsTool', () => {
     const periods = result.data.map((d) => d.fiscal_period);
     expect(periods).toContain('FY');
     expect(periods).toContain('Q3');
+  });
+
+  it('pins the line fields and every row field for a single-tag series', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const input = getFinancialsTool.input.parse({
+      company: 'AAPL',
+      concept: 'revenue',
+      period_type: 'all',
+    });
+    const result = await getFinancialsTool.handler(input, ctx);
+
+    expect(result).toMatchObject({
+      company: 'Apple Inc.',
+      cik: '0000320193',
+      concept: 'RevenueFromContractWithCustomerExcludingAssessedTax',
+      label: 'Revenue From Contract With Customer Excluding Assessed Tax',
+      unit: 'USD',
+    });
+    expect(result.description).toBeUndefined();
+    expect(result.data.map((d) => d.period)).toEqual(['CY2023', 'CY2023Q3', 'CY2022']);
+    expect(at(result.data, 1)).toMatchObject({
+      period: 'CY2023Q3',
+      value: 81797000000,
+      start: '2023-04-02',
+      end: '2023-07-01',
+      fiscal_year: 2023,
+      fiscal_period: 'Q3',
+      form: '10-Q',
+      filed: '2023-08-04',
+      accession_number: '0000320193-23-000077',
+    });
   });
 
   it('sorts data newest first', async () => {
@@ -695,6 +727,7 @@ describe('getFinancialsTool', () => {
           form: '10-K',
           filed: '2023-11-03',
           accession_number: '0000320193-23-000106',
+          tag: 'Revenues',
         },
       ],
       dataset: {
@@ -725,6 +758,7 @@ describe('getFinancialsTool', () => {
           form: '10-K',
           filed: '2023-11-03',
           accession_number: '0000320193-23-000106',
+          tag: 'Revenues',
         },
       ],
     };
@@ -751,6 +785,7 @@ describe('getFinancialsTool', () => {
           form: '10-K',
           filed: '2023-11-03',
           accession_number: '0000320193-23-000106',
+          tag: 'EarningsPerShareDiluted',
         },
       ],
     };
@@ -1376,6 +1411,20 @@ describe('dataframe registration (#72)', () => {
     // Source-filing values pass through unchanged under the new names.
     expect(rows[0].source_filing_fy).toBe(2023);
     expect(rows[0].source_filing_fp).toBe('FY');
+    expect(rows[0]).toMatchObject({
+      cik: '0000320193',
+      entity_name: 'Apple Inc.',
+      concept: 'RevenueFromContractWithCustomerExcludingAssessedTax',
+      taxonomy: 'us-gaap',
+      unit: 'USD',
+      period: 'CY2023',
+      value: 383285000000,
+      period_start: null,
+      period_end: '2023-09-30',
+      form: '10-K',
+      filed: '2023-11-03',
+      accession_number: '0000320193-23-000106',
+    });
 
     // The inline data[] keeps the documented field names — out of scope for the rename.
     expect(result.data[0]).toHaveProperty('fiscal_year');
@@ -1478,6 +1527,520 @@ describe('dataframe registration (#72)', () => {
   });
 });
 
+/** A companyconcept payload for one tag, from full-control unit rows. */
+function conceptPayload(
+  tag: string,
+  label: string,
+  units: CompanyConceptResponse['units'],
+  description?: string,
+): CompanyConceptResponse {
+  return {
+    cik: 310158,
+    entityName: 'Merck & Co., Inc.',
+    label,
+    tag,
+    taxonomy: 'us-gaap',
+    units,
+    ...(description ? { description } : {}),
+  };
+}
+
+describe('proxy-held annual frames (#123)', () => {
+  const FY2021 = { start: '2021-01-01', end: '2021-12-31' };
+  /** Merck's NetIncomeLoss: the DEF 14A holds the CY2021 frame at a rounded figure. */
+  const merck = conceptPayload('NetIncomeLoss', 'Net Income (Loss) Attributable to Parent', {
+    USD: [
+      {
+        ...FY2021,
+        accn: '0001193125-26-147704',
+        filed: '2026-04-08',
+        form: 'DEF 14A',
+        fp: null,
+        frame: 'CY2021',
+        fy: null,
+        val: 12_345_000_000,
+      },
+      {
+        ...FY2021,
+        accn: '0000310158-22-000010',
+        filed: '2022-02-25',
+        form: '10-K',
+        fp: 'FY',
+        fy: 2021,
+        val: 13_049_000_000,
+      },
+      {
+        start: '2021-07-01',
+        end: '2021-09-30',
+        accn: '0000310158-21-000031',
+        filed: '2021-11-05',
+        form: '10-Q',
+        fp: 'Q3',
+        frame: 'CY2021Q3',
+        fy: 2021,
+        val: 3_232_000_000,
+      },
+    ],
+  });
+
+  beforeEach(() => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000310158', name: 'Merck & Co., Inc.' });
+    mockApi.tryGetCompanyConcept.mockResolvedValue(merck);
+  });
+
+  it('answers the frame with the 10-K fact and its provenance, keeping the frame', async () => {
+    const result = await runToolContract(getFinancialsTool, {
+      company: 'MRK',
+      concept: 'net_income',
+    });
+
+    expect(result.isError).toBeFalsy();
+    const output = getFinancialsTool.output.parse(result.structuredContent);
+    expect(output.data).toEqual([
+      {
+        period: 'CY2021',
+        value: 13_049_000_000,
+        start: '2021-01-01',
+        end: '2021-12-31',
+        fiscal_year: 2021,
+        fiscal_period: 'FY',
+        form: '10-K',
+        filed: '2022-02-25',
+        accession_number: '0000310158-22-000010',
+        tag: 'NetIncomeLoss',
+      },
+    ]);
+    const text = blockText(result.content);
+    expect(text).toContain('CY2021: $13049.0M (raw 13049000000)');
+    expect(text).toContain('10-K (FY2021 FY) filed 2022-02-25 [0000310158-22-000010]');
+    expect(text).not.toContain('DEF 14A');
+  });
+
+  it('leaves the quarterly series unchanged', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const result = await getFinancialsTool.handler(
+      getFinancialsTool.input.parse({
+        company: 'MRK',
+        concept: 'net_income',
+        period_type: 'quarterly',
+      }),
+      ctx,
+    );
+    expect(result.data).toEqual([
+      expect.objectContaining({ period: 'CY2021Q3', value: 3_232_000_000, form: '10-Q' }),
+    ]);
+  });
+});
+
+describe('successor tags and per-value attribution (#125)', () => {
+  /** NVIDIA's capex: the PP&E tag stops at CY2020, the productive-assets successor runs on. */
+  const ppe = conceptPayload(
+    'PaymentsToAcquirePropertyPlantAndEquipment',
+    'Payments to Acquire Property, Plant, and Equipment',
+    {
+      USD: [
+        {
+          start: '2019-01-28',
+          end: '2020-01-26',
+          accn: '0001045810-20-000010',
+          filed: '2020-02-20',
+          form: '10-K',
+          fp: 'FY',
+          frame: 'CY2019',
+          fy: 2020,
+          val: 489_000_000,
+        },
+        {
+          start: '2020-01-27',
+          end: '2021-01-31',
+          accn: '0001045810-21-000010',
+          filed: '2021-02-26',
+          form: '10-K',
+          fp: 'FY',
+          frame: 'CY2020',
+          fy: 2021,
+          val: 1_128_000_000,
+        },
+      ],
+    },
+    'Cash outflow for PP&E.',
+  );
+  const productive = conceptPayload(
+    'PaymentsToAcquireProductiveAssets',
+    'Payments to Acquire Productive Assets',
+    {
+      USD: [
+        {
+          start: '2020-01-27',
+          end: '2021-01-31',
+          accn: '0001045810-21-000010',
+          filed: '2021-02-26',
+          form: '10-K',
+          fp: 'FY',
+          frame: 'CY2020',
+          fy: 2021,
+          val: 1_130_000_000,
+        },
+        {
+          start: '2025-01-27',
+          end: '2026-01-25',
+          accn: '0001045810-26-000021',
+          filed: '2026-02-25',
+          form: '10-K',
+          fp: 'FY',
+          frame: 'CY2025',
+          fy: 2026,
+          val: 6_042_000_000,
+        },
+      ],
+    },
+    'Cash outflow for capex, software, and intangibles.',
+  );
+
+  beforeEach(() => {
+    vi.setSystemTime(new Date('2026-07-26T00:00:00.000Z'));
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0001045810',
+      name: 'NVIDIA CORP',
+      ticker: 'NVDA',
+    });
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _tax: string, tag: string) =>
+        ({ [ppe.tag]: ppe, [productive.tag]: productive })[tag] ?? null,
+    );
+  });
+  afterAll(() => {
+    vi.setSystemTime(new Date(NOW));
+  });
+
+  it('walks the successor behind the PP&E tag and names each row’s source tag', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const result = await getFinancialsTool.handler(
+      getFinancialsTool.input.parse({ company: 'NVDA', concept: 'capex' }),
+      ctx,
+    );
+
+    expect(result.data.map((d) => [d.period, d.value, d.tag])).toEqual([
+      ['CY2025', 6_042_000_000, 'PaymentsToAcquireProductiveAssets'],
+      // A frame both tags report stays with the PP&E-only leader.
+      ['CY2020', 1_128_000_000, 'PaymentsToAcquirePropertyPlantAndEquipment'],
+      ['CY2019', 489_000_000, 'PaymentsToAcquirePropertyPlantAndEquipment'],
+    ]);
+    expect(result.tags_tried).toEqual([
+      'PaymentsToAcquirePropertyPlantAndEquipment',
+      'PaymentsToAcquireProductiveAssets',
+    ]);
+  });
+
+  it('describes the line by the tag behind the newest value, with no staleness caveat', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const result = await getFinancialsTool.handler(
+      getFinancialsTool.input.parse({ company: 'NVDA', concept: 'capex' }),
+      ctx,
+    );
+
+    expect(result).toMatchObject({
+      concept: 'PaymentsToAcquireProductiveAssets',
+      label: 'Payments to Acquire Productive Assets',
+      description: 'Cash outflow for capex, software, and intangibles.',
+      unit: 'USD',
+    });
+    expect(result.caveats).toBeUndefined();
+  });
+
+  it('renders the source tag on rows that came from a different tag than the line', async () => {
+    const result = await runToolContract(getFinancialsTool, { company: 'NVDA', concept: 'capex' });
+    const text = blockText(result.content);
+
+    expect(text).toContain('XBRL tag: PaymentsToAcquireProductiveAssets');
+    expect(text).toMatch(/CY2020: .*\| tag PaymentsToAcquirePropertyPlantAndEquipment/);
+    expect(text).not.toMatch(/CY2025: .*\| tag /);
+  });
+
+  it('carries the source tag on inline rows capped by limit and on every dataframe row', async () => {
+    const registerDataframe = vi.fn().mockResolvedValue({
+      name: 'df_ABCDE_FGHIJ',
+      rowCount: 3,
+      expiresAt: '2026-01-01T00:00:00.000Z',
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+    vi.mocked(toDatasetField).mockReturnValue({
+      name: 'df_ABCDE_FGHIJ',
+      row_count: 3,
+      expires_at: '2026-01-01T00:00:00.000Z',
+    });
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const result = await getFinancialsTool.handler(
+      getFinancialsTool.input.parse({ company: 'NVDA', concept: 'capex', limit: 1 }),
+      ctx,
+    );
+
+    expect(result.data).toEqual([
+      expect.objectContaining({ period: 'CY2025', tag: 'PaymentsToAcquireProductiveAssets' }),
+    ]);
+    expect(getEnrichment(ctx).truncated).toBe(true);
+    const { rows } = at(registerDataframe.mock.calls, 0)[1];
+    expect(rows.map((r: { tag: string }) => r.tag)).toEqual([
+      'PaymentsToAcquireProductiveAssets',
+      'PaymentsToAcquirePropertyPlantAndEquipment',
+      'PaymentsToAcquirePropertyPlantAndEquipment',
+    ]);
+    vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+  });
+});
+
+describe('10-Q trailing-twelve-month annual frames (#142)', () => {
+  /** Amazon's NetIncomeLoss as SEC frames it: the Q2-2026 10-Q TTM holds CY2026. */
+  const amazon = conceptPayload('NetIncomeLoss', 'Net Income (Loss)', {
+    USD: [
+      {
+        start: '2025-01-01',
+        end: '2025-12-31',
+        accn: '0001018724-26-000004',
+        filed: '2026-02-06',
+        form: '10-K',
+        fp: 'FY',
+        frame: 'CY2025',
+        fy: 2025,
+        val: 77_670_000_000,
+      },
+      {
+        start: '2025-07-01',
+        end: '2026-06-30',
+        accn: '0001018724-26-000026',
+        filed: '2026-07-31',
+        form: '10-Q',
+        fp: 'Q2',
+        frame: 'CY2026',
+        fy: 2026,
+        val: 135_281_000_000,
+      },
+      {
+        start: '2026-04-01',
+        end: '2026-06-30',
+        accn: '0001018724-26-000026',
+        filed: '2026-07-31',
+        form: '10-Q',
+        fp: 'Q2',
+        frame: 'CY2026Q2',
+        fy: 2026,
+        val: 18_164_000_000,
+      },
+    ],
+  });
+
+  beforeEach(() => {
+    vi.setSystemTime(new Date('2026-09-25T00:00:00.000Z'));
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0001018724',
+      name: 'AMAZON COM INC',
+      ticker: 'AMZN',
+    });
+    mockApi.tryGetCompanyConcept.mockResolvedValue(amazon);
+  });
+  afterAll(() => {
+    vi.setSystemTime(new Date(NOW));
+  });
+
+  it('ends the annual series at the 10-K year, on both surfaces', async () => {
+    const result = await runToolContract(getFinancialsTool, {
+      company: 'AMZN',
+      concept: 'net_income',
+      period_type: 'annual',
+      limit: 3,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const output = getFinancialsTool.output.parse(result.structuredContent);
+    expect(output.data.map((d) => [d.period, d.value, d.form])).toEqual([
+      ['CY2025', 77_670_000_000, '10-K'],
+    ]);
+    const text = blockText(result.content);
+    expect(text).toContain('CY2025: $77670.0M');
+    expect(text).not.toContain('CY2026:');
+  });
+
+  it('keeps the 10-Q’s quarterly frame', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const result = await getFinancialsTool.handler(
+      getFinancialsTool.input.parse({
+        company: 'AMZN',
+        concept: 'net_income',
+        period_type: 'quarterly',
+      }),
+      ctx,
+    );
+    expect(result.data).toEqual([
+      expect.objectContaining({ period: 'CY2026Q2', value: 18_164_000_000 }),
+    ]);
+  });
+});
+
+describe('companyconcept served without values (#141)', () => {
+  /**
+   * SEC answers Visa's and Coca-Cola's NetIncomeLoss companyconcept with
+   * `"units":{"USD":{}}`; the service edge drops the non-array unit, so the tool
+   * receives a payload that names the tag and carries no values.
+   */
+  const servedEmpty = conceptPayload(
+    'NetIncomeLoss',
+    'Net Income (Loss) Attributable to Parent',
+    {},
+  );
+  const visaFacts = {
+    cik: 1403161,
+    entityName: 'Visa Inc.',
+    facts: {
+      'us-gaap': {
+        NetIncomeLoss: {
+          label: 'Net Income (Loss) Attributable to Parent',
+          description: 'Net income attributable to the parent.',
+          units: {
+            USD: [
+              {
+                start: '2024-10-01',
+                end: '2025-09-30',
+                accn: '0001403161-25-000080',
+                filed: '2025-11-06',
+                form: '10-K',
+                fp: 'FY',
+                frame: 'CY2025',
+                fy: 2025,
+                val: 20_058_000_000,
+              },
+            ],
+          },
+        },
+      },
+    },
+  };
+
+  beforeEach(() => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0001403161', name: 'Visa Inc.', ticker: 'V' });
+    mockApi.tryGetCompanyConcept.mockResolvedValue(servedEmpty);
+  });
+
+  it('answers from companyfacts when companyconcept names the tag but carries no values', async () => {
+    mockApi.tryGetCompanyFacts.mockResolvedValue(visaFacts);
+    const result = await runToolContract(getFinancialsTool, {
+      company: 'V',
+      concept: 'net_income',
+      limit: 3,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const output = getFinancialsTool.output.parse(result.structuredContent);
+    expect(output).toMatchObject({
+      concept: 'NetIncomeLoss',
+      description: 'Net income attributable to the parent.',
+      data: [
+        {
+          period: 'CY2025',
+          value: 20_058_000_000,
+          form: '10-K',
+          accession_number: '0001403161-25-000080',
+          tag: 'NetIncomeLoss',
+        },
+      ],
+    });
+    expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledTimes(1);
+    expect(blockText(result.content)).toContain('CY2025: $20058.0M');
+  });
+
+  it('fails as no_concept_data when companyfacts holds nothing either', async () => {
+    mockApi.tryGetCompanyFacts.mockResolvedValue(null);
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const err = await caught(
+      getFinancialsTool.handler(
+        getFinancialsTool.input.parse({ company: 'V', concept: 'net_income' }),
+        ctx,
+      ),
+    );
+
+    expect(err.data.reason).toBe('no_concept_data');
+    expect(err.message).not.toContain('is not iterable');
+    expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads companyfacts only for the tag served empty, keeping the rest of the ladder', async () => {
+    // Tag 0 served empty, tag 1 well-formed: the ladder still resolves tag 0 from
+    // companyfacts rather than letting the lower tag answer alone.
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000021344', name: 'COCA COLA CO', ticker: 'KO' });
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _tax: string, tag: string) => {
+        if (tag === 'RevenueFromContractWithCustomerExcludingAssessedTax') {
+          return { ...servedEmpty, tag, label: 'Excluding' };
+        }
+        if (tag === 'Revenues') {
+          return conceptPayload('Revenues', 'Revenues', {
+            USD: [
+              {
+                accn: 'r-2025',
+                end: '2025-12-31',
+                start: '2025-01-01',
+                filed: '2026-02-20',
+                form: '10-K',
+                fp: 'FY',
+                frame: 'CY2025',
+                fy: 2025,
+                val: 1,
+              },
+            ],
+          });
+        }
+        return null;
+      },
+    );
+    mockApi.tryGetCompanyFacts.mockResolvedValue({
+      facts: {
+        'us-gaap': {
+          RevenueFromContractWithCustomerExcludingAssessedTax: {
+            label: 'Excluding',
+            units: {
+              USD: [
+                {
+                  accn: 'x-2025',
+                  end: '2025-12-31',
+                  start: '2025-01-01',
+                  filed: '2026-02-20',
+                  form: '10-K',
+                  fp: 'FY',
+                  frame: 'CY2025',
+                  fy: 2025,
+                  val: 47_900_000_000,
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const result = await getFinancialsTool.handler(
+      getFinancialsTool.input.parse({ company: 'KO', concept: 'revenue' }),
+      ctx,
+    );
+
+    expect(result.data).toEqual([
+      expect.objectContaining({
+        period: 'CY2025',
+        value: 47_900_000_000,
+        tag: 'RevenueFromContractWithCustomerExcludingAssessedTax',
+      }),
+    ]);
+  });
+
+  it('never reads companyfacts on the happy path', async () => {
+    mockApi.tryGetCompanyConcept.mockResolvedValue(mockConceptResponse);
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    await getFinancialsTool.handler(
+      getFinancialsTool.input.parse({ company: 'AAPL', concept: 'revenue' }),
+      ctx,
+    );
+    expect(mockApi.tryGetCompanyFacts).not.toHaveBeenCalled();
+  });
+});
+
 // Through the real argument-parsing path, where `inputAliases` is applied (#115).
 describe('getFinancialsTool parameter names (#115)', () => {
   const call = (args: Record<string, unknown>) => runToolContract(getFinancialsTool, args as never);
@@ -1502,4 +2065,143 @@ describe('getFinancialsTool parameter names (#115)', () => {
     expect(blockText(result.content)).toContain('bogus');
     expect(mockApi.resolveCik).not.toHaveBeenCalled();
   });
+});
+
+// Through the real tool pipeline, so the wire envelope is what a client receives (#128).
+describe('concept names that are neither a friendly name nor an XBRL tag (#128)', () => {
+  // SEC matches tags case-sensitively and answers an unreported one with a 404.
+  beforeEach(() => {
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _tax: string, tag: string) =>
+        /^[A-Z][A-Za-z0-9]*$/.test(tag) ? mockConceptResponse : null,
+    );
+  });
+
+  const edgarCalls = () =>
+    mockApi.resolveCik.mock.calls.length +
+    mockApi.tryGetCompanyConcept.mock.calls.length +
+    mockApi.tryGetCompanyFacts.mock.calls.length;
+
+  it.each([
+    ['free_cash_flow', 'operating_cash_flow − capex'],
+    ['ebitda', 'operating_income + depreciation_amortization'],
+  ])(
+    'fails %s as unknown_concept with its derivation, before any EDGAR call',
+    async (concept, formula) => {
+      const result = await runToolContract(getFinancialsTool, { company: 'AAPL', concept });
+
+      const error = wireError(result);
+      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+      expect(error.data).toMatchObject({ reason: 'unknown_concept', concept, derivation: formula });
+      expect(error.data.suggestions).toEqual([]);
+      const hint = String(bag(error.data.recovery).hint);
+      expect(hint).toContain(formula);
+      expect(hint).toContain('secedgar_search_concepts');
+      const text = blockText(result.content);
+      expect(text).toContain(formula);
+      expect(text).toContain('secedgar_search_concepts');
+      expect(text).toContain('reason unknown_concept');
+      expect(text).not.toContain('This filer reports under');
+      expect(edgarCalls()).toBe(0);
+    },
+  );
+
+  it('suggests debt for total_debt, on both surfaces', async () => {
+    const result = await runToolContract(getFinancialsTool, {
+      company: 'AAPL',
+      concept: 'total_debt',
+    });
+
+    const error = wireError(result);
+    expect(error.data.reason).toBe('unknown_concept');
+    expect(error.data.derivation).toBeUndefined();
+    expect(error.data.suggestions).toContain('debt');
+    expect(blockText(result.content)).toMatch(/Closest supported names are [a-z_, ]*\bdebt\b/);
+    expect(edgarCalls()).toBe(0);
+  });
+
+  it('suggests capex for capital_expenditures, matched on its label', async () => {
+    const result = await runToolContract(getFinancialsTool, {
+      company: 'AAPL',
+      concept: 'capital_expenditures',
+    });
+
+    const suggestions = wireError(result).data.suggestions;
+    expect(Array.isArray(suggestions) && suggestions[0]).toBe('capex');
+    expect(edgarCalls()).toBe(0);
+  });
+
+  it('names secedgar_search_concepts even with nothing close to suggest (fcf)', async () => {
+    const result = await runToolContract(getFinancialsTool, { company: 'AAPL', concept: 'fcf' });
+
+    const error = wireError(result);
+    expect(error.data.reason).toBe('unknown_concept');
+    expect(error.data.suggestions).toEqual([]);
+    expect(error.data.derivation).toBeUndefined();
+    expect(blockText(result.content)).toContain('secedgar_search_concepts');
+    expect(edgarCalls()).toBe(0);
+  });
+
+  it.each([
+    '../submissions/CIK0000320193',
+    'us-gaap:NetIncomeLoss',
+    'netincomeloss',
+    'Net Income!',
+    '   ',
+  ])('fails %j as unknown_concept without building a request', async (concept) => {
+    const result = await runToolContract(getFinancialsTool, { company: 'AAPL', concept });
+
+    expect(wireError(result).data.reason).toBe('unknown_concept');
+    expect(edgarCalls()).toBe(0);
+  });
+
+  it('trims surrounding whitespace, so " revenue" resolves to the revenue concept', async () => {
+    const result = await runToolContract(getFinancialsTool, {
+      company: 'AAPL',
+      concept: ' revenue ',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.tryGetCompanyConcept).toHaveBeenCalledWith(
+      '0000320193',
+      'us-gaap',
+      'RevenueFromContractWithCustomerExcludingAssessedTax',
+    );
+  });
+
+  it('trims a raw tag before it becomes the lookup key', async () => {
+    await runToolContract(getFinancialsTool, { company: 'AAPL', concept: ' NetIncomeLoss\t' });
+
+    expect(mockApi.tryGetCompanyConcept).toHaveBeenCalledWith(
+      '0000320193',
+      'us-gaap',
+      'NetIncomeLoss',
+    );
+  });
+
+  // Characterization: every input shape below reached SEC before the check existed.
+  it.each([
+    ['Net Income', 'us-gaap', 'us-gaap', 'NetIncomeLoss'],
+    ['NET_INCOME', 'us-gaap', 'us-gaap', 'NetIncomeLoss'],
+    ['net-income', 'us-gaap', 'us-gaap', 'NetIncomeLoss'],
+    ['NetIncomeLoss', 'us-gaap', 'us-gaap', 'NetIncomeLoss'],
+    ['Revenues', 'us-gaap', 'us-gaap', 'Revenues'],
+    ['SalesRevenueNet', 'us-gaap', 'us-gaap', 'SalesRevenueNet'],
+    ['NetIncomeLoss', 'ifrs-full', 'ifrs-full', 'NetIncomeLoss'],
+    ['ProfitLoss', 'ifrs-full', 'ifrs-full', 'ProfitLoss'],
+    ['EntityCommonStockSharesOutstanding', 'dei', 'dei', 'EntityCommonStockSharesOutstanding'],
+    ['NetIncomeLoss', 'dei', 'dei', 'NetIncomeLoss'],
+  ] as const)(
+    'still sends %s under %s to SEC as %s:%s',
+    async (concept, taxonomy, expectedTaxonomy, tag) => {
+      await runToolContract(getFinancialsTool, { company: 'AAPL', concept, taxonomy });
+
+      expect(mockApi.resolveCik).toHaveBeenCalledWith('AAPL');
+      expect(mockApi.tryGetCompanyConcept).toHaveBeenCalledWith(
+        '0000320193',
+        expectedTaxonomy,
+        tag,
+      );
+    },
+  );
 });

@@ -15,7 +15,14 @@ import {
   getCanvasBridge,
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
-import { resolveConceptTarget } from '@/services/edgar/concept-map.js';
+import {
+  describeUnknownConcepts,
+  findUnknownConcept,
+  resolveConcept,
+  resolveConceptTarget,
+  type UnknownConcept,
+  unknownConceptHint,
+} from '@/services/edgar/concept-map.js';
 import {
   type FramedUnit,
   newestReportedPeriod,
@@ -24,7 +31,7 @@ import {
 } from '@/services/edgar/concept-series.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { missingQuarterCaveats } from '@/services/edgar/fiscal-periods.js';
-import type { CikMatch } from '@/services/edgar/types.js';
+import type { CikMatch, ConceptMapping } from '@/services/edgar/types.js';
 
 /** Full-year duration frame — `CY2024`. */
 const ANNUAL_FRAME = /^CY(\d{4})$/;
@@ -41,6 +48,9 @@ const INSTANT_FRAME = /^CY(\d{4})(Q[1-4])I$/;
  * enrichment.
  */
 const MAX_INLINE_CELLS = 120;
+
+/** Most recent periods the inline matrix can be asked for (`periods`). */
+const MAX_PERIODS = 12;
 
 /**
  * Map a frame to the calendar period key the matrix aligns on, or undefined when
@@ -83,7 +93,7 @@ interface Cell {
 
 export const compareCompaniesTool = tool('secedgar_compare_companies', {
   description:
-    'Compare 2-10 named companies across 1-8 XBRL concepts, aligned on calendar periods. This is the middle shape between secedgar_get_financials (one company, one concept, full history) and secedgar_fetch_frames (one concept, one period, every reporting company) — reach for it when the question names the companies. One companyfacts read per company, resolved through the same frame dedup and tag priority as secedgar_get_financials so the numbers agree. Balance-sheet and entity-info concepts are filed as point-in-time values and align on the calendar year (annual) or quarter (quarterly) their snapshot falls in, so they sit in the same matrix as income-statement lines. The inline matrix covers the most recent periods up to `periods`, trimmed further when companies x concepts x periods is too large to return in one response; the full aligned series is materialized as df_<id> for growth rates and spreads — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query. A company that fails to resolve is reported in failed_companies and the comparison proceeds with the rest, and a company that does not report a concept is reported in gaps with the tags that were tried — never interpolated or zero-filled. Off-calendar filers and unit mismatches are surfaced in caveats rather than silently mixed.',
+    'Compare 2-10 named companies across 1-8 XBRL concepts, aligned on calendar periods. This is the middle shape between secedgar_get_financials (one company, one concept, full history) and secedgar_fetch_frames (one concept, one period, every reporting company) — reach for it when the question names the companies. One companyfacts read per company, resolved through the same frame dedup and tag priority as secedgar_get_financials so the numbers agree. Balance-sheet and entity-info concepts are filed as point-in-time values and align on the calendar year (annual) or quarter (quarterly) their snapshot falls in, so they sit in the same matrix as income-statement lines. The inline matrix covers the most recent periods up to `periods`, trimmed further when companies x concepts x periods is too large to return in one response; the full aligned series is materialized as df_<id> for growth rates and spreads — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query. A company that fails to resolve is reported in failed_companies and the comparison proceeds with the rest, and a company that does not report a concept is reported in gaps with the tags that were tried — never interpolated or zero-filled. A company that reports a concept only for periods older than the inline window is named in caveats with its newest period. A concept that is neither a friendly name nor an XBRL tag is reported once in unknown_concepts with the closest supported names, and fails the call only when every concept is one. Off-calendar filers and unit mismatches are surfaced in caveats rather than silently mixed.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   enrichment: {
@@ -118,6 +128,12 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       when: 'Companies resolved but not one of them reports any of the requested concepts for the requested period type',
       recovery:
         'Switch period_type, or discover reported concept names with secedgar_search_concepts.',
+    },
+    {
+      reason: 'unknown_concept',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'Every requested concept is neither a supported friendly name nor shaped like an XBRL tag, so no request is sent',
+      recovery: 'Use a friendly name from secedgar_search_concepts or a valid raw XBRL tag.',
     },
     {
       reason: 'rate_limited',
@@ -161,7 +177,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       .number()
       .int()
       .min(1)
-      .max(12)
+      .max(MAX_PERIODS)
       .default(4)
       .describe(
         'Upper bound on how many recent periods the inline matrix covers, newest first — not a guarantee. The matrix is companies x concepts x periods cells, and the inline window drops further older periods when that product is too large to return in one response. The full aligned series is always registered to the dataframe, so dropped periods stay queryable via secedgar_dataframe_query.',
@@ -219,7 +235,9 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
           })
           .describe('One requested concept and the units it resolved to.'),
       )
-      .describe('Concepts covered, in the order supplied.'),
+      .describe(
+        'Concepts covered, in the order supplied. Inputs that name the same concept (revenue and Revenue, or one raw tag spelled twice) appear once, under the first spelling.',
+      ),
     cells: z
       .array(
         z
@@ -231,7 +249,11 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
             value: z.number().describe('Reported value.'),
             unit: z.string().describe('Unit of measure for this value.'),
             taxonomy: z.string().describe('Taxonomy the value was read from.'),
-            tag: z.string().describe('XBRL tag that produced the value.'),
+            tag: z
+              .string()
+              .describe(
+                'XBRL tag this value was reported under — one concept can walk several tags, so it can differ between periods of the same company.',
+              ),
             frame: z
               .string()
               .describe(
@@ -264,12 +286,38 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
           .describe('One company-concept pair with no reported value.'),
       )
       .describe(
-        'Company-concept pairs with no data. Deliberately explicit — a missing value is never interpolated or zero-filled.',
+        'Company-concept pairs with no value in any period. Deliberately explicit — a missing value is never interpolated or zero-filled. A pair with values only in periods older than the inline window is not a gap; caveats names it.',
+      ),
+    unknown_concepts: z
+      .array(
+        z
+          .object({
+            concept: z
+              .string()
+              .describe(
+                'Concept as supplied (trimmed) — neither a supported friendly name nor an XBRL tag.',
+              ),
+            derivation: z
+              .string()
+              .optional()
+              .describe(
+                'How to build it from supported concepts when it is a standard combination, e.g. "operating_cash_flow − capex".',
+              ),
+            suggestions: z
+              .array(z.string())
+              .describe(
+                'Up to three closest supported friendly names. Empty when a derivation applies or no name is close.',
+              ),
+          })
+          .describe('One requested concept that was not queried for any company.'),
+      )
+      .describe(
+        'Requested concepts that are neither a supported friendly name nor an XBRL tag (UpperCamelCase, e.g. NetIncomeLoss), reported once each rather than as a gap per company — secedgar_search_concepts lists every supported name. Empty when every concept resolved.',
       ),
     caveats: z
       .array(z.string())
       .describe(
-        "Comparability warnings: a filer missing one or two calendar quarters from the frame-tagged series, a concept whose values stop at least two full years behind the rest of that company's reporting (either an XBRL tag SEC has retired, or a current tag the filer stopped using), period ends that differ inside one aligned period, and concepts whose unit differs across companies. Company-specific warnings are prefixed with the company name. Empty when nothing needs flagging.",
+        "Comparability warnings: a filer missing one or two calendar quarters from the frame-tagged series, a concept whose values stop at least two full years behind the rest of that company's reporting (either an XBRL tag SEC has retired, or a current tag the filer stopped using), period ends that differ inside one aligned period, concepts whose unit differs across companies, and — one line per concept — the companies that report a concept but have no value inside the inline periods, each with its newest period (its values are in the dataframe), and the concept inputs merged because they name the same concept. Company-specific warnings are prefixed with the company name. Empty when nothing needs flagging.",
       ),
     dataset: z
       .object({
@@ -288,6 +336,48 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
   }),
 
   async handler(input, ctx) {
+    /**
+     * A name that is neither a catalog entry nor tag-shaped is reported once,
+     * apart from the per-company gaps it would otherwise fill with "reports no
+     * X" rows. Only a call whose every concept is unknown fails, and it fails
+     * before any company is resolved (#128).
+     */
+    const unknownConcepts: UnknownConcept[] = [];
+    /**
+     * Each concept is compared once, keyed by what it resolves to — the catalog
+     * entry, or the trimmed raw tag — under the first spelling supplied, so
+     * `revenue` and `Revenue` do not double every cell, gap, and caveat. A
+     * catalog name and a raw tag it walks stay separate: they are different
+     * concepts that share a tag (#145).
+     */
+    const knownByIdentity = new Map<
+      ConceptMapping | string,
+      { concept: string; merged: string[] }
+    >();
+    for (const concept of input.concepts) {
+      const unknown = findUnknownConcept(concept);
+      if (unknown) {
+        if (!unknownConcepts.some((u) => u.concept === unknown.concept)) {
+          unknownConcepts.push(unknown);
+        }
+        continue;
+      }
+      const identity = resolveConcept(concept) ?? concept.trim();
+      const known = knownByIdentity.get(identity);
+      if (!known) knownByIdentity.set(identity, { concept, merged: [] });
+      else if (concept !== known.concept && !known.merged.includes(concept)) {
+        known.merged.push(concept);
+      }
+    }
+    const knownConcepts = [...knownByIdentity.values()];
+    if (knownConcepts.length === 0) {
+      const { message, hint } = describeUnknownConcepts(unknownConcepts);
+      throw ctx.fail('unknown_concept', message, {
+        recovery: { hint },
+        unknown_concepts: unknownConcepts,
+      });
+    }
+
     const api = getEdgarApiService();
 
     const resolvedCompanies: Array<CikMatch & { input: string }> = [];
@@ -331,7 +421,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       );
     }
 
-    const targets = input.concepts.map((concept) => ({
+    const targets = knownConcepts.map(({ concept }) => ({
       concept,
       target: resolveConceptTarget(concept, input.taxonomy),
     }));
@@ -342,6 +432,13 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     const unitsByConcept = new Map<string, Set<string>>();
     /** Deduped so a caveat shared by several concepts is stated once. */
     const caveatSet = new Set<string>();
+    for (const { concept, merged } of knownConcepts) {
+      if (merged.length === 0) continue;
+      const one = merged.length === 1;
+      caveatSet.add(
+        `${merged.map((m) => `'${m}'`).join(' and ')} ${one ? 'resolves' : 'resolve'} to the same concept as '${concept}', so the comparison reads ${one ? 'it' : 'them'} once, under '${concept}'.`,
+      );
+    }
 
     for (const company of resolvedCompanies) {
       const facts = await api.tryGetCompanyFacts(company.cik);
@@ -392,20 +489,22 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
          * instant beats an interim snapshot inside the same calendar year.
          */
         const seen = new Set<string>();
+        const units = unitsByConcept.get(concept) ?? new Set<string>();
         for (const unit of series.series) {
           if (QUARTER_FRAME.test(unit.frame)) quarterFrames.push(unit.frame);
           const period = periodKey(unit.frame, input.period_type);
           if (!period || seen.has(period)) continue;
           seen.add(period);
+          units.add(unit.unit);
           cells.push({
             cik: company.cik,
             company: name,
             concept,
             period,
             value: unit.val,
-            unit: series.unit || target.unit || '',
+            unit: unit.unit,
             taxonomy: series.taxonomy,
-            tag: series.tag,
+            tag: unit.tag,
             frame: unit.frame,
             period_end: unit.end,
             form: unit.form,
@@ -422,8 +521,6 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
           });
           continue;
         }
-        const units = unitsByConcept.get(concept) ?? new Set<string>();
-        units.add(series.unit || target.unit || '');
         unitsByConcept.set(concept, units);
 
         // series[] is sorted newest-first by period end.
@@ -462,10 +559,16 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     }
 
     if (cells.length === 0) {
+      const unknownNote =
+        unknownConcepts.length > 0 ? ` ${describeUnknownConcepts(unknownConcepts).message}` : '';
       throw ctx.fail(
         'no_comparable_data',
-        `None of the ${included.length} resolved companies report any of the requested concepts for ${input.period_type} periods.`,
-        { ...ctx.recoveryFor('no_comparable_data'), gaps },
+        `None of the ${included.length} resolved companies report any of the requested concepts for ${input.period_type} periods.${unknownNote}`,
+        {
+          ...ctx.recoveryFor('no_comparable_data'),
+          gaps,
+          ...(unknownConcepts.length > 0 ? { unknown_concepts: unknownConcepts } : {}),
+        },
       );
     }
 
@@ -515,6 +618,25 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       }
     }
 
+    /**
+     * The window follows whichever filer has reached the newest period, so a
+     * company reporting a concept only for older periods has no value inline —
+     * and, since it does report the concept, no gap either (#144). Each such
+     * pair keeps its newest aligned period; companies stay in input order.
+     */
+    const inlinePairs = new Set(inlineCells.map((c) => `${c.cik}|${c.concept}`));
+    const outsideWindow = new Map<string, Map<string, { company: string; newest: string }>>();
+    for (const cell of cells) {
+      if (inlinePairs.has(`${cell.cik}|${cell.concept}`)) continue;
+      const byCompany =
+        outsideWindow.get(cell.concept) ?? new Map<string, { company: string; newest: string }>();
+      const known = byCompany.get(cell.cik);
+      if (!known || cell.period.localeCompare(known.newest) > 0) {
+        byCompany.set(cell.cik, { company: cell.company, newest: cell.period });
+      }
+      outsideWindow.set(cell.concept, byCompany);
+    }
+
     let dataset: { name: string; row_count: number; expires_at: string } | undefined;
     const bridge = getCanvasBridge();
     if (bridge) {
@@ -531,6 +653,37 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       if (registered) dataset = toDatasetField(registered);
     }
 
+    /**
+     * What would widen the inline window, when anything would: the cell ceiling
+     * stopped it short of `periods` (narrowing the call helps, raising `periods`
+     * does not), or `periods` itself bounded it and can still go up. Read only
+     * when the window dropped periods.
+     */
+    const widen =
+      inlinePeriods.length < input.periods
+        ? 'narrow companies or concepts'
+        : input.periods < MAX_PERIODS
+          ? 'raise periods'
+          : undefined;
+
+    // One line per concept in input order, after registration so it can name a table that exists.
+    const reach = dataset
+      ? `those values are in dataframe ${dataset.name} — query it with secedgar_dataframe_query${widen ? ` — or ${widen} to bring them inline` : ''}`
+      : widen
+        ? `${widen} to bring those values inline`
+        : 'secedgar_get_financials returns each company’s full history of the concept';
+    for (const { concept } of targets) {
+      const byCompany = outsideWindow.get(concept);
+      if (!byCompany) continue;
+      const named = [...byCompany.values()]
+        .map((m) => `${m.company} (newest ${m.newest})`)
+        .join(', ');
+      const subject = byCompany.size === 1 ? 'It' : 'Each';
+      caveatSet.add(
+        `${concept}: no value inside the inline periods (${inlinePeriods.join(', ')}) for ${named}. ${subject} reports ${concept} for earlier periods only; ${reach}.`,
+      );
+    }
+
     // Emitted after registration so the pointer names a table that exists (#104).
     if (allPeriods.length > inlinePeriods.length) {
       ctx.enrich.truncated({
@@ -539,7 +692,11 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
         guidance: `Showing the ${inlinePeriods.length} most-recent of ${allPeriods.length} aligned periods. ${
           dataset
             ? dataframeGuidance(dataset)
-            : 'Narrow companies or concepts to fit more periods inline.'
+            : widen === 'raise periods'
+              ? `Raise periods (up to ${MAX_PERIODS}) to fit more periods inline.`
+              : widen
+                ? 'Narrow companies or concepts to fit more periods inline.'
+                : `${MAX_PERIODS} is the most periods the inline matrix shows; secedgar_get_financials returns one company’s full history of a concept.`
         }`,
       });
     } else if (dataset) {
@@ -566,6 +723,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       })),
       cells: inlineCells,
       gaps,
+      unknown_concepts: unknownConcepts,
       caveats: [...caveatSet],
       dataset,
     };
@@ -586,6 +744,9 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       out.push(
         `Concept: ${concept.label} [${concept.concept}] — units: ${concept.units.join(', ') || 'none'}`,
       );
+    }
+    for (const unknown of result.unknown_concepts) {
+      out.push(`Unknown concept: ${unknown.concept} — not queried. ${unknownConceptHint(unknown)}`);
     }
 
     // Cells are rendered as a flat, sorted list rather than a lookup grid: every

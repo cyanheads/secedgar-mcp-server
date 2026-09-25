@@ -17,7 +17,6 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
   initEdgarApiService: vi.fn(),
   suggestCompanies: vi.fn(() => []),
   pickPreferredTicker: vi.fn(),
-  trigramSimilarity: vi.fn(),
 }));
 
 // Partial mock: the canvas accessors are stubbed, but `dataframeGuidance` stays
@@ -369,6 +368,43 @@ describe('getFinancialsTool — input validation', () => {
     const input = getFinancialsTool.input.parse({ company: 'AAPL', concept: 'revenue' });
     const err = await caught(getFinancialsTool.handler(input, ctx));
     expect(JSON.stringify(err)).not.toContain('PrivateApp private@test.com');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Concept input as a URL path segment (#128)
+// ---------------------------------------------------------------------------
+
+describe('concept input never reaches a request path (#128)', () => {
+  const traversal = [
+    '../submissions/CIK0000320193',
+    'NetIncomeLoss/../../x',
+    '%2e%2e%2fx',
+    'a?b=c',
+  ];
+
+  it.each(traversal)('get_financials rejects %j before any EDGAR call', async (concept) => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const err = await caught(
+      getFinancialsTool.handler(getFinancialsTool.input.parse({ company: 'AAPL', concept }), ctx),
+    );
+    expect(err.data.reason).toBe('unknown_concept');
+    for (const fn of [
+      mockApi.resolveCik,
+      mockApi.tryGetCompanyConcept,
+      mockApi.tryGetCompanyFacts,
+    ]) {
+      expect(fn).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each(traversal)('fetch_frames rejects %j before the frames request', async (concept) => {
+    const ctx = createMockContext({ errors: fetchFramesTool.errors });
+    const err = await caught(
+      fetchFramesTool.handler(fetchFramesTool.input.parse({ concept, period: 'CY2023' }), ctx),
+    );
+    expect(err.data.reason).toBe('unknown_concept');
+    expect(mockApi.tryGetFrames).not.toHaveBeenCalled();
   });
 });
 

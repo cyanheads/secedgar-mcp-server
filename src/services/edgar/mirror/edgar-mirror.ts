@@ -17,6 +17,7 @@ import {
   type SyncResult,
   sqliteMirrorStore,
 } from '@cyanheads/mcp-ts-core/mirror';
+import { frameHolderFact } from '../concept-series.js';
 import type {
   CompanyConceptResponse,
   CompanyConceptUnit,
@@ -68,6 +69,23 @@ interface CompanyFactsScanRow {
   tag: string;
   taxonomy: string;
   units_json: string;
+}
+
+/** A camel-case compound element name (`InterestExpenseNonoperating`) — never prose. */
+const COMPOUND_TAG = /[a-z][A-Z]/;
+
+/**
+ * A stored taxonomy label, or `undefined` when SEC served the tag without one.
+ * The ingester writes the tag itself in that case (`concept.label ?? tag`), so a
+ * label equal to a compound tag is read as none — callers then fall back to the
+ * concept's own label instead of printing the raw tag as one. A one-word
+ * element's real label is the word itself (`Revenues`, `Assets`), so equality
+ * there is kept. Read-side, so rows already stored need no migration.
+ */
+function storedLabel(label: unknown, tag: string): string | undefined {
+  if (label == null) return;
+  const text = String(label);
+  return text === tag && COMPOUND_TAG.test(tag) ? undefined : text;
 }
 
 export class EdgarMirror {
@@ -152,6 +170,7 @@ export class EdgarMirror {
   /**
    * One company's full concept series in `companyconcept` API shape, or null when
    * the mirror has no row for this (cik, taxonomy, tag). Assumes the layer is ready.
+   * A tag SEC serves without a label reads back with an empty one ({@link storedLabel}).
    */
   async getCompanyConcept(
     cik: string,
@@ -162,12 +181,13 @@ export class EdgarMirror {
     const [row] = await this.companyFacts.getByIds([id]);
     if (!row) return null;
     const description = row.description == null ? undefined : String(row.description);
+    const storedTag = String(row.tag ?? tag);
     return {
       cik: Number(row.cik),
       entityName: String(row.entity_name ?? ''),
       taxonomy: String(row.taxonomy ?? taxonomy),
-      tag: String(row.tag ?? tag),
-      label: String(row.label ?? tag),
+      tag: storedTag,
+      label: storedLabel(row.label, storedTag) ?? '',
       units: JSON.parse(String(row.units_json ?? '{}')) as Record<string, CompanyConceptUnit[]>,
       ...(description !== undefined ? { description } : {}),
     };
@@ -198,9 +218,10 @@ export class EdgarMirror {
         namespace = {};
         facts[row.taxonomy] = namespace;
       }
+      const label = storedLabel(row.label, row.tag);
       namespace[row.tag] = {
-        label: row.label ?? row.tag,
         units: JSON.parse(row.units_json) as Record<string, CompanyConceptUnit[]>,
+        ...(label === undefined ? {} : { label }),
         ...(row.description == null ? {} : { description: row.description }),
       };
     }
@@ -215,7 +236,15 @@ export class EdgarMirror {
    * `unit` arrives in the dashed wire form the tool uses (`USD-per-shares`); the
    * `units` map is keyed by the slashed form (`USD/shares`). `loc` (business
    * location) is absent — companyfacts carries no location; the live frames API
-   * adds it. The tool treats an empty `loc` as absent.
+   * adds it. The tool treats an empty `loc` as absent. A tag SEC serves without
+   * a label answers with an empty `label`, as the live frames API does
+   * ({@link storedLabel}).
+   *
+   * Unlike the live frames API, the store carries each fact's form, so the
+   * per-filer holder-form rules apply ({@link frameHolderFact}): a proxy-held
+   * frame answers with the filer's reporting-form fact (#123), and an annual
+   * frame a 10-Q holds with a trailing-twelve-month figure drops that filer's row
+   * (#142). The response says so (`holderFormsResolved`).
    */
   async getFrames(
     taxonomy: string,
@@ -233,23 +262,32 @@ export class EdgarMirror {
     if (rows.length === 0) return null;
 
     const data: FrameEntry[] = [];
-    let label = tag;
+    /** Empty until a row carries a real label — the live API's answer for an unlabeled tag. */
+    let label = '';
     let description: string | undefined;
     for (const row of rows) {
-      const units = JSON.parse(row.units_json) as Record<string, CompanyConceptUnit[]>;
+      const units = JSON.parse(row.units_json) as Record<string, unknown>;
+      // SEC serves some filers' units as an object where an array belongs (#141).
       const series = units[unitKey];
-      if (!series) continue;
+      if (!Array.isArray(series)) continue;
+      const facts: CompanyConceptUnit[] = series;
       // The frame members are the datapoints whose `frame` equals the period; if a
       // value was re-filed, the latest filing wins (matches get_financials dedup).
-      let best: CompanyConceptUnit | undefined;
-      for (const u of series) {
+      let holder: CompanyConceptUnit | undefined;
+      for (const u of facts) {
         if (u.frame !== period) continue;
-        if (!best || u.filed > best.filed) best = u;
+        if (!holder || u.filed > holder.filed) holder = u;
       }
+      if (!holder) continue;
+      // The same holder-form rules the per-filer reads apply (#123, #142).
+      const best = frameHolderFact(holder, facts);
       if (!best) continue;
-      if (label === tag && row.label) {
-        label = row.label;
-        description = row.description ?? undefined;
+      if (!label) {
+        const rowLabel = storedLabel(row.label, tag);
+        if (rowLabel) {
+          label = rowLabel;
+          description = row.description ?? undefined;
+        }
       }
       data.push({
         accn: best.accn,
@@ -267,6 +305,7 @@ export class EdgarMirror {
       data,
       label,
       pts: data.length,
+      holderFormsResolved: true,
       tag,
       taxonomy,
       uom: unit,

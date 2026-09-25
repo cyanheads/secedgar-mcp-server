@@ -36,8 +36,13 @@ const pointSchema = z
     accession_number: z
       .string()
       .describe('Source filing accession number — pass to secedgar_get_filing.'),
+    tag: z
+      .string()
+      .describe(
+        "XBRL tag this value was reported under — differs from the line's tag when an older or successor tag in the concept answers this period.",
+      ),
   })
-  .describe('One reported value with its period and source filing.');
+  .describe('One reported value with its period, source filing, and source tag.');
 
 /** Most recent value whose frame matches `pattern`, or undefined when none does. */
 function latest(series: readonly FramedUnit[], pattern: RegExp) {
@@ -49,6 +54,7 @@ function latest(series: readonly FramedUnit[], pattern: RegExp) {
         period_end: hit.end,
         form: hit.form,
         accession_number: hit.accn,
+        tag: hit.tag,
       }
     : undefined;
 }
@@ -129,8 +135,16 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
                 'Statement group: income_statement, balance_sheet, cash_flow, per_share, or entity_info.',
               ),
             taxonomy: z.string().describe('Taxonomy the value was read from.'),
-            tag: z.string().describe('XBRL tag that produced the value.'),
-            unit: z.string().describe('Unit of measure (e.g. "USD", "USD/shares", "shares").'),
+            tag: z
+              .string()
+              .describe(
+                'XBRL tag behind the newest value — each point names its own when the concept walks several.',
+              ),
+            unit: z
+              .string()
+              .describe(
+                'Unit of measure of the newest value (e.g. "USD", "USD/shares", "shares").',
+              ),
             annual: pointSchema
               .optional()
               .describe(
@@ -342,8 +356,11 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
       `${result.concepts_resolved} of ${result.concepts_total} concepts resolved`,
     ];
 
-    const point = (kind: string, p: NonNullable<ReturnType<typeof latest>>) =>
-      `  ${kind} ${p.period} = ${p.value} | ends ${p.period_end} | ${p.form} [${p.accession_number}]`;
+    /** A point from the line's own tag carries it in the line header above. */
+    const point = (kind: string, p: NonNullable<ReturnType<typeof latest>>, lineTag: string) =>
+      `  ${kind} ${p.period} = ${p.value} | ends ${p.period_end} | ${p.form} [${p.accession_number}]${
+        p.tag === lineTag ? '' : ` | tag ${p.tag}`
+      }`;
 
     let group = '';
     for (const line of result.lines) {
@@ -352,9 +369,9 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
         out.push('', `### ${group}`);
       }
       out.push(`- ${line.label} [${line.concept} → ${line.taxonomy}:${line.tag}, ${line.unit}]`);
-      if (line.annual) out.push(point('annual', line.annual));
-      if (line.quarterly) out.push(point('quarterly', line.quarterly));
-      if (line.instant) out.push(point('instant', line.instant));
+      if (line.annual) out.push(point('annual', line.annual, line.tag));
+      if (line.quarterly) out.push(point('quarterly', line.quarterly, line.tag));
+      if (line.instant) out.push(point('instant', line.instant, line.tag));
     }
 
     if (result.gaps.length > 0) {

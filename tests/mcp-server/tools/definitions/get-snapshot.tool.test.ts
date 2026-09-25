@@ -113,6 +113,35 @@ describe('getSnapshotTool', () => {
     expect(revenue?.instant).toBeUndefined();
   });
 
+  it('pins every field of a resolved line', async () => {
+    const ctx = createMockContext({ errors: getSnapshotTool.errors });
+    const input = getSnapshotTool.input.parse({ company: 'AAPL' });
+    const result = await getSnapshotTool.handler(input, ctx);
+
+    expect(result.lines.find((l) => l.concept === 'revenue')).toMatchObject({
+      concept: 'revenue',
+      label: 'Revenue from Contract with Customer',
+      group: 'income_statement',
+      taxonomy: 'us-gaap',
+      tag: 'RevenueFromContractWithCustomerExcludingAssessedTax',
+      unit: 'USD',
+      annual: {
+        period: 'CY2024',
+        value: 391_035_000_000,
+        period_end: '2024-09-28',
+        form: '10-K',
+        accession_number: '0000320193-24-000123',
+      },
+      quarterly: {
+        period: 'CY2025Q2',
+        value: 94_036_000_000,
+        period_end: '2025-06-28',
+        form: '10-Q',
+        accession_number: '0000320193-25-000073',
+      },
+    });
+  });
+
   it('reports a point-in-time value for a balance-sheet concept', async () => {
     const ctx = createMockContext({ errors: getSnapshotTool.errors });
     const input = getSnapshotTool.input.parse({ company: 'AAPL' });
@@ -153,6 +182,20 @@ describe('getSnapshotTool', () => {
     expect(result.concepts_resolved).toBe(result.lines.length);
     expect(result.concepts_total).toBe(result.lines.length + result.gaps.length);
     expect(result.concepts_total).toBeGreaterThan(result.concepts_resolved);
+  });
+
+  it('attempts all 36 catalog concepts, the three #130 additions included', async () => {
+    const ctx = createMockContext({ errors: getSnapshotTool.errors });
+    const result = await getSnapshotTool.handler(
+      getSnapshotTool.input.parse({ company: 'AAPL' }),
+      ctx,
+    );
+
+    expect(result.concepts_total).toBe(36);
+    const gapNames = result.gaps.map((g) => g.concept);
+    for (const concept of ['ppe_net', 'pretax_income', 'shares_diluted']) {
+      expect(gapNames).toContain(concept);
+    }
   });
 
   it('omits the quarterly slot when period_type is annual', async () => {
@@ -365,6 +408,209 @@ describe('getSnapshotTool', () => {
 
       expect(result.caveats).toEqual([]);
     });
+  });
+
+  it('reads a proxy-held annual frame as the 10-K fact (#123)', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000310158', name: 'Merck & Co., Inc.' });
+    mockApi.tryGetCompanyFacts.mockResolvedValue({
+      facts: {
+        'us-gaap': {
+          NetIncomeLoss: {
+            label: 'Net Income (Loss)',
+            units: {
+              USD: [
+                fact({
+                  frame: 'CY2025',
+                  start: '2025-01-01',
+                  end: '2025-12-31',
+                  form: 'DEF 14A',
+                  accn: '0001193125-26-147704',
+                  filed: '2026-04-08',
+                  val: 18_300_000_000,
+                }),
+                // SEC frames only the latest-filed fact, so the 10-K twin carries none.
+                {
+                  start: '2025-01-01',
+                  end: '2025-12-31',
+                  accn: '0000310158-26-000012',
+                  filed: '2026-02-24',
+                  form: '10-K',
+                  fp: 'FY',
+                  fy: 2025,
+                  val: 18_254_000_000,
+                },
+              ],
+            },
+          },
+        },
+      },
+    } satisfies CompanyFactsResponse);
+
+    const ctx = createMockContext({ errors: getSnapshotTool.errors });
+    const result = await getSnapshotTool.handler(
+      getSnapshotTool.input.parse({ company: 'MRK' }),
+      ctx,
+    );
+    expect(result.lines.find((l) => l.concept === 'net_income')?.annual).toMatchObject({
+      period: 'CY2025',
+      value: 18_254_000_000,
+      form: '10-K',
+      accession_number: '0000310158-26-000012',
+    });
+  });
+
+  it('names the source tag on every point, and the line tag follows the newest value (#125)', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0001045810', name: 'NVIDIA CORP' });
+    mockApi.tryGetCompanyFacts.mockResolvedValue({
+      facts: {
+        'us-gaap': {
+          PaymentsToAcquirePropertyPlantAndEquipment: {
+            label: 'Payments to Acquire PP&E',
+            units: {
+              USD: [
+                fact({ frame: 'CY2020Q1', end: '2020-04-26', val: 155_000_000, form: '10-Q' }),
+                fact({ frame: 'CY2020', end: '2021-01-31', val: 1_128_000_000 }),
+              ],
+            },
+          },
+          PaymentsToAcquireProductiveAssets: {
+            label: 'Payments to Acquire Productive Assets',
+            units: {
+              USD: [
+                fact({ frame: 'CY2025', end: '2026-01-25', val: 6_042_000_000 }),
+                fact({ frame: 'CY2026Q1', end: '2026-04-26', val: 1_700_000_000, form: '10-Q' }),
+              ],
+            },
+          },
+        },
+      },
+    } satisfies CompanyFactsResponse);
+
+    const result = await runToolContract(getSnapshotTool, { company: 'NVDA' });
+    expect(result.isError).toBeFalsy();
+    const output = getSnapshotTool.output.parse(result.structuredContent);
+    const capex = output.lines.find((l) => l.concept === 'capex');
+    expect(capex).toMatchObject({
+      tag: 'PaymentsToAcquireProductiveAssets',
+      label: 'Payments to Acquire Productive Assets',
+      annual: { period: 'CY2025', value: 6_042_000_000, tag: 'PaymentsToAcquireProductiveAssets' },
+      quarterly: {
+        period: 'CY2026Q1',
+        value: 1_700_000_000,
+        tag: 'PaymentsToAcquireProductiveAssets',
+      },
+    });
+    expect(output.caveats.some((c) => c.startsWith('capex: '))).toBe(false);
+    expect(blockText(result.content)).toContain(
+      '[capex → us-gaap:PaymentsToAcquireProductiveAssets, USD]',
+    );
+  });
+
+  it('labels a line by the concept when SEC serves its newest tag without a label (#125)', async () => {
+    mockApi.tryGetCompanyFacts.mockResolvedValue({
+      facts: {
+        'us-gaap': {
+          InterestExpenseNonoperating: {
+            units: { USD: [fact({ frame: 'CY2025', end: '2026-01-25', val: 259_000_000 })] },
+          },
+        },
+      },
+    } satisfies CompanyFactsResponse);
+    const ctx = createMockContext({ errors: getSnapshotTool.errors });
+    const result = await getSnapshotTool.handler(
+      getSnapshotTool.input.parse({ company: 'NVDA' }),
+      ctx,
+    );
+
+    expect(result.lines.find((l) => l.concept === 'interest_expense')).toMatchObject({
+      label: 'Interest Expense',
+      tag: 'InterestExpenseNonoperating',
+    });
+  });
+
+  it('renders a point’s tag when it differs from the line’s (#125)', () => {
+    const text = blockText(
+      getSnapshotTool.format!({
+        company: 'X',
+        cik: '0000000001',
+        taxonomy: 'us-gaap',
+        period_type: 'both',
+        concepts_resolved: 1,
+        concepts_total: 1,
+        lines: [
+          {
+            concept: 'capex',
+            label: 'Capex',
+            group: 'cash_flow',
+            taxonomy: 'us-gaap',
+            tag: 'PaymentsToAcquireProductiveAssets',
+            unit: 'USD',
+            annual: {
+              period: 'CY2025',
+              value: 1,
+              period_end: '2025-12-31',
+              form: '10-K',
+              accession_number: 'a',
+              tag: 'PaymentsToAcquireProductiveAssets',
+            },
+            quarterly: {
+              period: 'CY2024Q1',
+              value: 2,
+              period_end: '2024-03-31',
+              form: '10-Q',
+              accession_number: 'b',
+              tag: 'PaymentsToAcquirePropertyPlantAndEquipment',
+            },
+          },
+        ],
+        gaps: [],
+        caveats: [],
+      }),
+    );
+    expect(text).toContain(
+      'quarterly CY2024Q1 = 2 | ends 2024-03-31 | 10-Q [b] | tag PaymentsToAcquirePropertyPlantAndEquipment',
+    );
+    expect(text).toContain('annual CY2025 = 1 | ends 2025-12-31 | 10-K [a]\n');
+  });
+
+  it('reports the 10-K year as the latest annual value, not a 10-Q TTM (#142)', async () => {
+    const tenK = fact({
+      frame: 'CY2025',
+      start: '2025-01-01',
+      end: '2025-12-31',
+      accn: 'ten-k',
+      val: 131_819_000_000,
+    });
+    const ttm = fact({
+      frame: 'CY2026',
+      start: '2025-07-01',
+      end: '2026-06-30',
+      filed: '2026-07-31',
+      form: '10-Q',
+      fp: 'Q2',
+      accn: 'ten-q',
+      val: 173_028_000_000,
+    });
+    mockApi.resolveCik.mockResolvedValue({ cik: '0001018724', name: 'AMAZON COM INC' });
+    mockApi.tryGetCompanyFacts.mockResolvedValue({
+      facts: {
+        'us-gaap': {
+          PaymentsToAcquireProductiveAssets: { label: 'Capex', units: { USD: [tenK, ttm] } },
+        },
+      },
+    } satisfies CompanyFactsResponse);
+
+    const result = await runToolContract(getSnapshotTool, {
+      company: 'AMZN',
+      period_type: 'annual',
+    });
+    const output = getSnapshotTool.output.parse(result.structuredContent);
+    expect(output.lines.find((l) => l.concept === 'capex')?.annual).toMatchObject({
+      period: 'CY2025',
+      value: 131_819_000_000,
+      form: '10-K',
+    });
+    expect(blockText(result.content)).toContain('annual CY2025 = 131819000000');
   });
 
   it('throws company_not_found for an unresolvable input', async () => {
