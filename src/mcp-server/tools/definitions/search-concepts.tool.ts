@@ -76,13 +76,13 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
             tags: z
               .array(z.string())
               .describe(
-                'XBRL tags this friendly name resolves to under us-gaap, tried in order. Multiple tags cover historical naming changes (e.g., pre- vs post-ASC 606 revenue) and can include a tag SEC has since retired, kept as a last-resort fallback for filers whose history predates its replacement.',
+                'XBRL tags under us-gaap, tried in order; several cover historical renames (pre- and post-ASC 606 revenue), possibly a retired tag as last resort.',
               ),
             ifrs_tags: z
               .array(z.string())
               .optional()
               .describe(
-                'XBRL tags this friendly name resolves to under taxonomy "ifrs-full", tried in order — a different element set from tags, not a synonym list. Each one is confirmed present in a live 20-F filing. Absent when the concept has no IFRS equivalent, in which case taxonomy "ifrs-full" does not resolve it.',
+                'Tags under taxonomy "ifrs-full", tried in order; a different element set from tags, each seen in a live 20-F. Absent when there is no IFRS equivalent.',
               ),
             related_tags: z
               .array(
@@ -101,7 +101,7 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
               )
               .optional()
               .describe(
-                'Alternate-DEFINITION tags (different meaning from `tags`, not historical synonyms) that a meaningful share of filers report this metric under instead — surfaced by secedgar_fetch_frames as `related_tags`. Present only when the concept has a known high-coverage alternate (e.g. cash → restricted-cash-inclusive total, equity → NCI-inclusive total). Query these separately; do not blindly union them with the base tag.',
+                'Alternate-definition tags (not synonyms) many filers report this metric under, as secedgar_fetch_frames flags them (e.g., cash including restricted cash). Query them separately, never blindly unioned. Absent when none is known.',
               ),
             taxonomy: z
               .enum(TAXONOMY_VALUES)
@@ -111,12 +111,12 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
             unit: z
               .string()
               .describe(
-                'Unit of measure (USD, USD/shares, shares, pure). secedgar_fetch_frames accepts both slash and dashed forms.',
+                'Unit of measure (USD, USD/shares, shares, pure); secedgar_fetch_frames also takes the dashed form.',
               ),
             group: z
               .enum(GROUP_VALUES)
               .describe(
-                'Statement section this concept belongs to: income_statement, balance_sheet, cash_flow, per_share, or entity_info.',
+                'Statement section: income_statement, balance_sheet, cash_flow, per_share, or entity_info.',
               ),
           })
           .describe('One XBRL concept mapping with its friendly name, tags, and grouping.'),

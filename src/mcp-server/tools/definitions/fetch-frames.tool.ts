@@ -124,25 +124,17 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     taxonomy: z
       .string()
       .describe(
-        'Frames namespace the tag was read from (us-gaap or dei) — a friendly name mapped to dei reads dei under the us-gaap default.',
+        'Frames namespace the tag was read from (us-gaap or dei); a friendly name mapped to dei reads dei.',
       ),
     period: z.string().describe('Calendar period the data was fetched for, echoed from input.'),
-    unit: z
-      .string()
-      .describe(
-        'Unit of measure used for the lookup (always normalized to dashed form, e.g. "USD-per-shares").',
-      ),
+    unit: z.string().describe('Unit of measure, in dashed form (e.g., "USD-per-shares").'),
     label: z.string().describe('Human-readable concept label.'),
     total_companies: z.number().describe('Total companies reporting this metric for this period.'),
-    offset: z
-      .number()
-      .describe('Rank the returned page starts at, 0-based — the effective offset applied.'),
+    offset: z.number().describe('Rank the returned page starts at, 0-based.'),
     next_offset: z
       .number()
       .optional()
-      .describe(
-        'Offset to pass on the next call to continue down the ranking. Absent on the last page (no companies remain past this one).',
-      ),
+      .describe('Offset for the next page down the ranking. Absent on the last page.'),
     data: z
       .array(
         z
@@ -155,9 +147,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
             location: z
               .string()
               .optional()
-              .describe(
-                'Business location (state or country). Absent when SEC has no location for this filer.',
-              ),
+              .describe('Business location (state or country). Absent when SEC has none.'),
             period_end: z.string().describe('Period end date (YYYY-MM-DD).'),
             accession_number: z.string().describe('Source filing for secedgar_get_filing.'),
           })
@@ -169,35 +159,31 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
         name: z
           .string()
           .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
           ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
       })
       .optional()
       .describe(
-        'Canvas dataframe handle holding the full frames response. Absent when canvas is unavailable or materialization failed.',
+        'Dataframe of the full frame, every reporter. Absent when canvas is unavailable or staging failed.',
       ),
     unqueried_tags: z
       .array(z.string())
       .describe(
-        'Other same-meaning XBRL tags in the friendly-name mapping that this call did NOT query (historical/variant spellings of the same metric). Empty for raw tags or single-tag concepts — for alternate-DEFINITION tags some filers use instead, see `related_tags`. For "revenue" this typically lists `Revenues`, `SalesRevenueNet`, `SalesRevenueGoodsNet` — filers reporting under legacy variants are absent from `data`; call again per tag and UNION/COALESCE in SQL to recover them.',
+        'Same-meaning mapped tags this call did not query (e.g., SalesRevenueNet for revenue); their filers are absent from data, so fetch each and UNION/COALESCE in SQL. Empty for raw tags and single-tag concepts.',
       ),
     related_tags: z
       .array(
         z
           .object({
-            tag: z
-              .string()
-              .describe(
-                'Alternate XBRL tag a meaningful share of filers report this metric under instead.',
-              ),
+            tag: z.string().describe('Alternate XBRL tag those filers report under.'),
             note: z.string().describe('How this tag differs in definition from the queried tag.'),
           })
           .describe('One alternate-definition tag and the reason it differs.'),
       )
       .describe(
-        'Alternate-DEFINITION XBRL tags (distinct from same-meaning `unqueried_tags`) that a meaningful share of filers use as their primary line for this metric — e.g. `cash` filers reporting `CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents` (incl. restricted cash), `equity` filers reporting `StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest` (incl. noncontrolling interest). These filers are NOT in `data` or the dataframe, so a whole-universe screen on the base tag silently under-counts. To recover them, run a separate fetch_frames against the alternate tag — do NOT blindly UNION (definitions differ; you would mix or double-count). Empty when the concept has no known high-coverage alternate.',
+        'Alternate-definition tags many filers use as their primary line (e.g., cash including restricted cash); those filers are absent from data. Fetch each separately; never blindly UNION, since definitions differ. Empty when none is known.',
       ),
     value_distribution: z
       .object({
@@ -207,24 +193,22 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
         max_to_p95_ratio: z
           .number()
           .describe(
-            'Maximum value divided by 95th percentile. Robust to zero/negative bulk (unlike median-based ratios — many frames have median = 0 or negative, e.g. EPS with many loss-making filers). Typical heavy-tail frames sit in the 10–50× range (mega-caps over the rest); ratios above ~200× usually indicate a filer-side XBRL scale-factor error (wrong `decimals` attribute) — verify the topmost row(s) in `data` before trusting absolute rankings.',
+            'Max divided by p95. Heavy-tail frames sit near 10–50×; above ~200× usually means a filer-side scale-factor error, so check the top rows of data before trusting rankings.',
           ),
       })
-      .describe(
-        'Distribution stats across the full frame, computed during materialization. Use `max_to_p95_ratio` as the primary outlier signal — it catches scale-factor anomalies even when median is 0 or negative.',
-      ),
+      .describe('Distribution across the full frame; max_to_p95_ratio is the outlier signal.'),
     period_end_range: z
       .object({
         min: z.string().describe('Earliest period_end across all rows (YYYY-MM-DD).'),
         max: z.string().describe('Latest period_end across all rows (YYYY-MM-DD).'),
       })
       .describe(
-        'Range of period_end dates across the frame. SEC normalizes to calendar periods but filers report against their own fiscal year-ends, so a "CY2023" duration frame can contain period_ends from 2023-01-31 (January-FY filers like Walmart) to 2024-12-31 (calendar-FY filers reported late). Wide ranges mean cross-comparison mixes fiscal periods.',
+        'Range of period_end dates; filers report on their own fiscal years, so "CY2023" can span 2023-01-31 to 2024-12-31, mixing fiscal periods.',
       ),
     caveats: z
       .array(z.string())
       .describe(
-        "Data-completeness warnings specific to this query. Populated for duration periods 'CY####Q[1-4]', where SEC XBRL omits filers' fiscal Q4 (reported only as the 10-K residual) — affected filers are silently absent from the frame. Populated for annual ('CY####') NetIncomeLoss frames, where a filer's row can be its proxy statement's pay-versus-performance figure rather than the 10-K's. Populated for an annual frame whose calendar year is still open or inside its 10-K filing window, where a filer's row can be a trailing-twelve-month figure from a 10-Q rather than a fiscal year. Also flags a value distribution whose top rows look like split or scale-factor artifacts. Otherwise empty.",
+        'Completeness warnings, else empty: quarterly frames (CY####Q#) omit fiscal-Q4 filers; annual NetIncomeLoss rows may be proxy pay-versus-performance figures; an annual frame still open or in its 10-K window may hold 10-Q trailing-twelve-month figures; top rows may be split or scale artifacts.',
       ),
   }),
 

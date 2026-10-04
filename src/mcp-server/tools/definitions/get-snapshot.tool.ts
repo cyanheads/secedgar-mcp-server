@@ -35,12 +35,8 @@ const pointSchema = z
     form: z.string().describe('Source filing type (10-K, 10-Q, 20-F).'),
     accession_number: z
       .string()
-      .describe('Source filing accession number — pass to secedgar_get_filing.'),
-    tag: z
-      .string()
-      .describe(
-        "XBRL tag this value was reported under — differs from the line's tag when an older or successor tag in the concept answers this period.",
-      ),
+      .describe('Source filing accession number for secedgar_get_filing.'),
+    tag: z.string().describe("XBRL tag behind this value; can differ from the line's tag."),
   })
   .describe('One reported value with its period, source filing, and source tag.');
 
@@ -135,33 +131,19 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
                 'Statement group: income_statement, balance_sheet, cash_flow, per_share, or entity_info.',
               ),
             taxonomy: z.string().describe('Taxonomy the value was read from.'),
-            tag: z
-              .string()
-              .describe(
-                'XBRL tag behind the newest value — each point names its own when the concept walks several.',
-              ),
+            tag: z.string().describe('XBRL tag behind the newest value; each point names its own.'),
             unit: z
               .string()
               .describe(
-                'Unit of measure of the newest value (e.g. "USD", "USD/shares", "shares").',
+                'Unit of every point on the line (e.g., "USD"). A concept in several units reads its newest value\'s unit, then the one with more periods; secedgar_get_financials reads the others.',
               ),
-            annual: pointSchema
-              .optional()
-              .describe(
-                'Latest full-year (CY####) value. Absent for point-in-time concepts and when period_type excludes it.',
-              ),
-            quarterly: pointSchema
-              .optional()
-              .describe(
-                'Latest single-quarter (CY####Q#) value. Absent for point-in-time concepts and when period_type excludes it.',
-              ),
-            instant: pointSchema
-              .optional()
-              .describe(
-                'Latest point-in-time (CY####Q#I) value. Present for balance-sheet and entity-info concepts.',
-              ),
+            annual: pointSchema.optional().describe('Latest full-year (CY####) value.'),
+            quarterly: pointSchema.optional().describe('Latest single-quarter (CY####Q#) value.'),
+            instant: pointSchema.optional().describe('Latest point-in-time (CY####Q#I) value.'),
           })
-          .describe('One resolved concept with its latest value per period kind.'),
+          .describe(
+            'One concept with its latest values: duration concepts carry annual and quarterly as period_type allows; point-in-time concepts carry instant only.',
+          ),
       )
       .describe('Resolved concepts, ordered by statement group then concept name.'),
     gaps: z
@@ -175,15 +157,13 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
               .array(z.string())
               .describe('XBRL tags attempted, in priority order, before giving up.'),
           })
-          .describe('One concept the filer does not report, with the tags that were tried.'),
+          .describe('One concept the filer does not report.'),
       )
-      .describe(
-        'Concepts with no value for this filer. Deliberately explicit — a missing concept is never zero-filled or interpolated.',
-      ),
+      .describe('Concepts with no value for this filer, never zero-filled or interpolated.'),
     caveats: z
       .array(z.string())
       .describe(
-        "Data-completeness warnings. One entry when one or two calendar quarters are absent from every recent qualifying year, because SEC reports a filer's fiscal Q4 as the 10-K residual rather than a discrete quarterly fact — this applies to calendar-year filers (no discrete Q4) as much as to off-calendar ones, and a filer whose other fiscal quarters span non-calendar durations loses a second quarter the same way. One further entry, prefixed with the concept name, per line whose values stop at least two full years behind the newest period this filer reports anywhere in the profile — either because the line resolved to an XBRL tag SEC has retired from the taxonomy, or because a current tag's series simply ends, which is what a migration to a different element or a dropped disclosure looks like. Empty when nothing needs flagging.",
+        "Completeness warnings, else empty: quarters missing from every recent year (SEC reports fiscal Q4 only within the 10-K), and, prefixed with the concept name, lines stopping 2+ years behind the filer's newest period.",
       ),
   }),
 

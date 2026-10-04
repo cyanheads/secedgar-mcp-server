@@ -247,34 +247,26 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       .string()
       .optional()
       .describe(
-        'The calendar-quarter end date this 13F covers (YYYY-MM-DD), from the filing cover page. Absent if not surfaced in the filing.',
+        'Calendar-quarter end this 13F covers (YYYY-MM-DD), from the cover page. Absent when the filing omits it.',
       ),
     filing_date: z.string().describe('Date the 13F was submitted (YYYY-MM-DD).'),
     accession_number: z
       .string()
-      .describe(
-        'Accession number for this 13F-HR filing — pass to secedgar_get_filing for the full document.',
-      ),
+      .describe('Accession number of this 13F-HR — pass to secedgar_get_filing.'),
     total_holdings_in_filing: z
       .number()
-      .describe(
-        'Total number of raw information-table rows in this filing, before consolidation and the limit.',
-      ),
+      .describe('Raw information-table rows in this filing, before consolidation and limit.'),
     total_positions: z
       .number()
       .optional()
       .describe(
-        'Number of distinct positions after consolidating info-table sub-lines, before the limit. Present only when consolidate=true.',
+        'Distinct positions after consolidating sub-lines, before limit. Present only when consolidate=true.',
       ),
-    offset: z
-      .number()
-      .describe('Row the returned page starts at, 0-based — the effective offset applied.'),
+    offset: z.number().describe('Row the returned page starts at, 0-based.'),
     next_offset: z
       .number()
       .optional()
-      .describe(
-        'Offset to pass on the next call to continue through the positions. Absent on the last page (no rows remain past this one).',
-      ),
+      .describe('Offset for the next page. Absent on the last page.'),
     holdings: z
       .array(
         z
@@ -292,51 +284,47 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
               .number()
               .optional()
               .describe(
-                'Market value of the position in whole USD at the reporting date. SEC Form 13F has reported whole dollars since the 2023 amendments; values from filings before 2023-01-03 (originally thousands) are normalized to whole USD. Absent when not reported.',
+                'Market value in whole USD at the reporting date; values from filings before 2023-01-03, reported in thousands, are scaled to whole USD. Absent when not reported.',
               ),
             shares_or_principal_amount: z
               .number()
               .optional()
-              .describe(
-                'Number of shares (for equities) or principal amount (for debt securities). Absent when not reported.',
-              ),
+              .describe('Shares (equities) or principal amount (debt). Absent when not reported.'),
             shares_or_principal_type: z
               .enum(['SH', 'PRN'])
               .optional()
               .describe(
-                'SH = share position, PRN = principal amount (bonds, notes). Absent when not reported.',
+                'SH shares, PRN principal amount (bonds, notes). Absent when not reported.',
               ),
             put_call: z
               .enum(['Put', 'Call'])
               .optional()
-              .describe(
-                'Options designation. Present only when the row represents a put or call option position.',
-              ),
+              .describe('Present only on a put or call option position.'),
             investment_discretion: z
               .enum(['SOLE', 'DFND', 'OTR'])
               .optional()
               .describe(
-                'SOLE = sole investment discretion, DFND = defined (shared/advised), OTR = other. Absent when not reported.',
+                'SOLE sole discretion, DFND defined (shared or advised), OTR other. Absent when not reported, and on consolidated positions.',
               ),
           })
           .describe('One row from the 13F information table.'),
       )
       .describe(
-        'One page of holdings, `limit` rows starting at `offset` — consolidated positions sorted by market value when consolidate=true, else raw information-table rows in filing order.',
+        '`limit` rows from `offset`: positions by market value when consolidate=true, else raw rows in filing order.',
       ),
     dataset: z
       .object({
         name: z
           .string()
           .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
           ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
       })
       .optional()
       .describe(
-        'Canvas dataframe holding every parsed position from this 13F filing (the inline holdings[] is a preview capped at limit). Each row carries the filer metadata (filer_cik, filer_name, reporting_period, filing_date, accession_number) plus the position fields, so it self-joins across quarters/filers on cusip + reporting_period. Reflects the consolidate setting (consolidated positions when true, raw info-table sub-lines with investment_discretion when false). Query with secedgar_dataframe_query. Absent when canvas is unavailable or the filing had no holdings.',
+        'Dataframe of every position, shaped by consolidate; rows carry the filer keys and join across quarters on cusip + reporting_period. Absent when canvas is unavailable or there are no holdings.',
       ),
   }),
 
@@ -344,9 +332,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     notice: z
       .string()
       .optional()
-      .describe(
-        'Guidance when no filings were found or the result set is empty — suggests alternatives.',
-      ),
+      .describe('Guidance when no filing was found or the result is empty, with alternatives.'),
     truncated: z
       .boolean()
       .optional()

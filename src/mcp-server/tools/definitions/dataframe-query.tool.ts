@@ -175,12 +175,12 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
     row_count: z
       .number()
       .describe(
-        'Rows the query produced, up to `row_limit` (exceeds `rows.length` when `preview` returned fewer). Read it with `row_count_capped`: when that is true this number is the `row_limit` cap itself, and the size of the full result is not in this response.',
+        'Rows the query produced, up to `row_limit`; exceeds `rows.length` when `preview` returned fewer. When `row_count_capped` is true this is the cap, not the full size.',
       ),
     row_count_capped: z
       .boolean()
       .describe(
-        'True when the query matched more rows than `row_limit`, so `row_count` is that cap rather than a total. False means `row_count` is exact — including when it happens to equal `row_limit`.',
+        'True when more rows matched than `row_limit`, so `row_count` is the cap; false means `row_count` is exact.',
       ),
     rows: z
       .array(z.record(z.string(), z.unknown()))

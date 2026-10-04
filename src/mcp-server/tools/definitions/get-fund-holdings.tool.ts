@@ -309,39 +309,37 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       .string()
       .optional()
       .describe(
-        'SEC series ID of the fund this report covers. Absent when the registrant files as a single fund with no series structure, which is how some older exchange-traded trusts are organized.',
+        'SEC series ID of the fund. Absent when the registrant files as a single fund with no series.',
       ),
     series_name: z
       .string()
       .optional()
       .describe(
-        'Fund name as the filer states it on the report. A closed-end fund organized as a single registrant names itself here with no series_id alongside; absent only when the filer leaves the field blank or writes "N/A".',
+        'Fund name on the report; a single-registrant closed-end fund names itself here, with no series_id. Absent when blank or "N/A".',
       ),
     class_ids: z
       .array(z.string())
-      .describe(
-        'SEC class IDs of the share classes covered. One report covers every class of the series, so a fund with both an ETF and an admiral-share class reports them together.',
-      ),
+      .describe('SEC class IDs covered; one report covers every class of the series.'),
     registrant_cik: z.string().describe('CIK of the registrant trust, zero-padded to 10 digits.'),
     registrant_name: z.string().describe('EDGAR-conformed name of the registrant trust.'),
     report_period_date: z
       .string()
       .optional()
       .describe(
-        "Last day of the period this portfolio is reported as of (YYYY-MM-DD). Holdings are the fund's positions on this date, not today's. Absent only when the filer omits it.",
+        'Portfolio date (YYYY-MM-DD): positions as of this date, not today. Absent only when the filer omits it.',
       ),
     report_period_end: z
       .string()
       .optional()
       .describe(
-        "Last day of the fiscal year the reporting period falls in (YYYY-MM-DD) — the fund's fiscal year end, not the portfolio date.",
+        'Fiscal year end the reporting period falls in (YYYY-MM-DD), not the portfolio date.',
       ),
     filing_date: z.string().describe('Date the report was submitted to EDGAR (YYYY-MM-DD).'),
     publication_lag_days: z
       .number()
       .optional()
       .describe(
-        'Days between the portfolio date and the filing date. Absent when the report omits its period date.',
+        'Days from the portfolio date to the filing date. Absent when the report omits its period date.',
       ),
     form: z.string().describe('EDGAR form name — "NPORT-P", or "NPORT-P/A" for an amended report.'),
     accession_number: z
@@ -351,7 +349,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       .boolean()
       .optional()
       .describe(
-        'True when the fund reports this as its last filing on the series, which marks a liquidation or merger. Absent when the filing does not answer.',
+        'True when the fund marks this its last filing for the series (liquidation or merger). Absent when unstated.',
       ),
     net_assets_usd: z
       .number()
@@ -367,22 +365,16 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       .number()
       .optional()
       .describe('Fund total liabilities in USD at the report date.'),
-    total_holdings: z
-      .number()
-      .describe(
-        'Positions in the report, before offset and limit — the size of the full portfolio.',
-      ),
+    total_holdings: z.number().describe('Positions in the full report, before offset and limit.'),
     offset: z.number().describe('Position the returned page starts at, 0-based.'),
     next_offset: z
       .number()
       .optional()
-      .describe(
-        'Offset to pass on the next call to continue through the portfolio. Absent on the last page.',
-      ),
+      .describe('Offset for the next page. Absent on the last page.'),
     available_report_periods: z
       .array(z.string())
       .describe(
-        "Period end dates of this fund's reports, newest first — the horizon report_date can address, not the fund's full history. It reaches back roughly a decade of quarterly reports, and a period older than that is refused rather than served. A period inside the horizon can still be missing from the list: the dates come from the registrant's recent submissions window, which a trust filing thousands of reports a year outruns in months, and a report the window no longer reaches is dated by reading it only when report_date asks for it.",
+        "Period end dates of this fund's reports, newest first: what report_date can address, about a decade back. A trust filing thousands of reports a year can miss periods here that report_date still reaches.",
       ),
     holdings: z
       .array(
@@ -391,7 +383,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
             name: z
               .string()
               .describe(
-                'Issuer name as the fund reports it. A derivative position routinely reports the literal "N/A" here and names the instrument in title instead, so group and label positions by title when asset_category marks a derivative.',
+                'Issuer name as reported. Derivatives often report "N/A" and name the instrument in title.',
               ),
             title: z
               .string()
@@ -414,9 +406,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
             balance: z
               .number()
               .optional()
-              .describe(
-                'Units held, counted in whatever `units` names — shares, principal, or contracts.',
-              ),
+              .describe('Units held, in whatever `units` names (shares, principal, or contracts).'),
             units: z
               .string()
               .optional()
@@ -435,7 +425,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
               .number()
               .optional()
               .describe(
-                "Percent of the fund's net assets, as the filer computes it. Negative on a short position — a leveraged fund's swap or futures leg regularly reports several percent below zero — so this is not bounded at 0.",
+                "Percent of the fund's net assets as the filer computes it; negative on short positions, so not bounded at 0.",
               ),
             payoff_profile: z
               .string()
@@ -445,13 +435,13 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
               .string()
               .optional()
               .describe(
-                'SEC asset-type code — EC equity-common, EP equity-preferred, DBT debt, RA repurchase agreement, STIV short-term investment vehicle, DE derivative. A filer that classifies a position as Other reports its own label here instead of a code ("Right"), because the code in that case is just "OTHER".',
+                'SEC asset-type code (EC equity-common, EP equity-preferred, DBT debt, RA repurchase agreement, STIV short-term investment vehicle, DE derivative), or the filer\'s own label for Other ("Right").',
               ),
             issuer_category: z
               .string()
               .optional()
               .describe(
-                'SEC issuer-type code — CORP corporate, MUN municipal, USGSE US government-sponsored, RF registered fund. A filer that classifies an issuer as Other reports its own label here instead of a code ("Future", "Warrant").',
+                'SEC issuer-type code (CORP corporate, MUN municipal, USGSE US government-sponsored, RF registered fund), or the filer\'s own label for Other ("Future").',
               ),
             country: z.string().optional().describe('ISO 3166 country of investment.'),
           })
@@ -465,14 +455,14 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
         name: z
           .string()
           .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
           ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
       })
       .optional()
       .describe(
-        'Canvas dataframe holding every position in the report (the inline holdings[] is a preview capped at limit). Each row carries the fund keys — series_id, registrant_cik, report_period_date, accession_number — alongside the position fields, so it joins against the 13F and insider dataframes on cusip. Absent when canvas is unavailable or the report had no positions.',
+        'Dataframe of every position, each row carrying the fund keys; joins 13F and insider dataframes on cusip. Absent when canvas is unavailable or the report had no positions.',
       ),
   }),
 
