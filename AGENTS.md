@@ -2,8 +2,10 @@
 
 **Server:** secedgar-mcp-server
 **Version:** 0.15.9
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.6`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.11`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**MCP SDK:** `@modelcontextprotocol/server` ^2.2.0
+**Zod:** ^4.6.5
 
 Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-only, no API keys required. Full design: `docs/sec-edgar-mcp-design.md`.
 
@@ -18,6 +20,7 @@ Query SEC EDGAR filings, XBRL financials, and company data through MCP. Read-onl
 - **Use `ctx.state`** for tenant-scoped storage. Never access persistence directly.
 - **Ask for missing input** with `return ctx.requestInput(...)`, reading the answers back through `ctx.inputs` when the handler is re-entered. Never await a caller mid-handler.
 - **Secrets in env vars only** — never hardcoded.
+- **Cut noise.** Add only what earns its place: no speculative generality, no guards for states the framework already prevents (Zod-validated params, classified errors), no abstraction until a third caller proves it, no option nothing sets.
 - **Close the loop on issues.** When implementing work tracked by a GitHub issue, comment on the issue with what landed and close it. Do both — a comment without a close leaves stale issues open; a close without a comment leaves no record of what shipped. The comment is for future readers — state the concrete changes, not the conversation that produced them.
 
 ---
@@ -117,7 +120,7 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 | `EDGAR_RATE_LIMIT_COOLDOWN_SECONDS` | No | `600` | Seconds to stop sending to SEC after a 429. Calls are refused locally for this long, then the first one goes out alone as a probe. SEC lifts its block only after ten quiet minutes, so a shorter value just probes into it. |
 | `EDGAR_TICKER_CACHE_TTL` | No | `3600` | Seconds to cache the ticker index (company_tickers.json + company_tickers_mf.json). A failed fund-file load is retried after 60 s (or the rate-limit cool-down) instead of standing for the TTL. |
 | `EDGAR_DATASET_TTL_SECONDS` | No | `86400` | Per-table TTL for canvas-registered dataframes. Sliding window touched on every dataframe op. |
-| `EDGAR_DATAFRAME_DROP_ENABLED` | No | `false` | Set to `true` to expose `secedgar_dataframe_drop`. TTL handles cleanup otherwise. Off, the tool is registered through `disabledTool()`: absent from `tools/list` and uncallable, but rendered on the HTTP landing page in a `disabled` group carrying the reason and `EDGAR_DATAFRAME_DROP_ENABLED=true`, so an operator can see the capability exists. The list `createApp()` receives — and `buildServerManifest()`'s `definitionCounts.tools` — is 17 either way; `/.well-known/mcp.json` on mcp-ts-core 0.13.6 carries no per-tool definitions at all, so nothing changes there (#103). |
+| `EDGAR_DATAFRAME_DROP_ENABLED` | No | `false` | Set to `true` to expose `secedgar_dataframe_drop`. TTL handles cleanup otherwise. Off, the tool is registered through `disabledTool()`: absent from `tools/list` and uncallable, but rendered on the HTTP landing page in a `disabled` group carrying the reason and `EDGAR_DATAFRAME_DROP_ENABLED=true`, so an operator can see the capability exists. The list `createApp()` receives — and `buildServerManifest()`'s `definitionCounts.tools` — is 17 either way; `/.well-known/mcp.json` carries no per-tool definitions at all, only capability flags, so nothing changes there (#103). |
 | `EDGAR_MIRROR_ENABLED` | No | `false` | Enable the local SQLite mirror of company_tickers + XBRL company-facts. Node/Bun only (skipped on Workers). Bootstrap once with `bun run mirror:init`. |
 | `EDGAR_MIRROR_PATH` | No | `./data/edgar-mirror` | Directory holding the mirror SQLite databases (tickers + companyfacts). |
 | `EDGAR_MIRROR_REFRESH_CRON` | No | — | In-process nightly refresh cron (HTTP transport only). Recommended `0 9 * * *`. Omit to refresh out-of-band via `bun run mirror:refresh`. |
@@ -156,13 +159,14 @@ Handlers receive a unified `ctx` object. Key properties:
 | Property | Description |
 |:---------|:------------|
 | `ctx.log` | Request-scoped logger — `.debug()`, `.info()`, `.notice()`, `.warning()`, `.error()`. Auto-correlates requestId, traceId, tenantId. Dual-sink: Pino **and** `notifications/message` to the client, so treat it as client-visible. |
-| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any serializable value. |
+| `ctx.state` | Tenant-scoped KV — `.get(key)`, `.set(key, value, { ttl? })`, `.delete(key)`, `.getMany(keys)`, `.list(prefix, { cursor, limit })`. Accepts any JSON-serializable value; reads return its JSON form (a `Date` comes back as an ISO string). |
 | `ctx.requestInput` | Suspend and ask the caller for more input — `return ctx.requestInput({ inputRequests: { key: inputRequired.elicit({ message, requestedSchema }) } })`. Never returns; the handler is re-entered with the answers. Always present. |
-| `ctx.inputs` | Reader over a retried request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped`. Empty on the first round. |
+| `ctx.inputs` | The request's responses — `.accepted(key, schema)`, `.view(key)`, `.state()`, `.dropped` — limited to what the client declared (`elicitation` and its form/url modes, `sampling`, `roots`). Client-supplied: a consent gate trusts only a `ctx.state` record it stored when it asked, bound to the operation, caller, and target (see the `api-context` skill). |
+| `ctx.clientCapabilities` | What the client declared for this request, `undefined` when no view exists. Decides whether to ask for optional context (e.g. roots); never a reason to skip a consent prompt. |
 | `ctx.enrich` | Success-path agent context (empty-result notices, query echo, pagination totals) — `ctx.enrich(...)` or `.notice()` / `.total()` / `.echo()` / `.truncated()`. Reaches `structuredContent` and `content[]`; lands only when the definition declares an `enrichment` block (no-op otherwise). |
 | `ctx.content` | Non-text content blocks — `.image(data, mimeType)`, `.audio(data, mimeType)`, or `ctx.content(block)` for a raw block. Prepended to `content[]` after `format()`; never enters `structuredContent`. |
 | `ctx.signal` | `AbortSignal` for cancellation. |
-| `ctx.requestId` | Unique request ID. |
+| `ctx.requestId` | Request ID — the one every log record of the call carries and its error envelope returns as `data.requestId`. |
 | `ctx.tenantId` | Tenant ID from JWT; `'default'` for stdio or HTTP with auth off. |
 
 ---
@@ -171,7 +175,7 @@ Handlers receive a unified `ctx` object. Key properties:
 
 Handlers throw — the framework catches, classifies, and formats.
 
-**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()`. The handler then receives `ctx.fail(reason, msg?, data?)` typed against the reason union, and `data.reason` is auto-populated for observability. The `recovery` field is required (≥5 words, lint-validated). Use `ctx.recoveryFor('reason')` to spread the contract recovery onto the wire (mirrored into `content[]` unless the message already contains it verbatim); pass an explicit `{ recovery: { hint } }` when runtime context matters. Forwarding it is lint-enforced per throw site (`error-contract-recovery-unforwarded`). Mark an entry raised below the handler — a module-level helper, a service, the canvas bridge — with `thrownBy: 'service'` so `error-contract-unthrown` skips it; lint-only metadata, nothing at runtime reads it. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely without declaration. **All EDGAR tools that have known failure modes use this pattern.**
+**Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()`. The handler then receives `ctx.fail(reason, msg?, data?)` typed against the reason union, and `data.reason` is auto-populated for observability. The `recovery` field is required (≥5 words, lint-validated). The framework puts it on the wire whenever a failure carrying that `reason` arrives without a hint — a bare `ctx.fail('reason')` or a service throw with `data: { reason }` — as `data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim; override with an explicit `{ recovery: { hint } }` when runtime context matters. The fill happens at the handler boundary, so a test asserting the hint on a direct `definition.handler(...)` throw either keeps the throw site's `...ctx.recoveryFor('reason')` or asserts through `runToolContract`. Every error envelope also carries `data.requestId`, the id the server's log records for that call carry. Mark an entry raised below the handler — a module-level helper, a service, the canvas bridge — with `thrownBy: 'service'` so `error-contract-unthrown` skips it; lint-only metadata, nothing at runtime reads it. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely without declaration. **All EDGAR tools that have known failure modes use this pattern.**
 
 ```ts
 errors: [
@@ -180,13 +184,11 @@ errors: [
     recovery: 'Use a ticker symbol or 10-digit CIK number for an exact match.' },
 ],
 async handler(input, ctx) {
-  if (!match) throw ctx.fail('company_not_found', `Company '${input.company}' not found.`, {
-    ...ctx.recoveryFor('company_not_found'),
-  });
+  if (!match) throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
 }
 ```
 
-**Service-layer pattern (no `ctx`).** Throw an `McpError` with `data: { reason, recovery: { hint } }`, and mark the tool's matching `errors[]` entry `thrownBy: 'service'`. The auto-classifier preserves `data` on the wire so clients see the same `error.data.reason` they'd see from `ctx.fail`. The tool error text closes with a term line rendering only what `data` carries — `(reason <reason>)` for a reason alone, `· retryable` / `· not retryable` appended when `data.retryable` is a boolean — so tests assert that `content[0].text` contains the diagnostic rather than pinning it exactly. A contract entry's `retryable` reaches `data` only through `ctx.fail`; a service throw sets `data.retryable` itself (#122).
+**Service-layer pattern (no `ctx`).** Throw an `McpError` with `data: { reason, recovery: { hint } }`, and mark the tool's matching `errors[]` entry `thrownBy: 'service'`. The auto-classifier preserves `data` on the wire so clients see the same `error.data.reason` they'd see from `ctx.fail`. The tool error text closes with a term line rendering only what `data` carries — `(reason <reason>)` for a reason alone, `· retryable` / `· not retryable` appended when `data.retryable` is a boolean, then `· request <id>` — so tests assert that `content[0].text` contains the diagnostic rather than pinning it exactly. A contract entry's `retryable` reaches `data` only through `ctx.fail`; a service throw sets `data.retryable` itself (#122).
 
 **Fallback for ad-hoc throws** (no contract entry fits, prototype code): use error factories or plain `Error`.
 
@@ -318,11 +320,15 @@ Available skills:
 | `api-utils` | Formatting, parsing, security, pagination, scheduling, telemetry helpers |
 | `api-workers` | Cloudflare Workers runtime |
 
+**Chaining skills into pipelines.** When the user wants a multi-phase effort — build this server out, QA-and-fix the surface, update-and-ship — *and you can spawn sub-agents*, `framework-skills/orchestrations/SKILL.md` sequences the task skills above into a gated pipeline with verification at each step. Read it to drive the run. Optional: skip it if you can't orchestrate sub-agents, and ignore it entirely if you were *spawned* as one — you've already been scoped to a single phase.
+
 When you complete a skill's checklist, check the boxes and add a completion timestamp at the end (e.g., `Completed: 2026-03-11`).
 
 ---
 
 ## Commands
+
+**Runtime:** Scripts use Bun's native TypeScript execution — `bun run <cmd>` is the standard invocation. `npm run <cmd>` also works (npm delegates to bun).
 
 | Command | Purpose |
 |:--------|:--------|
@@ -330,17 +336,18 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run rebuild` | Clean + build |
 | `bun run clean` | Remove build artifacts |
 | `bun run devcheck` | Lint + format + typecheck + security + changelog sync |
-| `bun run audit:fix` | Apply `bun audit fix` — first move when `devcheck` flags an advisory. |
-| `bun run audit:refresh` | Delete `bun.lock`, reinstall, re-audit. Use when `devcheck` flags a transitive advisory — stale lockfile can mask already-patched deps. If advisory survives, it's real. |
+| `bun run audit:fix` | `bun audit fix` — upgrade vulnerable packages to the lowest safe version within existing ranges (`--dry-run` previews, `--latest` rewrites ranges). First response when `devcheck` flags a transitive advisory; then `bun update <name>`, then `bun dedupe` |
+| `bun run audit:refresh` | Delete `bun.lock` and reinstall. Last resort after `audit:fix`, `bun update <name>`, and `bun dedupe` — re-resolves every ranged dep (the framework pin included) and rewrites the lockfile as `lockfileVersion: 2` |
 | `bun run tree` | Generate directory structure doc |
-| `bun run format` | Auto-fix formatting |
-| `bun run lint:mcp` | Validate MCP tool/resource definitions |
-| `bun run lint:packaging` | Validate env-var alignment between `manifest.json` and `server.json` |
+| `bun run format` | Auto-fix formatting (safe fixes only) |
+| `bun run format:unsafe` | Also apply Biome's unsafe autofixes — review the diff; they can change behavior |
+| `bun run lint:mcp` | Run the MCP definition linter standalone (rule catalog: `api-linter` skill) |
+| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity (run by devcheck) |
 | `bun run list-skills` | Print an index of available skills from `framework-skills/` |
 | `bun run changelog:build` | Regenerate `CHANGELOG.md` from `changelog/*.md` |
 | `bun run changelog:check` | Verify `CHANGELOG.md` is in sync with `changelog/` (used by devcheck) |
 | `bun run bundle` | Build, pack, and clean a `.mcpb` for one-click Claude Desktop install |
-| `bun run test` | Run tests |
+| `bun run test` | Run tests (Vitest — use `bun run test`, not `bun test`) |
 | `bun run mirror:init` | Bootstrap the local mirror (download company_tickers + companyfacts.zip). Out-of-band; resumable. |
 | `bun run mirror:refresh` | Incrementally refresh the local mirror from the SEC bulk files. |
 | `bun run mirror:verify` | Print mirror sync status + run sample reads. |
@@ -354,9 +361,11 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips dependency-shipped agent docs (`node_modules/**` `framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) that root-anchored `.mcpbignore` patterns cannot reach. MCPB is stdio-only — HTTP deployments are unaffected. Delete `manifest.json` and `.mcpbignore` to opt out; `lint:packaging` skips cleanly.
+`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. The bundle therefore ships without the DuckDB native — the framework lazy-loads `@duckdb/node-api`, so canvas tools report an actionable install hint and every other tool works normally (the data tools answer inline without registering a dataframe). MCPB is stdio-only — HTTP deployments are unaffected. Delete `manifest.json` and `.mcpbignore` to opt out; `lint:packaging` skips cleanly.
 
-**Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match.
+**Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
+
+**README install badges** (Claude Desktop `.mcpb`, Cursor, VS Code) and the `base64` / `encodeURIComponent` config-generation commands are ship-time concerns — run the `polish-docs-meta` skill, which carries the badge format, layout, and generation snippets in `framework-skills/polish-docs-meta/references/readme.md`.
 
 ---
 
@@ -367,7 +376,7 @@ Directory-based. Source of truth is `changelog/<major.minor>.x/<version>.md` —
 **To add a release entry:**
 
 1. Author `changelog/<major.minor>.x/<version>.md` using `changelog/template.md` as a reference.
-2. Add YAML frontmatter: `summary` (≤350 chars, no markdown), optional `breaking: true` flags breaking changes (`· ⚠️ Breaking` badge), optional `security: true` flags security fixes (`· 🛡️ Security` badge, pairs with a `## Security` body section).
+2. Add YAML frontmatter: `summary` (≤350 chars, no markdown), optional `breaking: true` flags breaking changes (`· ⚠️ Breaking` badge), optional `security: true` flags a security fix in this server's own source code (`· 🛡️ Security` badge, pairs with a `## Security` body section) — never a routine dependency or transitive CVE bump, which goes under `## Dependencies`.
 3. Set the H1 heading to `# <version> — YYYY-MM-DD`.
 4. Run `bun run changelog:build` to regenerate `CHANGELOG.md`.
 
@@ -415,13 +424,13 @@ import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 - [ ] Optional nested objects: handler guards for empty inner values from form-based clients (`if (input.obj?.field && ...)`, not just `if (input.obj)`). When regex/length constraints matter, use `z.union([z.literal(''), z.string().regex(...).describe(...)])` — literal variants are exempt from `describe-on-fields`.
 - [ ] JSDoc `@fileoverview` + `@module` on every file
 - [ ] `ctx.log` for logging, `ctx.state` for storage
-- [ ] Handlers throw on failure — typed `errors[]` contract + `ctx.fail(reason, …, ctx.recoveryFor(reason))` when failure modes are known; factories or plain `Error` for ad-hoc throws. No try/catch.
+- [ ] Handlers throw on failure — typed `errors[]` contract + `ctx.fail(reason, …)` when failure modes are known; factories or plain `Error` for ad-hoc throws. No try/catch.
 - [ ] Tool error contracts include `recovery` strings (≥5 words)
 - [ ] `format()` renders all data the LLM needs — Claude Code reads `structuredContent`, Claude Desktop reads `content[]`; both must carry the same data
 - [ ] EDGAR upstream sparsity: schemas reflect real nullability; `format()` preserves uncertainty (don't fabricate facts from missing XBRL fields); tests cover at least one sparse payload
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
 - [ ] Tests use `createMockContext({ errors: tool.errors })` from `@cyanheads/mcp-ts-core/testing` for tools with declared contracts
-- [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = package name; `interface.shortDescription` from `package.json` description
-- [ ] `.codex-plugin/mcp.json` updated — server name key matches `package.json` name; env vars added for any required API keys
-- [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; inline `mcpServers` entry with server name key, env vars for any required API keys
+- [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
+- [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset
+- [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`; inline `mcpServers` entry keyed by the unscoped repo name. Every user-supplied variable is declared under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and referenced from `env` as `"KEY": "${user_config.<option>}"` — mirror the `user_config` block in `manifest.json`. Never write `"KEY": ""` into `env`
 - [ ] `bun run devcheck` passes
