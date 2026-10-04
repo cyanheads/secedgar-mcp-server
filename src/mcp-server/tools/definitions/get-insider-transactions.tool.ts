@@ -71,6 +71,11 @@ function describeWindow(filedAfter: string | undefined, filedBefore: string | un
   return filedAfter ? `on or after ${filedAfter}` : `on or before ${filedBefore}`;
 }
 
+/** True when two CIKs name the same filer, however each is zero-padded. */
+function sameCik(a: string, b: string): boolean {
+  return a.replace(/^0+/, '') === b.replace(/^0+/, '');
+}
+
 function matchesFilter(tx: InsiderTransaction, filter: 'purchase' | 'sale' | 'all'): boolean {
   if (filter === 'all') return true;
   if (filter === 'purchase') return PURCHASE_CODES.has(tx.transaction_code);
@@ -208,85 +213,90 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
             transaction_code: z
               .string()
               .describe(
-                'Single-letter SEC transaction code: P = purchase, S = sale, M = exercise, A = award, G = gift, F = tax withholding, C = conversion, others exist.',
+                'SEC transaction code: P purchase, S sale, M exercise, A award, G gift, F tax withholding, C conversion, among others.',
               ),
             transaction_type: z
               .string()
               .describe(
-                'Human-readable description of the transaction code (e.g., "purchase", "sale", "conversion_of_derivative").',
+                'Plain-language name of the code (e.g., "purchase", "conversion_of_derivative").',
               ),
             is_derivative: z
               .boolean()
               .describe(
-                'True for derivative security transactions (options, RSUs, convertible notes). False for direct equity transactions.',
+                'True for derivative securities (options, RSUs, convertible notes); false for direct equity.',
               ),
             shares_traded: z
               .number()
               .optional()
               .describe(
-                'Absolute number of shares involved (always positive). Absent when the filing omits this field. Use `direction` to distinguish acquisitions from disposals.',
+                'Shares involved, always positive; direction gives the sign. Absent when the filing omits it.',
               ),
             direction: z
               .enum(['acquire', 'dispose'])
               .optional()
               .describe(
-                'Whether shares were acquired or disposed. "acquire" = buy, award, exercise; "dispose" = sale, gift, return. Absent when shares_traded is absent.',
+                '"acquire" (buy, award, exercise) or "dispose" (sale, gift, return). Absent when shares_traded is.',
               ),
             price_per_share: z
               .number()
               .optional()
               .describe(
-                'Price per share in USD. 0 for gifts and RSU awards (no cash consideration). Absent when not reported.',
+                'Price per share in USD; 0 for gifts and RSU awards. Absent when not reported.',
               ),
             shares_owned_after: z
               .number()
               .optional()
-              .describe(
-                'Total shares owned after this transaction, as reported. Absent when omitted by the filer.',
-              ),
+              .describe('Shares owned after this transaction, as reported. Absent when omitted.'),
             ownership_type: z
               .enum(['direct', 'indirect'])
               .optional()
               .describe(
-                'D = direct ownership, I = indirect (through a trust, family member, etc.). Absent when not reported.',
+                'Direct, or indirect (through a trust, family member, etc.). Absent when not reported.',
               ),
             ownership_nature: z
               .string()
               .optional()
               .describe(
-                'Nature of indirect ownership (e.g., "By Trust", "By Spouse"). Only present when ownership_type is indirect.',
+                'Nature of indirect ownership (e.g., "By Trust"). Present only when ownership_type is indirect.',
               ),
           })
           .describe('One insider transaction parsed from a Form 4 filing.'),
       )
       .describe(
-        'Insider transactions, newest filing first. Preview capped at `limit` — the full scanned set lives on the canvas dataframe (see `dataset`).',
+        'Insider transactions, newest filing first, capped at limit; the dataframe holds the full parsed set.',
       ),
-    filings_scanned: z.number().describe('Number of Form 4 filings scanned to produce the result.'),
+    filings_scanned: z
+      .number()
+      .describe('Form 4 filings scanned, including those in filings_other_issuer.'),
+    filings_other_issuer: z
+      .number()
+      .describe(
+        "Scanned Form 4 filings naming a different issuer, filed by this company as a reporting owner of another (e.g., a 10% holder of a fund). They are that issuer's activity, so they add no transactions here or in the dataframe.",
+      ),
     history_scanned_through: z
       .string()
       .optional()
       .describe(
-        'Filing date of the oldest Form 4 parsed (YYYY-MM-DD). Present only when a date window was given; absent when the window held no Form 4 filing.',
+        'Filing date of the oldest Form 4 parsed (YYYY-MM-DD). Present only with a date window that held a Form 4.',
       ),
     dataset: z
       .object({
         name: z
           .string()
           .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
           ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
         truncated: z
           .boolean()
           .describe(
-            'True when Form 4 filings exist beyond those parsed — past the newest-filings sample, or, with a date window, inside the window beyond the 100-filing cap or past the 10 archive pages read. Narrow the window to reach the rest.',
+            "True when Form 4 filings exist past those parsed (the newest-filings sample, or a window's 100-filing or 10-page cap); narrow the window to reach them.",
           ),
       })
       .optional()
       .describe(
-        'Canvas dataframe holding the full parsed transaction set from the scanned filings (the inline transactions[] is a preview capped at limit). Each row carries the issuer (issuer_cik, issuer_ticker) plus the transaction fields, so it aggregates net buy/sell by insider and joins across issuers. Query with secedgar_dataframe_query. Absent when canvas is unavailable or no transactions were parsed.',
+        'Dataframe of every parsed transaction, issuer keys on each row, for net buy/sell by insider and cross-issuer joins. Absent when canvas is unavailable or nothing parsed.',
       ),
   }),
 
@@ -295,7 +305,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       .string()
       .optional()
       .describe(
-        'Guidance when results are empty after filtering — explains the filter applied and suggests alternatives.',
+        'Why the result is empty (the filter, or every scanned filing naming another issuer), and the dataframe pointer when staged.',
       ),
     truncated: z
       .boolean()
@@ -423,6 +433,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     }> = [];
 
     let filingsScanned = 0;
+    let filingsOtherIssuer = 0;
     /** Filing date of the last filing parsed — the oldest, since filings run newest first. */
     let oldestParsed: string | undefined;
     let scannedWholeWindow = true;
@@ -449,6 +460,13 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
         ctx.log.warning('Failed to parse Form 4 XML', {
           accessionNumber: filing.accessionNumber,
         });
+        continue;
+      }
+
+      // The submissions feed also lists Form 4s this company filed as a reporting
+      // owner of another issuer — that issuer's insider activity, not this one's (#157).
+      if (parsed.issuer_cik && !sameCik(parsed.issuer_cik, match.cik)) {
+        filingsOtherIssuer++;
         continue;
       }
 
@@ -491,8 +509,9 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
 
     const windowText = dateWindow && describeWindow(filedAfter, filedBefore);
     if (windowText && filingBatch.length === 0) {
+      // The walk runs newest first, so only an earlier upper bound reaches older filings.
       const walkNote = walk?.truncated
-        ? ` The archive scan stopped after ${walk.pagesRead} pages, at filings from ${walk.scannedThrough}; narrow the window to reach older ones.`
+        ? ` The archive scan stopped after ${walk.pagesRead} pages, at filings from ${walk.scannedThrough}; narrow the window with filed_before=${walk.scannedThrough} to reach older ones.`
         : '';
       const eraNote =
         filedBefore && filedBefore < STRUCTURED_FORM4_START
@@ -506,13 +525,28 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
         input.transaction_type !== 'all'
           ? ` with transaction_type="${input.transaction_type}"`
           : '';
+      const filings = `Form 4 filing${filingsScanned === 1 ? '' : 's'}`;
       const scope = windowText
-        ? `the ${filingsScanned} Form 4 filings filed ${windowText}`
-        : `the ${filingsScanned} most recent Form 4 filings`;
-      ctx.enrich.notice(
-        `No insider transactions found for '${input.company}'${filterNote} in ${scope}. ` +
-          `Try transaction_type="all" or use secedgar_search_filings with forms=["4"] for broader coverage.`,
-      );
+        ? `the ${filingsScanned} ${filings} filed ${windowText}`
+        : `the ${filingsScanned} most recent ${filings}`;
+      const lead = `No insider transactions found for '${input.company}'${filterNote} in ${scope}`;
+      if (filingsOtherIssuer > 0 && filingsOtherIssuer === filingsScanned) {
+        // Every filing read is another issuer's insider activity, so no filter or
+        // broader form search surfaces this company's rows from them (#157).
+        const single = filingsScanned === 1;
+        ctx.enrich.notice(
+          `${lead}: ${single ? 'it names' : 'each names'} a different issuer — a Form 4 this company filed as a reporting owner of another company — so ${single ? "it reports that company's" : "they report those companies'"} insider activity, not this one's.`,
+        );
+      } else {
+        const otherIssuerNote =
+          filingsOtherIssuer > 0
+            ? ` ${filingsOtherIssuer} of them ${filingsOtherIssuer === 1 ? 'names' : 'name'} a different issuer — a Form 4 this company filed as a reporting owner of another company — and ${filingsOtherIssuer === 1 ? 'contributes' : 'contribute'} none.`
+            : '';
+        ctx.enrich.notice(
+          `${lead}.${otherIssuerNote} ` +
+            `Try transaction_type="all" or use secedgar_search_filings with forms=["4"] for broader coverage.`,
+        );
+      }
     }
 
     // Use issuer data from the resolved entity (the submissions API may not always
@@ -578,6 +612,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     ctx.log.info('Insider transactions retrieved', {
       cik: match.cik,
       filingsScanned,
+      filingsOtherIssuer,
       transactionCount: transactions.length,
       returned: inlineTransactions.length,
       filter: input.transaction_type,
@@ -590,15 +625,21 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       issuer_ticker: issuerTicker,
       transactions: inlineTransactions,
       filings_scanned: filingsScanned,
+      filings_other_issuer: filingsOtherIssuer,
       ...(dateWindow && { history_scanned_through: oldestParsed }),
       dataset,
     };
   },
 
   format: (result) => {
+    const otherIssuer = result.filings_other_issuer;
+    const otherIssuerNote =
+      otherIssuer > 0
+        ? `; ${otherIssuer} ${otherIssuer === 1 ? 'names another issuer and contributes' : 'name another issuer and contribute'} none`
+        : '';
     const lines: string[] = [
       `**Insider Transactions** — ${result.issuer_name} (CIK ${result.issuer_cik}${result.issuer_ticker ? `, ${result.issuer_ticker}` : ''})`,
-      `${result.transactions.length} transaction(s) from ${result.filings_scanned} Form 4 filing(s) scanned`,
+      `${result.transactions.length} transaction(s) from ${result.filings_scanned} Form 4 filing(s) scanned${otherIssuerNote}`,
     ];
 
     // One legend rather than a per-row tag: every row spells the direction out

@@ -382,6 +382,7 @@ describe('getInsiderTransactionsTool', () => {
         },
       ],
       filings_scanned: 1,
+      filings_other_issuer: 0,
     };
     const blocks = getInsiderTransactionsTool.format!(output);
     expect(blocks).toHaveLength(1);
@@ -424,6 +425,7 @@ describe('getInsiderTransactionsTool', () => {
         },
       ],
       filings_scanned: 1,
+      filings_other_issuer: 0,
     };
     const blocks = getInsiderTransactionsTool.format!(output);
     expect(blockText(blocks)).toContain('5,000 shares acquired');
@@ -438,10 +440,13 @@ describe('getInsiderTransactionsTool', () => {
       issuer_ticker: 'AAPL',
       transactions: [],
       filings_scanned: 5,
+      filings_other_issuer: 2,
     };
     const blocks = getInsiderTransactionsTool.format!(output);
     expect(blockText(blocks)).toContain('0 transaction(s)');
-    expect(blockText(blocks)).toContain('5 Form 4 filing(s)');
+    expect(blockText(blocks)).toContain(
+      '5 Form 4 filing(s) scanned; 2 name another issuer and contribute none',
+    );
     // Nothing to decode, so the legend stays off an empty listing.
     expect(blockText(blocks)).not.toContain('shares acquired" = acquire');
   });
@@ -472,6 +477,7 @@ describe('getInsiderTransactionsTool', () => {
         },
       ],
       filings_scanned: 1,
+      filings_other_issuer: 0,
     };
     const blocks = getInsiderTransactionsTool.format!(output);
     expect(blockText(blocks)).toContain('indirect: By Spouse');
@@ -505,6 +511,7 @@ describe('getInsiderTransactionsTool', () => {
         },
       ],
       filings_scanned: 1,
+      filings_other_issuer: 0,
     };
     const blocks = getInsiderTransactionsTool.format!(output);
     expect(blockText(blocks)).toContain('[derivative]');
@@ -1089,7 +1096,11 @@ describe('getInsiderTransactionsTool — filed_after / filed_before window (#127
     expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(10);
     const notice = String((result.structuredContent as { notice?: string }).notice);
     expect(notice).toContain('No Form 4 filings filed between 2005-01-01 and 2015-12-31');
-    expect(notice).toContain('stopped after 10 pages, at filings from 2007-01-01');
+    // The walk runs newest first, so only an earlier upper bound reaches older filings —
+    // the lever names it rather than leaving "narrow" to be read as a later filed_after.
+    expect(notice).toContain(
+      'The archive scan stopped after 10 pages, at filings from 2007-01-01; narrow the window with filed_before=2007-01-01 to reach older ones.',
+    );
     expect(notice).not.toContain('mid-2003');
     expect(result.structuredContent).not.toHaveProperty(
       'history_scanned_through',
@@ -1164,5 +1175,251 @@ describe('getInsiderTransactionsTool — filed_after / filed_before window (#127
     expect(mockApi.getRecentFilingsByForm).toHaveBeenCalledWith('0000320193', ['4', '4/A'], 101);
     expect(mockApi.getSubmissions).not.toHaveBeenCalled();
     expect(result.structuredContent).not.toHaveProperty('history_scanned_through');
+  });
+});
+
+// --- Form 4s the company filed as a reporting owner of another issuer (#157) ---
+
+/** A Form 4 the resolved company filed as a 10% owner of a different issuer. */
+const OTHER_ISSUER_XML = `<?xml version="1.0"?>
+<ownershipDocument>
+  <periodOfReport>2024-03-12</periodOfReport>
+  <issuer>
+    <issuerCik>0001034665</issuerCik>
+    <issuerName>BlackRock MuniHoldings Fund, Inc.</issuerName>
+    <issuerTradingSymbol>MHD</issuerTradingSymbol>
+  </issuer>
+  <reportingOwner>
+    <reportingOwnerId>
+      <rptOwnerCik>0000320193</rptOwnerCik>
+      <rptOwnerName>APPLE INC</rptOwnerName>
+    </reportingOwnerId>
+    <reportingOwnerRelationship>
+      <isTenPercentOwner>true</isTenPercentOwner>
+    </reportingOwnerRelationship>
+  </reportingOwner>
+  <nonDerivativeTable>
+    <nonDerivativeTransaction>
+      <securityTitle><value>Variable Rate Muni Term Preferred Shares</value></securityTitle>
+      <transactionDate><value>2024-03-12</value></transactionDate>
+      <transactionCoding>
+        <transactionCode>J</transactionCode>
+      </transactionCoding>
+      <transactionAmounts>
+        <transactionShares><value>1000</value></transactionShares>
+        <transactionAcquiredDisposedCode><value>D</value></transactionAcquiredDisposedCode>
+      </transactionAmounts>
+    </nonDerivativeTransaction>
+  </nonDerivativeTable>
+</ownershipDocument>`;
+
+describe('getInsiderTransactionsTool — Form 4s naming another issuer (#157)', () => {
+  const call = (args: Record<string, unknown>) =>
+    runToolContract(getInsiderTransactionsTool, args as never);
+
+  /** Recent Form 4 rows, newest first, each served the document named in `docs`. */
+  function serveFilings(docs: Record<string, string>) {
+    mockApi.getRecentFilingsByForm.mockResolvedValue(
+      Object.keys(docs).map((accessionNumber, i) => ({
+        accessionNumber,
+        filingDate: `2024-03-${String(20 - i).padStart(2, '0')}`,
+        primaryDocument: 'form4.xml',
+      })),
+    );
+    mockApi.tryGetFilingDocument.mockImplementation(
+      async (_cik: string, accession: string) => docs[accession] ?? null,
+    );
+  }
+
+  const accessions = (rows: Array<Record<string, unknown>>) =>
+    rows.map((row) => row.accession_number);
+
+  it('keeps a filing whose issuer CIK is the resolved company written without padding', async () => {
+    serveFilings({
+      unpadded: SALE_XML.replace(
+        '<issuerCik>0000320193</issuerCik>',
+        '<issuerCik>320193</issuerCik>',
+      ),
+      'no-issuer-cik': PURCHASE_XML.replace('<issuerCik>0000320193</issuerCik>', ''),
+    });
+
+    const result = await call({ company: 'AAPL' });
+
+    expect(result.isError).toBeFalsy();
+    const content = result.structuredContent as { transactions: Array<Record<string, unknown>> };
+    expect(accessions(content.transactions)).toEqual(['unpadded', 'no-issuer-cik']);
+    expect(result.structuredContent).toMatchObject({ filings_scanned: 2 });
+  });
+
+  it('stages and returns no row from a filing naming another issuer, and counts it', async () => {
+    serveFilings({
+      'own-a': SALE_XML,
+      'other-issuer': OTHER_ISSUER_XML,
+      'own-b': PURCHASE_XML,
+    });
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+
+    const result = await call({ company: 'AAPL', limit: 1 });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledTimes(3);
+    expect(result.structuredContent).toMatchObject({
+      filings_scanned: 3,
+      filings_other_issuer: 1,
+      dataset: { row_count: 2, truncated: false },
+    });
+    const rows = bridge.registerDataframe.mock.calls[0]?.[1].rows ?? [];
+    expect(accessions(rows)).toEqual(['own-a', 'own-b']);
+    expect(rows.every((row) => row.issuer_cik === '0000320193')).toBe(true);
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain(
+      '1 transaction(s) from 3 Form 4 filing(s) scanned; 1 names another issuer and contributes none',
+    );
+    expect(text).not.toContain('other-issuer');
+    expect(text).not.toContain('Variable Rate Muni');
+  });
+
+  it('keeps the no-canvas early stop and newest-first order, reading past the excluded filing', async () => {
+    serveFilings({
+      'own-a': SALE_XML,
+      'other-issuer': OTHER_ISSUER_XML,
+      'own-b': PURCHASE_XML,
+      'own-c': SALE_XML,
+    });
+
+    const result = await call({ company: 'AAPL', limit: 2 });
+
+    // The excluded filing adds no transaction, so the second one comes from own-b,
+    // and the scan stops there — own-c is never fetched.
+    expect(mockApi.tryGetFilingDocument.mock.calls.map(([, accn]) => accn)).toEqual([
+      'own-a',
+      'other-issuer',
+      'own-b',
+    ]);
+    const content = result.structuredContent as { transactions: Array<Record<string, unknown>> };
+    expect(accessions(content.transactions)).toEqual(['own-a', 'own-b']);
+    expect(result.structuredContent).toMatchObject({ filings_scanned: 3, filings_other_issuer: 1 });
+    expect((result.structuredContent as { dataset?: unknown }).dataset).toBeUndefined();
+  });
+
+  it('says the only filing scanned names another issuer, without pointing at the type filter', async () => {
+    serveFilings({ 'other-issuer': OTHER_ISSUER_XML });
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+
+    const result = await call({ company: 'AAPL' });
+
+    expect(bridge.registerDataframe).not.toHaveBeenCalled();
+    expect(result.structuredContent).toMatchObject({
+      transactions: [],
+      filings_scanned: 1,
+      filings_other_issuer: 1,
+    });
+    // transaction_type is already "all", and no filter would surface another issuer's rows.
+    const notice = String((result.structuredContent as { notice?: string }).notice);
+    expect(notice).toBe(
+      "No insider transactions found for 'AAPL' in the 1 most recent Form 4 filing: it names a different issuer — a Form 4 this company filed as a reporting owner of another company — so it reports that company's insider activity, not this one's.",
+    );
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain(notice);
+  });
+
+  it('says every filing in a window names another issuer when all of them do', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      submissionsWith([
+        { accession: 'other-a', date: '2024-03-20' },
+        { accession: 'other-b', date: '2024-03-12' },
+      ]),
+    );
+    mockApi.tryGetFilingDocument.mockResolvedValue(OTHER_ISSUER_XML);
+
+    const result = await call({
+      company: 'AAPL',
+      transaction_type: 'sale',
+      filed_after: '2024-03-01',
+      filed_before: '2024-03-31',
+    });
+
+    expect(result.structuredContent).toMatchObject({ filings_scanned: 2, filings_other_issuer: 2 });
+    expect(String((result.structuredContent as { notice?: string }).notice)).toBe(
+      "No insider transactions found for 'AAPL' with transaction_type=\"sale\" in the 2 Form 4 filings filed between 2024-03-01 and 2024-03-31: each names a different issuer — a Form 4 this company filed as a reporting owner of another company — so they report those companies' insider activity, not this one's.",
+    );
+  });
+
+  it('keeps the filter suggestion when some scanned filings name the resolved company', async () => {
+    serveFilings({ 'own-a': SALE_XML, 'other-issuer': OTHER_ISSUER_XML });
+
+    const result = await call({ company: 'AAPL', transaction_type: 'purchase' });
+
+    expect(result.structuredContent).toMatchObject({
+      transactions: [],
+      filings_scanned: 2,
+      filings_other_issuer: 1,
+    });
+    const notice = String((result.structuredContent as { notice?: string }).notice);
+    expect(notice).toContain(
+      '1 of them names a different issuer — a Form 4 this company filed as a reporting owner of another company — and contributes none.',
+    );
+    expect(notice).toContain('Try transaction_type="all"');
+  });
+
+  it('excludes a windowed filing naming another issuer while its date still bounds the scan', async () => {
+    // The oldest in-window Form 4 is the company's 10% holding in a fund.
+    mockApi.getSubmissions.mockResolvedValue(
+      submissionsWith([
+        { accession: 'own-a', date: '2024-03-20' },
+        { accession: 'own-b', date: '2024-03-15' },
+        { accession: 'other-issuer', date: '2024-03-12' },
+        { accession: 'before-window', date: '2024-02-27' },
+      ]),
+    );
+    const docs: Record<string, string> = {
+      'own-a': SALE_XML,
+      'own-b': PURCHASE_XML,
+      'other-issuer': OTHER_ISSUER_XML,
+    };
+    mockApi.tryGetFilingDocument.mockImplementation(
+      async (_cik: string, accession: string) => docs[accession] ?? null,
+    );
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+
+    const result = await call({
+      company: 'AAPL',
+      filed_after: '2024-03-01',
+      filed_before: '2024-03-31',
+    });
+
+    expect(mockApi.tryGetFilingDocument.mock.calls.map(([, accn]) => accn)).toEqual([
+      'own-a',
+      'own-b',
+      'other-issuer',
+    ]);
+    expect(result.structuredContent).toMatchObject({
+      filings_scanned: 3,
+      filings_other_issuer: 1,
+      history_scanned_through: '2024-03-12',
+      dataset: { row_count: 2, truncated: false },
+    });
+    const content = result.structuredContent as { transactions: Array<Record<string, unknown>> };
+    expect(accessions(content.transactions)).toEqual(['own-a', 'own-b']);
+    expect(accessions(bridge.registerDataframe.mock.calls[0]?.[1].rows ?? [])).toEqual([
+      'own-a',
+      'own-b',
+    ]);
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain(
+      '2 transaction(s) from 3 Form 4 filing(s) scanned; 1 names another issuer and contributes none',
+    );
+    expect(text).toContain('History scanned through: 2024-03-12');
+    expect(text).not.toContain('Variable Rate Muni');
+  });
+
+  it('reports a zero count when every filing names the resolved company', async () => {
+    const result = await call({ company: 'AAPL' });
+
+    expect(result.structuredContent).toMatchObject({ filings_scanned: 1, filings_other_issuer: 0 });
+    expect(blockText(result.content)).not.toContain('names another issuer');
   });
 });

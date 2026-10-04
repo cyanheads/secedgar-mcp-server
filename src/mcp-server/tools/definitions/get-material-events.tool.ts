@@ -65,7 +65,7 @@ function zipEightKs(block: FilingsRecent): EventRow[] {
 export const getMaterialEventsTool = tool('secedgar_get_material_events', {
   title: 'Get Material Events',
   description:
-    "Retrieve a company's 8-K filings with their item codes decoded, optionally filtered to specific items. 8-K item codes are how material events are actually scoped — 1.01 material agreements, 2.02 results of operations, 4.02 non-reliance on previously issued financials, 5.02 officer and director departures — and filtering by them is narrower than any form-level filter in secedgar_search_filings or secedgar_company_search, neither of which can see items. Each row carries the accession number and primary document for secedgar_get_filing; press releases usually ride as EX-99 exhibits rather than in the primary document. Two numbering regimes exist: filings from 2004-08-23 onward use the x.xx codes, earlier ones use single integers (12 was the old results-of-operations item, 9 the old Regulation FD item), and both are accepted as filters and decoded in the response. A date window reaches filings older than the recent submissions window by reading every archive page it overlaps, up to 10; without one, the scan reads back only as far as it needs to fill limit. Every scanned filing that passes the filter is materialized as df_<id> for item-distribution analysis over time (pass a date window to cover a longer span) — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query.",
+    "Retrieve a company's 8-K filings with their item codes decoded, optionally filtered to specific items. 8-K item codes are how material events are actually scoped — 1.01 material agreements, 2.02 results of operations, 4.02 non-reliance on previously issued financials, 5.02 officer and director departures — and filtering by them is narrower than any form-level filter in secedgar_search_filings or secedgar_company_search, neither of which can see items. Each row carries the accession number and primary document for secedgar_get_filing; press releases usually ride as EX-99 exhibits rather than in the primary document. Two numbering regimes exist: filings from 2004-08-23 onward use the x.xx codes, earlier ones use single integers (12 was the old results-of-operations item, 9 the old Regulation FD item), and both are accepted as filters and decoded in the response. A date window reaches filings older than the recent submissions window by reading every archive page it overlaps, up to 10; without one, the scan reads back only as far as it needs to fill limit with filings passing the items filter, within the same 10 pages. Every scanned filing that passes the filter is materialized as df_<id> for item-distribution analysis over time (pass a date window to cover a longer span) — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -154,9 +154,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
   },
 
   output: z.object({
-    cik: z
-      .string()
-      .describe('Central Index Key of the resolved company, zero-padded to 10 digits.'),
+    cik: z.string().describe('Resolved CIK, zero-padded to 10 digits.'),
     company_name: z.string().describe('SEC-conformed company name.'),
     items_filter: z
       .array(z.string())
@@ -164,24 +162,20 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       .describe('The item codes filtered on, echoed. Absent when no filter was applied.'),
     total_matched: z
       .number()
-      .describe(
-        'Filings matching every applied filter across the whole scan, which may exceed limit and the inline list.',
-      ),
+      .describe('Filings matching every filter across the scan; can exceed limit.'),
     total_8k_scanned: z
       .number()
-      .describe(
-        '8-K filings inside the date window before the items filter — compare against total_matched to see how much the items filter removed.',
-      ),
+      .describe('8-K filings in the date window before the items filter; compare total_matched.'),
     item_distribution: z
       .record(z.string(), z.number())
       .describe(
-        'Count of the 8-K filings scanned in the date window carrying each item code, before the items filter. Empty when no 8-K filings were scanned.',
+        'Scanned 8-K filings per item code, before the items filter. Empty when none were scanned.',
       ),
     history_scanned_through: z
       .string()
       .optional()
       .describe(
-        'Oldest filing date reached by the scan (YYYY-MM-DD). Older filings were not examined: the recent window holds the last year or 1,000 filings of every form, whichever is more, and archive pages are read only for a date filter (every page overlapping it, up to 10) or to fill limit (stopping on the page that fills it). Absent when no filings were scanned.',
+        'Oldest filing date the scan reached (YYYY-MM-DD); nothing older was examined. The scan reads the recent window (last year or 1,000 filings), then up to 10 archive pages: those a date filter overlaps, or, undated, until limit filings pass the items filter. Absent when nothing was scanned.',
       ),
     filings: z
       .array(
@@ -189,22 +183,20 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
           .object({
             accession_number: z
               .string()
-              .describe(
-                'Filing accession number, dash format. Pass to secedgar_get_filing for the document text.',
-              ),
+              .describe('Accession number, dash format, for secedgar_get_filing.'),
             form: z.string().describe('Form type — "8-K", or "8-K/A" for an amendment.'),
             filing_date: z.string().describe('Date the filing was submitted (YYYY-MM-DD).'),
             report_date: z
               .string()
               .optional()
               .describe(
-                'Date of the reported event (YYYY-MM-DD), which usually precedes the filing date. Absent when SEC records none.',
+                'Date of the reported event (YYYY-MM-DD), usually before filing_date. Absent when SEC records none.',
               ),
             primary_document: z
               .string()
               .optional()
               .describe(
-                "Primary document filename — pass as `document` to secedgar_get_filing. Press releases are usually separate EX-99 exhibits, listed in that tool's document catalog. Absent on older filings, which EDGAR records without one; secedgar_get_filing still resolves them from the accession number alone.",
+                'Primary document filename for secedgar_get_filing; press releases are usually EX-99 exhibits. Absent on older filings, which resolve from the accession number alone.',
               ),
             description: z
               .string()
@@ -219,19 +211,19 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
                       .string()
                       .optional()
                       .describe(
-                        'Item title from Form 8-K. Absent for a code neither numbering regime defines, so the raw code is never given a guessed meaning.',
+                        'Item title from Form 8-K. Absent for a code neither numbering regime defines.',
                       ),
                     regime: z
                       .enum(['current', 'legacy'])
                       .optional()
                       .describe(
-                        `Which numbering the code belongs to: "current" for the dotted scheme in force since ${EIGHT_K_RENUMBERING_DATE}, "legacy" for the single-integer scheme before it. Absent for an unrecognized code shape.`,
+                        `"current" (dotted, since ${EIGHT_K_RENUMBERING_DATE}) or "legacy" (single integer, before). Absent for an unrecognized code.`,
                       ),
                   })
                   .describe('One reported 8-K item.'),
               )
               .describe(
-                'Items this filing reports, decoded. Empty when EDGAR records no items for the filing, which happens on some older filings.',
+                'Items this filing reports, decoded. Empty when EDGAR records none (some older filings).',
               ),
           })
           .describe('One 8-K filing.'),
@@ -242,19 +234,19 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
         name: z
           .string()
           .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
           ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
         truncated: z
           .boolean()
           .describe(
-            'True when archive pages in range went unread — the 10-page cap ended the scan, or an undated call stopped once limit was filled, which is before any archive page when the recent window alone fills it — so older matching filings may exist beyond the dataframe. Pass filed_after / filed_before to reach them.',
+            'True when archive pages in range went unread (the 10-page cap, or an undated call that stopped once limit was filled, possibly before any archive page), so older matches may exist. Pass filed_after / filed_before to reach them.',
           ),
       })
       .optional()
       .describe(
-        "Canvas dataframe holding every scanned 8-K that passes the filter. Item codes ride as a comma-separated `item_codes` column, so item-frequency-over-time queries split it (`unnest(string_split(item_codes, ','))`). Absent when the result fits inline, canvas is unavailable, or materialization failed.",
+        "Dataframe of every scanned 8-K passing the filter; item_codes is comma-separated (unnest(string_split(item_codes, ','))). Absent when the result fits inline, canvas is unavailable, or staging failed.",
       ),
   }),
 
@@ -263,7 +255,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       .string()
       .optional()
       .describe(
-        'Guidance when nothing matched — distinguishes an empty date window from an items filter that excluded everything.',
+        'Why nothing matched (an empty date window, or an items filter that excluded everything), and, when fewer than limit matched while the page cap left pages unread, how far the scan reached and the window that goes further.',
       ),
     truncated: z.boolean().optional().describe('True when the inline filings list was capped.'),
     shown: z.number().optional().describe('Number of filings shown inline.'),
@@ -335,13 +327,15 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
     // A date window reads every page overlapping it, up to the cap; the under-fill
     // walk stops on the page that fills `limit` with rows passing the items filter,
     // since an undated call asks for the newest `limit` and nothing older (#134).
+    // Entry counts the same filtered rows as the stop test, so recent 8-Ks the
+    // filter rejects never stand in for matches (#139).
     const walk = new SubmissionsArchiveWalk(api, submissions, {
       filedAfter,
       filedBefore,
       order: 'newest-first',
     });
-    if (hasDateFilter || scanned.length < input.limit) {
-      let matchedSoFar = scanned.filter(passesItems).length;
+    let matchedSoFar = scanned.filter(passesItems).length;
+    if (hasDateFilter || matchedSoFar < input.limit) {
       for await (const { block } of walk) {
         const rows = zipEightKs(block).filter(inWindow);
         scanned.push(...rows);
@@ -405,15 +399,34 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
             ? `on or before ${filedBefore}`
             : 'in the scanned history';
 
+    // Fewer than `limit` matches while selected archive pages went unread — only the
+    // page cap ends a walk that short — so say how far the scan reached and how to go
+    // further. `ctx.enrich.notice` is last-wins, so it rides on the zero-hit notices.
+    // The walk runs newest first, so only an earlier upper bound reaches older filings.
+    const depthNote =
+      matched.length < input.limit && archiveTruncated
+        ? ` The archive scan stopped after ${walk.pagesRead} pages, at filings from ${historyScannedThrough}; ${
+            hasDateFilter
+              ? `narrow the window with filed_before=${historyScannedThrough} to reach older ones.`
+              : `pass filed_before=${historyScannedThrough}, or a filed_after / filed_before window, to reach older 8-K filings.`
+          }`
+        : '';
+
     if (scanned.length === 0) {
+      // Cut short by the cap, the empty result covers only the span scanned, and a
+      // wider range would reach nothing further — the depth sentence names the lever.
       ctx.enrich.notice(
-        `${submissions.name} filed no 8-K ${windowText}. Widen the date range, or list every form type with secedgar_company_search.`,
+        depthNote
+          ? `${submissions.name} filed no 8-K ${windowText}${hasDateFilter ? ' as far back as the scan reached' : ''}.${depthNote} List every form type with secedgar_company_search.`
+          : `${submissions.name} filed no 8-K ${windowText}. Widen the date range, or list every form type with secedgar_company_search.`,
       );
     } else if (matched.length === 0) {
       const present = Object.keys(itemDistribution).sort().join(', ');
       ctx.enrich.notice(
-        `${scanned.length} 8-K filings found ${windowText}, none reporting items [${(itemsFilter ?? []).join(', ')}]. Items actually reported in this window: ${present}. Filings before ${EIGHT_K_RENUMBERING_DATE} use single-integer item codes, so a dotted filter never matches them.`,
+        `${scanned.length} 8-K filings found ${windowText}, none reporting items [${(itemsFilter ?? []).join(', ')}]. Items actually reported in this window: ${present}. Filings before ${EIGHT_K_RENUMBERING_DATE} use single-integer item codes, so a dotted filter never matches them.${depthNote}`,
       );
+    } else if (depthNote) {
+      ctx.enrich.notice(depthNote.trimStart());
     } else if (matched.length > input.limit) {
       ctx.enrich.truncated({
         shown: input.limit,

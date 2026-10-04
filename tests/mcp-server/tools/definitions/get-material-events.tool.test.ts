@@ -516,6 +516,13 @@ describe('getMaterialEventsTool — under-filled archive walk (#134)', () => {
       total_matched: 15,
       history_scanned_through: '2005-01-01',
     });
+    // Under-filled with pages 011–014 unread: the depth sentence is the whole notice (#139).
+    const notice = String((result.structuredContent as { notice?: string }).notice);
+    expect(notice).toBe(
+      'The archive scan stopped after 10 pages, at filings from 2005-01-01; pass filed_before=2005-01-01, or a filed_after / filed_before window, to reach older 8-K filings.',
+    );
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain(notice);
   });
 
   it('is not truncated when the walk exhausts every page before the cap', async () => {
@@ -585,6 +592,178 @@ describe('getMaterialEventsTool — under-filled archive walk (#134)', () => {
     expect(result.structuredContent).toMatchObject({
       total_matched: 30,
       history_scanned_through: '2009-01-01',
+    });
+  });
+
+  // The walk's entry test counts the same rows as its stop test — rows passing the
+  // items filter — and an under-filled result with pages left unread says how far the
+  // scan reached (#139).
+  describe('items-filtered entry and depth notice (#139)', () => {
+    const notice = (result: { structuredContent?: unknown }) =>
+      String((result.structuredContent as { notice?: string }).notice);
+
+    it('sends no archive request when the recent rows passing the filter fill limit', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+      // Recent holds two 2.02 filings; limit 1 is filled before any page.
+      const result = await runToolContract(getMaterialEventsTool, {
+        company: 'AAPL',
+        items: ['2.02'],
+        limit: 1,
+      });
+
+      expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+      expect(result.structuredContent).toMatchObject({
+        total_matched: 2,
+        history_scanned_through: '2025-10-30',
+        dataset: { row_count: 2, truncated: true },
+      });
+    });
+
+    it('walks the archive when recent holds limit 8-Ks but fewer pass the filter', async () => {
+      // Page 001 carries 8.01 only; page 002 onward reports 5.02.
+      mockApi.fetchArchivePage.mockImplementation(async (name: string) =>
+        pageOf(name, Number(name.slice(-8, -5)) >= 2 ? '5.02' : '8.01'),
+      );
+      vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+      // Five recent 8-Ks meet limit 5, but only one is a 5.02.
+      const result = await runToolContract(getMaterialEventsTool, {
+        company: 'AAPL',
+        items: ['5.02'],
+        limit: 5,
+      });
+
+      expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(2);
+      expect(mockApi.fetchArchivePage).toHaveBeenLastCalledWith(
+        'CIK0000320193-submissions-002.json',
+      );
+      expect(result.structuredContent).toMatchObject({
+        total_matched: 11,
+        total_8k_scanned: 25,
+        history_scanned_through: '2013-01-01',
+        dataset: { row_count: 11, truncated: true },
+      });
+      expect((result.structuredContent as { filings: unknown[] }).filings).toHaveLength(5);
+      expect(notice(result)).not.toContain('archive scan stopped');
+    });
+
+    it('appends the depth sentence to the item-filter notice when the cap ends a zero-match walk', async () => {
+      const result = await runToolContract(getMaterialEventsTool, {
+        company: 'AAPL',
+        items: ['4.02'],
+        limit: 5,
+      });
+
+      expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(10);
+      expect(result.structuredContent).toMatchObject({
+        total_matched: 0,
+        total_8k_scanned: 105,
+        history_scanned_through: '2005-01-01',
+      });
+      const text = notice(result);
+      expect(text).toMatch(
+        /^105 8-K filings found in the scanned history, none reporting items \[4\.02\]\. /,
+      );
+      expect(text).toContain('Items actually reported in this window: 2.02, 5.02, 5.07, 8.01');
+      expect(text).toMatch(
+        / The archive scan stopped after 10 pages, at filings from 2005-01-01; pass filed_before=2005-01-01, or a filed_after \/ filed_before window, to reach older 8-K filings\.$/,
+      );
+      // The content[] trailer carries the same notice for content-only clients.
+      expect(result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n')).toContain(
+        text,
+      );
+    });
+
+    it('emits the depth sentence alone when the cap ends an under-filled filtered walk', async () => {
+      // One 5.02 and one 8.01 per page: 1 recent + 10 pages = 11 matches, short of 20.
+      mockApi.fetchArchivePage.mockImplementation(async (name: string) =>
+        block([
+          { accession: `${name}-0`, date: '2000-01-02', items: '5.02' },
+          { accession: `${name}-1`, date: '2000-01-01', items: '8.01' },
+        ]),
+      );
+      const result = await runToolContract(getMaterialEventsTool, {
+        company: 'AAPL',
+        items: ['5.02'],
+        limit: 20,
+      });
+
+      expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(10);
+      expect(result.structuredContent).toMatchObject({ total_matched: 11 });
+      expect(notice(result)).toBe(
+        'The archive scan stopped after 10 pages, at filings from 2005-01-01; pass filed_before=2005-01-01, or a filed_after / filed_before window, to reach older 8-K filings.',
+      );
+    });
+
+    it('words the depth sentence for a dated call to narrow the window', async () => {
+      mockApi.fetchArchivePage.mockImplementation(async (name: string) => {
+        const year = 2014 - (Number(name.slice(-8, -5)) - 1);
+        return block([{ accession: `${name}-0`, date: `${year}-06-01`, items: '8.01' }]);
+      });
+      const result = await runToolContract(getMaterialEventsTool, {
+        company: 'AAPL',
+        filed_after: '1990-01-01',
+        filed_before: '2014-12-31',
+        limit: 20,
+      });
+
+      // All fourteen pages overlap the window; the cap reads ten, one 8-K each. The
+      // newest-first walk reaches older filings only through an earlier upper bound,
+      // so the sentence names it — a later filed_after would re-read the same pages.
+      expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(10);
+      expect(result.structuredContent).toMatchObject({ total_matched: 10 });
+      expect(notice(result)).toBe(
+        'The archive scan stopped after 10 pages, at filings from 2005-01-01; narrow the window with filed_before=2005-01-01 to reach older ones.',
+      );
+    });
+
+    it('appends the depth sentence to the empty-window notice, claiming only the span scanned', async () => {
+      mockApi.fetchArchivePage.mockImplementation(async (name: string) =>
+        block([{ accession: `${name}-0`, date: '2000-01-01', form: '10-Q' }]),
+      );
+      const result = await runToolContract(getMaterialEventsTool, {
+        company: 'AAPL',
+        filed_after: '1990-01-01',
+        filed_before: '2014-12-31',
+      });
+
+      // Pages 011–014 overlap the window unread, so "no 8-K in the window" is unproven
+      // and widening the range would reach nothing further.
+      expect(result.structuredContent).toMatchObject({ total_8k_scanned: 0 });
+      expect(notice(result)).toBe(
+        'Apple Inc. filed no 8-K between 1990-01-01 and 2014-12-31 as far back as the scan reached. The archive scan stopped after 10 pages, at filings from 2005-01-01; narrow the window with filed_before=2005-01-01 to reach older ones. List every form type with secedgar_company_search.',
+      );
+    });
+
+    it('drops the widen-the-range advice from an undated empty result the cap cut short', async () => {
+      mockApi.getSubmissions.mockResolvedValue(
+        buildSubmissions({
+          filings: [{ accession: '0000320193-25-000090', date: '2025-10-30', form: '10-Q' }],
+          files: FILES,
+        }),
+      );
+      mockApi.fetchArchivePage.mockImplementation(async (name: string) =>
+        block([{ accession: `${name}-0`, date: '2000-01-01', form: '10-Q' }]),
+      );
+      const result = await runToolContract(getMaterialEventsTool, { company: 'AAPL' });
+
+      expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(10);
+      expect(result.structuredContent).toMatchObject({ total_8k_scanned: 0 });
+      expect(notice(result)).toBe(
+        'Apple Inc. filed no 8-K in the scanned history. The archive scan stopped after 10 pages, at filings from 2005-01-01; pass filed_before=2005-01-01, or a filed_after / filed_before window, to reach older 8-K filings. List every form type with secedgar_company_search.',
+      );
+    });
+
+    it('adds no depth sentence when a dated call fills limit despite unread pages', async () => {
+      const result = await runToolContract(getMaterialEventsTool, {
+        company: 'AAPL',
+        filed_after: '1990-01-01',
+        filed_before: '2014-12-31',
+        limit: 5,
+      });
+
+      expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(10);
+      expect(result.structuredContent).toMatchObject({ total_matched: 100 });
+      expect(notice(result)).not.toContain('archive scan stopped');
     });
   });
 });
