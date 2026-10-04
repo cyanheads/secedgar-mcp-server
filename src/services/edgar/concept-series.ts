@@ -5,6 +5,7 @@
  * filer's reporting-form fact for the same period, same-frame collisions resolve
  * by tag priority (index 0 = the preferred total), and ties within one tag
  * resolve to the latest `filed` date so a restatement replaces the original.
+ * Frames compete only within one unit key, and a series is read in one unit.
  * Every resolved value names the tag and unit key it was read under. Extracted
  * from `get_financials` so the snapshot and comparison tools produce numbers
  * identical to it rather than re-implementing the rules.
@@ -117,32 +118,110 @@ function dayOfYear(date: string): number {
   return Math.floor((at - Date.parse(`${date.slice(0, 4)}-01-01`)) / 86_400_000) + 1;
 }
 
+/** Whether a date falls within a week of a day of year, across the turn of the year. */
+function onFiscalYearEnd(end: string, holderDay: number): boolean {
+  const apart = Math.abs(dayOfYear(end) - holderDay);
+  return Math.min(apart, 366 - apart) <= FISCAL_YEAR_END_TOLERANCE_DAYS;
+}
+
+/** Whether a duration spans a fiscal year — 350 to 380 days, so a 53-week year counts. */
+function isYearLong(fact: CompanyConceptUnit): boolean {
+  if (!fact.start) return false;
+  const days = (Date.parse(fact.end) - Date.parse(fact.start)) / 86_400_000;
+  return days >= 350 && days <= 380;
+}
+
+/** Annual reports — `10-K`, the transition-period `10-KT`, `20-F`, and `40-F`, with amendments. */
+const ANNUAL_REPORT_FORM = /^(10-KT?|20-F|40-F)(\/A)?$/;
+
 /**
- * Whether a quarterly report's year-long fact covers a closed fiscal year, read
- * from the same series: it must have ended before the report was filed, and its
- * end must fall on a fiscal-year end the series shows — the end of a year-long
- * fact from any other form, within a week. A trailing-twelve-month figure ends
- * on a fiscal quarter end instead. When the series holds no year-long fact from
- * another form there is nothing to test against, and the fact is kept.
+ * A filer's fiscal-year ends, sorted and each listed once: for every annual
+ * report accession, the latest end among its year-long facts that ended before
+ * it was filed, across every tag and unit. That is the report's own fiscal year
+ * — the comparatives end earlier, and the before-filing guard drops a
+ * forward-looking year-long figure (Walmart and P&G each carry one). Taking
+ * every year-long fact from an annual report instead would admit off-cycle ends
+ * that sit on quarter ends (Merck's and P&G's 09-30, Toyota's 06-30) and keep a
+ * trailing-twelve-month figure ending there (#148). Units served as anything but
+ * an array are skipped (#141).
+ */
+export function fiscalYearEnds(unitMaps: Iterable<Readonly<Record<string, unknown>>>): string[] {
+  const latestByAccession = new Map<string, string>();
+  for (const units of unitMaps) {
+    for (const facts of Object.values(units)) {
+      if (!Array.isArray(facts)) continue;
+      for (const fact of facts as CompanyConceptUnit[]) {
+        if (!ANNUAL_REPORT_FORM.test(fact.form) || fact.end >= fact.filed || !isYearLong(fact)) {
+          continue;
+        }
+        const latest = latestByAccession.get(fact.accn);
+        if (!latest || fact.end > latest) latestByAccession.set(fact.accn, fact.end);
+      }
+    }
+  }
+  return [...new Set(latestByAccession.values())].sort();
+}
+
+/** {@link fiscalYearEnds} per companyfacts payload, so one payload is scanned at most once. */
+const yearEndsByPayload = new WeakMap<CompanyFactsResponse, string[]>();
+
+/**
+ * The fiscal-year ends a companyfacts payload shows ({@link fiscalYearEnds}),
+ * computed once per payload — `get_snapshot` resolves every catalog concept from
+ * the same one.
+ */
+export function filerFiscalYearEnds(facts: CompanyFactsResponse): string[] {
+  let ends = yearEndsByPayload.get(facts);
+  if (!ends) {
+    ends = fiscalYearEnds(
+      Object.values(facts.facts).flatMap((namespace) =>
+        Object.values(namespace).map((concept) => concept.units),
+      ),
+    );
+    yearEndsByPayload.set(facts, ends);
+  }
+  return ends;
+}
+
+/**
+ * Supplies the filer's fiscal-year ends ({@link fiscalYearEnds}) for a
+ * 10-Q-held annual frame whose own tag and unit hold nothing to test it
+ * against. Called only for such a frame, so a caller can defer the read until
+ * one turns up; `undefined` (the ends are not at hand) keeps the frame untested.
+ */
+export type FiscalYearEndsSource = () => readonly string[] | undefined;
+
+/**
+ * Whether a quarterly report's year-long fact covers a closed fiscal year. It
+ * must have ended before the report was filed, and its end must fall within a
+ * week of a fiscal-year end — a trailing-twelve-month figure ends on a fiscal
+ * quarter end instead.
+ *
+ * The fiscal-year ends come from the same series first: the end of every
+ * year-long fact from a form that is neither a quarterly report nor a proxy.
+ * When the series holds none (Amazon reports one exchange-rate tag only in a
+ * single 10-Q), they come from the filer's annual reports ({@link
+ * fiscalYearEnds}), and the fact is kept untested only when the filer has none
+ * or the caller does not hold them (#148).
  */
 function closesFiscalYear(
   holder: CompanyConceptUnit,
   sameSeries: readonly CompanyConceptUnit[],
+  filerYearEnds?: FiscalYearEndsSource,
 ): boolean {
   if (holder.end >= holder.filed) return false;
   const holderDay = dayOfYear(holder.end);
   let sawFiscalYear = false;
   for (const candidate of sameSeries) {
-    if (!candidate.start || isQuarterlyForm(candidate.form) || isProxyForm(candidate.form)) {
+    if (isQuarterlyForm(candidate.form) || isProxyForm(candidate.form) || !isYearLong(candidate)) {
       continue;
     }
-    const days = (Date.parse(candidate.end) - Date.parse(candidate.start)) / 86_400_000;
-    if (days < 350 || days > 380) continue;
     sawFiscalYear = true;
-    const apart = Math.abs(dayOfYear(candidate.end) - holderDay);
-    if (Math.min(apart, 366 - apart) <= FISCAL_YEAR_END_TOLERANCE_DAYS) return true;
+    if (onFiscalYearEnd(candidate.end, holderDay)) return true;
   }
-  return !sawFiscalYear;
+  if (sawFiscalYear) return false;
+  const ends = filerYearEnds?.();
+  return !ends?.length || ends.some((end) => onFiscalYearEnd(end, holderDay));
 }
 
 /**
@@ -161,17 +240,19 @@ function closesFiscalYear(
  *   else nothing — a trailing-twelve-month or unfinished-year figure is not an
  *   annual value. Quarterly and instant frames from 10-Qs are untouched.
  *
- * `sameSeries` is the holder's tag under its unit key.
+ * `sameSeries` is the holder's tag under its unit key. `filerYearEnds` is asked
+ * only when that series holds nothing to test a 10-Q-held year against (#148).
  */
 export function frameHolderFact<T extends CompanyConceptUnit>(
   holder: T,
   sameSeries: readonly T[],
+  filerYearEnds?: FiscalYearEndsSource,
 ): T | undefined {
   if (isProxyForm(holder.form)) return reportingFormTwin(holder, sameSeries) ?? holder;
   if (isQuarterlyForm(holder.form) && holder.frame && ANNUAL_FRAME.test(holder.frame)) {
     return (
       reportingFormTwin(holder, sameSeries) ??
-      (closesFiscalYear(holder, sameSeries) ? holder : undefined)
+      (closesFiscalYear(holder, sameSeries, filerYearEnds) ? holder : undefined)
     );
   }
   return holder;
@@ -210,7 +291,14 @@ export function preferredTagIndex(
 }
 
 /**
- * Collapse a company's reported values to one per standard calendar period.
+ * Collapse a company's reported values to one per standard calendar period,
+ * separately for every unit key the values sit under — a map from unit key
+ * (`USD`, `ZAR`, `USD/EUR`) to that unit's frames. Frames compete only within
+ * one unit: a 20-F filer frames the same year in its reporting currency and in
+ * a USD convenience translation, and letting the two compete swaps the unit
+ * partway through the history whenever the other unit's fact was filed later
+ * (#146). Every unit key the considered tags report is present, with an empty
+ * map when none of its values carried a frame.
  *
  * Values with no `frame` are non-standard periods and are dropped. What happens
  * to the rest depends on the selection, because the two selections describe
@@ -223,7 +311,8 @@ export function preferredTagIndex(
  * the leader does not report.
  *
  * Under `coverage` the tags are alternates the filer chooses between, so only
- * the tag it maintains contributes and the others drop out entirely. Letting a
+ * the tag it maintains — ranked by its standard periods across every unit —
+ * contributes, and the others drop out entirely with all their units. Letting a
  * loser fill the winner's gaps would splice two definitions into one series: the
  * filers that report both tags disagree on the years they overlap — Ferrari
  * tags CY2022 at EUR 16.2M under the employee element and EUR 20.9M under the
@@ -238,21 +327,37 @@ export function preferredTagIndex(
  * collision, so a proxy-held frame in the leading tag takes its twin from that
  * tag and is never handed to a lower one (#123); a trailing-twelve-month frame
  * the leader holds drops out, and a lower tag may then fill it with a real
- * annual value (#142).
- *
- * Returns an empty map when nothing carried a frame — the caller distinguishes
- * that from "the concept is not reported at all".
+ * annual value (#142). `filerYearEnds` tests a 10-Q-held year its own tag and
+ * unit cannot (#148).
  */
-export function resolveFrameSeries(
+export function resolveFrameSeriesByUnit(
   units: readonly TagPrioritizedUnit[],
   selection: TagSelection = 'priority',
-): Map<string, FramedUnit> {
+  filerYearEnds?: FiscalYearEndsSource,
+): Map<string, Map<string, FramedUnit>> {
   const winner = selection === 'coverage' ? preferredTagIndex(units, selection) : undefined;
   const considered =
     winner === undefined ? units : units.filter((unit) => unit.tagIndex === winner);
+  return new Map(
+    [...Map.groupBy(considered, (unit) => unit.unit)].map(([unitKey, series]) => [
+      unitKey,
+      resolveUnitFrames(series, filerYearEnds),
+    ]),
+  );
+}
 
+/**
+ * One unit key's values collapsed to one per frame: the holder rules, then tag
+ * priority, then the latest `filed` within a tag. `series` holds a single unit
+ * key, so scoping it to the holder's tag hands {@link frameHolderFact} the
+ * holder's tag under its unit key.
+ */
+function resolveUnitFrames(
+  series: readonly TagPrioritizedUnit[],
+  filerYearEnds?: FiscalYearEndsSource,
+): Map<string, FramedUnit> {
   const byFrame = new Map<string, TagPrioritizedUnit & FramedUnit>();
-  for (const unit of considered) {
+  for (const unit of series) {
     const { frame } = unit;
     if (!frame) continue;
     // Only the two corrected holder shapes pay for scoping the series.
@@ -260,7 +365,8 @@ export function resolveFrameSeries(
       isProxyForm(unit.form) || (ANNUAL_FRAME.test(frame) && isQuarterlyForm(unit.form))
         ? frameHolderFact(
             unit,
-            considered.filter((u) => u.tagIndex === unit.tagIndex && u.unit === unit.unit),
+            series.filter((u) => u.tagIndex === unit.tagIndex),
+            filerYearEnds,
           )
         : unit;
     if (!reported) continue;
@@ -279,6 +385,57 @@ export function resolveFrameSeries(
     resolved.set(frame, unit);
   }
   return resolved;
+}
+
+/** End date of the newest value in one unit's frames; empty when it has none. */
+function newestEnd(frames: ReadonlyMap<string, FramedUnit>): string {
+  let newest = '';
+  for (const unit of frames.values()) if (unit.end > newest) newest = unit.end;
+  return newest;
+}
+
+/**
+ * The unit keys that carried a frame, best first: the unit of the newest value,
+ * then the unit with more framed periods, then the alphabetically first key.
+ * The first entry is the unit a series is read in by default.
+ *
+ * Newest first follows a presentation-currency change (Prudential plc's GBP
+ * runs to 2018, its USD from 2017) instead of answering in the abandoned
+ * currency, and the period count settles the usual 20-F tie, where the
+ * reporting currency and a USD convenience translation share their newest year
+ * but the translation covers fewer of them. The catalog mapping's `unit` is
+ * never consulted: it reads `USD` for nearly every concept, under `ifrs-full`
+ * too, and would hand a 20-F filer's series to its translation (#146).
+ */
+export function rankSeriesUnits(
+  byUnit: ReadonlyMap<string, ReadonlyMap<string, FramedUnit>>,
+): string[] {
+  return [...byUnit]
+    .filter(([, frames]) => frames.size > 0)
+    .map(([unitKey, frames]) => ({ unitKey, periods: frames.size, newest: newestEnd(frames) }))
+    .sort(
+      (a, b) =>
+        b.newest.localeCompare(a.newest) ||
+        b.periods - a.periods ||
+        (a.unitKey < b.unitKey ? -1 : a.unitKey > b.unitKey ? 1 : 0),
+    )
+    .map(({ unitKey }) => unitKey);
+}
+
+/**
+ * One value per standard calendar period, all in one unit — the default unit
+ * {@link rankSeriesUnits} picks from {@link resolveFrameSeriesByUnit}. Returns an
+ * empty map when nothing carried a frame — the caller distinguishes that from
+ * "the concept is not reported at all".
+ */
+export function resolveFrameSeries(
+  units: readonly TagPrioritizedUnit[],
+  selection: TagSelection = 'priority',
+  filerYearEnds?: FiscalYearEndsSource,
+): Map<string, FramedUnit> {
+  const byUnit = resolveFrameSeriesByUnit(units, selection, filerYearEnds);
+  const [unitKey] = rankSeriesUnits(byUnit);
+  return (unitKey === undefined ? undefined : byUnit.get(unitKey)) ?? new Map();
 }
 
 /**
@@ -438,7 +595,10 @@ export interface ConceptSeries {
   tagsTried: string[];
   /** Taxonomy the values were read from. */
   taxonomy: string;
-  /** Unit of measure key of the newest value (e.g. `USD`, `USD/shares`, `shares`). */
+  /**
+   * Unit of measure key of every value (e.g. `USD`, `USD/shares`, `shares`) —
+   * the default unit {@link rankSeriesUnits} picks when the tags report several.
+   */
   unit: string;
 }
 
@@ -466,12 +626,16 @@ export function describingTag(
 
 /**
  * Resolve one concept from a companyfacts payload, applying the same tag
- * selection and frame dedup as {@link resolveFrameSeries}. Returns `undefined`
+ * selection, frame dedup, and default unit as {@link resolveFrameSeries}; other
+ * units the tags report are not part of the result. Returns `undefined`
  * when the filer reports none of the candidate tags under this taxonomy, which
  * the caller surfaces as a gap alongside the tags it tried.
  *
  * The reported `tag`, `label`, `description`, and `unit` describe the tag behind
- * the newest value ({@link describingTag}), not the first one present.
+ * the newest value ({@link describingTag}), not the first one present. A
+ * 10-Q-held year its own tag and unit cannot test is tested against the
+ * fiscal-year ends this same payload shows ({@link filerFiscalYearEnds}), read
+ * only when such a year turns up (#148).
  */
 export function seriesFromCompanyFacts(
   facts: CompanyFactsResponse,
@@ -508,9 +672,9 @@ export function seriesFromCompanyFacts(
     }
   }
 
-  const series = [...resolveFrameSeries(units, selection).values()].sort((a, b) =>
-    b.end.localeCompare(a.end),
-  );
+  const series = [
+    ...resolveFrameSeries(units, selection, () => filerFiscalYearEnds(facts)).values(),
+  ].sort((a, b) => b.end.localeCompare(a.end));
   /** Falls back to the first reporting tag when nothing carried a value to rank. */
   const tag = describingTag(series, units, selection) ?? [...reported.keys()][0];
   const described = tag !== undefined ? reported.get(tag) : undefined;

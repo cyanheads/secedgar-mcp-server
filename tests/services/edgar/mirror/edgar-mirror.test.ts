@@ -14,9 +14,51 @@ import { strToU8, zipSync } from 'fflate';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { seriesFromCompanyFacts } from '@/services/edgar/concept-series.js';
 import type { CompanyFactsFile } from '@/services/edgar/mirror/companyfacts-sync.js';
+import { FISCAL_YEAR_END_READ_BUDGET } from '@/services/edgar/mirror/edgar-mirror.js';
 import { EdgarMirror } from '@/services/edgar/mirror/index.js';
+import type { CompanyConceptUnit } from '@/services/edgar/types.js';
 
 const LM = 'Sat, 31 May 2026 03:00:00 GMT';
+
+const FX_TAG =
+  'EffectOfExchangeRateOnCashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents';
+
+/**
+ * Amazon's Q1-2022 10-Q shape (#148): an April–March trailing-twelve-month
+ * figure SEC framed CY2021, and the quarter beside it.
+ */
+function q1TrailingYear(accn: string): CompanyConceptUnit[] {
+  const q1 = { accn, fy: 2022, fp: 'Q1', form: '10-Q', filed: '2022-04-29' };
+  return [
+    { ...q1, start: '2021-04-01', end: '2022-03-31', val: -55000000, frame: 'CY2021' },
+    { ...q1, start: '2022-01-01', end: '2022-03-31', val: 16000000, frame: 'CY2022Q1' },
+  ];
+}
+
+/**
+ * December fiscal years from 10-K accessions, one fact per accession, until
+ * their JSON passes `minChars` (one fact at least).
+ */
+function decemberYears(minChars: number): CompanyConceptUnit[] {
+  const facts: CompanyConceptUnit[] = [];
+  let chars = 0;
+  for (let i = 0; chars < minChars || facts.length === 0; i++) {
+    const year = 2021 - (i % 30);
+    const fact = {
+      start: `${year}-01-01`,
+      end: `${year}-12-31`,
+      val: i,
+      accn: `k-${i}`,
+      fy: year,
+      fp: 'FY',
+      form: '10-K',
+      filed: `${year + 1}-02-15`,
+    };
+    facts.push(fact);
+    chars += JSON.stringify(fact).length + 1;
+  }
+  return facts;
+}
 
 const apple: CompanyFactsFile = {
   cik: 320193,
@@ -113,6 +155,24 @@ const msft: CompanyFactsFile = {
           ],
         },
       },
+      [FX_TAG]: {
+        label: 'Effect of Exchange Rate',
+        units: {
+          USD: [
+            {
+              start: '2020-07-01',
+              end: '2021-06-30',
+              val: -29000000,
+              frame: 'CY2021',
+              accn: 'msft-fy2021',
+              fy: 2021,
+              fp: 'FY',
+              form: '10-K',
+              filed: '2021-07-29',
+            },
+          ],
+        },
+      },
     },
   },
 };
@@ -155,6 +215,51 @@ const amazon: CompanyFactsFile = {
           ],
         },
       },
+      // Nothing but its Q1-2022 10-Q (#148): the CY2021 frame holds an
+      // April–March trailing-twelve-month figure its own series cannot test.
+      [FX_TAG]: {
+        label: 'Effect of Exchange Rate',
+        units: { USD: q1TrailingYear('amzn-q1-2022') },
+      },
+    },
+  },
+};
+
+/** A filer that has filed only quarterly reports — no fiscal-year end of its own (#148). */
+const quarterlyOnlyFiler: CompanyFactsFile = {
+  cik: 1990000,
+  entityName: 'QUARTERLY ONLY INC',
+  facts: {
+    'us-gaap': {
+      [FX_TAG]: { label: 'Effect of Exchange Rate', units: { USD: q1TrailingYear('qo-q1-2022') } },
+    },
+  },
+};
+
+/**
+ * A filer whose fact set alone overruns the fiscal-year-end read budget: its
+ * 10-Ks close each December, so its April–March `BudgetProbe` figure would leave
+ * the frame if its rows were read (#148).
+ */
+const oversizedFiler: CompanyFactsFile = {
+  cik: 1990001,
+  entityName: 'OVERSIZED FILER INC',
+  facts: {
+    'us-gaap': {
+      Filler: { label: 'Filler', units: { USD: decemberYears(FISCAL_YEAR_END_READ_BUDGET) } },
+      BudgetProbe: { label: 'Budget Probe', units: { USD: q1TrailingYear('big-q1-2022') } },
+    },
+  },
+};
+
+/** Scanned after the oversized filer, once the budget is spent (#148). */
+const laterFiler: CompanyFactsFile = {
+  cik: 1990002,
+  entityName: 'LATER FILER INC',
+  facts: {
+    'us-gaap': {
+      NetIncomeLoss: { label: 'Net Income (Loss)', units: { USD: decemberYears(1) } },
+      BudgetProbe: { label: 'Budget Probe', units: { USD: q1TrailingYear('late-q1-2022') } },
     },
   },
 };
@@ -266,6 +371,10 @@ function makeFetchMock() {
     'CIK0000789019.json': strToU8(JSON.stringify(msft)),
     'CIK0000310158.json': strToU8(JSON.stringify(merck)),
     'CIK0001018724.json': strToU8(JSON.stringify(amazon)),
+    'CIK0001990000.json': strToU8(JSON.stringify(quarterlyOnlyFiler)),
+    // Ingest order is scan order: the oversized filer's row comes before the later one's.
+    'CIK0001990001.json': strToU8(JSON.stringify(oversizedFiler)),
+    'CIK0001990002.json': strToU8(JSON.stringify(laterFiler)),
   });
   return vi.fn(async (url: string, init?: RequestInit) => {
     const u = String(url);
@@ -452,6 +561,26 @@ describe('EdgarMirror — init + read helpers', () => {
     // Merck's Revenues row carries `{"USD":{}}`; the other two filers still answer.
     const frame = await mirror.getFrames('us-gaap', 'Revenues', 'USD', 'CY2023');
     expect(frame?.data.map((d) => d.cik).sort()).toEqual([320193, 789019]);
+  });
+
+  it('tests a row its own series cannot test against the filer’s fiscal-year ends (#148)', async () => {
+    // Amazon's 10-Ks close each December, so its April–March CY2021 leaves the
+    // frame; the quarterly-only filer has no year end to test against and stays.
+    const frame = await mirror.getFrames('us-gaap', FX_TAG, 'USD', 'CY2021');
+    expect(frame?.data.map((d) => [d.cik, d.val, d.end])).toEqual([
+      [789019, -29000000, '2021-06-30'],
+      [1990000, -55000000, '2022-03-31'],
+    ]);
+    expect(frame?.pts).toBe(2);
+    const quarter = await mirror.getFrames('us-gaap', FX_TAG, 'USD', 'CY2022Q1');
+    expect(quarter?.data.map((d) => d.cik)).toEqual([1018724, 1990000]);
+  });
+
+  it('keeps untested rows once a filer overruns the per-call read budget (#148)', async () => {
+    // The later filer has Amazon's shape and December year ends, so it too would
+    // leave the frame — but the oversized filer before it spent the budget.
+    const frame = await mirror.getFrames('us-gaap', 'BudgetProbe', 'USD', 'CY2021');
+    expect(frame?.data.map((d) => d.cik)).toEqual([1990001, 1990002]);
   });
 
   it('returns null when no company reports the requested frame', async () => {

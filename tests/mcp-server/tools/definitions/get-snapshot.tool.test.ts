@@ -528,6 +528,135 @@ describe('getSnapshotTool', () => {
     });
   });
 
+  it('reaches a bank’s current interest expense through the operating caption (#147)', async () => {
+    /** JPMorgan's shape: InterestExpense stops at CY2024Q1; SEC serves the successor with `"label":null`. */
+    mockApi.tryGetCompanyFacts.mockResolvedValue({
+      facts: {
+        'us-gaap': {
+          InterestExpense: {
+            label: 'Interest Expense',
+            units: {
+              USD: [
+                fact({
+                  frame: 'CY2023',
+                  start: '2023-01-01',
+                  end: '2023-12-31',
+                  val: 81_321_000_000,
+                }),
+                fact({
+                  frame: 'CY2024Q1',
+                  start: '2024-01-01',
+                  end: '2024-03-31',
+                  val: 24_356_000_000,
+                  form: '10-Q',
+                }),
+              ],
+            },
+          },
+          InterestExpenseOperating: {
+            label: null as never,
+            units: {
+              USD: [
+                fact({
+                  frame: 'CY2023',
+                  start: '2023-01-01',
+                  end: '2023-12-31',
+                  val: 81_321_000_000,
+                }),
+                fact({
+                  frame: 'CY2025',
+                  start: '2025-01-01',
+                  end: '2025-12-31',
+                  val: 97_898_000_000,
+                }),
+                fact({
+                  frame: 'CY2026Q2',
+                  start: '2026-04-01',
+                  end: '2026-06-30',
+                  val: 25_113_000_000,
+                  form: '10-Q',
+                }),
+              ],
+            },
+          },
+          NetIncomeLoss: {
+            label: 'Net Income (Loss)',
+            units: {
+              USD: [
+                fact({
+                  frame: 'CY2026Q2',
+                  start: '2026-04-01',
+                  end: '2026-06-30',
+                  val: 14_987_000_000,
+                  form: '10-Q',
+                }),
+              ],
+            },
+          },
+        },
+      },
+    } satisfies CompanyFactsResponse);
+
+    const result = await runToolContract(getSnapshotTool, { company: 'JPM' });
+    const output = getSnapshotTool.output.parse(result.structuredContent);
+    expect(output.lines.find((l) => l.concept === 'interest_expense')).toMatchObject({
+      label: 'Interest Expense',
+      tag: 'InterestExpenseOperating',
+      unit: 'USD',
+      annual: { period: 'CY2025', value: 97_898_000_000, tag: 'InterestExpenseOperating' },
+      quarterly: { period: 'CY2026Q2', value: 25_113_000_000, tag: 'InterestExpenseOperating' },
+    });
+    expect(output.caveats.some((c) => c.startsWith('interest_expense: '))).toBe(false);
+    expect(blockText(result.content)).toContain(
+      '- Interest Expense [interest_expense → us-gaap:InterestExpenseOperating, USD]',
+    );
+  });
+
+  it('reads a line in one unit when its tag is also framed in a convenience translation (#146)', async () => {
+    /** A 20-F filer's Revenue: ZAR for three years, a later-filed USD translation of two. */
+    const year = (y: number, val: number, filed: string) =>
+      fact({
+        frame: `CY${y}`,
+        start: `${y - 1}-07-01`,
+        end: `${y}-06-30`,
+        val,
+        filed,
+        form: '20-F',
+      });
+    mockApi.tryGetCompanyFacts.mockResolvedValue({
+      facts: {
+        'ifrs-full': {
+          Revenue: {
+            label: 'Revenue',
+            units: {
+              ZAR: [
+                year(2023, 49_275_000_000, '2025-10-31'),
+                year(2024, 61_379_000_000, '2025-10-31'),
+                year(2025, 73_896_000_000, '2025-10-31'),
+              ],
+              USD: [
+                year(2024, 3_300_000_000, '2026-01-15'),
+                year(2025, 4_100_000_000, '2026-01-15'),
+              ],
+            },
+          },
+        },
+      },
+    } satisfies CompanyFactsResponse);
+
+    const result = await runToolContract(getSnapshotTool, {
+      company: 'HMY',
+      taxonomy: 'ifrs-full',
+    });
+    const output = getSnapshotTool.output.parse(result.structuredContent);
+    expect(output.lines.find((l) => l.concept === 'revenue')).toMatchObject({
+      unit: 'ZAR',
+      annual: { period: 'CY2025', value: 73_896_000_000 },
+    });
+    expect(output.caveats.some((c) => c.includes('USD'))).toBe(false);
+    expect(blockText(result.content)).toContain('[revenue → ifrs-full:Revenue, ZAR]');
+  });
+
   it('renders a point’s tag when it differs from the line’s (#125)', () => {
     const text = blockText(
       getSnapshotTool.format!({

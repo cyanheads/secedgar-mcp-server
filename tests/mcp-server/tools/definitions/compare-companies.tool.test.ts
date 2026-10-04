@@ -289,6 +289,75 @@ describe('compareCompaniesTool', () => {
     expect(blockText(result.content)).not.toContain('CY2026');
   });
 
+  describe('units (#146)', () => {
+    /** One company's Revenues under the given unit keys, an annual frame per year. */
+    const revenues = (units: Record<string, Array<{ year: number; filed?: string }>>) =>
+      ({
+        facts: {
+          'us-gaap': {
+            Revenues: {
+              label: 'Revenues',
+              units: Object.fromEntries(
+                Object.entries(units).map(([key, years]) => [
+                  key,
+                  years.map(({ year, filed = '2025-02-01' }) =>
+                    fact({ frame: `CY${year}`, end: `${year}-12-31`, val: year, filed }),
+                  ),
+                ]),
+              ),
+            },
+          },
+        },
+      }) satisfies CompanyFactsResponse;
+    const wire = (cal: CompanyFactsResponse, jun: CompanyFactsResponse) =>
+      mockApi.tryGetCompanyFacts.mockImplementation((cik: string) =>
+        cik === '0000789019' ? cal : jun,
+      );
+    const unitsCaveat = (caveats: readonly string[]) =>
+      caveats.filter((c) => c.includes('more than one unit'));
+
+    it('flags a concept whose unit differs between companies', async () => {
+      wire(
+        revenues({ USD: [{ year: 2024 }, { year: 2025 }] }),
+        revenues({ EUR: [{ year: 2024 }, { year: 2025 }] }),
+      );
+      const result = await runToolContract(compareCompaniesTool, {
+        companies: ['CAL', 'JUN'],
+        concepts: ['revenue'],
+      });
+      const output = compareCompaniesTool.output.parse(result.structuredContent);
+      expect(unitsCaveat(output.caveats)).toEqual([
+        "Concept 'revenue' resolved to more than one unit across these companies (USD, EUR). Values in different units are not directly comparable — each cell carries its own unit.",
+      ]);
+      expect(at(output.concepts).units).toEqual(['USD', 'EUR']);
+    });
+
+    it('reads each company in one unit, so a convenience translation raises no cross-company caveat', async () => {
+      // JUN reports ZAR plus a USD translation of its two newest years, filed
+      // later; CAL reports ZAR only. Frames compete within one unit, so JUN
+      // reads ZAR throughout and both companies share one unit.
+      wire(
+        revenues({ ZAR: [{ year: 2023 }, { year: 2024 }, { year: 2025 }] }),
+        revenues({
+          ZAR: [{ year: 2023 }, { year: 2024 }, { year: 2025 }],
+          USD: [
+            { year: 2024, filed: '2026-03-01' },
+            { year: 2025, filed: '2026-03-01' },
+          ],
+        }),
+      );
+      const result = await runToolContract(compareCompaniesTool, {
+        companies: ['CAL', 'JUN'],
+        concepts: ['revenue'],
+      });
+      const output = compareCompaniesTool.output.parse(result.structuredContent);
+      expect(new Set(output.cells.map((c) => c.unit))).toEqual(new Set(['ZAR']));
+      expect(unitsCaveat(output.caveats)).toEqual([]);
+      expect(at(output.concepts).units).toEqual(['ZAR']);
+      expect(blockText(result.content)).not.toContain(' USD |');
+    });
+  });
+
   /**
    * One filer reaching a period the others have not takes the inline window, so
    * a company that reports the concept only for older periods has no value

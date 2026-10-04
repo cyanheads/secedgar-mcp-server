@@ -17,7 +17,7 @@ import {
   type SyncResult,
   sqliteMirrorStore,
 } from '@cyanheads/mcp-ts-core/mirror';
-import { frameHolderFact } from '../concept-series.js';
+import { fiscalYearEnds, frameHolderFact } from '../concept-series.js';
 import type {
   CompanyConceptResponse,
   CompanyConceptUnit,
@@ -73,6 +73,17 @@ interface CompanyFactsScanRow {
 
 /** A camel-case compound element name (`InterestExpenseNonoperating`) — never prose. */
 const COMPOUND_TAG = /[a-z][A-Z]/;
+
+/**
+ * Most `units_json` characters one {@link EdgarMirror.getFrames} call reads to
+ * find filers' fiscal-year ends (#148) — about 40 ms of JSON parsing. A row
+ * needs its filer's ends only when its own series cannot test a 10-Q-held year:
+ * one row in about 5,000 annual frame rows across 33 large filers, never more
+ * than one per frame. A filer's whole fact set runs from under 1 MB to about
+ * 8 MB (JPMorgan), so the budget covers the rare frame's few such rows and
+ * caps a pathological one.
+ */
+export const FISCAL_YEAR_END_READ_BUDGET = 16 * 1024 * 1024;
 
 /**
  * A stored taxonomy label, or `undefined` when SEC served the tag without one.
@@ -245,6 +256,12 @@ export class EdgarMirror {
    * frame answers with the filer's reporting-form fact (#123), and an annual
    * frame a 10-Q holds with a trailing-twelve-month figure drops that filer's row
    * (#142). The response says so (`holderFormsResolved`).
+   *
+   * A 10-Q-held year that filer's series cannot test is tested against its
+   * fiscal-year ends ({@link fiscalYearEnds}), read from its own rows through the
+   * `cik` index (#148). A scan holds one row per filer, so each filer is read at
+   * most once. The reads share {@link FISCAL_YEAR_END_READ_BUDGET}; once a filer
+   * overruns it, no further filer is read and those rows keep the untested frame.
    */
   async getFrames(
     taxonomy: string,
@@ -260,6 +277,20 @@ export class EdgarMirror {
       )
       .all(taxonomy, tag);
     if (rows.length === 0) return null;
+
+    const filerRows = handle.prepare<{ units_json: string }>(
+      `SELECT units_json FROM ${COMPANY_CONCEPTS_TABLE} WHERE cik = ?`,
+    );
+    let budget = FISCAL_YEAR_END_READ_BUDGET;
+    const filerYearEnds = (cik: string): string[] | undefined => {
+      if (budget < 0) return;
+      const filer = filerRows.all(cik);
+      budget -= filer.reduce((chars, row) => chars + row.units_json.length, 0);
+      if (budget < 0) return;
+      return fiscalYearEnds(
+        filer.map((row) => JSON.parse(row.units_json) as Record<string, unknown>),
+      );
+    };
 
     const data: FrameEntry[] = [];
     /** Empty until a row carries a real label — the live API's answer for an unlabeled tag. */
@@ -279,8 +310,8 @@ export class EdgarMirror {
         if (!holder || u.filed > holder.filed) holder = u;
       }
       if (!holder) continue;
-      // The same holder-form rules the per-filer reads apply (#123, #142).
-      const best = frameHolderFact(holder, facts);
+      // The same holder-form rules the per-filer reads apply (#123, #142, #148).
+      const best = frameHolderFact(holder, facts, () => filerYearEnds(row.cik));
       if (!best) continue;
       if (!label) {
         const rowLabel = storedLabel(row.label, tag);

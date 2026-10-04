@@ -242,10 +242,22 @@ describe('successor tags behind the current leaders (#125)', () => {
   });
 
   it('appends the nonoperating interest caption behind both existing interest tags', () => {
+    expect(resolveConcept('interest_expense')?.tags.slice(0, 3)).toEqual([
+      'InterestExpense',
+      'InterestExpenseDebt',
+      'InterestExpenseNonoperating',
+    ]);
+  });
+
+  it('appends the banks’ operating interest caption last, behind the nonoperating one (#147)', () => {
+    // JPMorgan, Bank of America, and Wells Fargo report interest expense only
+    // under InterestExpenseOperating from 2024; last, it fills only the frames
+    // none of the three older tags covers.
     expect(resolveConcept('interest_expense')?.tags).toEqual([
       'InterestExpense',
       'InterestExpenseDebt',
       'InterestExpenseNonoperating',
+      'InterestExpenseOperating',
     ]);
   });
 

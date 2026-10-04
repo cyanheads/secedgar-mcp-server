@@ -3,7 +3,7 @@
  * @module tests/mcp-server/tools/definitions/get-financials.tool
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials.tool.js';
@@ -1789,6 +1789,354 @@ describe('successor tags and per-value attribution (#125)', () => {
   });
 });
 
+describe('banks’ operating interest caption (#147)', () => {
+  /** JPMorgan's shape: InterestExpense stops at CY2024Q1, the operating caption runs to CY2026Q2. */
+  const fact = (
+    frame: string,
+    start: string,
+    end: string,
+    val: number,
+    form: string,
+    filed: string,
+    accn: string,
+  ) => ({ frame, start, end, val, form, filed, accn, fp: form === '10-K' ? 'FY' : 'Q', fy: 2026 });
+  const interestExpense = conceptPayload('InterestExpense', 'Interest Expense', {
+    USD: [
+      fact(
+        'CY2023',
+        '2023-01-01',
+        '2023-12-31',
+        81_321_000_000,
+        '10-K',
+        '2024-02-16',
+        '0000019617-24-000225',
+      ),
+      fact(
+        'CY2024Q1',
+        '2024-01-01',
+        '2024-03-31',
+        24_356_000_000,
+        '10-Q',
+        '2024-05-01',
+        '0000019617-24-000326',
+      ),
+    ],
+  });
+  /** SEC serves this tag's companyconcept with `"label":null`. */
+  const interestExpenseOperating = conceptPayload('InterestExpenseOperating', null as never, {
+    USD: [
+      // Filed later and (here) disagreeing: the older tag still owns the frame.
+      fact(
+        'CY2023',
+        '2023-01-01',
+        '2023-12-31',
+        80_000_000_000,
+        '10-K',
+        '2026-02-13',
+        '0001628280-26-008131',
+      ),
+      fact(
+        'CY2024Q1',
+        '2024-01-01',
+        '2024-03-31',
+        24_356_000_000,
+        '10-Q',
+        '2025-05-01',
+        '0000019617-25-000421',
+      ),
+      fact(
+        'CY2025',
+        '2025-01-01',
+        '2025-12-31',
+        97_898_000_000,
+        '10-K',
+        '2026-02-13',
+        '0001628280-26-008131',
+      ),
+      fact(
+        'CY2026Q2',
+        '2026-04-01',
+        '2026-06-30',
+        25_113_000_000,
+        '10-Q',
+        '2026-08-06',
+        '0001628280-26-054343',
+      ),
+    ],
+  });
+
+  beforeEach(() => {
+    vi.setSystemTime(new Date('2026-10-04T00:00:00.000Z'));
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0000019617',
+      name: 'JPMORGAN CHASE & CO',
+      ticker: 'JPM',
+    });
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _tax: string, tag: string) =>
+        ({
+          [interestExpense.tag]: interestExpense,
+          [interestExpenseOperating.tag]: interestExpenseOperating,
+        })[tag] ?? null,
+    );
+  });
+  afterAll(() => {
+    vi.setSystemTime(new Date(NOW));
+  });
+
+  it('reaches CY2026Q2 under the operating caption, labelled Interest Expense, with no staleness caveat', async () => {
+    const result = await runToolContract(getFinancialsTool, {
+      company: 'JPM',
+      concept: 'interest_expense',
+      period_type: 'all',
+    });
+
+    const output = getFinancialsTool.output.parse(result.structuredContent);
+    expect(output).toMatchObject({
+      concept: 'InterestExpenseOperating',
+      label: 'Interest Expense',
+      unit: 'USD',
+    });
+    expect(output.caveats).toBeUndefined();
+    expect(at(output.data, 0)).toMatchObject({
+      period: 'CY2026Q2',
+      value: 25_113_000_000,
+      tag: 'InterestExpenseOperating',
+    });
+    const text = blockText(result.content);
+    expect(text).toContain('**Interest Expense** — JPMORGAN CHASE & CO');
+    expect(text).not.toContain('**InterestExpenseOperating**');
+    expect(text).not.toContain('Caveat:');
+  });
+
+  it('moves no frame the older tags resolve', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const result = await getFinancialsTool.handler(
+      getFinancialsTool.input.parse({
+        company: 'JPM',
+        concept: 'interest_expense',
+        period_type: 'all',
+      }),
+      ctx,
+    );
+
+    expect(result.data.map((d) => [d.period, d.value, d.tag])).toEqual([
+      ['CY2026Q2', 25_113_000_000, 'InterestExpenseOperating'],
+      ['CY2025', 97_898_000_000, 'InterestExpenseOperating'],
+      ['CY2024Q1', 24_356_000_000, 'InterestExpense'],
+      ['CY2023', 81_321_000_000, 'InterestExpense'],
+    ]);
+  });
+});
+
+describe('a tag reported under several unit keys (#146)', () => {
+  /** An annual 20-F fact on Harmony Gold's 30 June fiscal year end. */
+  const fy = (year: number, val: number, filed: string, form = '20-F') => ({
+    start: `${year - 1}-07-01`,
+    end: `${year}-06-30`,
+    accn: `0001628280-${filed.slice(2, 4)}-0${year}`,
+    filed,
+    form,
+    fp: 'FY',
+    frame: `CY${year}`,
+    fy: year,
+    val,
+  });
+  /**
+   * Harmony's ifrs-full Revenue: ZAR from CY2017, plus a USD convenience
+   * translation for CY2016–CY2018 filed on one 20-F/A ahead of the ZAR facts.
+   */
+  const harmony = conceptPayload('Revenue', 'Revenue', {
+    USD: [
+      fy(2016, 1_264_000_000, '2018-11-23', '20-F/A'),
+      fy(2017, 1_416_000_000, '2018-11-23', '20-F/A'),
+      fy(2018, 1_584_000_000, '2018-11-23', '20-F/A'),
+    ],
+    ZAR: [
+      fy(2017, 19_494_000_000, '2019-10-24'),
+      fy(2018, 20_452_000_000, '2020-10-29'),
+      fy(2025, 73_896_000_000, '2025-10-31'),
+    ],
+  });
+  const run = (input: Record<string, unknown>) =>
+    runToolContract(getFinancialsTool, {
+      company: 'HMY',
+      concept: 'revenue',
+      taxonomy: 'ifrs-full',
+      ...input,
+    });
+
+  beforeEach(() => {
+    vi.setSystemTime(new Date('2026-10-04T00:00:00.000Z'));
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0001023514',
+      name: 'HARMONY GOLD MINING CO LTD',
+      ticker: 'HMY',
+    });
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _tax: string, tag: string) => (tag === 'Revenue' ? harmony : null),
+    );
+  });
+  afterAll(() => {
+    vi.setSystemTime(new Date(NOW));
+    vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+  });
+
+  it('reads the unit of the newest value and names the other unit in a caveat, on both surfaces', async () => {
+    const result = await run({});
+    const output = getFinancialsTool.output.parse(result.structuredContent);
+
+    expect(output.unit).toBe('ZAR');
+    expect(output.data.map((d) => [d.period, d.value])).toEqual([
+      ['CY2025', 73_896_000_000],
+      ['CY2018', 20_452_000_000],
+      ['CY2017', 19_494_000_000],
+    ]);
+    expect(output.caveats).toEqual([
+      'Also reported in USD (3 periods, CY2016–CY2018). This series holds ZAR values only — values in different units never share a series; pass unit: "USD" to read another.',
+    ]);
+    const text = blockText(result.content);
+    expect(text).toContain('(CIK 0001023514, ZAR)');
+    expect(text).toContain('CY2017: 19,494,000,000');
+    expect(text).not.toContain('CY2016:');
+    expect(text).toContain('Caveat: Also reported in USD (3 periods, CY2016–CY2018).');
+  });
+
+  it('reads the series in the unit asked for, naming the default unit in its place', async () => {
+    const result = await run({ unit: 'USD' });
+    const output = getFinancialsTool.output.parse(result.structuredContent);
+
+    expect(output.unit).toBe('USD');
+    expect(output.data.map((d) => [d.period, d.value, d.form])).toEqual([
+      ['CY2018', 1_584_000_000, '20-F/A'],
+      ['CY2017', 1_416_000_000, '20-F/A'],
+      ['CY2016', 1_264_000_000, '20-F/A'],
+    ]);
+    // Staleness reads the concept across units: the ZAR series runs to CY2025.
+    expect(output.caveats).toEqual([
+      'Also reported in ZAR (3 periods, CY2017–CY2025). This series holds USD values only — values in different units never share a series; pass unit: "ZAR" to read another.',
+    ]);
+    expect(blockText(result.content)).toContain('CY2016: $1264.0M');
+  });
+
+  describe('when every unit has stopped', () => {
+    beforeEach(() => {
+      vi.setSystemTime(new Date('2030-10-04T00:00:00.000Z'));
+    });
+
+    it('measures the default series by its own end', async () => {
+      const output = getFinancialsTool.output.parse((await run({})).structuredContent);
+      expect(output.caveats).toContainEqual(
+        expect.stringContaining('This series ends at CY2025, period ending 2025-06-30'),
+      );
+    });
+
+    it('describes the series in the unit asked for by its own end, on both surfaces', async () => {
+      const result = await run({ unit: 'USD' });
+      const output = getFinancialsTool.output.parse(result.structuredContent);
+      const stale = output.caveats?.find((c) => c.startsWith('This series ends at'));
+
+      expect(stale).toContain('This series ends at CY2018, period ending 2018-06-30');
+      expect(output.caveats?.join(' ')).not.toContain('ends at CY2025');
+      expect(blockText(result.content)).toContain(`Caveat: ${stale}`);
+    });
+  });
+
+  it('accepts the unit key in another case', async () => {
+    const output = getFinancialsTool.output.parse((await run({ unit: 'zar' })).structuredContent);
+    expect(output.unit).toBe('ZAR');
+    expect(output.data).toHaveLength(3);
+  });
+
+  it('accepts fetch_frames’ -per- spelling of a ratio unit', async () => {
+    /** SAP's AverageForeignExchangeRate: every pair framed for the same year, filed the same day. */
+    const rate = (val: number) => ({ ...fy(2025, val, '2026-02-26'), end: '2025-12-31' });
+    mockApi.tryGetCompanyConcept.mockResolvedValue(
+      conceptPayload('AverageForeignExchangeRate', 'Average foreign exchange rate', {
+        'USD/EUR': [rate(1.13)],
+        'AUD/EUR': [rate(1.75)],
+        'JPY/EUR': [rate(163.9)],
+      }),
+    );
+    const base = {
+      company: 'SAP',
+      concept: 'AverageForeignExchangeRate',
+      taxonomy: 'ifrs-full',
+    } as const;
+
+    const byDefault = getFinancialsTool.output.parse(
+      (await runToolContract(getFinancialsTool, base)).structuredContent,
+    );
+    expect(byDefault.unit).toBe('AUD/EUR');
+    expect(at(byDefault.caveats)).toContain(
+      'Also reported in JPY/EUR (1 period, CY2025); USD/EUR (1 period, CY2025).',
+    );
+
+    const perEuro = getFinancialsTool.output.parse(
+      (await runToolContract(getFinancialsTool, { ...base, unit: 'USD-per-EUR' }))
+        .structuredContent,
+    );
+    expect(perEuro.unit).toBe('USD/EUR');
+    expect(perEuro.data.map((d) => d.value)).toEqual([1.13]);
+  });
+
+  it('fails as no_unit_data, listing the units the tag reports, for a unit it does not', async () => {
+    const result = await run({ unit: 'GBP' });
+    const error = wireError(result);
+
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.data).toMatchObject({
+      reason: 'no_unit_data',
+      unit: 'GBP',
+      units: ['USD', 'ZAR'],
+    });
+    expect(error.message).toContain('USD, ZAR');
+    const text = blockText(result.content);
+    expect(text).toContain('USD, ZAR');
+    expect(text).toContain('omit unit');
+  });
+
+  it('still fails as no_concept_data when no tag is reported, whatever the unit', async () => {
+    mockApi.tryGetCompanyConcept.mockResolvedValue(null);
+    const error = wireError(await run({ unit: 'GBP' }));
+    expect(error.data.reason).toBe('no_concept_data');
+  });
+
+  it('fails as no_frame_data for a reported unit whose values carry no frame', async () => {
+    const { frame: _frame, ...unframed } = fy(2025, 5, '2025-10-31');
+    mockApi.tryGetCompanyConcept.mockResolvedValue(
+      conceptPayload('Revenue', 'Revenue', { ...harmony.units, GBP: [unframed] }),
+    );
+    expect(wireError(await run({ unit: 'GBP' })).data.reason).toBe('no_frame_data');
+  });
+
+  it('caps the inline series with limit and stages one unit on the dataframe', async () => {
+    const registerDataframe = vi.fn().mockResolvedValue({
+      name: 'df_ABCDE_FGHIJ',
+      rowCount: 3,
+      expiresAt: '2026-01-01T00:00:00.000Z',
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+    vi.mocked(toDatasetField).mockReturnValue({
+      name: 'df_ABCDE_FGHIJ',
+      row_count: 3,
+      expires_at: '2026-01-01T00:00:00.000Z',
+    });
+
+    const result = await run({ unit: 'USD', limit: 1 });
+    const output = getFinancialsTool.output.parse(result.structuredContent);
+    expect(output.data.map((d) => d.period)).toEqual(['CY2018']);
+    expect(bag(result.structuredContent).truncated).toBe(true);
+    const [, { rows, queryParams }] = at(registerDataframe.mock.calls, 0);
+    expect(rows.map((r: { unit: string; period: string }) => [r.period, r.unit])).toEqual([
+      ['CY2018', 'USD'],
+      ['CY2017', 'USD'],
+      ['CY2016', 'USD'],
+    ]);
+    expect(queryParams).toMatchObject({ unit: 'USD' });
+  });
+});
+
 describe('10-Q trailing-twelve-month annual frames (#142)', () => {
   /** Amazon's NetIncomeLoss as SEC frames it: the Q2-2026 10-Q TTM holds CY2026. */
   const amazon = conceptPayload('NetIncomeLoss', 'Net Income (Loss)', {
@@ -1873,6 +2221,253 @@ describe('10-Q trailing-twelve-month annual frames (#142)', () => {
     expect(result.data).toEqual([
       expect.objectContaining({ period: 'CY2026Q2', value: 18_164_000_000 }),
     ]);
+  });
+});
+
+describe('a 10-Q-held year its own series cannot test (#148)', () => {
+  const fxTag =
+    'EffectOfExchangeRateOnCashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents';
+  /** Every fact Amazon reports under the tag, all from its Q1-2022 10-Q. */
+  const fxUnits: CompanyConceptResponse['units'] = {
+    USD: (
+      [
+        ['2020-04-01', '2021-03-31', 'CY2020', 809_000_000],
+        ['2021-01-01', '2021-03-31', 'CY2021Q1', -293_000_000],
+        ['2021-04-01', '2022-03-31', 'CY2021', -55_000_000],
+        ['2022-01-01', '2022-03-31', 'CY2022Q1', 16_000_000],
+      ] as const
+    ).map(([start, end, frame, val]) => ({
+      start,
+      end,
+      frame,
+      val,
+      accn: '0001018724-22-000013',
+      filed: '2022-04-29',
+      form: '10-Q',
+      fp: 'Q1',
+      fy: 2022,
+    })),
+  };
+  const fxPayload = { ...conceptPayload(fxTag, 'Effect of Exchange Rate', fxUnits), cik: 1018724 };
+  /** Amazon's companyfacts: its 10-Ks close each year on December 31. */
+  const amazonFacts = {
+    cik: 1018724,
+    entityName: 'AMAZON COM INC',
+    facts: {
+      'us-gaap': {
+        NetIncomeLoss: {
+          label: 'Net Income (Loss)',
+          units: {
+            USD: [
+              {
+                start: '2021-01-01',
+                end: '2021-12-31',
+                accn: '0001018724-22-000005',
+                filed: '2022-02-04',
+                form: '10-K',
+                fp: 'FY',
+                frame: 'CY2021',
+                fy: 2021,
+                val: 33_364_000_000,
+              },
+            ],
+          },
+        },
+        [fxTag]: { label: 'Effect of Exchange Rate', units: fxUnits },
+      },
+    },
+  };
+
+  beforeEach(() => {
+    vi.setSystemTime(new Date('2022-06-30T00:00:00.000Z'));
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0001018724',
+      name: 'AMAZON COM INC',
+      ticker: 'AMZN',
+    });
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _tax: string, tag: string) => (tag === fxTag ? fxPayload : null),
+    );
+    mockApi.tryGetCompanyFacts.mockResolvedValue(amazonFacts);
+  });
+  afterAll(() => {
+    vi.setSystemTime(new Date(NOW));
+  });
+
+  it('tests Amazon’s April–March frames against its December year ends, on both surfaces', async () => {
+    const result = await runToolContract(getFinancialsTool, {
+      company: 'AMZN',
+      concept: fxTag,
+      period_type: 'all',
+    });
+
+    expect(result.isError).toBeFalsy();
+    const output = getFinancialsTool.output.parse(result.structuredContent);
+    expect(output.data.map((d) => [d.period, d.value])).toEqual([
+      ['CY2022Q1', 16_000_000],
+      ['CY2021Q1', -293_000_000],
+    ]);
+    const text = blockText(result.content);
+    expect(text).toContain('CY2022Q1: $16.0M');
+    expect(text).not.toContain('CY2021: ');
+    expect(text).not.toContain('CY2020: ');
+    expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledTimes(1);
+    expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledWith('0001018724');
+  });
+
+  it('leaves the annual view empty, failing as no_period_data', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const err = await caught(
+      getFinancialsTool.handler(
+        getFinancialsTool.input.parse({ company: 'AMZN', concept: fxTag, period_type: 'annual' }),
+        ctx,
+      ),
+    );
+    expect(err.data.reason).toBe('no_period_data');
+  });
+
+  it('keeps the frames when the filer has no annual-report accession', async () => {
+    mockApi.tryGetCompanyFacts.mockResolvedValue({
+      ...amazonFacts,
+      facts: { 'us-gaap': { [fxTag]: { label: 'Effect of Exchange Rate', units: fxUnits } } },
+    });
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const result = await getFinancialsTool.handler(
+      getFinancialsTool.input.parse({ company: 'AMZN', concept: fxTag, period_type: 'annual' }),
+      ctx,
+    );
+    expect(result.data.map((d) => [d.period, d.value])).toEqual([
+      ['CY2021', -55_000_000],
+      ['CY2020', 809_000_000],
+    ]);
+  });
+
+  it('keeps the frames when companyfacts holds nothing for the filer', async () => {
+    mockApi.tryGetCompanyFacts.mockResolvedValue(null);
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const result = await getFinancialsTool.handler(
+      getFinancialsTool.input.parse({ company: 'AMZN', concept: fxTag, period_type: 'annual' }),
+      ctx,
+    );
+    expect(result.data.map((d) => d.period)).toEqual(['CY2021', 'CY2020']);
+  });
+
+  describe('when the companyfacts read fails', () => {
+    const unavailable = () =>
+      new McpError(
+        JsonRpcErrorCode.ServiceUnavailable,
+        'SEC EDGAR API request failed after retries',
+      );
+
+    it('keeps the untested frames and names them in a caveat, on both surfaces', async () => {
+      mockApi.tryGetCompanyFacts.mockRejectedValue(unavailable());
+      const result = await runToolContract(getFinancialsTool, {
+        company: 'AMZN',
+        concept: fxTag,
+        period_type: 'annual',
+      });
+
+      expect(result.isError).toBeFalsy();
+      const output = getFinancialsTool.output.parse(result.structuredContent);
+      expect(output.data.map((d) => [d.period, d.value])).toEqual([
+        ['CY2021', -55_000_000],
+        ['CY2020', 809_000_000],
+      ]);
+      const caveat = output.caveats?.find((c) => c.includes('fiscal-year ends'));
+      expect(caveat).toContain('CY2021, CY2020');
+      expect(caveat).toContain('trailing-twelve-month');
+      expect(blockText(result.content)).toContain(`Caveat: ${caveat}`);
+      expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledTimes(1);
+    });
+
+    it('adds no caveat when the series shown holds no 10-Q-held year', async () => {
+      mockApi.tryGetCompanyFacts.mockRejectedValue(new TypeError('fetch failed'));
+      const result = await runToolContract(getFinancialsTool, {
+        company: 'AMZN',
+        concept: fxTag,
+        period_type: 'quarterly',
+      });
+
+      expect(result.isError).toBeFalsy();
+      const output = getFinancialsTool.output.parse(result.structuredContent);
+      expect(output.data.map((d) => d.period)).toEqual(['CY2022Q1', 'CY2021Q1']);
+      expect(output.caveats ?? []).not.toContainEqual(expect.stringContaining('fiscal-year ends'));
+    });
+
+    it('fails a cancelled call instead of returning the untested series', async () => {
+      const controller = new AbortController();
+      mockApi.tryGetCompanyFacts.mockImplementation(async () => {
+        controller.abort();
+        throw unavailable();
+      });
+      const ctx = createMockContext({
+        errors: getFinancialsTool.errors,
+        signal: controller.signal,
+      });
+      await expect(
+        getFinancialsTool.handler(
+          getFinancialsTool.input.parse({ company: 'AMZN', concept: fxTag, period_type: 'annual' }),
+          ctx,
+        ),
+      ).rejects.toThrow('SEC EDGAR API request failed after retries');
+    });
+  });
+
+  it('reuses the companyfacts payload a served-empty tag already read', async () => {
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _tax: string, tag: string) => {
+        if (tag === 'RevenueFromContractWithCustomerExcludingAssessedTax') {
+          return conceptPayload(tag, 'Excluding', {});
+        }
+        if (tag === 'Revenues') return conceptPayload('Revenues', 'Revenues', fxUnits);
+        return null;
+      },
+    );
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const result = await getFinancialsTool.handler(
+      getFinancialsTool.input.parse({ company: 'AMZN', concept: 'revenue', period_type: 'all' }),
+      ctx,
+    );
+    expect(result.data.map((d) => d.period)).toEqual(['CY2022Q1', 'CY2021Q1']);
+    expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends no companyfacts request when every 10-Q-held year is testable in its own series', async () => {
+    mockApi.tryGetCompanyConcept.mockResolvedValue(
+      conceptPayload('NetIncomeLoss', 'Net Income (Loss)', {
+        USD: [
+          {
+            start: '2021-01-01',
+            end: '2021-12-31',
+            accn: 'k',
+            filed: '2022-02-04',
+            form: '10-K',
+            fp: 'FY',
+            frame: 'CY2021',
+            fy: 2021,
+            val: 1,
+          },
+          {
+            start: '2021-04-01',
+            end: '2022-03-31',
+            accn: 'q',
+            filed: '2022-04-29',
+            form: '10-Q',
+            fp: 'Q1',
+            frame: 'CY2022',
+            fy: 2022,
+            val: 2,
+          },
+        ],
+      }),
+    );
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const result = await getFinancialsTool.handler(
+      getFinancialsTool.input.parse({ company: 'AMZN', concept: 'net_income' }),
+      ctx,
+    );
+    expect(result.data.map((d) => d.period)).toEqual(['CY2021']);
+    expect(mockApi.tryGetCompanyFacts).not.toHaveBeenCalled();
   });
 });
 

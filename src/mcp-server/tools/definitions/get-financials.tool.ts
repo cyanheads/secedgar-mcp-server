@@ -19,14 +19,38 @@ import {
 import {
   describingTag,
   type FramedUnit,
+  filerFiscalYearEnds,
+  isQuarterlyForm,
   matchesPeriodType,
-  resolveFrameSeries,
+  rankSeriesUnits,
+  resolveFrameSeriesByUnit,
   seriesStalenessCaveats,
   type TagPrioritizedUnit,
 } from '@/services/edgar/concept-series.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { missingQuarterCaveats } from '@/services/edgar/fiscal-periods.js';
 import type { CompanyConceptUnit, CompanyFactsResponse } from '@/services/edgar/types.js';
+
+/**
+ * The reported unit key a `unit` input names: exact after `fetch_frames`' dashed
+ * spelling (`USD-per-shares`) is folded to SEC's slash, else the one key equal
+ * to it ignoring case. `undefined` when no reported key matches.
+ */
+function matchUnitKey(requested: string, reported: readonly string[]): string | undefined {
+  const wanted = requested.trim().replaceAll('-per-', '/');
+  if (reported.includes(wanted)) return wanted;
+  const folded = reported.filter((key) => key.toLowerCase() === wanted.toLowerCase());
+  return folded.length === 1 ? folded[0] : undefined;
+}
+
+/** `USD (3 periods, CY2016–CY2018)` — a unit's frames, oldest to newest. */
+function describeUnitFrames(unitKey: string, frames: Iterable<FramedUnit>): string {
+  const ordered = [...frames].sort((a, b) => a.end.localeCompare(b.end));
+  const first = ordered[0]?.frame;
+  const last = ordered.at(-1)?.frame;
+  const span = first === last ? first : `${first}–${last}`;
+  return `${unitKey} (${ordered.length} period${ordered.length === 1 ? '' : 's'}, ${span})`;
+}
 
 export const getFinancialsTool = tool('secedgar_get_financials', {
   description:
@@ -87,6 +111,12 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       recovery: 'Switch period_type to "quarterly" or "all" for balance sheet items.',
     },
     {
+      reason: 'no_unit_data',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The unit input names a unit the resolved concept is not reported in for this company',
+      recovery: 'Pass one of the units the error lists, or omit unit to read the default series.',
+    },
+    {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.RateLimited,
       when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
@@ -120,6 +150,13 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       .describe(
         'Filter to annual (FY) or quarterly (Q1-Q4) data. "all" returns both. When omitted, defaults to "annual"; instant (balance-sheet) concepts automatically fall back to returning the full series on the first call when the annual filter yields nothing (#48).',
       ),
+    unit: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'SEC unit key to read the series in, for a concept reported in more than one (e.g. "ZAR" and a "USD" convenience translation, or "USD/EUR" among exchange-rate pairs). "USD-per-shares" is read as "USD/shares". When omitted, the series takes the unit of its newest value, then the unit with more periods; any other units are named in caveats.',
+      ),
     limit: z
       .number()
       .int()
@@ -136,21 +173,19 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
   output: z.object({
     company: z.string().describe('Resolved entity name (SEC-conformed).'),
     cik: z.string().describe('Resolved CIK, zero-padded to 10 digits.'),
-    concept: z
-      .string()
-      .describe(
-        'XBRL tag behind the newest value. A friendly name can walk several tags, so each row names its own.',
-      ),
+    concept: z.string().describe('XBRL tag behind the newest value; each row names its own tag.'),
     label: z.string().describe('Human-readable taxonomy label of the concept tag.'),
     description: z
       .string()
       .optional()
       .describe(
-        'XBRL taxonomy description of the concept tag. Often absent for company-extension tags or older concepts.',
+        'XBRL taxonomy description of the tag. Often absent for extension tags and older concepts.',
       ),
     unit: z
       .string()
-      .describe('Unit of measure of the newest value (e.g., "USD", "shares", "USD/shares").'),
+      .describe(
+        'Unit of every value in data (e.g., "USD", "USD/shares"): the unit input when given (an unreported one fails with no_unit_data), else the newest value\'s unit, then the unit with more periods. A series never mixes units.',
+      ),
     data: z
       .array(
         z
@@ -166,13 +201,13 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
               .number()
               .nullable()
               .describe(
-                "Fiscal year of the source filing, not the data period — every comparative period restated in the same filing carries that filing's fiscal year, so use end (or period) as the time key. Null when the source filing did not encode a fiscal year.",
+                "Fiscal year of the source filing, not of the data period (restated comparatives carry the filing's year); key time on end. Null when not encoded.",
               ),
             fiscal_period: z
               .string()
               .nullable()
               .describe(
-                'Fiscal period of the source filing (FY, Q1, Q2, Q3, Q4), not the data period. Null when the source filing did not encode a fiscal period.',
+                'Fiscal period of the source filing (FY, Q1–Q4), not of the data period. Null when not encoded.',
               ),
             form: z.string().describe('Source filing type (10-K, 10-Q, etc.).'),
             filed: z.string().describe('Date the source filing was submitted (YYYY-MM-DD).'),
@@ -182,41 +217,37 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
             tag: z
               .string()
               .describe(
-                'XBRL tag this value was reported under — differs from concept when an older or successor tag in the friendly name answers this period.',
+                'XBRL tag this value was reported under; differs from concept when an older or successor tag answers this period.',
               ),
           })
-          .describe(
-            'One reported value with its period, fiscal context, source filing, and source tag.',
-          ),
+          .describe('One reported value with its period, source filing, and tag.'),
       )
       .describe(
-        "Deduplicated time series, newest first — one value per calendar period. Where SEC's period frame sits on a proxy statement's figure (the pay-versus-performance table re-tags net income), the value comes from the filer's own report of the same period; an annual period SEC framed on a 10-Q's trailing-twelve-month figure is left out, since the filer has not closed that year.",
+        "Deduplicated series, newest first, one value per calendar period. A period SEC framed on a proxy statement figure takes the filer's own report instead; an annual period framed on a 10-Q trailing-twelve-month figure is left out.",
       ),
     tags_tried: z
       .array(z.string())
       .optional()
-      .describe(
-        'XBRL tags that were attempted (shown when using friendly names that map to multiple tags).',
-      ),
+      .describe('XBRL tags attempted, when a friendly name maps to several.'),
     dataset: z
       .object({
         name: z
           .string()
           .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
           ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
       })
       .optional()
       .describe(
-        'Canvas dataframe handle holding the same time series. Use for cross-company JOINs via secedgar_dataframe_query. The source-filing fiscal keys are materialized as source_filing_fy/source_filing_fp — order, group, and window by period_end, not by those columns. Absent when canvas is unavailable.',
+        'Dataframe of the same series; fiscal keys are source_filing_fy/source_filing_fp, so order by period_end. Absent when canvas is unavailable.',
       ),
     caveats: z
       .array(z.string())
       .optional()
       .describe(
-        "Data-completeness warnings about the returned series. Two kinds. On quarterly results, one entry when one or two calendar quarters are absent from every recent qualifying year — SEC reports a filer's fiscal Q4 as the 10-K residual rather than a discrete quarterly fact, so the calendar quarter fiscal Q4 spans has no frame-tagged value, and a filer whose other fiscal quarters span non-calendar durations loses a second quarter the same way. Applies to calendar-year filers (no discrete Q4) as much as to off-calendar ones. On any result, one entry when the series stops well short of today — either because the concept resolved to an XBRL tag SEC has retired from the taxonomy (the current tags reported nothing), or because a current tag's series ends more than two years plus a filing window back, which is what a filer migrating to a different element or dropping the disclosure looks like. Absent when the series has nothing to flag.",
+        'Completeness warnings, absent when none apply: other units the concept is reported in, with period counts and spans (pass unit to read one); quarters missing from every recent year (SEC reports fiscal Q4 only within the 10-K); a series ending well short of today (a retired or dropped tag).',
       ),
   }),
 
@@ -329,9 +360,12 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     /**
      * The filer's companyfacts payload, read at most once: it answers every tag
      * companyconcept served empty — the same filer's companyfacts carries those
-     * facts well-formed — and backs the no-data probe below. `undefined` until read.
+     * facts well-formed — supplies the fiscal-year ends a 10-Q-held annual frame
+     * may need, and backs the no-data probe below. `undefined` until read.
      */
     let facts: CompanyFactsResponse | null | undefined;
+    /** Set when the fiscal-year-end read below fails, leaving those frames untested (#148). */
+    let yearEndsUnread = false;
     if (servedEmpty.length > 0) {
       facts = await api.tryGetCompanyFacts(match.cik);
       const namespace = facts?.facts[taxonomy];
@@ -347,12 +381,51 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     }
 
     /**
-     * Collapse to one value per standard calendar period — frame-bearing entries
-     * only, a proxy-held frame answered by the filer's reporting-form fact,
-     * same-frame collisions resolved by tag priority then latest `filed` (#44,
-     * #123). An empty map means the concept exists but has no frame-aligned entries.
+     * Collapse to one value per standard calendar period within each unit key —
+     * frame-bearing entries only, a proxy-held frame answered by the filer's
+     * reporting-form fact, same-frame collisions resolved by tag priority then
+     * latest `filed` (#44, #123) — then read one unit: the one asked for, else
+     * the default ranking (#146). An empty map means the concept exists but has
+     * no frame-aligned entries in that unit.
+     *
+     * A 10-Q-held annual frame its own tag and unit cannot test is tested
+     * against the filer's fiscal-year ends, which only companyfacts carries
+     * (#148). The first pass records whether any frame needs them; only then is
+     * companyfacts read — reusing the payload a served-empty tag already read —
+     * and the series resolved again, so no other series pays the request.
      */
-    const byFrameClean = resolveFrameSeries(allUnits, tagSelection);
+    let needsYearEnds = false;
+    let byUnit = resolveFrameSeriesByUnit(allUnits, tagSelection, () => {
+      needsYearEnds = true;
+    });
+    if (needsYearEnds) {
+      if (facts === undefined) {
+        /**
+         * Best-effort: the first pass is already a complete series, so a failed
+         * read keeps those frames untested and a caveat names them; a cancelled
+         * call still fails.
+         */
+        try {
+          facts = await api.tryGetCompanyFacts(match.cik);
+        } catch (err) {
+          if (ctx.signal.aborted) throw err;
+          yearEndsUnread = true;
+          ctx.log.warning('companyfacts read for fiscal-year ends failed', {
+            cik: match.cik,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      if (!yearEndsUnread) {
+        const yearEnds = facts ? filerFiscalYearEnds(facts) : undefined;
+        byUnit = resolveFrameSeriesByUnit(allUnits, tagSelection, () => yearEnds);
+      }
+    }
+    const rankedUnits = rankSeriesUnits(byUnit);
+    const unitKey =
+      input.unit === undefined ? rankedUnits[0] : matchUnitKey(input.unit, [...byUnit.keys()]);
+    const byFrameClean =
+      (unitKey === undefined ? undefined : byUnit.get(unitKey)) ?? new Map<string, FramedUnit>();
     /**
      * The concept is described by the tag behind its newest value: a successor
      * behind an older leader answers the recent frames (#125), and under a
@@ -400,6 +473,22 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
           taxonomy,
           tags_tried: tagsTried,
           available_namespaces: availableNamespaces.length > 0 ? availableNamespaces : undefined,
+        },
+      );
+    }
+
+    if (input.unit !== undefined && unitKey === undefined) {
+      const reportedUnits = [...byUnit.keys()].sort();
+      throw ctx.fail(
+        'no_unit_data',
+        `'${conceptTag}' is not reported in ${input.unit} for this company — it is reported in ${reportedUnits.join(', ')}.`,
+        {
+          recovery: {
+            hint: `Pass unit as one of ${reportedUnits.join(', ')}, or omit unit to read the default series.`,
+          },
+          tag: conceptTag,
+          unit: input.unit,
+          units: reportedUnits,
         },
       );
     }
@@ -461,6 +550,37 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     filtered.sort((a, b) => b.end.localeCompare(a.end));
 
     /**
+     * Staleness reads the concept across units, so a convenience translation
+     * the filer stopped publishing is not reported as a series that stopped;
+     * the unit caveat names each unit's span instead (#146). Once every unit
+     * has stopped, the caveat describes the series shown, by its own end.
+     */
+    const newestAcrossUnits = [...byUnit.values()]
+      .flatMap((frames) => [...frames.values()])
+      .reduce((newest, unit) => (unit.end > newest.end ? unit : newest), newestFramed);
+    const stalenessReference = {
+      date: new Date().toISOString().slice(0, 10),
+      kind: 'current-date',
+    } as const;
+    const conceptStopped =
+      seriesStalenessCaveats(
+        conceptTag,
+        conceptResponse.label,
+        newestAcrossUnits,
+        stalenessReference,
+      ).length > 0;
+    const otherUnits = rankedUnits.filter((key) => key !== newestFramed.unit);
+    const otherUnitSpans = otherUnits
+      .map((key) => describeUnitFrames(key, byUnit.get(key)?.values() ?? []))
+      .join('; ');
+    /** The 10-Q-held years shown that a failed companyfacts read may have left untested (#148). */
+    const untestedYears = yearEndsUnread
+      ? filtered
+          .filter((u) => isQuarterlyForm(u.form) && matchesPeriodType(u.frame, 'annual'))
+          .map((u) => u.frame)
+      : [];
+
+    /**
      * Off-calendar filers lose a whole calendar quarter from the frame-tagged
      * series — SEC reports fiscal Q4 as the 10-K residual, never as a discrete
      * quarterly fact — so a caller sees a gap with no way to tell "did not
@@ -479,14 +599,25 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
        * today is the signal — one companyconcept payload is all this tool reads,
        * and it holds no filer-wide period to compare against (#102).
        */
-      ...seriesStalenessCaveats(conceptTag, conceptResponse.label, newestFramed, {
-        date: new Date().toISOString().slice(0, 10),
-        kind: 'current-date',
-      }),
+      ...(conceptStopped
+        ? seriesStalenessCaveats(
+            conceptTag,
+            conceptResponse.label,
+            newestFramed,
+            stalenessReference,
+          )
+        : []),
+      ...(otherUnits.length > 0
+        ? [
+            `Also reported in ${otherUnitSpans}. This series holds ${newestFramed.unit} values only — values in different units never share a series; pass unit: "${otherUnits[0]}" to read another.`,
+          ]
+        : []),
+      ...(untestedYears.length > 0
+        ? [
+            `Annual periods held by a 10-Q (${untestedYears.join(', ')}) are kept without the fiscal-year-end test, because reading the filer's fiscal-year ends from companyfacts failed. One whose own tag reports no full fiscal year may be a trailing-twelve-month figure rather than a closed fiscal year; retry to run the test.`,
+          ]
+        : []),
     ];
-
-    /** The newest value's unit key, alongside its tag describing the line. */
-    const unitKey = newestFramed.unit;
 
     const data = filtered.map((u) => ({
       period: u.frame,
@@ -533,6 +664,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
           concept: conceptTag,
           taxonomy,
           period_type: resolvedPeriodType,
+          unit: newestFramed.unit,
         },
       });
       if (registered) dataset = toDatasetField(registered);
@@ -566,7 +698,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       concept: conceptTag,
       label: conceptResponse.label || label,
       description: conceptResponse.description || undefined,
-      unit: unitKey,
+      unit: newestFramed.unit,
       data: inlineData,
       tags_tried: tagsTried.length > 1 ? tagsTried : undefined,
       dataset,

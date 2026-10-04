@@ -105,7 +105,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       .string()
       .optional()
       .describe(
-        'Guidance when the inline matrix dropped periods, or when the full aligned series is staged as a dataframe.',
+        'Guidance when the inline matrix dropped periods, or the full series is staged as a dataframe.',
       ),
     truncated: z
       .boolean()
@@ -190,7 +190,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     periods: z
       .array(z.string())
       .describe(
-        'Calendar period keys covered by the inline matrix, newest first. Shorter than the requested periods when the cell count forced the window to shrink — the enrichment trailer reports the drop.',
+        'Period keys in the inline matrix, newest first; shorter than requested when the cell count shrank it (see notice).',
       ),
     companies: z
       .array(
@@ -201,7 +201,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
             name: z.string().describe('Resolved entity name (SEC-conformed).'),
             ticker: z.string().optional().describe('Ticker symbol when SEC lists one.'),
           })
-          .describe('One company that resolved and contributed to the matrix.'),
+          .describe('One company that contributed to the matrix.'),
       )
       .describe('Companies included in the comparison.'),
     failed_companies: z
@@ -212,15 +212,13 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
             reason: z
               .enum(['not_found', 'ambiguous', 'no_company_facts'])
               .describe(
-                'Machine-readable failure. not_found: the input matched no CIK. ambiguous: it matched several, and the message lists them. no_company_facts: it resolved but the filer reports no XBRL. Match on this rather than the message.',
+                'not_found: no CIK matched. ambiguous: several matched; the message lists them. no_company_facts: resolved, but the filer reports no XBRL. Match on this, not the message.',
               ),
             message: z.string().describe('What went wrong and how to fix this one input.'),
           })
-          .describe('One company that could not be included, with a machine-readable reason.'),
+          .describe('One company that could not be included.'),
       )
-      .describe(
-        'Companies excluded from the matrix. The comparison proceeds with the rest rather than failing the whole call.',
-      ),
+      .describe('Companies excluded from the matrix; the rest still compare.'),
     concepts: z
       .array(
         z
@@ -230,13 +228,13 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
             units: z
               .array(z.string())
               .describe(
-                'Distinct units this concept resolved to across the companies. More than one means the values are not directly comparable — see caveats.',
+                'Units this concept resolved to across companies; more than one means values are not directly comparable.',
               ),
           })
           .describe('One requested concept and the units it resolved to.'),
       )
       .describe(
-        'Concepts covered, in the order supplied. Inputs that name the same concept (revenue and Revenue, or one raw tag spelled twice) appear once, under the first spelling.',
+        'Concepts covered, in input order; inputs naming the same concept appear once, under the first spelling.',
       ),
     cells: z
       .array(
@@ -252,12 +250,12 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
             tag: z
               .string()
               .describe(
-                'XBRL tag this value was reported under — one concept can walk several tags, so it can differ between periods of the same company.',
+                'XBRL tag this value was reported under; can differ between periods of one company.',
               ),
             frame: z
               .string()
               .describe(
-                'Underlying XBRL frame, which differs from period for point-in-time concepts (e.g. frame CY2024Q3I under period CY2024).',
+                'Underlying XBRL frame; differs from period for point-in-time concepts (CY2024Q3I under CY2024).',
               ),
             period_end: z
               .string()
@@ -286,22 +284,18 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
           .describe('One company-concept pair with no reported value.'),
       )
       .describe(
-        'Company-concept pairs with no value in any period. Deliberately explicit — a missing value is never interpolated or zero-filled. A pair with values only in periods older than the inline window is not a gap; caveats names it.',
+        'Company-concept pairs with no value in any period (never zero-filled). A pair with values only before the inline window appears in caveats instead.',
       ),
     unknown_concepts: z
       .array(
         z
           .object({
-            concept: z
-              .string()
-              .describe(
-                'Concept as supplied (trimmed) — neither a supported friendly name nor an XBRL tag.',
-              ),
+            concept: z.string().describe('Concept as supplied, trimmed.'),
             derivation: z
               .string()
               .optional()
               .describe(
-                'How to build it from supported concepts when it is a standard combination, e.g. "operating_cash_flow − capex".',
+                'How to build it from supported concepts, when it is a standard combination (e.g., "operating_cash_flow − capex").',
               ),
             suggestions: z
               .array(z.string())
@@ -312,26 +306,26 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
           .describe('One requested concept that was not queried for any company.'),
       )
       .describe(
-        'Requested concepts that are neither a supported friendly name nor an XBRL tag (UpperCamelCase, e.g. NetIncomeLoss), reported once each rather than as a gap per company — secedgar_search_concepts lists every supported name. Empty when every concept resolved.',
+        'Concepts that are neither a supported name nor an XBRL tag, reported once instead of as per-company gaps; secedgar_search_concepts lists supported names. Empty when all resolved.',
       ),
     caveats: z
       .array(z.string())
       .describe(
-        "Comparability warnings: a filer missing one or two calendar quarters from the frame-tagged series, a concept whose values stop at least two full years behind the rest of that company's reporting (either an XBRL tag SEC has retired, or a current tag the filer stopped using), period ends that differ inside one aligned period, concepts whose unit differs across companies, and — one line per concept — the companies that report a concept but have no value inside the inline periods, each with its newest period (its values are in the dataframe), and the concept inputs merged because they name the same concept. Company-specific warnings are prefixed with the company name. Empty when nothing needs flagging.",
+        "Comparability warnings (company-specific ones prefixed with the name), else empty: missing quarters; a concept stopping 2+ years behind the company's other reporting; period ends differing within a period; units differing across companies; values only before the inline window; merged inputs.",
       ),
     dataset: z
       .object({
         name: z
           .string()
           .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
           ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
       })
       .optional()
       .describe(
-        'Canvas dataframe holding the full aligned series across every period, not just the inline window. Columns match cells[]. Absent when canvas is unavailable.',
+        'Dataframe of the full aligned series, every period, with cells[] columns. Absent when canvas is unavailable.',
       ),
   }),
 
@@ -609,6 +603,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
         `Period ends differ inside ${inlinePeriods[0]} — ${spread}. Filers on different fiscal calendars land in the same aligned period with cut-off dates weeks apart, so the comparison is approximate; each cell carries its own period_end.`,
       );
     }
+    // Each company's series reads one unit (#146), so a second unit here is another company's.
     for (const [concept, units] of unitsByConcept) {
       if (units.size > 1) {
         caveatSet.add(

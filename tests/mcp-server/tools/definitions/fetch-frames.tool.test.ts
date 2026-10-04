@@ -843,7 +843,11 @@ describe('fetchFramesTool', () => {
     expect(capex.unqueried_tags).toEqual(['PaymentsToAcquireProductiveAssets']);
     const interest = await run('interest_expense');
     expect(interest.concept).toBe('InterestExpense');
-    expect(interest.unqueried_tags).toEqual(['InterestExpenseDebt', 'InterestExpenseNonoperating']);
+    expect(interest.unqueried_tags).toEqual([
+      'InterestExpenseDebt',
+      'InterestExpenseNonoperating',
+      'InterestExpenseOperating',
+    ]);
   });
 
   it('queries shares_diluted in the shares unit (#130)', async () => {

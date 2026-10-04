@@ -287,12 +287,23 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     /**
      * `InterestExpenseNonoperating` is the income-statement caption filers moved
      * to (NVIDIA and Microsoft report interest expense only under it). It sits
-     * last: it disagrees with `InterestExpense` for 26 of 53 CY2025 filers
-     * reporting both and with `InterestExpenseDebt` for 47 of 67, so behind them
-     * it only fills frames neither covers and moves no value either resolves
-     * (#125, the #98 precedent).
+     * behind both older tags: it disagrees with `InterestExpense` for 26 of 53
+     * CY2025 filers reporting both and with `InterestExpenseDebt` for 47 of 67,
+     * so there it only fills frames neither covers and moves no value either
+     * resolves (#125, the #98 precedent).
+     *
+     * `InterestExpenseOperating` is the caption banks present interest expense
+     * under — JPMorgan, Bank of America, and Wells Fargo report it alone from
+     * 2024. It goes last by the same rule: among CY2025Q2 filers reporting both,
+     * it matches `InterestExpense` for 33 of 37 but `InterestExpenseNonoperating`
+     * for 0 of 4, so ahead of that tag it would replace values it resolves (#147).
      */
-    tags: ['InterestExpense', 'InterestExpenseDebt', 'InterestExpenseNonoperating'],
+    tags: [
+      'InterestExpense',
+      'InterestExpenseDebt',
+      'InterestExpenseNonoperating',
+      'InterestExpenseOperating',
+    ],
     /**
      * `InterestExpense` leads because it is the exact counterpart of the us-gaap
      * tag. `FinanceCosts` is the IAS 1 income-statement caption and is broader —
