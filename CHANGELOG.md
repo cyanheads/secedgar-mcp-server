@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.15.11](changelog/0.15.x/0.15.11.md) — 2026-10-04
+
+search_filings counts filings rather than matching documents, company names resolve to their exact match, and legacy plain-text filings keep their line structure for outlines and section navigation.
+
 ## [0.15.10](changelog/0.15.x/0.15.10.md) — 2026-10-04
 
 Framework mcp-ts-core 0.13.6 → 0.13.11. Multi-arch Docker images now install each architecture's DuckDB binding without relying on the OTel step (#150) and drop unused musl bindings; tool errors carry their request ID; server.json's HTTP entry selects the HTTP transport.

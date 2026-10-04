@@ -13,7 +13,7 @@ The core tools designed below. The full shipped surface — snapshot, comparison
 | `secedgar_company_search` | Find companies and retrieve entity info with optional recent filings. Entry point for most workflows. | `query`, `include_filings?`, `forms?`, `filing_limit?` | `readOnlyHint`, `openWorldHint` |
 | `secedgar_search_filings` | Search EDGAR filings since 1993 — EFTS full-text for 2001-present, archive-backed browse (submissions history / quarterly full-index) for pre-2001 ranges. | `query`, `forms?`, `filed_after?`, `filed_before?`, `limit?`, `offset?` | `readOnlyHint`, `openWorldHint` |
 | `secedgar_get_filing` | Fetch a specific filing's metadata and document content by accession number. | `accession_number`, `cik?`, `content_limit?`, `document?` | `readOnlyHint`, `idempotentHint` |
-| `secedgar_get_financials` | Get historical XBRL financial data for a company. Accepts friendly concept names. | `company`, `concept`, `taxonomy?`, `period_type?` | `readOnlyHint`, `idempotentHint` |
+| `secedgar_get_financials` | Get historical XBRL financial data for a company. Accepts friendly concept names. | `company`, `concept`, `taxonomy?`, `period_type?`, `unit?`, `limit?` | `readOnlyHint`, `idempotentHint` |
 | `secedgar_fetch_frames` | Compare a financial metric across all reporting companies for a specific period. | `concept`, `period`, `taxonomy?`, `unit?`, `limit?`, `offset?`, `sort?` | `readOnlyHint`, `openWorldHint` |
 
 ### Resources
@@ -168,14 +168,14 @@ output: z.object({
 **Handler flow:**
 1. If `query` looks like a number → treat as CIK, zero-pad
 2. If `query` is 1-5 letters → case-insensitive ticker lookup via `Map` (O(1))
-3. Otherwise → name search against `company_tickers.json`: exact match first, then case-insensitive prefix, then substring. Return top 5 scored matches. No fuzzy-matching library needed — prefix + substring covers practical cases across ~10K entries.
+3. Otherwise → case-insensitive name search over `company_tickers.json` titles and committed former names, tiered exact (including the registry title with its corporate suffix dropped, so "Apple" matches "Apple Inc."), then prefix, then substring. Resolve within the best tier a current title reaches and return up to 5 matches from it; a former name can tie a current title but never outrank one. No fuzzy-matching library needed — prefix + substring covers practical cases across ~10K entries.
 4. Fetch `data.sec.gov/submissions/CIK{padded}.json`
 5. Filter `filings.recent` parallel arrays by `forms` if provided
 6. Slice to `filing_limit`
 
 **Error guidance:**
 - No match → `"No company found for '{query}'. Try a ticker symbol (e.g., 'AAPL'), full company name, or 10-digit CIK."`
-- Ambiguous name → return top matches with tickers: `"Multiple matches for 'Apple': AAPL (Apple Inc.), APLE (Apple Hospitality REIT). Specify a ticker for exact match."`
+- Ambiguous name → return top matches with tickers: `"Multiple matches for 'Blue Owl Capital': OWL (BLUE OWL CAPITAL INC.), OBDC (Blue Owl Capital Corp). Specify a ticker for exact match."`
 
 ---
 
@@ -209,8 +209,9 @@ input: z.object({
 })
 
 output: z.object({
-  total: z.number().describe('Total matching filings (capped at 10,000).'),
-  total_is_exact: z.boolean().describe('False when total hits the 10,000 cap.'),
+  total: z.number().describe("Matching filings, one per accession — for a search, exact when one 100-document window held every match, else a lower bound; for a forms- or entity-only browse from 2001 on, EDGAR's own count; a range crossing 2001-01-01 sums the archive rows and one window's filings."),
+  total_is_exact: z.boolean().describe('False when total is a lower bound.'),
+  total_documents: z.number().optional().describe('EFTS document count (capped at 10,000).'),
   results: z.array(z.object({
     accession_number: z.string().describe('Use with secedgar_get_filing to retrieve content.'),
     form: z.string(),
@@ -220,23 +221,24 @@ output: z.object({
     cik: z.string(),
     tickers: z.array(z.string()).optional(),
     file_description: z.string().optional(),
+    matched_documents: z.array(z.object({ name: z.string(), type: z.string().optional() })).optional(),
     sic: z.string().optional(),
     location: z.string().optional(),
   })),
   form_distribution: z.record(z.number()).optional()
-    .describe('Count of results by form type from aggregations. Helps narrow follow-up searches.'),
+    .describe('Filings in hand counted by form type. Helps narrow follow-up searches.'),
 })
 ```
 
 **Handler flow:**
 1. Build query params: `q` (omitted when empty), `forms` (comma-join), `ciks` when `cik:`/`ticker:` targeting resolved a CIK, `dateRange=custom` + `startdt`/`enddt` if dates provided, `from`, `size`
 2. Fetch `efts.sec.gov/LATEST/search-index`
-3. Map Elasticsearch hits to clean output objects
-4. Extract `form_filter` aggregation for distribution info
+3. Collapse the Elasticsearch hits — one per matching document, `_id` = `<accession>:<filename>` — to one row per accession, listing the matched documents
+4. Count `form_distribution` from those rows
 
 **Key design decisions:**
 - Default `limit: 20` (not 100) — most searches don't need 100 results and it keeps LLM context lean
-- Include `form_distribution` from ES aggregations — lets the agent see "142 results in 10-K, 89 in 8-K" and refine
+- One row per filing, with `total` and `form_distribution` counting filings — EFTS returns a hit per matching document, so a filing whose body and exhibits match would otherwise fill several rows. EFTS counts only documents (`hits.total.value`, and the `form_filter` aggregation, whose buckets also fold amendments into the root form) and serves 100 hits per request whatever `size` asks, so a search's exact filing count exists only when one window holds every match; past that, `total` is the window's filings with `total_is_exact: false`, and `total_documents` keeps EFTS's count. A browse (no `q`) is the exception: EFTS matches each filing's primary document alone, so `hits.total.value` is the filing count and becomes `total`, trusted while the window shows one document per accession. `form_distribution` describes the filings in hand rather than the whole match set (#124)
 - Entity filtering via `cik:` / `ticker:` in the `query` string, resolved to a CIK passed through EFTS's plural `ciks` param (the singular `entity` param is ignored) — server-side scope, so filings under a former company name on the same CIK are included
 
 **Error guidance:**
@@ -293,9 +295,9 @@ output: z.object({
 **Handler flow:**
 1. Normalize accession number (ensure dash format for display, no-dash for URL path)
 2. Derive CIK from accession number prefix if not provided
-3. Fetch filing index: `sec.gov/Archives/edgar/data/{cik}/{accn_nodashes}/{accn}-index.json`
-4. Determine target document (primary or specified)
-5. Fetch document HTML
+3. Fetch filing index: `www.sec.gov/Archives/edgar/data/{cik}/{accn_nodashes}/index.json`, with the CIK unpadded (a zero-padded archive path answers 301)
+4. Determine target document (primary or specified). With the index, read the `<accn>-index-headers.html` page and the filer's submissions feed together (both also feed the response metadata). The primary is the feed's `primaryDocument` (last path segment) when the accession is in its recent window, else the document the header page types with the submission's form, else the largest readable document, never an `R<n>.htm` viewer page. Size alone picks an 8-K's larger press-release exhibit, so it is only the fallback
+5. Fetch document HTML. When the primary the index names is not served (404, common in 2000–2001 indexes), read the full submission `<accession>.txt` instead and say so in the response notice; a caller-named document that 404s fails with a hint naming the submission
 6. Convert HTML to clean text (strip tags, normalize whitespace, preserve table structure where possible)
 7. Truncate to `content_limit`
 
@@ -326,6 +328,8 @@ input: z.object({
     .describe('XBRL taxonomy. us-gaap for US companies, ifrs-full for foreign filers, dei for entity info (shares outstanding).'),
   period_type: z.enum(['annual', 'quarterly', 'all']).default('annual')
     .describe('Filter to annual (FY) or quarterly (Q1-Q4) data. "all" returns both.'),
+  unit: z.string().optional()
+    .describe('SEC unit key to read the series in, for a concept reported in more than one (e.g. "ZAR" and a "USD" convenience translation).'),
 })
 
 output: z.object({
@@ -334,7 +338,7 @@ output: z.object({
   concept: z.string().describe('XBRL tag behind the newest value.'),
   label: z.string().describe('Human-readable label for the concept.'),
   description: z.string().optional().describe('XBRL taxonomy description.'),
-  unit: z.string().describe('Unit of measure (e.g., "USD", "shares", "USD/shares").'),
+  unit: z.string().describe('Unit of measure of every value (e.g., "USD", "shares", "USD/shares").'),
   data: z.array(z.object({
     period: z.string().describe('Calendar period label (e.g., "CY2023", "CY2023Q3").'),
     value: z.number(),
@@ -358,9 +362,12 @@ output: z.object({
 3. Map friendly `concept` name to XBRL tag(s) — some map to multiple tags (e.g., "revenue" → 5 tags)
 4. For each mapped tag, fetch `data.sec.gov/api/xbrl/companyconcept/CIK{padded}/{taxonomy}/{tag}.json`; a unit served as anything but an array is dropped at the service edge, and a tag left with no values is answered from one companyfacts read
 5. Merge results if multiple tags returned data; each value keeps its source tag and unit key
-6. Deduplicate: keep only entries with `frame` field (one value per standard calendar period); a frame held by a proxy statement takes the latest fact another form reports for the same tag, unit, and period; an annual frame held by a 10-Q takes the same-period fact from the 10-K, stays when it covers a closed fiscal year, and otherwise drops out (a trailing-twelve-month figure); same-frame collisions go to the lower tag index, then the later filing
-7. Filter by `period_type` (FY vs Q1-Q4)
-8. Sort newest first
+6. Deduplicate within each unit key: keep only entries with `frame` field (one value per standard calendar period); a frame held by a proxy statement takes the latest fact another form reports for the same tag, unit, and period; an annual frame held by a 10-Q takes the same-period fact from the 10-K, stays when it covers a closed fiscal year, and otherwise drops out (a trailing-twelve-month figure); when its own tag and unit hold no year-long fact to test it against, it is tested against the filer's annual-report year ends, read from one companyfacts request made only then; same-frame collisions go to the lower tag index, then the later filing
+7. Read one unit: `unit` when given (an unreported key fails as `no_unit_data`, listing the keys the concept reports), else the unit of the newest value, then the unit with more framed periods, then the alphabetically first; a caveat names every other unit with its period count and span
+8. Filter by `period_type` (FY vs Q1-Q4)
+9. Sort newest first
+
+- *Decision:* frames compete only within one unit key. A 20-F filer frames a year in its reporting currency and in a USD convenience translation, and letting the units compete printed a translated value under the reporting currency wherever the translation was filed later. The default unit is never the catalog mapping's `unit`, which reads `USD` under `ifrs-full` too; newest value first follows a presentation-currency change, and the period count settles the translation tie. Other units are reached through `unit` rather than added to the dataframe, which keeps one row per period. `get_snapshot` and `compare_companies` read the same default unit without the caveat.
 
 **Friendly name → XBRL tag mapping** (36 concepts; `src/services/edgar/concept-map.ts` is the source of truth):
 
@@ -390,7 +397,7 @@ output: z.object({
 | `shares_outstanding` | `EntityCommonStockSharesOutstanding` | — | dei | shares |
 | `cogs` | `CostOfGoodsAndServicesSold`, `CostOfRevenue`, `CostOfGoodsSold` | `CostOfSales` | us-gaap | USD |
 | `gross_profit` | `GrossProfit` | `GrossProfit` | us-gaap | USD |
-| `interest_expense` | `InterestExpense`, `InterestExpenseDebt`, `InterestExpenseNonoperating` | `InterestExpense`, `FinanceCosts` | us-gaap | USD |
+| `interest_expense` | `InterestExpense`, `InterestExpenseDebt`, `InterestExpenseNonoperating`, `InterestExpenseOperating` | `InterestExpense`, `FinanceCosts` | us-gaap | USD |
 | `net_income` | `NetIncomeLoss` | `ProfitLoss` | us-gaap | USD |
 | `operating_income` | `OperatingIncomeLoss` | `ProfitLossFromOperatingActivities` | us-gaap | USD |
 | `pretax_income` | `IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest`, `IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments` | `ProfitLossBeforeTax` | us-gaap | USD |
@@ -496,16 +503,16 @@ output: z.object({
 | Ticker lookup | `https://www.sec.gov/files/company_tickers.json` | `secedgar_company_search`, all tools (CIK resolution) |
 | Submissions | `https://data.sec.gov/submissions/CIK{cik}.json` | `secedgar_company_search` |
 | EFTS search | `https://efts.sec.gov/LATEST/search-index?q=...` | `secedgar_search_filings` |
-| Filing archive | `https://www.sec.gov/Archives/edgar/data/{cik}/{accn}/` | `secedgar_get_filing` |
+| Filing archive | `https://www.sec.gov/Archives/edgar/data/{cik}/{accn}/` (CIK unpadded) | `secedgar_get_filing` |
 | Company concept | `https://data.sec.gov/api/xbrl/companyconcept/CIK{cik}/{taxonomy}/{tag}.json` | `secedgar_get_financials` |
-| Company facts | `https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json` | `secedgar_get_snapshot`, `secedgar_compare_companies`, `secedgar_get_financials` (tags companyconcept serves empty, and the no-data probe) |
+| Company facts | `https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json` | `secedgar_get_snapshot`, `secedgar_compare_companies`, `secedgar_get_financials` (tags companyconcept serves empty, the fiscal-year ends a 10-Q-held annual frame is tested against, and the no-data probe) |
 | Frames | `https://data.sec.gov/api/xbrl/frames/{taxonomy}/{tag}/{unit}/{period}.json` | `secedgar_fetch_frames` |
 
 ### API Quirks
 
 | Quirk | Impact | Mitigation |
 |:------|:-------|:-----------|
-| CIK must be 10-digit zero-padded in URLs | Bare integers from ticker lookup fail | `String(cik).padStart(10, '0')` |
+| `data.sec.gov` URLs need the 10-digit zero-padded CIK; archive paths take it unpadded | A bare integer fails the APIs; a padded `www.sec.gov/Archives` path answers 301, so each archive read costs two requests | `String(cik).padStart(10, '0')` for `data.sec.gov`; strip the leading zeros for archive paths |
 | EFTS `entity` param is ignored server-side | Can't filter by company name via param | Resolve `cik:` / `ticker:` targeting to a CIK and pass it in the plural `ciks` param |
 | EFTS `dateRange` must be `"custom"` to activate | Passing just `startdt`/`enddt` silently does nothing | Always set `dateRange=custom` when dates provided |
 | EFTS ignores `size` | Every request answers with 100 hits | Page with `from` and slice to `limit` locally |
@@ -583,7 +590,7 @@ function filingToText(html: string, limit?: number): {
 
 **Why `html-to-text`:** Purpose-built for HTML→text with native table support — tables render as aligned columns. `htmlparser2` is tolerant of malformed markup (common in pre-2010 SEC filings). Lightweight, well-maintained, no browser/DOM dependency.
 
-**Known limitations:** Pre-2005 filings use deeply nested layout tables (not data tables), producing noisier output. Some filings embed data in images or PDFs within HTML — invisible to any HTML parser. Both acceptable for v1. The library's DOM walk is recursive, so conversion caps it at 512 levels (`limits.maxDepth`) and prints `[…]` where markup nests deeper — the stack otherwise overflows near 1,360 levels on Node. Legacy SGML `<PAGE>` markers, which the parser never closes, are replaced with line breaks first so a long text document does not reach the cap; the extracted text is unchanged. Input over the library's 16,777,216-character `maxInputLength` is truncated without an ellipsis; no measured filing reaches it.
+**Known limitations:** Pre-2005 filings use deeply nested layout tables (not data tables), producing noisier output. Some filings embed data in images or PDFs within HTML — invisible to any HTML parser. Both acceptable for v1. The library's DOM walk is recursive, so conversion caps it at 512 levels (`limits.maxDepth`) and prints `[…]` where markup nests deeper — the stack otherwise overflows near 1,360 levels on Node. Legacy SGML `<PAGE>` markers, which the parser never closes, are replaced with line breaks first so a long text document does not reach the cap. A plain-text SGML `<TEXT>` body (no `<html`, `<body`, `<p`, `<div`, `<br`, `<font`, `<tr`, `<td`, or `<xml` in it) has its tags dropped and goes through as a `<pre>` block, so pre-2001 submissions and 2000s ASCII primary documents keep their lines and their headings; input with no plain body converts exactly as before. The library converts only `<body>` elements when the input has one, so in a submission holding an HTML document each plain body goes in a `<body>` of its own and every document converts in order; uuencoded payloads, machine-readable files (`.xml`, `.xsd`, `.css`, `.js`, `.json`), and the XBRL renderer's generated files (`<TYPE>XML`: the `R*.htm` viewer pages and their script and stylesheet) stay out. Input over the library's 16,777,216-character `maxInputLength` is truncated without an ellipsis; no measured filing reaches it.
 
 ---
 
@@ -600,7 +607,7 @@ function filingToText(html: string, limit?: number): {
 
 One row per `(cik, taxonomy, tag)` stores the concept's full `units` map verbatim, so a point read (`getByIds`) reconstructs the `companyconcept` API shape and a `taxonomy+tag` scan reconstructs the `frames` API shape off the same ~2.5M-row table — no separate ~10⁸-row fact-inversion table, keeping the store inside the embedded-SQLite tier.
 
-**No FTS5.** Every routed lookup is exact/indexed (cik+taxonomy+tag point, taxonomy+tag scan, ticker/CIK equality); full-text search would add ingestion cost and disk with no access path to serve. EFTS filing-text search stays live and out of scope.
+**No FTS5.** Every routed lookup is exact/indexed (cik+taxonomy+tag point, taxonomy+tag scan, cik scan for the whole-company read and a frames call's fiscal-year-end reads, ticker/CIK equality); full-text search would add ingestion cost and disk with no access path to serve. EFTS filing-text search stays live and out of scope.
 
 ### Sync model
 

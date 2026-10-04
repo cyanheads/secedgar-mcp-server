@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-10-04 07:36:26
+Generated on: 2026-10-04 12:50:21
 
 ```text
 secedgar-mcp-server/
@@ -239,7 +239,9 @@ secedgar-mcp-server/
 │   │       │   ├── get-institutional-holdings.tool.test.ts
 │   │       │   ├── get-material-events.tool.test.ts
 │   │       │   ├── get-snapshot.tool.test.ts
+│   │       │   ├── output-descriptions.test.ts
 │   │       │   ├── search-concepts.tool.test.ts
+│   │       │   ├── search-filings.relevance-pages.test.ts
 │   │       │   ├── search-filings.tool.test.ts
 │   │       │   ├── security.test.ts
 │   │       │   └── tool-definitions.test.ts
@@ -263,6 +265,7 @@ secedgar-mcp-server/
 │   │       ├── beneficial-ownership-parser.test.ts
 │   │       ├── concept-map.test.ts
 │   │       ├── concept-series.test.ts
+│   │       ├── edgar-api-service.archive-urls.test.ts
 │   │       ├── edgar-api-service.efts.test.ts
 │   │       ├── edgar-api-service.filing-headers.test.ts
 │   │       ├── edgar-api-service.full-index.test.ts
