@@ -4,7 +4,10 @@
  * @module tests/services/edgar/filing-to-text
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { getFilingTool } from '@/mcp-server/tools/definitions/get-filing.tool.js';
+import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import {
   clearExtractCache,
   detectHeadings,
@@ -18,6 +21,13 @@ import {
   windowText,
 } from '@/services/edgar/filing-to-text.js';
 import { at } from '../../support/assertions.js';
+
+// Only the service singleton is mocked, for the one `get_filing` round trip
+// below; every conversion and heading test runs the real module.
+vi.mock('@/services/edgar/edgar-api-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/edgar/edgar-api-service.js')>()),
+  getEdgarApiService: vi.fn(),
+}));
 
 afterEach(() => {
   clearExtractCache();
@@ -117,12 +127,14 @@ describe('filingToExtract', () => {
 });
 
 describe('hasExtractCache / getExtractCache / setExtractCache', () => {
+  const entry = (text: string, document = 'doc.htm') => ({ text, document });
+
   it('hasExtractCache returns false before any set', () => {
     expect(hasExtractCache('no-such-key')).toBe(false);
   });
 
   it('hasExtractCache returns true after setExtractCache', () => {
-    setExtractCache('k1', 'value1');
+    setExtractCache('k1', entry('value1'));
     expect(hasExtractCache('k1')).toBe(true);
   });
 
@@ -130,29 +142,31 @@ describe('hasExtractCache / getExtractCache / setExtractCache', () => {
     expect(getExtractCache('missing')).toBeUndefined();
   });
 
-  it('getExtractCache returns value after setExtractCache', () => {
-    setExtractCache('k2', 'value2');
-    expect(getExtractCache('k2')).toBe('value2');
+  it('getExtractCache returns the text and its source document after setExtractCache', () => {
+    setExtractCache('k2', entry('value2', '0000899681-00-000406.txt'));
+    expect(getExtractCache('k2')).toEqual({ text: 'value2', document: '0000899681-00-000406.txt' });
   });
 
   it('getExtractCache returns same value on repeated calls (LRU refresh, not eviction)', () => {
-    setExtractCache('k3', 'value3');
-    expect(getExtractCache('k3')).toBe('value3');
-    expect(getExtractCache('k3')).toBe('value3');
+    setExtractCache('k3', entry('value3'));
+    expect(getExtractCache('k3')?.text).toBe('value3');
+    expect(getExtractCache('k3')?.text).toBe('value3');
   });
 });
 
 describe('LRU eviction', () => {
+  const entry = (text: string) => ({ text, document: 'doc.htm' });
+
   it('evicts the oldest entry when capacity (8) is exceeded', () => {
     // Fill to capacity
     for (let i = 0; i < 8; i++) {
-      setExtractCache(`lru-key-${i}`, `value-${i}`);
+      setExtractCache(`lru-key-${i}`, entry(`value-${i}`));
     }
     expect(extractCacheSize()).toBe(8);
     expect(hasExtractCache('lru-key-0')).toBe(true);
 
     // Add a 9th entry — lru-key-0 is oldest and should be evicted
-    setExtractCache('lru-key-8', 'value-8');
+    setExtractCache('lru-key-8', entry('value-8'));
     expect(extractCacheSize()).toBe(8);
     expect(hasExtractCache('lru-key-0')).toBe(false);
     expect(hasExtractCache('lru-key-8')).toBe(true);
@@ -160,13 +174,13 @@ describe('LRU eviction', () => {
 
   it('accessing an entry refreshes it (moves it to MRU position)', () => {
     for (let i = 0; i < 8; i++) {
-      setExtractCache(`refresh-key-${i}`, `value-${i}`);
+      setExtractCache(`refresh-key-${i}`, entry(`value-${i}`));
     }
     // Access key-0 to move it to MRU
     getExtractCache('refresh-key-0');
 
     // Adding a 9th should evict key-1 (now oldest), not key-0
-    setExtractCache('refresh-key-8', 'new-value');
+    setExtractCache('refresh-key-8', entry('new-value'));
     expect(hasExtractCache('refresh-key-0')).toBe(true);
     expect(hasExtractCache('refresh-key-1')).toBe(false);
   });
@@ -554,6 +568,165 @@ describe('detectHeadings — bare Item markers and running page headers (#105)',
   });
 });
 
+describe('detectHeadings — a wrapped sentence that starts a line with an Item marker (#136)', () => {
+  /** The shape of Apple's 1996 10-K: a cross-reference wrapped onto the start of a line. */
+  const WRAPPED_10K = [
+    'PART I',
+    '',
+    'Item 1. Business',
+    '',
+    'Further discussion may be found under Part II, Item 7 of this Form 10-K under the ',
+    'subheading "Inventory and Supply," and in Part II, ',
+    'Item 8 on this Form 10-K in the Notes to Consolidated Financial ',
+    'Statements under the subheading "Concentrations." ',
+    '',
+    'Item 8. Financial Statements and Supplementary Data',
+    '',
+    'INDEX TO CONSOLIDATED FINANCIAL STATEMENTS',
+    '',
+  ].join('\n');
+
+  it('leaves the wrapped line out of the outline and keeps the real heading', () => {
+    expect(detectHeadings(WRAPPED_10K)).toEqual([
+      { heading: 'PART I', offset: 0 },
+      { heading: 'Item 1. Business', offset: 8 },
+      {
+        heading: 'Item 8. Financial Statements and Supplementary Data',
+        offset: WRAPPED_10K.indexOf('Item 8.'),
+      },
+      {
+        heading: 'INDEX TO CONSOLIDATED FINANCIAL STATEMENTS',
+        offset: WRAPPED_10K.indexOf('INDEX TO'),
+      },
+    ]);
+  });
+
+  it.each([
+    [
+      'the word after the marker is lowercase',
+      'Proxy matters.\n\nItem 1 is the election of directors.\n',
+    ],
+    [
+      'the line before ends on a lowercase word',
+      'For liquidity, see\nItem 7 "Liquidity and Capital Resources."\n',
+    ],
+    [
+      'the line before ends on a comma',
+      'as described in Part III,\nItem 13 - Certain Relationships.\n',
+    ],
+  ])('drops an unpunctuated marker when %s', (_label, text) => {
+    expect(detectHeadings(text)).toEqual([]);
+  });
+
+  // Characterization: each heading is detected by the pre-change patterns too.
+  it.each([
+    ['a punctuated Item directly under PART I', 'PART I\nItem 1. Business\n', 'Item 1. Business'],
+    ['an unpunctuated Item directly under PART I', 'PART I\nItem 1 Business\n', 'Item 1 Business'],
+    [
+      'an unpunctuated Item with a capitalized title',
+      'Notes.\n\nItem 6 Selected Financial Data\n',
+      'Item 6 Selected Financial Data',
+    ],
+    [
+      'a dash after the marker',
+      'None.\n\nItem 1 - Legal Proceedings\n',
+      'Item 1 - Legal Proceedings',
+    ],
+    [
+      'a 20-F lettered marker',
+      'Text.\n\nItem 16J Insider Trading Policies\n',
+      'Item 16J Insider Trading Policies',
+    ],
+    [
+      'a punctuated Item under a running page header',
+      'Table of Contents\nItem 7. Management’s Discussion and Analysis\n',
+      'Item 7. Management’s Discussion and Analysis',
+    ],
+  ])('keeps %s', (_label, text, heading) => {
+    expect(detectHeadings(text).map((h) => h.heading)).toContain(heading);
+  });
+
+  it('lands get_filing section "item 8" on the real heading, not the wrapped line', async () => {
+    const accession = '0000320193-96-000023';
+    const sgml = `<DOCUMENT>\n<TYPE>10-K\n<TEXT>\n${WRAPPED_10K}</TEXT>\n</DOCUMENT>\n`;
+    vi.mocked(getEdgarApiService).mockReturnValue({
+      findFilingCiks: vi.fn(async () => ['0000320193']),
+      tryGetFilingIndex: vi.fn(async () => ({
+        directory: {
+          name: '000032019396000023',
+          item: [
+            { name: `${accession}.txt`, type: 'text', size: '', 'last-modified': '1996-12-19' },
+          ],
+        },
+      })),
+      tryGetFilingDocument: vi.fn(async () => sgml),
+      tryGetFilingHeaders: vi.fn(async () => null),
+      tryGetSubmissionHeader: vi.fn(async () => null),
+      getSubmissions: vi.fn(async () => ({
+        cik: '0000320193',
+        name: 'APPLE COMPUTER INC',
+        tickers: [],
+        exchanges: [],
+        filings: {
+          recent: {
+            accessionNumber: [accession],
+            filingDate: ['1996-12-19'],
+            form: ['10-K'],
+            primaryDocument: [''],
+            primaryDocDescription: [''],
+            reportDate: ['1996-09-27'],
+          },
+          files: [],
+        },
+      })),
+    } as never);
+
+    const result = await runToolContract(getFilingTool, {
+      accession_number: accession,
+      cik: '320193',
+      section: 'item 8',
+    });
+
+    expect(result.isError).toBeFalsy();
+    const content = (result.structuredContent as { content: string }).content;
+    expect(content.startsWith('Item 8. Financial Statements and Supplementary Data')).toBe(true);
+  });
+});
+
+describe('detectHeadings — heading scans stay linear on long lines (#136)', () => {
+  const cpuMs = (text: string): number => {
+    const start = process.threadCpuUsage();
+    detectHeadings(text);
+    const used = process.threadCpuUsage(start);
+    return (used.user + used.system) / 1000;
+  };
+  const bestOf3 = (text: string) => Math.min(cpuMs(text), cpuMs(text), cpuMs(text));
+  const fill = (unit: string, chars: number) => unit.repeat(Math.ceil(chars / unit.length));
+
+  it.each([
+    ['wrapped Item lines under prose lines', (n: number) => fill('see\nItem 1 Business\n', n)],
+    [
+      'one long prose line before an Item line',
+      (n: number) => `${'a'.repeat(n)}\nItem 1 Business\n`,
+    ],
+    ['an Item marker before a long whitespace run', (n: number) => `Item 1${' '.repeat(n)}X\n`],
+    // The page-number strip and the all-caps arm each went quadratic on these.
+    ['an all-caps line with a long whitespace run', (n: number) => `ABCDEFGHIJ${' '.repeat(n)}X\n`],
+    [
+      'an all-caps start, a long whitespace run, then lowercase',
+      (n: number) => `ABCDEFGHIJ${' '.repeat(n)}x\n`,
+    ],
+  ])('%s', (_label, build) => {
+    detectHeadings(build(5_000)); // warm the JIT
+    const t5k = Math.max(bestOf3(build(5_000)), 0.25);
+    bestOf3(build(20_000));
+    const t80k = bestOf3(build(80_000));
+
+    expect(t80k / t5k).toBeLessThan(64);
+    expect(t80k).toBeLessThan(200);
+  });
+});
+
 describe('foldForHeadingMatch (#106)', () => {
   const NBSP = ' ';
 
@@ -614,12 +787,12 @@ describe('filingToExtract — nesting depth and SGML page markers (#118)', () =>
     ]);
   });
 
-  it('leaves a short SGML text document with <PAGE> markers unchanged', () => {
+  it('keeps a short SGML text document line for line, each <PAGE> marker a line break (#136)', () => {
     const sgml =
       '<DOCUMENT>\n<TYPE>10-K\n<TEXT>\nITEM 1.  BUSINESS\n\nThe company sells computers.\n<PAGE>   2\nITEM 2.  PROPERTIES\n\nHeadquarters in Cupertino.\n<PAGE>   3\nITEM 3.  LEGAL PROCEEDINGS\n\nNone.\n</TEXT>\n</DOCUMENT>\n';
 
     expect(filingToExtract(sgml)).toBe(
-      '10-K ITEM 1. BUSINESS The company sells computers. 2 ITEM 2. PROPERTIES Headquarters in Cupertino. 3 ITEM 3. LEGAL PROCEEDINGS None.',
+      '10-K\n\n\nITEM 1.  BUSINESS\n\nThe company sells computers.\n\n   2\nITEM 2.  PROPERTIES\n\nHeadquarters in Cupertino.\n\n   3\nITEM 3.  LEGAL PROCEEDINGS\n\nNone.\n',
     );
   });
 
@@ -670,5 +843,401 @@ describe('filingToExtract — nesting depth and SGML page markers (#118)', () =>
     expect(text.match(/page \d+ text/g)).toHaveLength(800);
     expect(text).toContain('END');
     expect(text).not.toContain(ELLIPSIS);
+  });
+});
+
+describe('filingToExtract — plain-text SGML bodies keep their lines (#136)', () => {
+  const wrap = (body: string, type = '10-K') =>
+    `<DOCUMENT>\n<TYPE>${type}\n<TEXT>\n${body}</TEXT>\n</DOCUMENT>\n`;
+
+  /** The shape of a 1990s 10-K body: flush headings, an EDGAR ASCII table, page markers. */
+  const LEGACY_10K = wrap(
+    [
+      'PART I',
+      '',
+      'Item 1.  Business',
+      '',
+      '     The Company designs personal computers.',
+      '',
+      '<TABLE>',
+      '<CAPTION>',
+      '                          1996       1995',
+      '<S>                     <C>        <C>',
+      'Net sales               $9,833     $11,062',
+      '</TABLE>',
+      '<PAGE>   2',
+      "Item 7.  Management's Discussion and Analysis",
+      '',
+      '     Net sales fell & margins < 20%; see <Note 4.',
+      '',
+    ].join('\n'),
+  );
+
+  it('keeps line structure, so the outline lists the Part and Items', () => {
+    const text = filingToExtract(LEGACY_10K);
+
+    expect(detectHeadings(text).map((h) => h.heading)).toEqual([
+      'PART I',
+      'Item 1.  Business',
+      "Item 7.  Management's Discussion and Analysis",
+    ]);
+    expect(detectHeadings(text).at(-1)?.offset).toBe(text.indexOf('Item 7.'));
+    // The <PAGE> marker's page number stays on a line of its own.
+    expect(text).toContain('\n   2\nItem 7.');
+  });
+
+  it('drops the SGML table tags and keeps the columns aligned', () => {
+    const text = filingToExtract(LEGACY_10K);
+
+    expect(text).toContain('\n                          1996       1995\n');
+    expect(text).toContain('\nNet sales               $9,833     $11,062\n');
+    for (const tag of ['<TABLE>', '<CAPTION>', '<S>', '<C>', '</TABLE>', 'CAPTION']) {
+      expect(text).not.toContain(tag);
+    }
+  });
+
+  it('keeps a literal &, <, and > of the source text verbatim', () => {
+    const text = filingToExtract(LEGACY_10K);
+    expect(text).toContain('     Net sales fell & margins < 20%; see <Note 4.\n');
+    expect(filingToExtract(wrap('AT&amp;T  a < b > c\n'))).toContain('AT&amp;T  a < b > c\n');
+  });
+
+  it('drops EX-27 field tags, <PP&E> and <PERIOD-TYPE> included, one value per line', () => {
+    const ex27 = wrap(
+      '<ARTICLE> 5\n<MULTIPLIER> 1,000\n<PERIOD-TYPE> YEAR\n<PP&E> 1,234\n<TOTAL-ASSETS> 9,999\n',
+      'EX-27',
+    );
+    expect(filingToExtract(ex27)).toBe('EX-27\n\n\n 5\n 1,000\n YEAR\n 1,234\n 9,999\n');
+  });
+
+  it('keeps every plain document of a submission line for line', () => {
+    const submission =
+      wrap('ITEM 1.  BUSINESS\n\nBody text.\n') +
+      wrap('EXHIBIT 21\n\nSUBSIDIARIES OF THE REGISTRANT\n', 'EX-21');
+    const text = filingToExtract(submission);
+
+    expect(text).toContain('\nITEM 1.  BUSINESS\n\nBody text.\n');
+    expect(text).toContain('\nEXHIBIT 21\n\nSUBSIDIARIES OF THE REGISTRANT\n');
+  });
+});
+
+describe('filingToExtract — input with no plain <TEXT> body converts as before (#136)', () => {
+  // Characterization: each expected string is the pre-#136 conversion of the same input.
+  it('an SGML-wrapped HTML document', () => {
+    const sgml =
+      '<DOCUMENT>\n<TYPE>10-K\n<SEQUENCE>1\n<FILENAME>form10k.htm\n<TEXT>\n<HTML>\n<BODY>\n<P>PART I</P>\n<P>Item 1.  Business</P>\n<P>We design\npersonal computers.</P>\n<TABLE><TR><TD>Net sales</TD><TD>9,833</TD></TR></TABLE>\n</BODY>\n</HTML>\n</TEXT>\n</DOCUMENT>\n';
+    const text = filingToExtract(sgml);
+
+    expect(text).toBe(
+      'PART I\n\nItem 1. Business\n\nWe design personal computers.\n\nNet sales9,833',
+    );
+    expect(detectHeadings(text)).toEqual([
+      { heading: 'PART I', offset: 0 },
+      { heading: 'Item 1. Business', offset: 8 },
+    ]);
+  });
+
+  it('an inline SVG <text> element — the wrapper match is case-sensitive', () => {
+    const html =
+      '<html><body><p>Revenue by segment</p><svg viewBox="0 0 10 10"><text x="0" y="5">Americas\nsegment</text></svg><p>See note 4.</p></body></html>';
+    expect(filingToExtract(html)).toBe('Revenue by segment\n\nAmericas segment\n\nSee note 4.');
+  });
+
+  it.each([
+    ['<html>', '10-K line one line two'],
+    ['<BODY>', 'line one line two'],
+    ['<p>', '10-K\n\nline one line two'],
+    ['<DIV>', '10-K\nline one line two'],
+    ['<br>', '10-K\nline one line two'],
+    ['<FONT size=2>', '10-K line one line two'],
+    ['<tr>', '10-K line one line two'],
+    ['<TD>', '10-K line one line two'],
+    ['<XML>', '10-K line one line two'],
+  ])('a <TEXT> body opening %s reads as HTML', (opener, expected) => {
+    const sgml = `<DOCUMENT>\n<TYPE>10-K\n<TEXT>\n${opener}line one\nline two\n</TEXT>\n</DOCUMENT>\n`;
+    expect(filingToExtract(sgml)).toBe(expected);
+  });
+});
+
+describe('filingToExtract — every document of a submission holding an HTML document (#159)', () => {
+  const SEC_HEADER =
+    '<SEC-DOCUMENT>0000950134-00-009775.txt : 20001115\n<SEC-HEADER>0000950134-00-009775.hdr.sgml : 20001115\nACCESSION NUMBER:\t\t0000950134-00-009775\nCONFORMED SUBMISSION TYPE:\t10-Q\n</SEC-HEADER>\n';
+  const doc = (type: string, filename: string, body: string) =>
+    `<DOCUMENT>\n<TYPE>${type}\n<FILENAME>${filename}\n<TEXT>\n${body}</TEXT>\n</DOCUMENT>\n`;
+  const submission = (...docs: string[]) => `${SEC_HEADER}${docs.join('')}</SEC-DOCUMENT>\n`;
+
+  const HTML_10Q = doc(
+    '10-Q',
+    'd81726e10-q.htm',
+    '<HTML><BODY><P>PART I</P><P>Item 1. Financial Statements</P><P>Revenue rose.</P></BODY></HTML>\n',
+  );
+  const EX_10 = doc(
+    'EX-10.1',
+    'd81726ex10-1.txt',
+    '<PAGE>   1\n                    EXHIBIT 10.1\n\nFOURTEENTH AMENDMENT TO THE PARTNERSHIP AGREEMENT\n\nThis amendment is made\nas of September 12, 2000.\n',
+  );
+  const EX_27 = doc(
+    'EX-27',
+    'art5sept00.frm',
+    '<TABLE> <S> <C>\n<ARTICLE> 5\n<CASH> 1,234\n</TABLE>\n',
+  );
+  const HTML_EX99 = doc(
+    'EX-99',
+    'd81726ex99.htm',
+    '<HTML><BODY><P>EXHIBIT 99</P><P>Press release.</P></BODY></HTML>\n',
+  );
+  const GRAPHIC = doc(
+    'GRAPHIC',
+    'logo.jpg',
+    'begin 644 logo.jpg\nM_]C_X``02D9)1@`!`@$`2`!(``#_\n`\nend\n',
+  );
+  // Encoded bytes that spell `<BR`, so the payload passes the HTML test.
+  const PDF = doc(
+    '10-Q',
+    'd81726e10-q_pdf.pdf',
+    '<PDF>\nbegin 666 DOC.PDF\nM)5!$1BTQ<BR\\_3#0H\n`\nend\n',
+  );
+
+  const HTML_10Q_TEXT = 'PART I\n\nItem 1. Financial Statements\n\nRevenue rose.';
+  const EX_10_TEXT =
+    '\n\n   1\n                    EXHIBIT 10.1\n\nFOURTEENTH AMENDMENT TO THE PARTNERSHIP AGREEMENT\n\nThis amendment is made\nas of September 12, 2000.\n';
+
+  it('converts each plain exhibit after the HTML document, line for line, in document order', () => {
+    const text = filingToExtract(submission(HTML_10Q, EX_10, EX_27));
+
+    expect(text).toBe(`${HTML_10Q_TEXT}\n\n${EX_10_TEXT}\n\n\n  \n 5\n 1,234\n\n`);
+    // The SEC header sits outside every document, as it always did for these submissions.
+    expect(text).not.toContain('ACCESSION NUMBER');
+  });
+
+  it('keeps a plain exhibit between two HTML documents in its place', () => {
+    expect(filingToExtract(submission(HTML_10Q, EX_10, HTML_EX99))).toBe(
+      `${HTML_10Q_TEXT}\n\n${EX_10_TEXT}\n\nEXHIBIT 99\n\nPress release.`,
+    );
+  });
+
+  it('keeps an HTML exhibit of bare <P>/<TABLE> fragments, with no <body>, in its place', () => {
+    const fragments = doc(
+      'EX-10.2',
+      'd81726ex10-2.htm',
+      '<P>EXHIBIT 10.2</P>\n<TABLE><TR><TD>Monthly rent</TD><TD>$1,000</TD></TR></TABLE>\n',
+    );
+    expect(filingToExtract(submission(HTML_10Q, fragments, HTML_EX99))).toBe(
+      `${HTML_10Q_TEXT}\n\nEXHIBIT 10.2\n\nMonthly rent$1,000\n\nEXHIBIT 99\n\nPress release.`,
+    );
+  });
+
+  it('keeps an <HTML> exhibit that never opens a <BODY>', () => {
+    const noBody = doc(
+      'EX-21',
+      'd81726ex21.htm',
+      '<HTML><P>SUBSIDIARIES OF THE REGISTRANT</P></HTML>\n',
+    );
+    expect(filingToExtract(submission(HTML_10Q, noBody))).toBe(
+      `${HTML_10Q_TEXT}\n\nSUBSIDIARIES OF THE REGISTRANT`,
+    );
+  });
+
+  // Characterization: the #159 conversion of the same input.
+  it('leaves out an XML document with no <body>, by its .xml extension', () => {
+    const form4 = doc(
+      '4',
+      'primary_doc.xml',
+      '<XML>\n<ownershipDocument><issuerName>ACME</issuerName></ownershipDocument>\n</XML>\n',
+    );
+    expect(filingToExtract(submission(HTML_10Q, form4))).toBe(HTML_10Q_TEXT);
+  });
+
+  it('leaves out uuencoded payloads, a PDF that reads as HTML included', () => {
+    expect(filingToExtract(submission(HTML_10Q, EX_10, PDF, GRAPHIC))).toBe(
+      `${HTML_10Q_TEXT}\n\n${EX_10_TEXT}`,
+    );
+  });
+
+  it('leaves out the machine-readable files of a modern full submission', () => {
+    const modern = submission(
+      HTML_10Q,
+      doc(
+        'EX-101.SCH',
+        'abc-20260902.xsd',
+        '<XBRL>\n<xs:schema>XBRL SCHEMA LABEL</xs:schema>\n</XBRL>\n',
+      ),
+      doc('XML', 'report.css', '/* Updated 2009-11-04 */\n.report { color: black; }\n'),
+      doc('JSON', 'MetaLinks.json', '{\n "version": "2.2"\n}\n'),
+      doc('XML', 'FilingSummary.xml', '<XML>\n<FilingSummary>SUMMARY</FilingSummary>\n</XML>\n'),
+      EX_10,
+    );
+    expect(filingToExtract(modern)).toBe(`${HTML_10Q_TEXT}\n\n${EX_10_TEXT}`);
+  });
+
+  it("lists the primary document's headings first, so an exhibit cannot crowd them past the cap", () => {
+    const text = filingToExtract(submission(HTML_10Q, EX_10));
+
+    expect(detectHeadings(text)).toEqual([
+      { heading: 'PART I', offset: 0 },
+      { heading: 'Item 1. Financial Statements', offset: 8 },
+      {
+        heading: 'FOURTEENTH AMENDMENT TO THE PARTNERSHIP AGREEMENT',
+        offset: text.indexOf('FOURTEENTH'),
+      },
+    ]);
+    expect(detectHeadings(text, 2).map((h) => h.heading)).toEqual([
+      'PART I',
+      'Item 1. Financial Statements',
+    ]);
+  });
+
+  // Characterization: each expected string is the #136 conversion of the same input.
+  it('a single HTML document with uuencoded graphics converts as before', () => {
+    expect(filingToExtract(submission(HTML_10Q, GRAPHIC))).toBe(HTML_10Q_TEXT);
+  });
+
+  it('a submission of HTML documents only converts as before', () => {
+    expect(filingToExtract(submission(HTML_10Q, HTML_EX99))).toBe(
+      `${HTML_10Q_TEXT}\n\nEXHIBIT 99\n\nPress release.`,
+    );
+  });
+
+  it('a plain-only submission converts whole, SEC header included, as before', () => {
+    const plain = submission(
+      doc('10-K', '0001.txt', 'ITEM 1.  BUSINESS\n\nThe company sells computers.\n'),
+      doc('EX-21', '0002.txt', 'EXHIBIT 21\n\nSUBSIDIARIES OF THE REGISTRANT\n'),
+    );
+    expect(filingToExtract(plain)).toBe(
+      '0000950134-00-009775.txt : 20001115 0000950134-00-009775.hdr.sgml : 20001115 ACCESSION NUMBER: 0000950134-00-009775 CONFORMED SUBMISSION TYPE: 10-Q 10-K 0001.txt\n\n\nITEM 1.  BUSINESS\n\nThe company sells computers.\n\n\nEX-21 0002.txt\n\n\nEXHIBIT 21\n\nSUBSIDIARIES OF THE REGISTRANT\n',
+    );
+  });
+});
+
+describe('filingToExtract — the XBRL renderer files of a full submission stay out (#160)', () => {
+  const doc = (type: string, filename: string, body: string) =>
+    `<DOCUMENT>\n<TYPE>${type}\n<SEQUENCE>1\n<FILENAME>${filename}\n<DESCRIPTION>${type}\n<TEXT>\n${body}</TEXT>\n</DOCUMENT>\n`;
+  const submission = (...docs: string[]) =>
+    `<SEC-DOCUMENT>0001045810-26-000078.txt : 20260902\n<SEC-HEADER>0001045810-26-000078.hdr.sgml : 20260902\nCONFORMED SUBMISSION TYPE:\t8-K\n</SEC-HEADER>\n${docs.join('')}</SEC-DOCUMENT>\n`;
+
+  // An inline-XBRL primary is typed by its form, not XML.
+  const PRIMARY = doc(
+    '8-K',
+    'nvda-20260902.htm',
+    '<XBRL>\n<html><body><div>Item 8.01 Other Events</div><div>The company announced a dividend.</div></body></html>\n</XBRL>\n',
+  );
+  const EX_99 = doc(
+    'EX-99.1',
+    'q2fy27pr.htm',
+    '<html><body><p>NVIDIA Announces Results</p></body></html>\n',
+  );
+  const FILED_TEXT =
+    'Item 8.01 Other Events\nThe company announced a dividend.\n\nNVIDIA Announces Results';
+
+  it('cuts the renderer viewer pages, script, and stylesheet, keeping the filed documents', () => {
+    const text = filingToExtract(
+      submission(
+        PRIMARY,
+        EX_99,
+        doc(
+          'XML',
+          'R1.htm',
+          '<html><head><title></title></head><body><table><tr><th>Document and Entity Information</th></tr><tr><td>Entity Central Index Key</td><td>0001045810</td></tr></table></body></html>\n',
+        ),
+        // The renderer script of 2011-era filings writes `<body>` in a string literal.
+        doc(
+          'XML',
+          'Show.js',
+          "Show.page = function () { return '<body>' + 'More' + '</body>'; };\n",
+        ),
+        doc('XML', 'report.css', '.report { color: black; }\n'),
+      ),
+    );
+    expect(text).toBe(FILED_TEXT);
+  });
+
+  // Characterization: the #159 conversion of the same input.
+  it('a full submission with no renderer files converts as before', () => {
+    expect(filingToExtract(submission(PRIMARY, EX_99))).toBe(FILED_TEXT);
+  });
+
+  it('keeps a filed document by its type, whatever its file name', () => {
+    const renamed = doc(
+      'EX-99.1',
+      'R1.htm',
+      '<html><body><p>NVIDIA Announces Results</p></body></html>\n',
+    );
+    expect(filingToExtract(submission(PRIMARY, renamed))).toBe(FILED_TEXT);
+  });
+});
+
+describe('filingToExtract — <TEXT> body scan worst cases stay linear (#136, #159, #160)', () => {
+  /** Thread CPU milliseconds for one conversion — wall clock is noise under a parallel suite. */
+  const cpuMs = (input: string): number => {
+    const start = process.threadCpuUsage();
+    filingToExtract(input);
+    const used = process.threadCpuUsage(start);
+    return (used.user + used.system) / 1000;
+  };
+  /** Best of three, so one scheduler hiccup cannot fail the ratio. */
+  const bestOf3 = (input: string) => Math.min(cpuMs(input), cpuMs(input), cpuMs(input));
+  const fill = (unit: string, chars: number) => unit.repeat(Math.ceil(chars / unit.length));
+
+  it.each([
+    ['repeated opener, no closer', (n: number) => fill('<TEXT>', n)],
+    ['nested openers', (n: number) => `${fill('<TEXT>', n / 2)}x${fill('</TEXT>', n / 2)}`],
+    ['overlapping opener prefixes', (n: number) => fill('<TEX<TEXT', n)],
+    ['unclosed tag openers in a plain body', (n: number) => `<TEXT>${fill('<a', n)}</TEXT>`],
+    ['HTML-signal prefixes in a plain body', (n: number) => `<TEXT>${fill('<pa<bod', n)}</TEXT>`],
+    ['dense SGML tags in a plain body', (n: number) => `<TEXT>${fill('<S>x <C>\n', n)}</TEXT>`],
+    // With a <body> in the input, each plain body goes in a <body> of its own (#159).
+    ['repeated opener, no closer, after a <body>', (n: number) => `<body>${fill('<TEXT>', n)}`],
+    [
+      'thousands of plain documents after a <body>',
+      (n: number) =>
+        `<body>${fill('<DOCUMENT>\n<FILENAME>a.txt\n<TEXT>\nx\n</TEXT>\n</DOCUMENT>\n', n)}`,
+    ],
+    [
+      'thousands of machine-readable documents after a <body>',
+      (n: number) =>
+        `<body>${fill('<DOCUMENT>\n<FILENAME>a.xsd\n<TEXT>\nx\n</TEXT>\n</DOCUMENT>\n', n)}`,
+    ],
+    [
+      'thousands of uuencoded documents after a <body>',
+      (n: number) => `<body>${fill('<DOCUMENT>\n<TEXT>\nbegin 644 a.gif\nM\n</TEXT>\n', n)}`,
+    ],
+    [
+      'repeated <FILENAME> openers on one line after a <body>',
+      (n: number) => `<body>${fill('<FILENAME>', n)}<TEXT>x</TEXT>`,
+    ],
+    [
+      'a whitespace run before a <PDF> tag after a <body>',
+      (n: number) => `<body><TEXT>${' '.repeat(n)}${fill('<PDF> ', n)}</TEXT>`,
+    ],
+    ['<body> prefixes with no closing >', (n: number) => `${fill('<bod', n)}<TEXT>x</TEXT>`],
+    // Renderer files are cut by their <TYPE> (#160).
+    [
+      'thousands of renderer viewer pages after a <body>',
+      (n: number) =>
+        `<body>${fill('<DOCUMENT>\n<TYPE>XML\n<TEXT>\n<html><body>x</body></html>\n</TEXT>\n', n)}`,
+    ],
+    [
+      'repeated <TYPE> openers on one line after a <body>',
+      (n: number) => `<body>${fill('<TYPE>', n)}<TEXT>x</TEXT>`,
+    ],
+    [
+      'thousands of HTML fragment documents with no <body> after a <body>',
+      (n: number) => `<body>${fill('<DOCUMENT>\n<TEXT>\n<P>x</P>\n</TEXT>\n', n)}`,
+    ],
+    [
+      '<body prefixes in an HTML fragment after a <body>',
+      (n: number) => `<body><TEXT><P>${fill('<bod', n)}</TEXT>`,
+    ],
+  ])('%s', (_label, build) => {
+    filingToExtract(build(5_000)); // warm the JIT
+    // Floored so a sub-millisecond baseline cannot inflate the ratio on noise.
+    const t5k = Math.max(bestOf3(build(5_000)), 0.25);
+    bestOf3(build(20_000));
+    const t80k = bestOf3(build(80_000));
+
+    // Measured at 1–17 ms for 80k. A lazy `<TEXT>([\s\S]*?)</TEXT>` regex scan
+    // takes ~470 ms on the no-closer shape alone, a 230× span ratio.
+    expect(t80k / t5k).toBeLessThan(64);
+    expect(t80k).toBeLessThan(200);
   });
 });

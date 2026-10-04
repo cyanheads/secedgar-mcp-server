@@ -83,10 +83,18 @@ export function toDatasetField(registered: RegisterDataframeResult): {
  * off, registration failed, or the row set was empty, and this text promises a
  * table the caller can query. `ctx.enrich.notice` is last-wins across
  * `notice`/`truncated`, so a call site where both can fire composes one string
- * rather than emitting two.
+ * rather than emitting two. A `truncated` dataset holds only the rows fetched, and
+ * the pointer says so rather than calling the table the full set (#162).
  */
-export function dataframeGuidance(dataset: { name: string; row_count: number }): string {
-  return `Full set staged as ${dataset.name} (${dataset.row_count} rows) — use secedgar_dataframe_describe to inspect its columns, then secedgar_dataframe_query to analyze it with SQL.`;
+export function dataframeGuidance(dataset: {
+  name: string;
+  row_count: number;
+  truncated?: boolean;
+}): string {
+  const staged = dataset.truncated
+    ? `The rows fetched are staged as ${dataset.name} (${dataset.row_count} rows), not the full set`
+    : `Full set staged as ${dataset.name} (${dataset.row_count} rows)`;
+  return `${staged} — use secedgar_dataframe_describe to inspect its columns, then secedgar_dataframe_query to analyze it with SQL.`;
 }
 
 /** Options accepted by {@link CanvasBridge.registerDataframe}. */

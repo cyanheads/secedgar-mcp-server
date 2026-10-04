@@ -35,11 +35,12 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import { at, blockAt, blockText, caught, recoveryHint } from '../../../support/assertions.js';
+import { at, bag, blockAt, blockText, caught, recoveryHint } from '../../../support/assertions.js';
 
-const mockEftsResponse: EftsResponse = {
+// EFTS also sends form_filter aggregation buckets, which EftsResponse omits and the tool ignores.
+const mockEftsResponse: EftsResponse & { aggregations: unknown } = {
   hits: {
-    total: { value: 42, relation: 'eq' },
+    total: { value: 2, relation: 'eq' },
     hits: [
       {
         _id: '0000320193-23-000106:aapl-20230930.htm',
@@ -137,8 +138,9 @@ describe('searchFilingsTool', () => {
     const input = searchFilingsTool.input.parse({ query: 'material weakness' });
     const result = await searchFilingsTool.handler(input, ctx);
 
-    expect(result.total).toBe(42);
+    expect(result.total).toBe(2);
     expect(result.total_is_exact).toBe(true);
+    expect(result.total_documents).toBe(2);
     expect(result.results).toHaveLength(2);
     expect(at(result.results, 0).accession_number).toBe('0000320193-23-000106');
     expect(at(result.results, 0).form).toBe('10-K');
@@ -317,23 +319,38 @@ describe('searchFilingsTool', () => {
     expect(result.results.map((r) => r.filing_date)).toEqual(['2010-01-01', '2025-01-01']);
   });
 
-  it('extracts form distribution from aggregations', async () => {
+  it('counts form_distribution from the rows, ignoring the aggregation buckets (#124)', async () => {
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({ query: 'test' });
     const result = await searchFilingsTool.handler(input, ctx);
 
-    expect(result.form_distribution).toEqual({ '10-K': 20, '10-Q': 22 });
+    // The fixture's buckets claim 20 + 22 documents; the window holds one filing of each.
+    expect(result.form_distribution).toEqual({ '10-K': 1, '10-Q': 1 });
   });
 
-  it('handles missing aggregations', async () => {
+  it('omits form_distribution when no row carries a form', async () => {
     mockApi.searchFilings.mockResolvedValue({
       ...mockEftsResponse,
-      aggregations: undefined,
+      hits: {
+        total: { value: 1, relation: 'eq' },
+        hits: [
+          {
+            _id: '0000320193-23-000106:doc.htm',
+            _source: {
+              adsh: '0000320193-23-000106',
+              file_date: '2023-11-03',
+              display_names: ['Test Corp'],
+              ciks: ['0000320193'],
+            },
+          },
+        ],
+      },
     });
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({ query: 'test' });
     const result = await searchFilingsTool.handler(input, ctx);
 
+    expect(result.total).toBe(1);
     expect(result.form_distribution).toBeUndefined();
   });
 
@@ -692,9 +709,27 @@ describe('searchFilingsTool', () => {
     // CIK 1326801 is Meta (formerly Facebook). The fix must NOT inject the
     // entity's current name as a phrase — that dropped Facebook-era filings on
     // the same CIK. The cik: branch resolves to the padded CIK directly.
+    const metaHit = (id: string, date: string) => ({
+      _id: id,
+      _source: {
+        adsh: id.split(':')[0],
+        form: '10-K',
+        file_date: date,
+        display_names: ['Meta Platforms, Inc.  (META)  (CIK 0001326801)'],
+        ciks: ['0001326801'],
+      },
+    });
+    // Three matching documents of two filings: the count is the entity's filings (#124).
     mockApi.searchFilings.mockResolvedValue({
       ...mockEftsResponse,
-      hits: { total: { value: 15, relation: 'eq' }, hits: [] },
+      hits: {
+        total: { value: 3, relation: 'eq' },
+        hits: [
+          metaHit('0001326801-13-000003:fb-12312012x10k.htm', '2013-02-01'),
+          metaHit('0001326801-13-000003:fb-12312012xex211.htm', '2013-02-01'),
+          metaHit('0001326801-24-000012:meta-20231231.htm', '2024-02-02'),
+        ],
+      },
     });
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     const input = searchFilingsTool.input.parse({
@@ -714,8 +749,9 @@ describe('searchFilingsTool', () => {
     // The free-text query carries no injected entity name.
     const sentQuery = mockApi.searchFilings.mock.calls[0]![0].query;
     expect(sentQuery).not.toMatch(/Meta|Facebook/);
-    expect(result.total).toBe(15);
+    expect(result.total).toBe(2);
     expect(result.total_is_exact).toBe(true);
+    expect(result.total_documents).toBe(3);
 
     const enrichment = getEnrichment(ctx);
     expect(enrichment.effectiveQuery).toContain('0001326801');
@@ -781,7 +817,11 @@ describe('searchFilingsTool', () => {
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ query: '', forms: ['S-1'] }),
     );
+    // A browse matches one document per filing, so EDGAR's count of 80 is the filing
+    // count even though the window holds one of them (#124).
     expect(result.total).toBe(80);
+    expect(result.total_is_exact).toBe(true);
+    expect(result.total_documents).toBe(80);
     expect(at(result.results, 0).form).toBe('S-1');
   });
 
@@ -802,10 +842,6 @@ describe('searchFilingsTool', () => {
   });
 
   it('allows entity-scope-only browse via cik: with no forms/query — regression guard (#79)', async () => {
-    mockApi.searchFilings.mockResolvedValue({
-      ...mockEftsResponse,
-      hits: { total: { value: 5, relation: 'eq' }, hits: [] },
-    });
     const ctx = createMockContext({ errors: searchFilingsTool.errors });
     // cik: carries raw content, so the both-absent guard does not fire even with no forms.
     const input = searchFilingsTool.input.parse({ query: 'cik:320193' });
@@ -814,7 +850,7 @@ describe('searchFilingsTool', () => {
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ query: '', ciks: ['0000320193'] }),
     );
-    expect(result.total).toBe(5);
+    expect(result.total).toBe(2);
   });
 
   it('zero-hit forms-only browse notice names the forms, not an empty query (#79)', async () => {
@@ -902,7 +938,8 @@ describe('searchFilingsTool', () => {
     });
     const result = await searchFilingsTool.handler(input, ctx);
 
-    expect(result.total).toBe(10000);
+    expect(result.total).toBe(2);
+    expect(result.total_documents).toBe(10000);
     expect(result.results).toHaveLength(0);
 
     const enrichment = getEnrichment(ctx);
@@ -950,14 +987,16 @@ describe('searchFilingsTool', () => {
     expect(blockText(blocks)).toContain('Form distribution');
   });
 
-  it('formats non-exact total with capped note', () => {
+  it('formats a full-text lower bound with its document count, flagging the 10,000 cap', () => {
     const output = {
-      total: 10000,
+      total: 94,
       total_is_exact: false,
+      total_documents: 10000,
       results: [],
     };
-    const blocks = searchFilingsTool.format!(output);
-    expect(blockText(blocks)).toContain('capped at 10,000');
+    const text = blockText(searchFilingsTool.format!(output));
+    expect(text).toContain('Found 94 filings (lower bound');
+    expect(text).toContain('10000+ matching documents');
   });
 
   it('renders the source marker per row (format-parity)', () => {
@@ -1516,6 +1555,42 @@ describe('searchFilingsTool', () => {
     expect(blockText(result.content)).toContain('DEEP');
   });
 
+  it('matches a phrase found only in a plain exhibit of a submission holding an HTML document (#159)', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      submissionsWith([
+        { accession: 'EXHIBIT', date: '2000-11-14', form: '10-Q' },
+        { accession: 'BODY', date: '2000-08-14', form: '10-Q' },
+      ]),
+    );
+    // An HTML-era submission: an HTML 10-Q, then a plain-text exhibit.
+    const htmlEraSubmission = (exhibit: string) =>
+      '<SEC-DOCUMENT>\n<DOCUMENT>\n<TYPE>10-Q\n<FILENAME>d81726e10-q.htm\n<TEXT>\n<HTML><BODY><P>Item 1. Financial Statements</P></BODY></HTML>\n</TEXT>\n</DOCUMENT>\n' +
+      `<DOCUMENT>\n<TYPE>EX-10.1\n<FILENAME>d81726ex10-1.txt\n<TEXT>\n${exhibit}\n</TEXT>\n</DOCUMENT>\n</SEC-DOCUMENT>\n`;
+    mockApi.tryGetFilingDocument = vi.fn(async (_cik: string, accession: string) =>
+      htmlEraSubmission(
+        accession === 'EXHIBIT'
+          ? '                    FOURTEENTH AMENDMENT TO THE\n         THIRD AMENDED AND RESTATED AGREEMENT'
+          : 'SECOND AMENDMENT TO THE CREDIT AGREEMENT',
+      ),
+    );
+
+    const result = await runToolContract(searchFilingsTool, {
+      query: 'cik:320193 "fourteenth amendment"',
+      filed_after: '2000-01-01',
+      filed_before: '2000-12-31',
+    });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as {
+      results: Array<{ accession_number: string }>;
+      scan: unknown;
+    };
+    expect(structured.results.map((r) => r.accession_number)).toEqual(['EXHIBIT']);
+    expect(structured.scan).toEqual({ candidates: 2, scanned: 2, matched: 1, capped: false });
+    expect(blockText(result.content)).toContain('EXHIBIT');
+    expect(blockText(result.content)).toContain('2 candidate filings, 1 matched');
+  });
+
   it('renders the scan disclosure in format() (format-parity) (#87)', () => {
     const text = blockText(
       searchFilingsTool.format!({
@@ -1555,7 +1630,7 @@ describe('searchFilingsTool', () => {
     mockApi.searchFilings.mockResolvedValue({
       ...mockEftsResponse,
       hits: {
-        total: { value: 3, relation: 'eq' },
+        total: { value: 1, relation: 'eq' },
         hits: [
           {
             _id: 'e1',
@@ -1602,8 +1677,8 @@ describe('searchFilingsTool', () => {
       '2000-12-14',
       '1999-12-22',
     ]);
-    // total counts both eras: 2 archive rows + EFTS's own reported total.
-    expect(result.total).toBe(5);
+    // total counts both eras' filings: 2 archive rows + the full-text side's 1.
+    expect(result.total).toBe(3);
     expect(result.total_is_exact).toBe(true);
   });
 
@@ -1652,6 +1727,7 @@ describe('searchFilingsTool', () => {
       'period_ending',
       'ticker',
       'file_description',
+      'matched_documents',
       'sic',
       'location',
     ] as const) {
@@ -1705,7 +1781,10 @@ describe('searchFilingsTool', () => {
       expect.objectContaining({ startDate: '2001-01-01', endDate: '2001-03-31' }),
     );
     expect(result.results.map((r) => r.source)).toEqual(['efts', 'full-index']);
-    expect(result.total).toBe(4068);
+    // The full-text side's one-filing window of 4,067 documents makes the sum a lower bound.
+    expect(result.total).toBe(2);
+    expect(result.total_is_exact).toBe(false);
+    expect(result.total_documents).toBe(4067);
   });
 
   it('runs the local scan on the archive half of a straddling free-text search (#87)', async () => {
@@ -1719,7 +1798,7 @@ describe('searchFilingsTool', () => {
     mockApi.searchFilings.mockResolvedValue({
       ...mockEftsResponse,
       hits: {
-        total: { value: 2, relation: 'eq' },
+        total: { value: 1, relation: 'eq' },
         hits: [
           {
             _id: 'e1',
@@ -1750,7 +1829,7 @@ describe('searchFilingsTool', () => {
     );
     expect(result.scan).toEqual({ candidates: 2, scanned: 2, matched: 1, capped: false });
     expect(result.results.map((r) => r.accession_number)).toEqual(['EFTS1', 'HIT']);
-    expect(result.total).toBe(3);
+    expect(result.total).toBe(2);
   });
 
   it('rejects a straddling free-text search with no entity scope, before any fetch (#87)', async () => {
@@ -1868,7 +1947,7 @@ describe('searchFilingsTool', () => {
     const call = registerDataframe.mock.calls[0]![1];
     expect(call.rows.map((r: any) => r.source)).toEqual(['efts', 'submissions', 'submissions']);
     expect(call.queryParams.source).toBe('efts+archive');
-    // EFTS reported 500 matches behind a 1-row window — more exists than was materialized.
+    // EFTS reported 500 matching documents behind a 1-row window — more exists than was materialized.
     expect(call.truncated).toBe(true);
     expect(result.dataset?.truncated).toBe(true);
     // Second success path that registers a dataframe — it carries the same
@@ -1920,6 +1999,675 @@ describe('searchFilingsTool', () => {
     expect(result.dataset).toBeUndefined();
     expect(String(getEnrichment(ctx).notice)).not.toContain('secedgar_dataframe_describe');
   });
+
+  // --- Offset past the assembled rows ---
+
+  /** A forms-only browse across 2001-01-01: one archive row plus a one-filing window of 4,067 documents. */
+  const crossingBrowse = (offset: number) => {
+    mockApi.fetchFullIndexQuarter.mockResolvedValue([
+      {
+        cik: '0000320193',
+        companyName: 'APPLE COMPUTER INC',
+        form: '10-K',
+        filingDate: '2000-12-14',
+        accessionNumber: 'IDX1',
+      },
+    ]);
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: {
+        total: { value: 4067, relation: 'eq' },
+        hits: [
+          {
+            _id: 'e1',
+            _source: {
+              adsh: 'EFTS1',
+              form: '10-K',
+              file_date: '2001-03-30',
+              display_names: ['Some Issuer'],
+              ciks: ['0001234567'],
+            },
+          },
+        ],
+      },
+    });
+    return runToolContract(searchFilingsTool, {
+      query: '',
+      forms: ['10-K'],
+      filed_after: '2000-10-01',
+      filed_before: '2001-03-31',
+      offset,
+    });
+  };
+
+  it('names the way to the rest when an offset passes assembled rows that are a lower bound', async () => {
+    const result = await crossingBrowse(5);
+
+    const notice = String(bag(result.structuredContent).notice);
+    expect(notice).toMatch(
+      /^Offset \(5\) exceeds the 2 filings this search assembled — lower the offset\. /,
+    );
+    expect(notice).toContain(
+      'search 2001-01-01 to 2001-03-31 on its own to page through the rest.',
+    );
+    expect(notice).toContain('More matches exist beyond the rows fetched — narrow the range.');
+    // The enrichment trailer carries the notice to content[] as well.
+    expect(result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n')).toContain(
+      notice,
+    );
+    expect(bag(result.structuredContent).total_is_exact).toBe(false);
+  });
+
+  it('names the capped archive scan when an offset passes a pre-2001 browse it truncated', async () => {
+    mockApi.fetchFullIndexQuarter.mockResolvedValue([
+      {
+        cik: '0000320193',
+        companyName: 'APPLE COMPUTER INC',
+        form: '10-K',
+        filingDate: '1999-12-14',
+        accessionNumber: 'IDX1',
+      },
+    ]);
+
+    const result = await runToolContract(searchFilingsTool, {
+      query: '',
+      forms: ['10-K'],
+      filed_after: '1993-01-01',
+      filed_before: '2000-12-31',
+      offset: 3,
+    });
+
+    expect(bag(result.structuredContent).notice).toBe(
+      'Offset (3) exceeds the 1 filings this search assembled — lower the offset. Served from the quarterly EDGAR full-index — full-text search covers 2001-present only. More matches exist beyond the rows fetched — narrow the range.',
+    );
+  });
+
+  it('keeps the bare lower-the-offset notice when the assembled rows are every match', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      submissionsWith([{ accession: 'ARCH1', date: '2000-12-01' }]),
+    );
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: {
+        total: { value: 1, relation: 'eq' },
+        hits: [
+          {
+            _id: 'e1',
+            _source: {
+              adsh: 'EFTS1',
+              form: '10-K',
+              file_date: '2002-01-01',
+              display_names: ['X'],
+              ciks: ['0000320193'],
+            },
+          },
+        ],
+      },
+    });
+
+    const result = await runToolContract(searchFilingsTool, {
+      query: 'cik:320193',
+      forms: ['10-K'],
+      filed_after: '2000-01-01',
+      filed_before: '2003-12-31',
+      offset: 4,
+    });
+
+    expect(bag(result.structuredContent).notice).toBe(
+      'Offset (4) exceeds the 2 filings this search assembled — lower the offset.',
+    );
+  });
+
+  it("describes a crossing range's total as its archive rows plus one window, never EDGAR's count (#124)", () => {
+    const { shape } = searchFilingsTool.output;
+    const total = String(shape.total.description);
+    expect(total).toContain("A forms- or entity-only browse from 2001 on gives EDGAR's own count");
+    expect(total).not.toContain("A forms- or entity-only browse gives EDGAR's own count");
+    expect(String(shape.results.element.shape.source.description)).toContain(
+      'total sums its archive rows and the filings of one 100-document full-text window',
+    );
+  });
+});
+
+/**
+ * The live `"going concern" ticker:TSLA` response: EFTS answers one hit per matching
+ * document, `_id` is `<accession>:<filename>`, and 18 documents span 14 filings.
+ * Columns: `_id`, form, file_type, file_description, file_date — in rank order.
+ */
+const TSLA_GOING_CONCERN = [
+  ['0001193125-16-665620:d200129dex101.htm', '8-K', 'EX-10.1', 'EX-10.1', '2016-08-01'],
+  ['0001193125-16-665621:d200129dex101.htm', '425', 'EX-10.1', 'EX-10.1', '2016-08-01'],
+  ['0001564590-17-015705:tsla-ex103_121.htm', '10-Q', 'EX-10.3', 'EX-10.3', '2017-08-04'],
+  [
+    '0001193125-10-017054:dex1027.htm',
+    'S-1',
+    'EX-10.27',
+    'SUPPLY AGREEMENT - SANYO ELECTRIC CO. LTD',
+    '2010-01-29',
+  ],
+  ['0001564590-17-015705:tsla-ex101_122.htm', '10-Q', 'EX-10.1', 'EX-10.1', '2017-08-04'],
+  ['0001564590-16-026820:tsla-10q_20160930.htm', '10-Q', '10-Q', '10-Q', '2016-11-02'],
+  ['0001564590-17-003118:tsla-ex991_2714.htm', '10-K', 'EX-99.1', 'EX-99.1', '2017-03-01'],
+  ['0001564590-17-003118:tsla-10k_20161231.htm', '10-K', '10-K', '10-K', '2017-03-01'],
+  ['0000950170-23-001409:tsla-ex10_59.htm', '10-K', 'EX-10.59', 'EX-10.59', '2023-01-31'],
+  ['0001104659-24-053372:tm2412112d4_ars.pdf', 'ARS', 'ARS', 'ARS', '2024-04-29'],
+  ['0001104659-24-053333:tm2326076d14_def14a.pdf', 'DEF 14A', 'DEF 14A', 'PDF', '2024-04-29'],
+  ['0001564590-16-026820:tsla-ex102_708.htm', '10-Q', 'EX-10.2', 'EX-10.2', '2016-11-02'],
+  [
+    '0001193125-10-129878:dex1037.htm',
+    'S-1/A',
+    'EX-10.37',
+    'LOAN ARRANGEMENT AND REIMBURSEMENT AGREEMENT',
+    '2010-05-27',
+  ],
+  ['0001193125-19-095913:d625340dex1068.htm', 'S-4/A', 'EX-10.68', 'EX-10.68', '2019-04-03'],
+  [
+    '0001104659-24-053333:tm2326076d15_def14a.htm',
+    'DEF 14A',
+    'DEF 14A',
+    'FORM DEF14A',
+    '2024-04-29',
+  ],
+  ['0001104659-24-048040:tm2326076d13_pre14a.htm', 'PRE 14A', 'PRE 14A', 'PRE 14A', '2024-04-17'],
+  ['0001564590-21-004599:tsla-ex1044_13.htm', '10-K', 'EX-10.44', 'EX-10.44', '2021-02-08'],
+  ['0001193125-15-222013:d942001dex101.htm', '8-K', 'EX-10.1', 'EX-10.1', '2015-06-12'],
+] as const;
+
+/** The form_filter buckets EFTS sent with that response — document counts by root form. */
+const TSLA_FORM_AGGREGATION = [
+  { key: '10-K', doc_count: 4 },
+  { key: '10-Q', doc_count: 4 },
+  { key: '8-K', doc_count: 2 },
+  { key: 'DEF 14A', doc_count: 2 },
+  { key: 'S-1', doc_count: 2 },
+  { key: '425', doc_count: 1 },
+  { key: 'ARS', doc_count: 1 },
+  { key: 'PRE 14A', doc_count: 1 },
+  { key: 'S-4', doc_count: 1 },
+];
+
+/** The same response's filings by form — 14 accessions, amendments kept apart. */
+const TSLA_FILINGS_BY_FORM = {
+  '8-K': 2,
+  '425': 1,
+  '10-Q': 2,
+  'S-1': 1,
+  '10-K': 3,
+  ARS: 1,
+  'DEF 14A': 1,
+  'S-1/A': 1,
+  'S-4/A': 1,
+  'PRE 14A': 1,
+};
+
+/** One matching document as an EFTS hit. */
+function documentHit(
+  id: string,
+  form: string,
+  fileType: string,
+  fileDescription: string | null,
+  fileDate: string,
+) {
+  return {
+    _id: id,
+    _source: {
+      adsh: id.split(':')[0] ?? '',
+      form,
+      file_type: fileType,
+      file_description: fileDescription,
+      file_date: fileDate,
+      display_names: ['Tesla, Inc.  (TSLA)  (CIK 0001318605)'],
+      ciks: ['0001318605'],
+      sics: ['3711'],
+      biz_locations: ['Palo Alto, CA'],
+    },
+  };
+}
+
+/** An EFTS response holding `hits`, reporting `value` matching documents. */
+function eftsWindow(
+  hits: ReturnType<typeof documentHit>[],
+  value = hits.length,
+  relation: 'eq' | 'gte' = 'eq',
+) {
+  return {
+    hits: { total: { value, relation }, hits },
+    query: { from: 0, size: 100, query: '' },
+    aggregations: { form_filter: { buckets: TSLA_FORM_AGGREGATION } },
+  };
+}
+
+const tslaHits = () =>
+  TSLA_GOING_CONCERN.map(([id, form, type, description, date]) =>
+    documentHit(id, form, type, description, date),
+  );
+
+/** A contract result's structuredContent: the domain output plus the enrichment fields. */
+type SearchContent = ReturnType<typeof searchFilingsTool.output.parse> & {
+  truncated?: boolean;
+  notice?: string;
+};
+
+describe('searchFilingsTool — one row per filing (#124)', () => {
+  const call = (args: Record<string, unknown>) => runToolContract(searchFilingsTool, args as never);
+  const tsla = { cik: '0001318605', name: 'Tesla, Inc.', ticker: 'TSLA' };
+
+  it('collapses the documents of one filing into one row that lists them', async () => {
+    mockApi.resolveCik.mockResolvedValue(tsla);
+    mockApi.searchFilings.mockResolvedValue(eftsWindow(tslaHits()));
+
+    const result = await call({ query: '"going concern" ticker:TSLA', limit: 3 });
+    const out = result.structuredContent as SearchContent;
+
+    expect(out.total).toBe(14);
+    expect(out.total_is_exact).toBe(true);
+    expect(out.total_documents).toBe(18);
+    // Newest first: the three 2024 filings, the two-document proxy counted once.
+    expect(out.results.map((r) => r.accession_number)).toEqual([
+      '0001104659-24-053372',
+      '0001104659-24-053333',
+      '0001104659-24-048040',
+    ]);
+    const proxy = at(out.results, 1);
+    // The first-ranked document's fields, and every matching document in rank order.
+    expect(proxy.file_description).toBe('PDF');
+    expect(proxy.matched_documents).toEqual([
+      { name: 'tm2326076d14_def14a.pdf', type: 'DEF 14A' },
+      { name: 'tm2326076d15_def14a.htm', type: 'DEF 14A' },
+    ]);
+    expect(at(out.results, 0).matched_documents).toEqual([
+      { name: 'tm2412112d4_ars.pdf', type: 'ARS' },
+    ]);
+
+    const text = blockText(result.content);
+    expect(text).toContain('Found 14 filings (exact)');
+    expect(text).toContain('18 matching documents');
+    expect(text).toContain(
+      'matched documents: tm2326076d14_def14a.pdf (DEF 14A), tm2326076d15_def14a.htm (DEF 14A)',
+    );
+    expect(text.split('[0001104659-24-053333]')).toHaveLength(2);
+  });
+
+  it('reads form_distribution from the filings in hand, not the document-count aggregation', async () => {
+    mockApi.searchFilings.mockResolvedValue(eftsWindow(tslaHits()));
+
+    const result = await searchFilingsTool.handler(
+      searchFilingsTool.input.parse({ query: '"going concern"' }),
+      createMockContext({ errors: searchFilingsTool.errors }),
+    );
+
+    expect(result.form_distribution).toEqual(TSLA_FILINGS_BY_FORM);
+    const counted = Object.values(result.form_distribution ?? {}).reduce((a, b) => a + b, 0);
+    expect(counted).toBe(result.total);
+  });
+
+  it('stages one dataframe row per accession with a comma-separated matched_documents column', async () => {
+    mockApi.resolveCik.mockResolvedValue(tsla);
+    mockApi.searchFilings.mockResolvedValue(eftsWindow(tslaHits()));
+    const registerDataframe = vi.fn().mockResolvedValue({
+      tableName: 'df_TSLA1_GOING2',
+      rowCount: 14,
+      expiresAt: '2026-10-05T00:00:00.000Z',
+      columnSchema: [],
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+
+    const result = await searchFilingsTool.handler(
+      searchFilingsTool.input.parse({ query: '"going concern" ticker:TSLA', limit: 3 }),
+      createMockContext({ errors: searchFilingsTool.errors }),
+    );
+
+    const { rows, truncated } = registerDataframe.mock.calls[0]![1];
+    expect(rows).toHaveLength(14);
+    expect(new Set(rows.map((r: any) => r.accession_number)).size).toBe(14);
+    const byAccession = new Map(rows.map((r: any) => [r.accession_number, r]));
+    expect((byAccession.get('0001104659-24-053333') as any).matched_documents).toBe(
+      'tm2326076d14_def14a.pdf,tm2326076d15_def14a.htm',
+    );
+    expect((byAccession.get('0000950170-23-001409') as any).matched_documents).toBe(
+      'tsla-ex10_59.htm',
+    );
+    // The window held every matching document, so nothing lies beyond the dataframe.
+    expect(truncated).toBe(false);
+    expect(result.dataset?.truncated).toBe(false);
+  });
+
+  it('counts the window as a lower bound, keeps the document total, and says why', async () => {
+    // Four documents of three filings, out of 1,034 matching documents.
+    mockApi.searchFilings.mockResolvedValue(
+      eftsWindow(
+        [
+          documentHit('0000000001-25-000001:a.htm', '8-K', '8-K', '8-K', '2025-04-09'),
+          documentHit('0000000001-25-000001:ex99.htm', '8-K', 'EX-99.1', 'EX-99.1', '2025-04-09'),
+          documentHit('0000000002-25-000001:b.htm', '8-K', '8-K', null, '2025-04-08'),
+          documentHit('0000000003-25-000001:c.htm', '8-K', '8-K', '8-K', '2025-04-07'),
+        ],
+        1034,
+      ),
+    );
+
+    const result = await call({ query: 'tariff', forms: ['8-K'] });
+    const out = result.structuredContent as SearchContent;
+
+    expect(out.total).toBe(3);
+    expect(out.total_is_exact).toBe(false);
+    expect(out.total_documents).toBe(1034);
+    expect(out.results).toHaveLength(3);
+    // Every filing in hand is shown, yet more exist — the truncation notice still fires.
+    expect(out.truncated).toBe(true);
+    expect(out.notice).toContain('1034 matching documents');
+    // A null file_description stays absent rather than becoming a string.
+    expect(at(out.results, 1).file_description).toBeUndefined();
+    expect(at(out.results, 1).matched_documents).toEqual([{ name: 'b.htm', type: '8-K' }]);
+    const text = blockText(result.content);
+    expect(text).toContain('Found 3 filings (lower bound');
+    expect(text).toContain('1034 matching documents');
+  });
+
+  it.each([
+    ['EFTS reports a lower bound (gte)', 'gte' as const, {}],
+    [
+      'the window starts past 0 (sort=relevance)',
+      'eq' as const,
+      { sort: 'relevance', offset: 100 },
+    ],
+  ])(
+    'is not exact when %s, even with every document of the window in hand',
+    async (_label, relation, args) => {
+      const hits = [
+        documentHit('0000000001-25-000001:a.htm', '10-K', '10-K', '10-K', '2025-02-01'),
+        documentHit('0000000002-25-000001:b.htm', '10-K', '10-K', '10-K', '2025-02-02'),
+      ];
+      mockApi.searchFilings.mockResolvedValue(eftsWindow(hits, hits.length, relation));
+
+      const result = await searchFilingsTool.handler(
+        searchFilingsTool.input.parse({ query: 'impairment', ...args }),
+        createMockContext({ errors: searchFilingsTool.errors }),
+      );
+
+      expect(result.total).toBe(2);
+      expect(result.total_is_exact).toBe(false);
+      expect(result.total_documents).toBe(2);
+    },
+  );
+
+  it('names the documents past a relevance page that ran off the end, not a zero match', async () => {
+    mockApi.searchFilings.mockResolvedValue(eftsWindow([], 150));
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+
+    const result = await searchFilingsTool.handler(
+      searchFilingsTool.input.parse({ query: 'impairment', sort: 'relevance', offset: 200 }),
+      ctx,
+    );
+
+    expect(result.results).toHaveLength(0);
+    expect(result.total_documents).toBe(150);
+    const notice = String(getEnrichment(ctx).notice);
+    expect(notice).not.toContain('No filings matched');
+    expect(notice).toContain('Offset (200)');
+    expect(notice).toContain('150 matching documents');
+  });
+
+  it('says how many documents a relevance page past offset 0 actually fetched', async () => {
+    mockApi.searchFilings.mockResolvedValue(
+      eftsWindow(
+        [
+          documentHit('0000000001-25-000001:a.htm', '10-K', '10-K', '10-K', '2025-02-01'),
+          documentHit('0000000002-25-000001:b.htm', '10-K', '10-K', '10-K', '2025-02-02'),
+        ],
+        102,
+      ),
+    );
+
+    const result = await call({ query: 'impairment', sort: 'relevance', offset: 100 });
+    const out = result.structuredContent as SearchContent;
+
+    expect(out.total).toBe(2);
+    expect(out.total_is_exact).toBe(false);
+    // The last page held two documents, not a 100-document page.
+    expect(out.notice).toContain(
+      'total counts the filings among the 2 documents fetched from offset 100 of 102 matching documents',
+    );
+    expect(out.notice).not.toContain('100-document page');
+  });
+
+  it('tells an offset past a window that held every match to lower it, without a 100-document window', async () => {
+    mockApi.resolveCik.mockResolvedValue(tsla);
+    mockApi.searchFilings.mockResolvedValue(eftsWindow(tslaHits()));
+
+    const result = await call({ query: '"going concern" ticker:TSLA', offset: 50 });
+    const out = result.structuredContent as SearchContent;
+
+    expect(out.results).toHaveLength(0);
+    expect(out.notice).toBe('Offset (50) exceeds the 14 matching filings — lower the offset.');
+  });
+
+  describe('a forms- or entity-only browse matches one document per filing', () => {
+    /** One primary document per filing — what EDGAR answers when no search terms are sent. */
+    const s1Filings = (n: number, form = 'S-1') =>
+      Array.from({ length: n }, (_, i) =>
+        documentHit(
+          `0000000${String(i + 1).padStart(3, '0')}-25-000001:primary.htm`,
+          form,
+          form,
+          form,
+          `2025-01-${String(31 - i).padStart(2, '0')}`,
+        ),
+      );
+
+    it("reports EDGAR's count as the exact filing total, flagging the window the rows came from", async () => {
+      mockApi.searchFilings.mockResolvedValue(eftsWindow(s1Filings(3), 264));
+      const registerDataframe = vi.fn().mockResolvedValue({
+        tableName: 'df_S1BRW_JAN25',
+        rowCount: 3,
+        expiresAt: '2026-10-05T00:00:00.000Z',
+        columnSchema: [],
+      });
+      vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+
+      const result = await call({
+        forms: ['S-1'],
+        filed_after: '2025-01-01',
+        filed_before: '2025-01-31',
+        limit: 2,
+      });
+      const out = result.structuredContent as SearchContent;
+
+      expect(out.total).toBe(264);
+      expect(out.total_is_exact).toBe(true);
+      expect(out.total_documents).toBe(264);
+      // The rows in hand are one window of the 264, so the dataframe is a sample.
+      expect(out.dataset).toMatchObject({ row_count: 3, truncated: true });
+      expect(out.form_distribution).toEqual({ 'S-1': 3 });
+      expect(out.truncated).toBe(true);
+      expect(out.notice).toContain('The rows fetched are the first 3 of 264 matching filings');
+      expect(blockText(result.content)).toContain('Found 264 filings (exact)');
+    });
+
+    it('points at a truncated dataframe as the rows fetched, never the full set (#162)', async () => {
+      mockApi.searchFilings.mockResolvedValue(eftsWindow(s1Filings(100), 264));
+      const registerDataframe = vi.fn().mockResolvedValue({
+        tableName: 'df_S1BRW_JAN25',
+        rowCount: 100,
+        expiresAt: '2026-10-05T00:00:00.000Z',
+        columnSchema: [],
+      });
+      vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+
+      const result = await call({
+        forms: ['S-1'],
+        filed_after: '2025-01-01',
+        filed_before: '2025-01-31',
+      });
+
+      expect(result.structuredContent as SearchContent).toMatchObject({
+        total: 264,
+        dataset: { row_count: 100, truncated: true },
+      });
+      const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+      expect(text).toContain(
+        'The rows fetched are staged as df_S1BRW_JAN25 (100 rows), not the full set — use secedgar_dataframe_describe',
+      );
+      expect(text).not.toContain('Full set staged');
+    });
+
+    it('counts a browse page past offset 0 under sort=relevance exactly too', async () => {
+      mockApi.searchFilings.mockResolvedValue(eftsWindow(s1Filings(2, '8-K'), 150));
+
+      const result = await call({ forms: ['8-K'], sort: 'relevance', offset: 100 });
+      const out = result.structuredContent as SearchContent;
+
+      expect(out.total).toBe(150);
+      expect(out.total_is_exact).toBe(true);
+      expect(out.notice).toContain('page on with offset');
+    });
+
+    it('falls back to the window lower bound when the window shows two documents of one filing', async () => {
+      mockApi.searchFilings.mockResolvedValue(
+        eftsWindow(
+          [
+            documentHit('0000000001-25-000001:a.htm', 'S-1', 'S-1', 'S-1', '2025-01-31'),
+            documentHit('0000000001-25-000001:ex.htm', 'S-1', 'EX-10.1', 'EX-10.1', '2025-01-31'),
+            documentHit('0000000002-25-000001:b.htm', 'S-1', 'S-1', 'S-1', '2025-01-30'),
+          ],
+          50,
+        ),
+      );
+
+      const result = await call({ forms: ['S-1'] });
+      const out = result.structuredContent as SearchContent;
+
+      expect(out.total).toBe(2);
+      expect(out.total_is_exact).toBe(false);
+      expect(out.total_documents).toBe(50);
+    });
+
+    it('keeps counting the window for a search with terms, whose documents outnumber its filings', async () => {
+      mockApi.searchFilings.mockResolvedValue(eftsWindow(s1Filings(3), 264));
+
+      const result = await call({ query: 'tariff', forms: ['S-1'] });
+      const out = result.structuredContent as SearchContent;
+
+      expect(out.total).toBe(3);
+      expect(out.total_is_exact).toBe(false);
+    });
+  });
+
+  it('collapses master.idx lines that list one accession under several CIKs', async () => {
+    // A Schedule 13G is indexed once under the filer and once under the subject company.
+    mockApi.fetchFullIndexQuarter.mockResolvedValue([
+      {
+        cik: '0000102909',
+        companyName: 'VANGUARD GROUP INC',
+        form: 'SC 13G',
+        filingDate: '1999-02-03',
+        accessionNumber: '0000102909-99-000101',
+      },
+      {
+        cik: '0000320193',
+        companyName: 'APPLE COMPUTER INC',
+        form: 'SC 13G',
+        filingDate: '1999-02-03',
+        accessionNumber: '0000102909-99-000101',
+      },
+      {
+        cik: '0000789019',
+        companyName: 'MICROSOFT CORP',
+        form: 'SC 13G',
+        filingDate: '1999-02-04',
+        accessionNumber: '0000950123-99-000777',
+      },
+    ]);
+
+    const result = await searchFilingsTool.handler(
+      searchFilingsTool.input.parse({
+        forms: ['SC 13G'],
+        filed_after: '1999-02-01',
+        filed_before: '1999-02-05',
+      }),
+      createMockContext({ errors: searchFilingsTool.errors }),
+    );
+
+    expect(result.total).toBe(2);
+    expect(result.results.map((r) => r.accession_number).sort()).toEqual([
+      '0000102909-99-000101',
+      '0000950123-99-000777',
+    ]);
+    // The first index line names the row.
+    const collapsed = result.results.find((r) => r.accession_number === '0000102909-99-000101');
+    expect(collapsed).toMatchObject({ cik: '0000102909', company_name: 'VANGUARD GROUP INC' });
+    expect(result.form_distribution).toEqual({ 'SC 13G': 2 });
+    // No full-text side ran, so there is no document count to report.
+    expect(result.total_documents).toBeUndefined();
+    expect(result.results.every((r) => r.matched_documents === undefined)).toBe(true);
+  });
+
+  it('counts filings and reports the document total on a range crossing 2001-01-01', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      submissionsWith([{ accession: '0001318605-00-000001', date: '2000-11-01' }], 'TESLA'),
+    );
+    mockApi.searchFilings.mockResolvedValue(
+      eftsWindow([
+        documentHit(
+          '0001564590-17-003118:tsla-ex991_2714.htm',
+          '10-K',
+          'EX-99.1',
+          'EX-99.1',
+          '2017-03-01',
+        ),
+        documentHit(
+          '0001564590-17-003118:tsla-10k_20161231.htm',
+          '10-K',
+          '10-K',
+          '10-K',
+          '2017-03-01',
+        ),
+        documentHit(
+          '0000950170-23-001409:tsla-ex10_59.htm',
+          '10-K',
+          'EX-10.59',
+          'EX-10.59',
+          '2023-01-31',
+        ),
+      ]),
+    );
+    const registerDataframe = vi.fn().mockResolvedValue({
+      tableName: 'df_CROSS_TSLA1',
+      rowCount: 3,
+      expiresAt: '2026-10-05T00:00:00.000Z',
+      columnSchema: [],
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+
+    const result = await searchFilingsTool.handler(
+      searchFilingsTool.input.parse({
+        query: 'cik:1318605',
+        forms: ['10-K'],
+        filed_after: '2000-01-01',
+        filed_before: '2024-12-31',
+        limit: 1,
+      }),
+      createMockContext({ errors: searchFilingsTool.errors }),
+    );
+
+    // One archive filing plus two full-text filings across three documents.
+    expect(result.total).toBe(3);
+    expect(result.total_is_exact).toBe(true);
+    expect(result.total_documents).toBe(3);
+    expect(result.form_distribution).toEqual({ '10-K': 3 });
+    const rows = registerDataframe.mock.calls[0]![1].rows;
+    expect(rows.map((r: any) => [r.source, r.matched_documents])).toEqual([
+      ['efts', 'tsla-ex10_59.htm'],
+      ['efts', 'tsla-ex991_2714.htm,tsla-10k_20161231.htm'],
+      ['submissions', null],
+    ]);
+  });
+
+  it('says offset counts documents under sort=relevance, so a filing can recur', () => {
+    const description = searchFilingsTool.input.shape.offset.description ?? '';
+    expect(description).toMatch(/sort=relevance[^.]*counts (matching )?documents/);
+    expect(description).toContain('recur');
+  });
 });
 
 // Through the real argument-parsing path, where `inputAliases` is applied (#115).
@@ -1941,7 +2689,7 @@ describe('searchFilingsTool parameter names (#115)', () => {
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ startDate: '2023-01-01', endDate: '2023-12-31' }),
     );
-    expect(result.structuredContent).toMatchObject({ total: 42 });
+    expect(result.structuredContent).toMatchObject({ total: 2 });
     expect(blockText(result.content)).toContain('0000320193-23-000106');
   });
 
@@ -1952,7 +2700,7 @@ describe('searchFilingsTool parameter names (#115)', () => {
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ forms: ['10-K'] }),
     );
-    expect(blockText(result.content)).toContain('Found 42 filings');
+    expect(blockText(result.content)).toContain('Found 2 filings');
   });
 
   it('names the canonical bounds when a retired spelling arrives with only one of them', async () => {

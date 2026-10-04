@@ -119,5 +119,17 @@ describe('staged dataframe pointers', () => {
         positionOf(text, 'secedgar_dataframe_query'),
       );
     });
+
+    it('calls an untruncated table the full set', () => {
+      expect(dataframeGuidance({ name: 'df_ABCDE_12345', row_count: 4200, truncated: false })).toBe(
+        'Full set staged as df_ABCDE_12345 (4200 rows) — use secedgar_dataframe_describe to inspect its columns, then secedgar_dataframe_query to analyze it with SQL.',
+      );
+    });
+
+    it('says a truncated table holds the rows fetched, not the full set (#162)', () => {
+      expect(dataframeGuidance({ name: 'df_ABCDE_12345', row_count: 100, truncated: true })).toBe(
+        'The rows fetched are staged as df_ABCDE_12345 (100 rows), not the full set — use secedgar_dataframe_describe to inspect its columns, then secedgar_dataframe_query to analyze it with SQL.',
+      );
+    });
   });
 });

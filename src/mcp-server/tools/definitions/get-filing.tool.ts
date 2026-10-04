@@ -5,9 +5,10 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import type { FilingDocumentHeader } from '@/services/edgar/filing-headers.js';
+import { filingArchiveUrl, getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+import type { FilingDocumentHeader, FilingHeaders } from '@/services/edgar/filing-headers.js';
 import {
+  type CachedExtract,
   detectHeadings,
   filingToExtract,
   foldForHeadingMatch,
@@ -15,7 +16,7 @@ import {
   setExtractCache,
   windowText,
 } from '@/services/edgar/filing-to-text.js';
-import type { FilingIndex } from '@/services/edgar/types.js';
+import type { FilingIndex, SubmissionsResponse } from '@/services/edgar/types.js';
 
 const MAX_DOCUMENTS_IN_FORMAT = 10;
 /**
@@ -40,6 +41,27 @@ const FILING_CONTENT_END = '--- END SEC FILING CONTENT ---';
 const PRIMARY_SENTINEL = '\x00primary';
 
 type FilingIndexItem = FilingIndex['directory']['item'][number];
+
+/**
+ * What SEC records about a filing beyond its directory listing: the header page
+ * (`null` when the archive has none, as for many older filings) and the filer's
+ * submissions feed. Both name the primary document, so they are read once per
+ * call before the body (#161).
+ */
+interface FilingRecords {
+  headers: FilingHeaders | null;
+  submissions: SubmissionsResponse;
+}
+
+/**
+ * What this tool caches per `accession:document` key: the extract, the document it
+ * was read from, and the CIK whose archive served it. A hit resolves its metadata
+ * under that CIK, so it reports the `cik` and `filing_url` the miss did (#158).
+ * This tool is the extract cache's only writer, so every entry carries the CIK.
+ */
+interface FilingExtract extends CachedExtract {
+  cik: string;
+}
 
 interface DocumentEntry {
   /** True when the entry holds binary bytes and cannot be read as text. */
@@ -67,27 +89,35 @@ type ResolveOutcome =
       targetName: string;
       /** The filing's actual primary document (independent of the `document` param). */
       filingPrimaryName: string;
+      /**
+       * The primary the filing index names, when the archive did not serve it and
+       * the full submission was read in its place (#158).
+       */
+      unservedPrimary?: string | undefined;
+      records: FilingRecords;
     }
   | {
       ok: false;
       kind: 'document_not_found';
       requestedDocument: string;
-      /** Filing documents grouped by category (headers inferred from filename patterns). */
+      /** True when the index lists the document but the archive answered 404 for it. */
+      notServed: boolean;
+      /** Filing documents grouped by category, typed as on the success path. */
       documents: CategorizedDocuments;
     }
   | {
       ok: false;
       kind: 'no_documents';
-      /** Filing documents grouped by category (headers inferred from filename patterns). */
+      /** Filing documents grouped by category, typed as on the success path. */
       documents: CategorizedDocuments;
     }
   | {
       ok: false;
       kind: 'binary_document';
       requestedDocument: string;
-      /** Inferred type of the rejected entry — GRAPHIC, PDF, or BINARY. */
+      /** Type label of the rejected entry — GRAPHIC, PDF, or BINARY. */
       documentType: string;
-      /** Filing documents grouped by category (headers inferred from filename patterns). */
+      /** Filing documents grouped by category, typed as on the success path. */
       documents: CategorizedDocuments;
     }
   | { ok: false; kind: 'filing_not_found'; providedCik: string | undefined };
@@ -98,21 +128,17 @@ const documentEntrySchema = z
     type: z
       .string()
       .describe(
-        'SEC document type from the submission header (e.g., "10-K", "EX-21.1", "GRAPHIC", "XML"). When the submission header is unavailable, falls back to a label inferred from the filename: known XBRL artifacts ("XBRL-LINKBASE", "XBRL-INSTANCE", etc.), "exhibit" for common exhibit filename patterns (ex-21.htm, exhibit21, dex991), "GRAPHIC"/"PDF"/"BINARY" for known binary file extensions, and "unknown" for everything else.',
+        'SEC document type (e.g., "10-K", "EX-21.1", "GRAPHIC"), or without a submission header a filename-inferred label ("exhibit", "PDF", "unknown").',
       ),
     description: z
       .string()
       .optional()
-      .describe(
-        'Human-readable description (e.g., "Annual Report", "Subsidiaries of the Registrant"). Absent when SEC published none for this entry.',
-      ),
+      .describe('SEC description (e.g., "Subsidiaries of the Registrant"). Absent when none.'),
     size: z.number().optional().describe('File size in bytes.'),
     binary: z
       .boolean()
       .optional()
-      .describe(
-        'Present and true when the entry holds binary bytes — a scanned page or logo, a PDF exhibit, a packaged archive or spreadsheet. These cannot be converted to text and are rejected by the document input. Absent for readable entries.',
-      ),
+      .describe('True for a binary entry (scan, PDF, archive, spreadsheet); absent otherwise.'),
   })
   .describe('One document entry from the filing.');
 
@@ -128,7 +154,9 @@ export const getFilingTool = tool('secedgar_get_filing', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance on reading the next page when the content was capped.'),
+      .describe(
+        'How to read the next page, and which file was read when the archive does not serve the indexed primary.',
+      ),
     truncated: z
       .boolean()
       .optional()
@@ -237,7 +265,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .min(1)
       .optional()
       .describe(
-        "Jump to a named section by case-insensitive substring match against detected headings (e.g. 'risk factors', 'item 7', 'certain relationships'). Matching also ignores whitespace and quote-style differences, so a heading copied from the outline resolves whether it carries the filing's non-breaking spaces and curly quotes or plain ones. Takes precedence over offset when both are provided. On a miss, the error message includes the detected outline so you can pick the correct heading.",
+        "Jump to a named section by case-insensitive substring match against detected headings (e.g. 'risk factors', 'item 7', 'certain relationships'). A value ending in a number matches only that number: 'item 1' reaches Item 1 and Item 1A, never Items 10–16. Matching also ignores whitespace and quote-style differences, so a heading copied from the outline resolves whether it carries the filing's non-breaking spaces and curly quotes or plain ones. Takes precedence over offset when both are provided. On a miss, the error message includes the detected outline so you can pick the correct heading.",
       ),
   }),
 
@@ -247,7 +275,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .string()
       .optional()
       .describe(
-        'Form type (e.g., "10-K", "10-Q"). From the company\'s submissions feed for a recent filing, else from the filing\'s own SEC header. Absent only when neither source carries it.',
+        'Form type (e.g., "10-K"), from the submissions feed or the filing\'s SEC header. Absent only when neither has it.',
       ),
     filing_date: z
       .string()
@@ -264,52 +292,50 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .string()
       .optional()
       .describe(
-        'Period the filing reports on (YYYY-MM-DD), from the same source as form. Absent for forms with no period of report (S-8, Form 4, proxy statements) and when neither source carries it.',
+        'Period of report (YYYY-MM-DD), from the same source as form. Absent for forms without one (S-8, Form 4, proxy statements) or when neither source has it.',
       ),
     primary_document: z
       .string()
-      .describe("Filename of the filing's actual primary document (e.g., the 10-K HTML file)."),
+      .describe(
+        'Filename of the primary document. When the archive does not serve the one the index names (common in 2000–2001), this is the full submission file <accession>.txt instead; the notice names both.',
+      ),
     requested_document: z
       .string()
       .optional()
       .describe(
-        'Filename of the specific document requested via the document param. Only present when document differs from primary_document.',
+        'Filename requested via document. Present only when it differs from primary_document.',
       ),
     documents: z
       .object({
         primary: z
           .array(documentEntrySchema)
-          .describe(
-            'Primary filing document(s). Typically a single entry whose type matches the form (e.g., "10-K").',
-          ),
+          .describe('Primary document(s), typically one entry whose type matches the form.'),
         exhibits: z
           .array(documentEntrySchema)
           .describe(
-            'Filed exhibits (EX-21 subsidiaries, EX-31/32 certifications, EX-99 press releases, etc.). Excludes XBRL technical exhibits (EX-101.*). Identified by the EX- prefix on the document type, or by common exhibit filename patterns when the submission header is unavailable (type "exhibit"). Exhibits with unrecognizable filenames may still appear under auxiliary in the header-less case.',
+            'Filed exhibits (EX-21, EX-31/32, EX-99, etc.), excluding XBRL EX-101.*; without a submission header, matched by filename (type "exhibit"), the rest under auxiliary.',
           ),
         auxiliary: z
           .array(documentEntrySchema)
-          .describe(
-            "Other supporting documents that aren't the primary, exhibits, or XBRL artifacts (cover pages, audit consent letters, embedded graphics).",
-          ),
+          .describe('Other supporting documents: cover pages, consent letters, graphics.'),
         xbrl: z
           .array(documentEntrySchema)
           .optional()
           .describe(
-            'XBRL viewer artifacts and machine-readable taxonomy files. Only present when include_xbrl=true.',
+            'XBRL viewer artifacts and taxonomy files. Present only when include_xbrl=true.',
           ),
       })
       .describe(
-        'Filing documents grouped by category. Every name is a valid document input EXCEPT entries carrying binary: true — scanned pages, PDFs, packaged archives and spreadsheets, which hold no text and are rejected with a binary_document error. Scans can outnumber readable documents in a filing, so read the flag before picking a name. XBRL viewer artifacts are suppressed by default; setting include_xbrl=true surfaces them under the xbrl bucket.',
+        'Filing documents by category. Any name is a valid document input except entries with binary: true, which fail with binary_document; scans can outnumber readable documents.',
       ),
     content: z.string().describe('Document text content for this page window.'),
     content_truncated: z.boolean().describe('True if content was truncated at content_limit.'),
-    content_total_length: z.number().describe('Full document length before any truncation.'),
+    content_total_length: z.number().describe('Full document length in characters.'),
     next_offset: z
       .number()
       .optional()
       .describe(
-        'Character offset to pass as offset on the next call to continue reading. Only present when the response was truncated. Calling agents should follow this until content_truncated is false.',
+        'Offset of the next page, to pass as offset; present while content_truncated is true.',
       ),
     outline: z
       .array(
@@ -318,15 +344,13 @@ export const getFilingTool = tool('secedgar_get_filing', {
             heading: z.string().describe('Detected heading text.'),
             offset: z
               .number()
-              .describe(
-                'Character offset of this heading in the full document. Pass as offset to jump directly to this section.',
-              ),
+              .describe('Character offset of this heading in the full document; pass as offset.'),
           })
           .describe('One detected heading with its offset.'),
       )
       .optional()
       .describe(
-        'Document outline — up to 50 detected headings with their character offsets. Present on the first page of a truncated response (offset=0, no section). Use a heading offset as offset, or pass heading text as section, to jump to that section.',
+        'Up to 50 headings, on the first page of a truncated response (offset=0, no section); pass a heading offset as offset, or its text as section.',
       ),
     filing_url: z.string().describe('Direct URL to the filing on SEC.gov.'),
   }),
@@ -339,14 +363,17 @@ export const getFilingTool = tool('secedgar_get_filing', {
     const cacheKey = `${accn}:${documentKey}`;
 
     // If we have a cache hit, skip the document fetch entirely.
-    let fullText = getExtractCache(cacheKey);
+    const cached = getExtractCache(cacheKey) as FilingExtract | undefined;
 
+    let fullText: string;
     let resolvedCik: string;
     let index: FilingIndex;
     let targetName: string;
     let filingPrimaryName: string;
+    let unservedPrimary: string | undefined;
+    let records: FilingRecords;
 
-    if (fullText === undefined) {
+    if (cached === undefined) {
       // Cache miss — fetch, convert, and cache.
       const resolved = await resolveFilingArchive(api, accn, input.cik, input.document);
       if (!resolved.ok) {
@@ -357,18 +384,26 @@ export const getFilingTool = tool('secedgar_get_filing', {
           // section_not_found already uses for its outline, bounded per category.
           const catalogBlock = renderDocumentCatalog(resolved.documents);
           const primaryName = resolved.documents.primary[0]?.name;
-          // A non-empty primary bucket is exactly the condition under which the
-          // no-document call succeeds — the loop only reaches this branch past
-          // findPrimaryDocument. Without one, that call fails the same way, so
-          // don't advertise a route that dead-ends.
-          const hint = primaryName
-            ? `Use document="${primaryName}" (the primary), or pick another filename from the list above. Call secedgar_get_filing again with the same accession_number and no document argument for the complete catalog.`
-            : catalogBlock
-              ? 'Pick a filename from the list above.'
-              : 'Pick a filename from documents.primary or exhibits in error data.';
+          // A document the index lists but the archive does not serve (the
+          // sequence-numbered names in many 2000–2001 indexes) is readable only
+          // through the full submission file (#158).
+          // Otherwise: a non-empty primary bucket is exactly the condition under
+          // which the no-document call succeeds — the loop only reaches this
+          // branch past findPrimaryDocument. Without one, that call fails the
+          // same way, so don't advertise a route that dead-ends.
+          const hint = resolved.notServed
+            ? `Use document="${accn}.txt", the full submission file, which the archive serves for this filing.`
+            : primaryName
+              ? `Use document="${primaryName}" (the primary), or pick another filename from the list above. Call secedgar_get_filing again with the same accession_number and no document argument for the complete catalog.`
+              : catalogBlock
+                ? 'Pick a filename from the list above.'
+                : 'Pick a filename from documents.primary or exhibits in error data.';
+          const problem = resolved.notServed
+            ? "is listed in this filing's index, but the SEC archive does not serve it."
+            : 'not found in this filing.';
           throw ctx.fail(
             'document_not_found',
-            `Document '${resolved.requestedDocument}' not found in this filing.${catalogBlock}`,
+            `Document '${resolved.requestedDocument}' ${problem}${catalogBlock}`,
             {
               requested_document: resolved.requestedDocument,
               documents: resolved.documents,
@@ -430,24 +465,39 @@ export const getFilingTool = tool('secedgar_get_filing', {
       index = resolved.index;
       targetName = resolved.targetName;
       filingPrimaryName = resolved.filingPrimaryName;
+      unservedPrimary = resolved.unservedPrimary;
+      records = resolved.records;
 
       fullText = filingToExtract(resolved.html);
-      setExtractCache(cacheKey, fullText);
+      const extract: FilingExtract = { text: fullText, document: targetName, cik: resolvedCik };
+      setExtractCache(cacheKey, extract);
     } else {
-      // Cache hit — still need metadata. Re-resolve the index (no document body fetch).
+      // Cache hit — still need metadata. Re-resolve the index under the CIK whose
+      // archive served the cached text (no candidate search, no document body fetch).
       // A resolution failure here is a real failure (EDGAR index unavailable or the
       // filing gone): fail honestly rather than fabricating placeholder metadata.
-      const metaResolved = await resolveFilingMeta(api, accn, input.cik, input.document);
+      const metaResolved = await resolveFilingMeta(api, accn, cached.cik, input.document);
       if (!metaResolved.ok) {
         throw ctx.fail('filing_not_found', `Filing '${accn}' could not be resolved.`, {
           accession_number: accn,
           cik: input.cik,
         });
       }
-      resolvedCik = metaResolved.cik;
+      resolvedCik = cached.cik;
       index = metaResolved.index;
-      targetName = metaResolved.targetName;
+      records = metaResolved.records;
+      fullText = cached.text;
+      targetName = cached.document;
       filingPrimaryName = metaResolved.filingPrimaryName;
+      // A primary read cached from the full submission keeps reporting it (#158).
+      if (
+        !input.document &&
+        cached.document === `${accn}.txt` &&
+        cached.document !== metaResolved.filingPrimaryName
+      ) {
+        unservedPrimary = metaResolved.filingPrimaryName;
+        filingPrimaryName = cached.document;
+      }
     }
 
     // Determine effective offset (section wins over raw offset)
@@ -457,10 +507,9 @@ export const getFilingTool = tool('secedgar_get_filing', {
       const headings = detectHeadings(fullText, 50);
       // Fold both operands (Unicode whitespace runs, typographic quotes) so a
       // heading re-sent from a rendered outline still matches the bytes it came
-      // from. Substring semantics are unchanged, and the outline the error
-      // renders below stays verbatim (#106).
+      // from. The outline the error renders below stays verbatim (#106).
       const needle = foldForHeadingMatch(input.section);
-      const match = headings.find((h) => foldForHeadingMatch(h.heading).includes(needle));
+      const match = headings.find((h) => sectionMatches(foldForHeadingMatch(h.heading), needle));
       if (!match) {
         // Render the outline into the message itself — clients reliably see only
         // message + recovery hint, not error data (#70).
@@ -500,25 +549,29 @@ export const getFilingTool = tool('secedgar_get_filing', {
       input.content_limit,
     );
 
+    // `notice` is last-wins across notice/truncated, so the fallback disclosure
+    // rides inside the truncation guidance when both apply.
+    const fallbackNotice = unservedPrimary
+      ? `The filing index names ${unservedPrimary} as the primary document, but the SEC archive does not serve it, so this text is the full submission file ${targetName}.`
+      : undefined;
     if (truncated) {
+      const paging = `Showing ${text.length} of ${totalLength} characters. Pass next_offset (${nextOffset ?? '?'}) as offset to read the next page, or jump with section.`;
       ctx.enrich.truncated({
         shown: text.length,
         cap: input.content_limit,
-        guidance: `Showing ${text.length} of ${totalLength} characters. Pass next_offset (${nextOffset ?? '?'}) as offset to read the next page, or jump with section.`,
+        guidance: fallbackNotice ? `${fallbackNotice} ${paging}` : paging,
       });
+    } else if (fallbackNotice) {
+      ctx.enrich.notice(fallbackNotice);
     }
 
     // Emit outline on first-page truncated responses (not on subsequent pages or section jumps)
     const shouldEmitOutline = truncated && effectiveOffset === 0 && !input.section;
     const outline = shouldEmitOutline ? detectHeadings(fullText, 50) : undefined;
 
-    // Parallelize: submissions metadata (recent-window enrichment) and submission
-    // headers (canonical document types). Headers are best-effort — categorization
-    // falls back to name-pattern inference when absent.
-    const [submissions, headers] = await Promise.all([
-      api.getSubmissions(resolvedCik),
-      api.tryGetFilingHeaders(resolvedCik, accn),
-    ]);
+    // Headers give canonical document types; without them categorization falls
+    // back to name-pattern inference.
+    const { submissions, headers } = records;
 
     const documents = categorizeDocuments(
       index.directory.item,
@@ -549,9 +602,9 @@ export const getFilingTool = tool('secedgar_get_filing', {
       offset: effectiveOffset,
       inRecentWindow: idx >= 0,
       headersResolved: headers !== null,
+      unservedPrimary,
     });
 
-    const accnNoDashes = accn.replace(/-/g, '');
     const requestedDocument =
       input.document && input.document !== filingPrimaryName ? input.document : undefined;
 
@@ -570,7 +623,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       content_total_length: totalLength,
       next_offset: nextOffset,
       outline,
-      filing_url: `https://www.sec.gov/Archives/edgar/data/${resolvedCik}/${accnNoDashes}/${targetName}`,
+      filing_url: filingArchiveUrl(resolvedCik, accn, targetName),
     };
   },
 
@@ -607,6 +660,23 @@ export const getFilingTool = tool('secedgar_get_filing', {
     ];
   },
 });
+
+/**
+ * Whether a folded `section` needle matches a folded heading: a substring match,
+ * except that a needle ending in a digit never continues into a longer number —
+ * `item 1` matches `Item 1.` and `Item 1A`, never `Item 12`. Plain-text outlines
+ * keep their TOC rows (they are worded differently from the body heading, so
+ * dedup leaves them), and a TOC row for Item 10–16 precedes the body Item 1, so
+ * a bare substring test landed `item 1` on the wrong Item (#136). Every
+ * occurrence is checked, not just the first.
+ */
+function sectionMatches(heading: string, needle: string): boolean {
+  const bounded = /\d$/.test(needle);
+  for (let at = heading.indexOf(needle); at !== -1; at = heading.indexOf(needle, at + 1)) {
+    if (!bounded || !/\d/.test(heading.charAt(at + needle.length))) return true;
+  }
+  return false;
+}
 
 /**
  * Render outline entries as `  [offset] HEADING` lines. Shared by format()
@@ -675,60 +745,102 @@ async function resolveFilingArchive(
   requestedDocument: string | undefined,
 ): Promise<ResolveOutcome> {
   const candidateCiks = await resolveCandidateCiks(api, accessionNumber, providedCik);
-  let lastIndexedItems: FilingIndexItem[] = [];
+  /** The last archive path whose index exists, with its records, for the error catalog. */
+  let lastIndexed: { items: FilingIndexItem[]; records: FilingRecords } | undefined;
+  /** First archive path whose index named a primary the archive answered 404 for. */
+  let unserved:
+    | { cik: string; index: FilingIndex; primary: string; records: FilingRecords }
+    | undefined;
+  let requestedNotServed = false;
 
   for (const cik of candidateCiks) {
     const index = await api.tryGetFilingIndex(cik, accessionNumber);
     if (!index) continue;
 
+    // Records name the primary every outcome below reports, error catalogs included.
     const items = index.directory.item;
-    lastIndexedItems = items;
+    const records = await readFilingRecords(api, cik, accessionNumber);
+    lastIndexed = { items, records };
+    if (requestedDocument && !items.some((item) => item.name === requestedDocument)) continue;
 
-    // Always resolve the filing's actual primary document independently of what the caller requested.
-    const filingPrimaryName = findPrimaryDocument(items);
+    const filingPrimaryName = findPrimaryDocument(items, accessionNumber, records);
     if (!filingPrimaryName) continue;
 
     const targetName = requestedDocument ?? filingPrimaryName;
-    if (!items.some((item) => item.name === targetName)) continue;
+    const headerDocuments = records.headers?.documents ?? null;
 
     /**
      * Reject a binary target BEFORE the body is fetched. `filingToExtract` runs
      * `html-to-text` over whatever bytes arrive and never inspects a content
      * type, so a `.jpg` would come back as its own decoded payload with a
-     * plausible length and no error (#96). The check is filename-only — the
-     * canonical GRAPHIC type lives in the submission header, which this path
-     * has not fetched yet, and requiring it here would trade the parallel
-     * header/submissions fetch for a sequential one on every call.
+     * plausible length and no error (#96). The header page is already in hand,
+     * so its type catches a scan the filer named oddly, as the catalog does.
      */
-    const binaryType = binaryTypeFromName(targetName);
-    if (binaryType) {
-      const documents = categorizeDocuments(items, filingPrimaryName, null, false);
+    const documentType = binaryType(targetName, headerDocuments?.get(targetName)?.type);
+    if (documentType) {
+      const documents = categorizeDocuments(items, filingPrimaryName, headerDocuments, false);
       return {
         ok: false,
         kind: 'binary_document',
         requestedDocument: targetName,
-        documentType: binaryType,
+        documentType,
         documents,
       };
     }
 
     const html = await api.tryGetFilingDocument(cik, accessionNumber, targetName);
-    if (!html) continue;
-
-    return { ok: true, cik, html, index, targetName, filingPrimaryName };
+    if (html) return { ok: true, cik, html, index, targetName, filingPrimaryName, records };
+    if (requestedDocument) requestedNotServed = true;
+    else unserved ??= { cik, index, primary: targetName, records };
   }
 
-  if (lastIndexedItems.length === 0) {
+  /**
+   * Many 2000–2001 indexes list sequence-numbered documents (`0001.htm`,
+   * `0001.txt`) the archive answers 404 for, while the full submission
+   * `<accession>.txt` is served (#158). A primary no candidate CIK serves is read
+   * from it instead — after the loop, so a CIK that serves the primary still
+   * wins, and only for the primary: a document the caller named fails with a
+   * hint pointing at the submission.
+   */
+  const submission = `${accessionNumber}.txt`;
+  if (unserved && unserved.primary !== submission) {
+    const html = await api.tryGetFilingDocument(unserved.cik, accessionNumber, submission);
+    if (html) {
+      return {
+        ok: true,
+        cik: unserved.cik,
+        html,
+        index: unserved.index,
+        targetName: submission,
+        filingPrimaryName: submission,
+        unservedPrimary: unserved.primary,
+        records: unserved.records,
+      };
+    }
+  }
+
+  if (!lastIndexed?.items.length) {
     return { ok: false, kind: 'filing_not_found', providedCik };
   }
 
-  // Categorize using name-pattern inference (no submission headers at this point).
-  // The primary is inferred from the index items — the same logic the success path uses.
-  const errorPrimaryName = findPrimaryDocument(lastIndexedItems) ?? '';
-  const documents = categorizeDocuments(lastIndexedItems, errorPrimaryName, null, false);
+  // Categorize as the success path does: the same primary, the header page's types.
+  const errorPrimaryName =
+    findPrimaryDocument(lastIndexed.items, accessionNumber, lastIndexed.records) ?? '';
+  const documents = categorizeDocuments(
+    lastIndexed.items,
+    errorPrimaryName,
+    lastIndexed.records.headers?.documents ?? null,
+    false,
+  );
 
   if (requestedDocument) {
-    return { ok: false, kind: 'document_not_found', requestedDocument, documents };
+    return {
+      ok: false,
+      kind: 'document_not_found',
+      requestedDocument,
+      notServed: requestedNotServed,
+      documents,
+    };
   }
   return { ok: false, kind: 'no_documents', documents };
 }
@@ -736,40 +848,53 @@ async function resolveFilingArchive(
 type MetaOutcome =
   | {
       ok: true;
-      cik: string;
       index: FilingIndex;
-      targetName: string;
       filingPrimaryName: string;
+      records: FilingRecords;
     }
   | { ok: false };
 
 /**
- * Resolve filing index and document names WITHOUT fetching the document body.
- * Used on cache hits to get metadata while skipping the expensive document fetch.
+ * Resolve filing index and document names under one CIK WITHOUT fetching the
+ * document body. Used on cache hits, with the CIK whose archive served the cached
+ * text, to get metadata while skipping the expensive document fetch.
  */
 async function resolveFilingMeta(
   api: ReturnType<typeof getEdgarApiService>,
   accessionNumber: string,
-  providedCik: string | undefined,
+  cik: string,
   requestedDocument: string | undefined,
 ): Promise<MetaOutcome> {
-  const candidateCiks = await resolveCandidateCiks(api, accessionNumber, providedCik);
+  const index = await api.tryGetFilingIndex(cik, accessionNumber);
+  if (!index) return { ok: false };
 
-  for (const cik of candidateCiks) {
-    const index = await api.tryGetFilingIndex(cik, accessionNumber);
-    if (!index) continue;
-
-    const items = index.directory.item;
-    const filingPrimaryName = findPrimaryDocument(items);
-    if (!filingPrimaryName) continue;
-
-    const targetName = requestedDocument ?? filingPrimaryName;
-    if (!items.some((item) => item.name === targetName)) continue;
-
-    return { ok: true, cik, index, targetName, filingPrimaryName };
+  const items = index.directory.item;
+  if (requestedDocument && !items.some((item) => item.name === requestedDocument)) {
+    return { ok: false };
   }
 
-  return { ok: false };
+  const records = await readFilingRecords(api, cik, accessionNumber);
+  const filingPrimaryName = findPrimaryDocument(items, accessionNumber, records);
+  if (!filingPrimaryName) return { ok: false };
+
+  return { ok: true, index, filingPrimaryName, records };
+}
+
+/**
+ * Read a filing's header page and its filer's submissions feed together. A
+ * missing header page is `null`; the feed is required for the response metadata,
+ * so its failure fails the call as it always has.
+ */
+async function readFilingRecords(
+  api: ReturnType<typeof getEdgarApiService>,
+  cik: string,
+  accessionNumber: string,
+): Promise<FilingRecords> {
+  const [submissions, headers] = await Promise.all([
+    api.getSubmissions(cik),
+    api.tryGetFilingHeaders(cik, accessionNumber),
+  ]);
+  return { headers, submissions };
 }
 
 async function resolveCandidateCiks(
@@ -788,13 +913,31 @@ async function resolveCandidateCiks(
   return [...new Set([...ciks, prefixCik])];
 }
 
-/** Find the primary document in a filing index (prefer real filing docs over SEC index pages). */
-function findPrimaryDocument(items: FilingIndexItem[]): string | undefined {
+/** SEC's XBRL viewer pages (`R1.htm`, `R2.htm`, …), which can outweigh a filing's own documents. */
+const RENDERER_PAGE = /^R\d+\.html?$/;
+
+/**
+ * The filing's primary document: the first name SEC records for it (see
+ * {@link recordedPrimaryNames}) that the index lists. With none, the largest
+ * readable document stands in, preferring real filing documents over SEC index
+ * pages. Size alone picks a press-release exhibit over a shorter 8-K, so it is
+ * only the fallback (#161).
+ */
+function findPrimaryDocument(
+  items: FilingIndexItem[],
+  accessionNumber: string,
+  records: FilingRecords,
+): string | undefined {
+  const listed = recordedPrimaryNames(accessionNumber, records).find(
+    (name) => name && items.some((item) => item.name === name),
+  );
+  if (listed) return listed;
+
   const htmlDocs = items.filter(
     (item) =>
       isNonIndexFile(item.name) &&
       (item.name.endsWith('.htm') || item.name.endsWith('.html')) &&
-      !item.name.startsWith('R'),
+      !RENDERER_PAGE.test(item.name),
   );
   if (htmlDocs.length > 0) return getLargestDocument(htmlDocs)?.name;
 
@@ -808,6 +951,26 @@ function findPrimaryDocument(items: FilingIndexItem[]): string | undefined {
   if (textDocs.length > 0) return getLargestDocument(textDocs)?.name;
 
   return items.find((item) => isNonIndexFile(item.name))?.name ?? items[0]?.name;
+}
+
+/**
+ * The names SEC records for a filing's primary document, most authoritative
+ * first: the submissions feed's `primaryDocument` when the accession sits in the
+ * feed's recent window, then the document the header page types with the
+ * submission's form. The feed records an XML form through its stylesheet path
+ * (`xslF345X06/form4.xml`), so only the last segment names the archive file.
+ */
+function recordedPrimaryNames(
+  accessionNumber: string,
+  { headers, submissions }: FilingRecords,
+): Array<string | undefined> {
+  const recent = submissions.filings.recent;
+  const row = recent.accessionNumber.indexOf(accessionNumber);
+  const fromFeed = row >= 0 ? recent.primaryDocument[row]?.split('/').pop() : undefined;
+  const form = headers?.submission.form;
+  const typed =
+    headers && form ? [...headers.documents].find(([, doc]) => doc.type === form)?.[0] : undefined;
+  return [fromFeed, typed];
 }
 
 function getLargestDocument(items: FilingIndexItem[]): FilingIndexItem | undefined {
@@ -849,7 +1012,7 @@ function categorizeDocuments(
       type,
       description: header?.description,
       size: item.size ? Number.parseInt(item.size, 10) || undefined : undefined,
-      ...(isBinaryDocument(item.name, type) ? { binary: true } : {}),
+      ...(binaryType(item.name, type) ? { binary: true } : {}),
     };
 
     if (item.name === primaryName) {
@@ -896,8 +1059,8 @@ const EXHIBIT_NAME_PATTERN = /(?:^|[^a-z])ex[-_.]?\d|exhibit[-_.]?\d|\d[dx]ex[-_
  * Binary file extensions EDGAR filings carry, mapped to the type label reported
  * for them. Images use SEC's own canonical TYPE (`GRAPHIC`) so header-derived and
  * inferred types read identically. The set is deliberately extension-driven: it
- * is the only signal available before the document body is fetched, and it works
- * for a binary entry in any bucket — a PDF exhibit is typed `EX-99.*` in the
+ * is the one signal every filing carries, header page or not, and it works for a
+ * binary entry in any bucket — a PDF exhibit is typed `EX-99.*` in the
  * submission header and lands under exhibits, not among the graphics.
  */
 const BINARY_EXTENSIONS: Array<[RegExp, string]> = [
@@ -915,12 +1078,13 @@ function binaryTypeFromName(name: string): string | undefined {
 }
 
 /**
- * Whether an entry holds bytes rather than text. The filename is authoritative
- * for the fetch guard; the header type adds the cases a filer named oddly, since
- * SEC types every scanned page `GRAPHIC` regardless of extension.
+ * Type label for an entry that holds bytes rather than text, or undefined when it
+ * reads as text. The filename's label comes first; the header type adds the cases
+ * a filer named oddly, since SEC types every scanned page `GRAPHIC` regardless of
+ * extension. One rule for the fetch guard and the catalog's `binary` flag.
  */
-function isBinaryDocument(name: string, type: string): boolean {
-  return binaryTypeFromName(name) !== undefined || type.toUpperCase() === 'GRAPHIC';
+function binaryType(name: string, type: string | undefined): string | undefined {
+  return binaryTypeFromName(name) ?? (type?.toUpperCase() === 'GRAPHIC' ? 'GRAPHIC' : undefined);
 }
 
 /** Fallback type label when the submission header is unavailable. */

@@ -12,11 +12,14 @@ import { getFilingTool } from '@/mcp-server/tools/definitions/get-filing.tool.js
 import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials.tool.js';
 import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
 
-vi.mock('@/services/edgar/edgar-api-service.js', () => ({
+vi.mock('@/services/edgar/edgar-api-service.js', async (importOriginal) => ({
   getEdgarApiService: vi.fn(),
   initEdgarApiService: vi.fn(),
   suggestCompanies: vi.fn(() => []),
   pickPreferredTicker: vi.fn(),
+  // Pure URL builder get_filing's filing_url uses.
+  filingArchiveUrl: (await importOriginal<typeof import('@/services/edgar/edgar-api-service.js')>())
+    .filingArchiveUrl,
 }));
 
 // Partial mock: the canvas accessors are stubbed, but `dataframeGuidance` stays

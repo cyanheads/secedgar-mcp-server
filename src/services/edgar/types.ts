@@ -96,9 +96,6 @@ export interface FullIndexEntry {
 
 /** EFTS full-text search response. */
 export interface EftsResponse {
-  aggregations?: {
-    form_filter?: { buckets: Array<{ key: string; doc_count: number }> };
-  };
   hits: {
     hits: EftsHit[];
     total: { value: number; relation: string };

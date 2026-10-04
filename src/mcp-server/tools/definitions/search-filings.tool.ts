@@ -25,7 +25,7 @@ import {
 } from '@/services/edgar/edgar-api-service.js';
 import { filingToExtract } from '@/services/edgar/filing-to-text.js';
 import { SubmissionsArchiveWalk } from '@/services/edgar/submissions-archive.js';
-import type { EftsHit, FilingSource, FilingsRecent } from '@/services/edgar/types.js';
+import type { EftsHit, EftsResponse, FilingSource, FilingsRecent } from '@/services/edgar/types.js';
 
 /**
  * The EFTS full-text index only covers filings from this date onward, even
@@ -55,8 +55,18 @@ const FULL_INDEX_QUARTER_SCAN_CAP = 8;
  */
 const DOCUMENT_SCAN_CAP = 50;
 
+/** Assembled-path guidance when the sources held more matches than were read. */
+const MORE_MATCHES_BEYOND_ROWS = 'More matches exist beyond the rows fetched — narrow the range.';
+
 /**
- * Canonical, fully-keyed row for a filing hit — one shape across all three
+ * One document of a filing that matched a full-text query. `name` is the filename
+ * `secedgar_get_filing` takes as `document`; `type` is EDGAR's document type
+ * (`10-K`, `EX-99.1`), which tells the body from an exhibit.
+ */
+type MatchedDocument = { name: string; type?: string | undefined };
+
+/**
+ * Canonical, fully-keyed row for one filing — one shape across all three
  * sources (efts, submissions, full-index) so the canvas schema is stable and a
  * `source` column is always present. Absent fields are `null`; the inline
  * result mapper drops nulls to `undefined` for the optional output fields.
@@ -70,6 +80,7 @@ type SearchRow = {
   cik: string | null;
   ticker: string | null;
   file_description: string | null;
+  matched_documents: MatchedDocument[] | null;
   sic: string | null;
   location: string | null;
   source: FilingSource;
@@ -97,6 +108,7 @@ type ScanSummary = { candidates: number; scanned: number; matched: number; cappe
 type SearchFilingsResult = {
   total: number;
   total_is_exact: boolean;
+  total_documents?: number | undefined;
   results: Array<{
     accession_number: string;
     form?: string | undefined;
@@ -106,6 +118,7 @@ type SearchFilingsResult = {
     cik: string;
     ticker?: string | undefined;
     file_description?: string | undefined;
+    matched_documents?: MatchedDocument[] | undefined;
     sic?: string | undefined;
     location?: string | undefined;
     source?: FilingSource | undefined;
@@ -115,21 +128,58 @@ type SearchFilingsResult = {
   dataset?: { name: string; row_count: number; expires_at: string; truncated: boolean } | undefined;
 };
 
-function eftsHitToRow(hit: EftsHit): SearchRow {
-  const displayName = hit._source.display_names?.[0] || '';
-  return {
-    accession_number: hit._source.adsh || hit._id.split(':')[0] || hit._id,
-    form: hit._source.form ?? null,
-    filing_date: hit._source.file_date,
-    period_ending: hit._source.period_ending ?? null,
-    company_name: cleanDisplayName(displayName),
-    cik: hit._source.ciks?.[0] ?? null,
-    ticker: extractTicker(displayName),
-    file_description: hit._source.file_description ?? null,
-    sic: hit._source.sics?.[0] ?? null,
-    location: hit._source.biz_locations?.[0] ?? null,
-    source: 'efts',
-  };
+/**
+ * Collapse full-text hits into one row per filing, in first-occurrence order. EFTS
+ * answers one hit per matching document (`_id` is `<accession>:<filename>`), so a
+ * filing whose body and exhibits both match arrives several times. A row takes its
+ * first-ranked hit's fields — the filing-level ones agree across a filing's hits —
+ * and lists every matching document in rank order (#124).
+ */
+function collapseEftsHits(hits: EftsHit[]): SearchRow[] {
+  const rows = new Map<string, SearchRow>();
+  for (const hit of hits) {
+    const [idAccession, filename] = hit._id.split(':');
+    const accession = hit._source.adsh || idAccession || hit._id;
+    const document: MatchedDocument[] = filename
+      ? [{ name: filename, ...(hit._source.file_type && { type: hit._source.file_type }) }]
+      : [];
+    const existing = rows.get(accession);
+    if (existing) {
+      existing.matched_documents?.push(...document);
+      continue;
+    }
+    const displayName = hit._source.display_names?.[0] || '';
+    rows.set(accession, {
+      accession_number: accession,
+      form: hit._source.form ?? null,
+      filing_date: hit._source.file_date,
+      period_ending: hit._source.period_ending ?? null,
+      company_name: cleanDisplayName(displayName),
+      cik: hit._source.ciks?.[0] ?? null,
+      ticker: extractTicker(displayName),
+      file_description: hit._source.file_description ?? null,
+      matched_documents: document,
+      sic: hit._source.sics?.[0] ?? null,
+      location: hit._source.biz_locations?.[0] ?? null,
+      source: 'efts',
+    });
+  }
+  return [...rows.values()];
+}
+
+/**
+ * True when one EFTS window holds every matching document — fetched from 0, as
+ * many hits as the reported total, and a total EFTS calls exact. Only then do a
+ * search's collapsed rows count every matching filing; otherwise they are a lower
+ * bound, because a search matches documents and no request yields its filing count
+ * (#124). A browse is the exception: it matches one document per filing.
+ */
+function windowHoldsEveryMatch(response: EftsResponse, from: number): boolean {
+  return (
+    from === 0 &&
+    response.hits.hits.length >= response.hits.total.value &&
+    response.hits.total.relation === 'eq'
+  );
 }
 
 /** Map a fully-keyed {@link SearchRow} to an inline output row (nulls → omitted optionals). */
@@ -143,9 +193,25 @@ function toInlineResult(row: SearchRow): SearchFilingsResult['results'][number] 
     cik: row.cik ?? '',
     ...(row.ticker != null && { ticker: row.ticker }),
     ...(row.file_description != null && { file_description: row.file_description }),
+    ...(row.matched_documents != null &&
+      row.matched_documents.length > 0 && { matched_documents: row.matched_documents }),
     ...(row.sic != null && { sic: row.sic }),
     ...(row.location != null && { location: row.location }),
     source: row.source,
+  };
+}
+
+/**
+ * Map a {@link SearchRow} to its dataframe row: matched documents ride as a
+ * comma-separated filename column (EDGAR filenames carry no commas), null on
+ * archive rows, so the column stays VARCHAR.
+ */
+function toCanvasRow(row: SearchRow): Record<string, unknown> {
+  return {
+    ...row,
+    matched_documents: row.matched_documents?.length
+      ? row.matched_documents.map((doc) => doc.name).join(',')
+      : null,
   };
 }
 
@@ -319,24 +385,27 @@ function sortRows(
  *
  * **`offset` model.** `offset` indexes the sorted row list assembled by this call
  * — every row the tool holds, across every source it read. The 2001+ full-text
- * path instead offsets into a single ≤100-row EFTS window (or, under
- * sort=relevance, EDGAR's server-side pagination). The assembled-list model is
+ * path instead offsets into the filings of a single 100-document EFTS window (or,
+ * under sort=relevance, EDGAR's server-side pagination). The assembled-list model is
  * the only one a merge can honor: once archive rows interleave with EFTS rows by
  * date, an offset relative to either source's own window addresses nothing the
- * caller can see. `total` may exceed the assembled row count (EFTS reports its
- * true match count while returning one window), so paging past the rows in hand
- * is a real state — the offset-exceeded notice names it.
+ * caller can see.
+ *
+ * `total` is the assembled filing count. When `totalIsExact` is false the sources
+ * held more than was read (an archive cap, a scan cap, or a full-text window short
+ * of its document total), so the dataframe is flagged truncated and the truncation
+ * notice fires even when every assembled row is shown.
  */
 async function finishAssembledResult(
   ctx: Context,
   args: {
     matched: SearchRow[];
-    total: number;
     totalIsExact: boolean;
+    /** The full-text side's matching-document count, when a full-text side ran. */
+    totalDocuments?: number | undefined;
     sort: 'filing_date_desc' | 'filing_date_asc' | 'relevance';
     limit: number;
     offset: number;
-    truncated: boolean;
     queryParams: Record<string, unknown>;
     effectiveQuery: string;
     coverageNote: string;
@@ -345,6 +414,8 @@ async function finishAssembledResult(
   },
 ): Promise<SearchFilingsResult> {
   const sorted = sortRows(args.matched, args.sort);
+  const total = sorted.length;
+  const truncated = !args.totalIsExact;
   const sliced = sorted.slice(args.offset, args.offset + args.limit);
   const results = sliced.map(toInlineResult);
 
@@ -354,34 +425,36 @@ async function finishAssembledResult(
     | { name: string; row_count: number; expires_at: string; truncated: boolean }
     | undefined;
   const bridge = getCanvasBridge();
-  if (bridge && sorted.length > args.limit) {
+  if (bridge && total > args.limit) {
     const registered = await bridge.registerDataframe(ctx, {
-      rows: sorted,
+      rows: sorted.map(toCanvasRow),
       sourceTool: 'secedgar_search_filings',
       queryParams: args.queryParams,
-      truncated: args.truncated,
+      truncated,
     });
-    if (registered) dataset = { ...toDatasetField(registered), truncated: args.truncated };
+    if (registered) dataset = { ...toDatasetField(registered), truncated };
   }
 
   ctx.enrich.echo(args.effectiveQuery);
-  if (args.total === 0) {
+  if (total === 0) {
     ctx.enrich.notice(`No filings matched ${args.zeroHitCriteria}. ${args.coverageNote}`);
-  } else if (results.length === 0 && args.offset >= sorted.length) {
-    ctx.enrich.notice(
-      `Offset (${args.offset}) exceeds the ${sorted.length} rows this search assembled. ${args.total} filings matched — lower the offset.` +
-        (dataset ? ` ${dataframeGuidance(dataset)}` : ''),
-    );
-  } else if (args.total > results.length) {
+  } else if (results.length === 0) {
+    // When the sources held more than was read, the coverage note names the way to
+    // the rest (a window searched on its own, a capped scan), as the truncation does.
+    const notice = [
+      `Offset (${args.offset}) exceeds the ${total} filings this search assembled — lower the offset.`,
+    ];
+    if (truncated) notice.push(args.coverageNote, MORE_MATCHES_BEYOND_ROWS);
+    if (dataset) notice.push(dataframeGuidance(dataset));
+    ctx.enrich.notice(notice.join(' '));
+  } else if (total > results.length || !args.totalIsExact) {
     // `notice` is last-wins across notice/truncated, so every applicable clause —
     // coverage, the fetch boundary, the staged-dataframe pointer — is composed
     // into this one guidance string rather than emitted as competing notices (#104).
     const guidance = [args.coverageNote];
-    if (args.truncated) {
-      guidance.push('More matches exist beyond the rows fetched — narrow the range.');
-    }
+    if (truncated) guidance.push(MORE_MATCHES_BEYOND_ROWS);
     if (dataset) guidance.push(dataframeGuidance(dataset));
-    else if (!args.truncated) guidance.push('Page further with offset.');
+    else if (!truncated) guidance.push('Page further with offset.');
 
     ctx.enrich.truncated({
       shown: results.length,
@@ -391,8 +464,9 @@ async function finishAssembledResult(
   }
 
   return {
-    total: args.total,
+    total,
     total_is_exact: args.totalIsExact,
+    total_documents: args.totalDocuments,
     results,
     form_distribution: formDistribution,
     scan: args.scan,
@@ -405,8 +479,8 @@ async function finishAssembledResult(
  * window plus the `filings.files[]` archive pages reused from #78) filtered by
  * form + date, read through the shared archive walk (`SubmissionsArchiveWalk`,
  * newest-first, page cap included). Rows are tagged `source: 'submissions'`; the EFTS-only fields
- * (period_ending, ticker, file_description, sic, location) are left null for a
- * uniform archive-row shape.
+ * (period_ending, ticker, file_description, matched_documents, sic, location) are left
+ * null for a uniform archive-row shape.
  */
 async function collectSubmissionsRows(
   ctx: Context,
@@ -463,6 +537,7 @@ async function collectSubmissionsRows(
         cik: args.entityCik,
         ticker: null,
         file_description: null,
+        matched_documents: null,
         sic: null,
         location: null,
         source: 'submissions',
@@ -488,6 +563,11 @@ async function collectSubmissionsRows(
  * files spanning the range and filter by form + date client-side (the index is
  * not form-filterable server-side). Bounded by FULL_INDEX_QUARTER_SCAN_CAP —
  * the heaviest arm. Rows are tagged `source: 'full-index'`.
+ *
+ * `master.idx` lists a filing once per CIK it names — a Schedule 13G under the
+ * filer and the subject company — so lines collapse to one row per accession,
+ * keeping the first line's `cik` and `company_name`; the index carries no
+ * filer/subject role to choose by (#124).
  */
 async function collectFullIndexRows(args: {
   forms: string[];
@@ -500,6 +580,7 @@ async function collectFullIndexRows(args: {
   const scanTruncated = quarters.length > quarterLimit;
 
   const rows: SearchRow[] = [];
+  const seen = new Set<string>();
   for (let i = 0; i < quarterLimit; i++) {
     const quarter = quarters[i];
     if (!quarter) break;
@@ -507,6 +588,8 @@ async function collectFullIndexRows(args: {
     for (const entry of entries) {
       if (entry.filingDate < args.startDate || entry.filingDate > args.endDate) continue;
       if (!formMatches(entry.form, args.forms)) continue;
+      if (seen.has(entry.accessionNumber)) continue;
+      seen.add(entry.accessionNumber);
       rows.push({
         accession_number: entry.accessionNumber,
         form: entry.form || null,
@@ -516,6 +599,7 @@ async function collectFullIndexRows(args: {
         cik: entry.cik,
         ticker: null,
         file_description: null,
+        matched_documents: null,
         sic: null,
         location: null,
         source: 'full-index',
@@ -576,10 +660,11 @@ async function scanFilingText(
 }
 
 /**
- * Fetch one 100-row EFTS window plus the index's own match total. Used by the
- * straddling merge for the ≥2001 side, where the rows join an archive row set and
- * are sorted and sliced together — so the window is always fetched from offset 0
- * regardless of the caller's `offset`, which addresses the merged list instead.
+ * Fetch one 100-document EFTS window, collapsed to its filings, plus the index's
+ * own document total. Used by the straddling merge for the ≥2001 side, where the
+ * rows join an archive row set and are sorted and sliced together — so the window
+ * is always fetched from offset 0 regardless of the caller's `offset`, which
+ * addresses the merged list instead.
  */
 async function fetchEftsRows(args: {
   query: string;
@@ -587,7 +672,7 @@ async function fetchEftsRows(args: {
   entityCik: string | undefined;
   startDate: string;
   endDate: string;
-}): Promise<{ rows: SearchRow[]; total: number; totalIsExact: boolean }> {
+}): Promise<{ rows: SearchRow[]; totalIsExact: boolean; totalDocuments: number }> {
   const response = await getEdgarApiService().searchFilings({
     query: args.query,
     forms: args.forms,
@@ -598,9 +683,9 @@ async function fetchEftsRows(args: {
     size: 100,
   });
   return {
-    rows: response.hits.hits.map(eftsHitToRow),
-    total: response.hits.total.value,
-    totalIsExact: response.hits.total.relation === 'eq',
+    rows: collapseEftsHits(response.hits.hits),
+    totalIsExact: windowHoldsEveryMatch(response, 0),
+    totalDocuments: response.hits.total.value,
   };
 }
 
@@ -610,21 +695,27 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   // Agent-facing context for the success path — the query as EDGAR executed it and
-  // an optional notice for empty results. Populated via ctx.enrich so it reaches
-  // both structuredContent and content[]; kept out of the domain return.
+  // an optional notice for empty, truncated, or over-offset results. Populated via
+  // ctx.enrich so it reaches both structuredContent and content[]; kept out of the
+  // domain return.
   enrichment: {
     effectiveQuery: z
       .string()
       .describe(
-        'The query as executed against EDGAR (ticker/cik: tokens resolved to entity names).',
+        'The query as executed: a ticker:/cik: token shows as "(entity scope: CIK …)", a forms-only browse as "(browse: forms …)", and a pre-2001 range names its archive route and dates.',
       ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Guidance when no results were returned — echoes the query and suggests how to broaden.',
+        'Why nothing matched, what lies past a truncated list and how to reach it, or that offset passed the filings available.',
       ),
-    truncated: z.boolean().optional().describe('True when results were capped by limit.'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when more filings match than are shown: limit capped the list, or total is a lower bound.',
+      ),
     shown: z.number().optional().describe('Number of results shown inline.'),
     cap: z.number().optional().describe('The limit cap applied.'),
   },
@@ -739,7 +830,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .max(9999)
       .default(0)
       .describe(
-        'Pagination offset. For sort=relevance on a 2001-onward search, EDGAR pages server-side up to its 10,000-result cap. Everywhere else the offset indexes the rows this call assembled and sorted: a single 100-row window for date sorts and entity targeting, the full matched set on a pre-2001 archive path, or both together on a range that crosses 2001-01-01. Offsets at or past those rows return nothing even when total is larger — switch to sort=relevance for deep pagination on a 2001-onward search, narrow the search (forms, dates, entity targeting), or query the dataframe. On a crossing range the two sides are assembled unevenly — the archive side contributes every row it matched, the full-text side one window of its total — so once the window runs out the rows jump to the pre-2001 era with the remaining full-text matches absent from the middle; search the 2001-onward era on its own to page through those.',
+        'Pagination offset. For sort=relevance on a 2001-onward search, EDGAR pages server-side up to its 10,000-result cap, and the offset counts matching documents, not filings — EDGAR indexes each document of a filing separately — so a page lists the filings among its limit documents, which can be fewer than limit, and a filing whose matching documents straddle a page edge can recur on the next page; stepping by limit never skips one. Everywhere else the offset indexes the filings this call assembled and sorted: the filings of a single 100-document window for date sorts and entity targeting, the full matched set on a pre-2001 archive path, or both together on a range that crosses 2001-01-01. Offsets at or past those rows return nothing even when more filings match (a total above the rows fetched, or total_is_exact false) — switch to sort=relevance for deep pagination on a 2001-onward search, narrow the search (forms, dates, entity targeting), or query the dataframe. On a crossing range the two sides are assembled unevenly — the archive side contributes every row it matched, the full-text side the filings of one document window — so once the window runs out the rows jump to the pre-2001 era with the remaining full-text matches absent from the middle; search the 2001-onward era on its own to page through those.',
       ),
     sort: z
       .enum(['filing_date_desc', 'filing_date_asc', 'relevance'])
@@ -761,22 +852,24 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     total: z
       .number()
       .describe(
-        "Total matching filings, which can exceed the rows returned inline or materialized. On the full-text (2001+) path this is capped at 10,000; entity targeting (ticker:/cik:) scopes server-side via the EFTS ciks param, so it is the entity's exact match count up to the cap. On a pre-2001 archive path it is the exact count within the scanned window (see total_is_exact). On a range crossing 2001-01-01 it is the sum of both eras' counts.",
+        "Matching filings, one per accession; can exceed the rows returned. A search with terms counts the filings among the full-text documents fetched (100 per request): a lower bound unless total_is_exact. A forms- or entity-only browse from 2001 on gives EDGAR's own count; earlier ranges count rows read.",
       ),
     total_is_exact: z
       .boolean()
       .describe(
-        'False when total is a lower bound — the full-text path hit its 10,000 cap, a pre-2001 archive scan hit its page/quarter cap before exhausting the range, or a pre-2001 local text scan hit its document cap (scan.capped).',
+        "False when total is a lower bound: a search with terms whose 100-document window missed matches (or a relevance page past offset 0), EDGAR's 10,000 cap, or a pre-2001 archive or text scan that hit its cap. True does not mean every match is in the rows: a browse total can exceed the window.",
+      ),
+    total_documents: z
+      .number()
+      .optional()
+      .describe(
+        "EDGAR's count of matching full-text documents, capped at 10,000. A search counts a filing once per matching document; a browse matches one document per filing. Absent on pure pre-2001 archive paths.",
       ),
     results: z
       .array(
         z
           .object({
-            accession_number: z
-              .string()
-              .describe(
-                'Filing accession number. Pass to secedgar_get_filing to retrieve the document text.',
-              ),
+            accession_number: z.string().describe('Accession number for secedgar_get_filing.'),
             form: z
               .string()
               .optional()
@@ -788,7 +881,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
               .string()
               .optional()
               .describe(
-                'Period the filing reports on (YYYY-MM-DD). Absent for filings without a reporting period (e.g., proxy statements, ownership reports) and for all pre-2001 archive-sourced rows (source submissions/full-index), which carry no period field. A range crossing 2001-01-01 returns both kinds of row together, so this field is populated on source=efts rows only.',
+                'Period the filing reports on (YYYY-MM-DD). Absent for forms without one (proxy statements, ownership reports).',
               ),
             company_name: z
               .string()
@@ -798,79 +891,95 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
               .string()
               .optional()
               .describe(
-                'Primary ticker symbol parsed from the EFTS display name. Absent for private filers, foreign filers without a US listing, filings whose display name omits the ticker parenthetical, and all pre-2001 archive-sourced rows. A range crossing 2001-01-01 returns both kinds of row together, so this field is populated on source=efts rows only. For multi-class issuers (e.g., BRK-A / BRK-B), this is the first class listed.',
+                'Primary ticker; the first class for multi-class issuers (BRK-A / BRK-B). Absent for private filers, foreign filers without a US listing, and display names that omit it.',
               ),
             file_description: z
               .string()
               .optional()
               .describe(
-                'SEC-provided description of the matching document (e.g., "EX-99.1"). Absent when SEC published none, and for pre-2001 archive-sourced rows. A range crossing 2001-01-01 returns both kinds of row together, so this field is populated on source=efts rows only.',
+                'SEC description of the first-ranked matching document (e.g., "EX-99.1"). Absent when SEC published none.',
+              ),
+            matched_documents: z
+              .array(
+                z
+                  .object({
+                    name: z
+                      .string()
+                      .describe(
+                        'Document filename — pass as secedgar_get_filing document to read it.',
+                      ),
+                    type: z
+                      .string()
+                      .optional()
+                      .describe(
+                        'EDGAR document type (e.g., "EX-99.1"), telling body from exhibit. Absent when the index has none.',
+                      ),
+                  })
+                  .describe('One document of this filing that matched the query.'),
+              )
+              .optional()
+              .describe(
+                'Documents of this filing that matched, in rank order; the dataframe holds their filenames as a comma-separated column.',
               ),
             sic: z
               .string()
               .optional()
-              .describe(
-                'SIC industry code for the filer. Absent for filers without a classification, and for pre-2001 archive-sourced rows. A range crossing 2001-01-01 returns both kinds of row together, so this field is populated on source=efts rows only.',
-              ),
+              .describe('SIC industry code. Absent for filers without one.'),
             location: z
               .string()
               .optional()
-              .describe(
-                'Business location (state or country code). Absent when SEC has no location for this filer, and for pre-2001 archive-sourced rows. A range crossing 2001-01-01 returns both kinds of row together, so this field is populated on source=efts rows only.',
-              ),
+              .describe('Business location (state or country code). Absent when SEC has none.'),
             source: z
               .enum(['efts', 'submissions', 'full-index'])
               .optional()
               .describe(
-                'Which EDGAR backend served this row: "efts" (2001+ full-text index), "submissions" (a pre-2001 entity-scoped filing history), or "full-index" (a pre-2001 unscoped quarterly index browse). A date range crossing 2001-01-01 is split at the boundary and returns rows of two sources in one result set, so read this per row rather than per result. Provenance is carried into the canvas dataframe as a `source` column.',
+                '"efts" (2001+ full-text), "submissions" (pre-2001 entity history), or "full-index" (pre-2001 quarterly index). A range crossing 2001-01-01 mixes sources; total sums its archive rows and the filings of one 100-document full-text window. Also a dataframe column.',
               ),
           })
-          .describe('One matching filing hit.'),
+          .describe(
+            'One matching filing. period_ending, ticker, file_description, matched_documents, sic, and location are absent on pre-2001 archive rows (source submissions or full-index).',
+          ),
       )
       .describe('Matching filings.'),
     form_distribution: z
       .record(z.string(), z.number())
       .optional()
-      .describe('Count of results by form type. Helps narrow follow-up searches.'),
+      .describe(
+        'Filings in hand by form: every row assembled (what a dataframe holds), not only the page shown. Sums to total when every matching filing is in hand and every row has a form.',
+      ),
     scan: z
       .object({
-        candidates: z
-          .number()
-          .describe('Filings the form + date pre-filter selected before any document was read.'),
-        scanned: z
-          .number()
-          .describe(
-            'Candidate documents actually fetched and matched against. Capped at 50 per call.',
-          ),
-        matched: z.number().describe('Scanned filings whose text satisfied the query terms.'),
+        candidates: z.number().describe('Filings the form and date pre-filter selected.'),
+        scanned: z.number().describe('Candidates fetched and matched, at most 50 per call.'),
+        matched: z.number().describe('Scanned filings whose text satisfied the query.'),
         capped: z
           .boolean()
           .describe(
-            'True when candidates exceeded the document cap, so the unscanned remainder may hold further matches — narrow the form or date filter to bring them into range.',
+            'True when candidates exceeded the 50-document cap; unread filings may match, so narrow forms or dates.',
           ),
       })
       .optional()
       .describe(
-        "Present only on the pre-2001 entity-scoped free-text path, where no full-text index exists and terms are matched by reading documents. Reports the scan's shape so a partial read is never presented as a complete one. Each document read is the whole accession .txt — SEC's original flat-submission format concatenates every exhibit into one file, and pre-1997 filings expose no per-document URL at all — so a match may sit in an attached exhibit rather than the body of the requested form. Absent on every other path.",
+        "Pre-2001 entity-scoped free-text path only. Each candidate's whole accession .txt is read, so a match may sit in an exhibit rather than the body of the requested form.",
       ),
     dataset: z
       .object({
         name: z
           .string()
           .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
           ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
         truncated: z
           .boolean()
           .describe(
-            'True when more matches exist beyond the materialized set — the full-text window was exceeded, or a pre-2001 archive scan hit its cap. Each row carries a `source` column so provenance survives into secedgar_dataframe_query.',
+            'True when matches exist beyond the staged rows: the full-text window was exceeded, or an archive scan hit its cap.',
           ),
       })
       .optional()
       .describe(
-        'Canvas dataframe holding the fetched hits (full-text window, or the full pre-2001 archive match set), each tagged with its `source`. Absent when total ≤ inline limit, canvas is unavailable, or materialization failed. Query with secedgar_dataframe_query SQL.',
+        'Dataframe of every filing assembled (the full-text window, or the full pre-2001 match set). Absent when the rows fit inline, canvas is unavailable, or staging failed.',
       ),
   }),
 
@@ -960,12 +1069,11 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
           })
         : undefined;
 
-      // `total` counts both eras' true match totals: the archive side's count is
-      // exact within what it scanned, while EFTS reports its own total independently
-      // of the single window fetched.
+      // `total` counts both eras' filings: the archive side's is exact within what it
+      // scanned, and the full-text side's is exact only when its one window held every
+      // matching document — EFTS counts documents, never filings (#124).
       const archiveIncomplete = archive.scanTruncated || (scan?.capped ?? false);
-      const total = archive.rows.length + (efts?.total ?? 0);
-      const eftsWindowIncomplete = efts !== undefined && efts.total > efts.rows.length;
+      const eftsWindowIncomplete = efts !== undefined && !efts.totalIsExact;
 
       const formsNote = input.forms?.length ? `, forms ${input.forms.join(', ')}` : '';
       const scopeNote = entityCik ? `CIK ${entityCik}` : 'full-index browse';
@@ -975,24 +1083,23 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       const scanNote = scan
         ? ` Read ${scan.scanned} of ${scan.candidates} candidate filings for the text terms${scan.capped ? ` (document cap ${DOCUMENT_SCAN_CAP})` : ''}; ${scan.matched} matched. Each read covers the whole accession .txt, so a match may sit in an attached exhibit rather than the body of the requested form.`
         : '';
-      // The archive side contributes every row it matched; the full-text side contributes one
-      // window of a total it reports independently. When that window is short of its total,
+      // The archive side contributes every row it matched; the full-text side contributes the
+      // filings of one document window. When that window is short of the document total,
       // the merged list runs out of full-text rows and drops straight into the archive era —
       // a gap in the middle of the date order that neither offset nor the dataframe reaches,
       // since both address the rows this call assembled.
       const windowNote =
         efts && eftsWindowIncomplete
-          ? ` The ${EFTS_FULLTEXT_FLOOR}-onward side contributed one ${efts.rows.length}-row window of its ${efts.total} matches, so the merged rows jump from the end of that window straight to ${ARCHIVE_ERA_END} — search ${EFTS_FULLTEXT_FLOOR} to ${endDate} on its own to page through the rest.`
+          ? ` The ${EFTS_FULLTEXT_FLOOR}-onward side contributed the ${efts.rows.length} filings of one 100-document window of its ${efts.totalDocuments} matching documents, so the merged rows jump from the end of that window straight to ${ARCHIVE_ERA_END} — search ${EFTS_FULLTEXT_FLOOR} to ${endDate} on its own to page through the rest.`
           : '';
 
       return await finishAssembledResult(ctx, {
         matched: [...archive.rows, ...(efts?.rows ?? [])],
-        total,
-        totalIsExact: !archiveIncomplete && (efts?.totalIsExact ?? true),
+        totalIsExact: !archiveIncomplete && !eftsWindowIncomplete,
+        totalDocuments: efts?.totalDocuments,
         sort: input.sort,
         limit: input.limit,
         offset: input.offset,
-        truncated: archiveIncomplete || eftsWindowIncomplete,
         queryParams: {
           query: hasFreeText ? query : undefined,
           entity_cik: entityCik,
@@ -1005,7 +1112,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
           ? `${hasFreeText ? `${query} ` : ''}(split at ${EFTS_FULLTEXT_FLOOR}: ${scopeNote}${formsNote}, ${startDate} to ${endDate})`
           : `${hasFreeText ? `${query} ` : ''}(pre-2001 archive: ${scopeNote}${formsNote}, ${startDate} to ${endDate})`,
         coverageNote: straddles
-          ? `Merged across the ${EFTS_FULLTEXT_FLOOR} boundary — filings from ${EFTS_FULLTEXT_FLOOR} on come from the full-text index, earlier ones from ${archiveSource}. Read each row's source; the EFTS-only fields (period_ending, ticker, file_description, sic, location) are null on archive rows.${windowNote}${scanNote}`
+          ? `Merged across the ${EFTS_FULLTEXT_FLOOR} boundary — filings from ${EFTS_FULLTEXT_FLOOR} on come from the full-text index, earlier ones from ${archiveSource}. Read each row's source; the EFTS-only fields (period_ending, ticker, file_description, matched_documents, sic, location) are null on archive rows.${windowNote}${scanNote}`
           : `Served from ${archiveSource} — full-text search covers 2001-present only.${scanNote}`,
         zeroHitCriteria: [
           ...(hasFreeText ? [`"${query}"`] : []),
@@ -1035,74 +1142,50 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       size: fetchSize,
     });
 
-    // EFTS scopes by the server-side `ciks` param (set above when entity
-    // targeting was used), so total/total_is_exact come straight from the
-    // response: no client-side CIK post-filter, and the count is the entity's
-    // true match total (up to the 10k cap), not a sampled-window lower bound.
-    const total = response.hits.total.value;
-    const totalIsExact = response.hits.total.relation === 'eq';
+    // EFTS scopes by the server-side `ciks` param (set above when entity targeting
+    // was used), so no client-side CIK post-filter is involved. A search with terms
+    // answers one hit per matching document, so the window collapses to one row per
+    // filing and `total` counts those filings — every match when the window held every
+    // document, else a lower bound — beside EFTS's own document count (#124). A forms-
+    // or entity-only browse matches each filing's primary document alone, so there
+    // EFTS's count is the filing count, trusted while the window bears it out with one
+    // document per accession.
+    const totalDocuments = response.hits.total.value;
+    const fetchedDocuments = response.hits.hits.length;
+    const windowComplete = windowHoldsEveryMatch(response, fetchFrom);
+    const collapsed = collapseEftsHits(response.hits.hits);
+    const countsFilings = !query && collapsed.length === fetchedDocuments;
+    // Filings of one date keep their rank order (the sort is stable).
+    const rows = input.sort === 'relevance' ? collapsed : sortRows(collapsed, input.sort);
+    const total = countsFilings ? totalDocuments : rows.length;
+    const totalIsExact = countsFilings ? response.hits.total.relation === 'eq' : windowComplete;
 
-    let hits = response.hits.hits;
+    // EDGAR pages sort=relevance by document, and the window runs past the page, so a
+    // page lists the filings among its own `limit` documents — the window's first rows,
+    // since collapsing keeps first-occurrence order. `limit` filings from the whole
+    // window would reappear on the next page, `limit` documents on (#124).
+    const pageRows = wideFetch
+      ? rows.slice(input.offset, input.offset + input.limit)
+      : rows.slice(0, collapseEftsHits(response.hits.hits.slice(0, input.limit)).length);
+    const results = pageRows.map(toInlineResult);
 
-    if (input.sort === 'filing_date_desc') {
-      hits = [...hits].sort((a, b) => b._source.file_date.localeCompare(a._source.file_date));
-    } else if (input.sort === 'filing_date_asc') {
-      hits = [...hits].sort((a, b) => a._source.file_date.localeCompare(b._source.file_date));
-    }
-
-    const startIdx = wideFetch ? input.offset : 0;
-    const sliced = hits.slice(startIdx, startIdx + input.limit);
-
-    const results = sliced.map((hit) => {
-      const accessionNumber = hit._source.adsh || hit._id.split(':')[0] || hit._id;
-      const displayName = hit._source.display_names?.[0] || '';
-      const ticker = extractTicker(displayName);
-
-      return {
-        accession_number: accessionNumber,
-        form: hit._source.form ?? undefined,
-        filing_date: hit._source.file_date,
-        period_ending: hit._source.period_ending ?? undefined,
-        company_name: cleanDisplayName(displayName),
-        cik: hit._source.ciks?.[0] || '',
-        ...(ticker !== null && { ticker }),
-        file_description: hit._source.file_description ?? undefined,
-        sic: hit._source.sics?.[0] ?? undefined,
-        location: hit._source.biz_locations?.[0] ?? undefined,
-        source: 'efts' as const,
-      };
-    });
-
-    // Form distribution must reflect the same set as `total`.
-    // When entity targeting or a forms filter is applied, the EFTS aggregation
-    // reflects the pre-filter sample and would disagree with `total`. In either
-    // case, recompute from the post-filter `hits` to keep the counts consistent.
-    let formDistribution: Record<string, number> | undefined;
-    if (entityCik || input.forms?.length) {
-      formDistribution = buildFormDistribution(hits.map((hit) => hit._source.form));
-    } else if (response.aggregations?.form_filter?.buckets) {
-      formDistribution = {};
-      for (const bucket of response.aggregations.form_filter.buckets) {
-        formDistribution[bucket.key] = bucket.doc_count;
-      }
-    }
+    // The filings in hand — the rows the dataframe holds. EFTS's own form_filter
+    // aggregation counts documents by root form (amendments folded in), so it
+    // describes neither these rows nor `total` (#6, #124).
+    const formDistribution = buildFormDistribution(rows.map((row) => row.form));
 
     let dataset:
       | { name: string; row_count: number; expires_at: string; truncated: boolean }
       | undefined;
     const bridge = getCanvasBridge();
-    const eftsTotal = response.hits.total.value;
-    // Materialize the hits we already fetched — no additional EFTS calls.
-    // `hits` is already entity-filtered (and sorted, where applicable) above.
-    // Skip when the response fits inline or when there's no canvas.
-    if (bridge && hits.length > input.limit) {
-      // Truncated when EFTS reported more text matches than the window we
-      // fetched. Under entity targeting, additional entity hits may exist
-      // beyond the window we sampled; under no targeting, more text matches
-      // exist past the window. Either way, the dataframe is a sample.
-      const truncated = eftsTotal > response.hits.hits.length;
+    // Materialize the filings already fetched — no additional EFTS calls. Skip when
+    // the response fits inline or when there's no canvas.
+    if (bridge && rows.length > input.limit) {
+      // Truncated when matches exist beyond the window fetched — the dataframe then
+      // holds a sample of the matching filings.
+      const truncated = !windowComplete;
       const registered = await bridge.registerDataframe(ctx, {
-        rows: hits.map(eftsHitToRow),
+        rows: rows.map(toCanvasRow),
         sourceTool: 'secedgar_search_filings',
         queryParams: {
           query,
@@ -1120,6 +1203,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     ctx.log.info('Filing search completed', {
       query: input.query,
       total,
+      totalDocuments,
       resultCount: results.length,
       datasetName: dataset?.name,
     });
@@ -1128,7 +1212,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       ? `${query ? `${query} ` : ''}(entity scope: CIK ${entityCik})`
       : query || (input.forms?.length ? `(browse: forms ${input.forms.join(', ')})` : '');
     ctx.enrich.echo(effectiveQuery);
-    if (total === 0) {
+    if (totalDocuments === 0) {
       // Genuine no-match — EFTS returned zero hits. Echo all active criteria; on the
       // browse path (no query text) lead with the form/entity criteria instead of an
       // empty quoted query.
@@ -1143,31 +1227,60 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       ctx.enrich.notice(
         `No filings matched ${criteriaText}. Broaden the query, remove the form filter, or widen the date range.`,
       );
-    } else if (results.length === 0 && wideFetch && input.offset >= hits.length) {
-      // The offset exceeded the client-side window (wideFetch fetches 100 rows max).
-      // There are results — the caller just paged past the available window. The
-      // materialized dataframe holds the same window, so SQL paging reaches no further.
-      // Entity targeting forces wideFetch regardless of sort (see `wideFetch` above),
-      // so switching to sort=relevance does NOT unlock deeper EDGAR-side pagination on
-      // that path — only the non-entity path pages server-side via relevance.
+    } else if (results.length === 0 && !wideFetch) {
+      // A relevance page past the last match: EDGAR's `from` counts documents, which on
+      // a browse are filings.
+      ctx.enrich.notice(
+        countsFilings
+          ? `Offset (${input.offset}) is past the ${total} matching filings — lower it.`
+          : `Offset (${input.offset}) is past the ${totalDocuments} matching documents — under sort=relevance offset counts documents, not filings, so lower it.`,
+      );
+    } else if (results.length === 0) {
+      // The offset exceeded the client-side window (wideFetch fetches one 100-document
+      // window). The materialized dataframe holds the same window, so SQL paging reaches
+      // no further. Entity targeting forces wideFetch regardless of sort (see `wideFetch`
+      // above), so switching to sort=relevance does NOT unlock deeper EDGAR-side
+      // pagination on that path — only the non-entity path pages server-side via relevance.
       const deeperPaging = entityCik
         ? 'narrow the search with forms or dates'
-        : 'switch to sort=relevance for EDGAR-side pagination up to 10,000 results, or narrow the search with forms, dates, or entity targeting';
+        : 'switch to sort=relevance for EDGAR-side pagination up to 10,000 matching documents, or narrow the search with forms, dates, or entity targeting';
       ctx.enrich.notice(
-        `Offset (${input.offset}) exceeds the fetched window (${hits.length} rows — date sorts and entity targeting fetch a single window). ${total} filings matched: ${deeperPaging}.` +
+        (windowComplete
+          ? `Offset (${input.offset}) exceeds the ${rows.length} matching filings — lower the offset.`
+          : `Offset (${input.offset}) exceeds the ${rows.length} filings in the fetched window (the first ${fetchedDocuments} of ${totalDocuments} matching ${countsFilings ? 'filings' : 'documents'} — date sorts and entity targeting fetch a single window): ${deeperPaging}.`) +
           (dataset ? ` ${dataframeGuidance(dataset)}` : ''),
       );
-    } else if (total > results.length) {
+    } else if (total > results.length || !totalIsExact) {
+      // `notice` is last-wins across notice/truncated, so the window boundary and the
+      // dataframe pointer compose into one guidance string (#104).
+      const guidance: string[] = [];
+      if (!windowComplete) {
+        const reach = entityCik
+          ? 'narrow with forms or dates'
+          : 'switch to sort=relevance to page deeper, or narrow with forms, dates, or entity targeting';
+        const ofTotal = `${total}${totalIsExact ? '' : '+'} matching filings`;
+        guidance.push(
+          countsFilings
+            ? wideFetch
+              ? `The rows fetched are the first ${rows.length} of ${ofTotal} — ${reach} to reach the rest.`
+              : `The rows fetched are the ${rows.length} filings from offset ${input.offset} of ${ofTotal} — page on with offset.`
+            : wideFetch
+              ? `total counts the filings among the first ${fetchedDocuments} of ${totalDocuments} matching documents — ${reach} to reach the rest.`
+              : `total counts the filings among the ${fetchedDocuments} documents fetched from offset ${input.offset} of ${totalDocuments} matching documents — page on with offset, which counts documents under sort=relevance, so a filing can recur on the next page.`,
+        );
+      }
+      if (dataset) guidance.push(dataframeGuidance(dataset));
       ctx.enrich.truncated({
         shown: results.length,
         cap: input.limit,
-        ...(dataset && { guidance: dataframeGuidance(dataset) }),
+        ...(guidance.length > 0 && { guidance: guidance.join(' ') }),
       });
     }
 
     return {
       total,
       total_is_exact: totalIsExact,
+      total_documents: totalDocuments,
       results,
       form_distribution: formDistribution,
       dataset,
@@ -1175,24 +1288,29 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
   },
 
   format: (result) => {
-    const fromArchive = result.results.some(
-      (r) => r.source === 'submissions' || r.source === 'full-index',
-    );
+    // Only the pure pre-2001 archive paths report no document count.
     const exactness = result.total_is_exact
       ? 'exact'
-      : fromArchive || result.scan
+      : result.total_documents === undefined
         ? 'partial — scan cap reached, more may exist'
-        : 'capped at 10,000';
-    const lines = [`Found ${result.total} filings (${exactness})`];
+        : 'lower bound — more may exist beyond what was read';
+    const documents =
+      result.total_documents === undefined
+        ? ''
+        : ` — ${result.total_documents}${result.total_documents >= 10_000 ? '+' : ''} matching documents in the full-text index`;
+    const lines = [`Found ${result.total} filings (${exactness})${documents}`];
     for (const r of result.results) {
       const period = r.period_ending ? ` (period: ${r.period_ending})` : '';
       const desc = r.file_description ? ` — ${r.file_description}` : '';
+      const matched = r.matched_documents?.length
+        ? ` | matched documents: ${r.matched_documents.map((d) => (d.type ? `${d.name} (${d.type})` : d.name)).join(', ')}`
+        : '';
       const sic = r.sic ? ` | SIC ${r.sic}` : '';
       const loc = r.location ? ` | ${r.location}` : '';
       const src = r.source ? ` | source: ${r.source}` : '';
       const ident = r.ticker ? `${r.ticker}, CIK ${r.cik}` : `CIK ${r.cik}`;
       lines.push(
-        `- ${r.form ?? 'N/A'} ${r.filing_date}${period} — ${r.company_name} (${ident})${sic}${loc}${desc}${src} [${r.accession_number}]`,
+        `- ${r.form ?? 'N/A'} ${r.filing_date}${period} — ${r.company_name} (${ident})${sic}${loc}${desc}${matched}${src} [${r.accession_number}]`,
       );
     }
     if (result.form_distribution) {
