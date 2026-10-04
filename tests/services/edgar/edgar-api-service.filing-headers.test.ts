@@ -24,7 +24,8 @@ vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => undef
 
 import { getEdgarApiService, initEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 
-const BASE = 'https://www.sec.gov/Archives/edgar/data/0000320193/000110465905058421';
+// Archive paths carry the unpadded CIK; SEC 301s the zero-padded form (#156).
+const BASE = 'https://www.sec.gov/Archives/edgar/data/320193/000110465905058421';
 const HDR_SGML = `<SEC-HEADER>0001104659-05-058421.hdr.sgml : 20051201
 <ACCEPTANCE-DATETIME>20051130212248
 <TYPE>10-K

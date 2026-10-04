@@ -235,6 +235,45 @@ export function normalizeCompanySuffix(name: string): string {
   return canonical ? `${name.slice(0, cut)} ${canonical}` : name;
 }
 
+/**
+ * Every terminal token `stripCompanySuffix` drops: the four `SUFFIX_CANONICAL`
+ * buckets plus the entity forms that have no bucket — `plc`, `llc`, the `lp` family,
+ * `nv`, `sa`, `ag`, `se` — written with or without periods. Dropping only, never
+ * normalizing: these forms stay out of `SUFFIX_CANONICAL`, so `lp` never folds into
+ * `ltd` (#107). With them, `Rio Tinto` ties RIO TINTO LTD and RIO TINTO PLC instead
+ * of silently picking the one whose suffix happens to sit in a bucket (#155).
+ */
+const DROPPABLE_SUFFIXES = new Set([
+  ...SUFFIX_CANONICAL.keys(),
+  'plc',
+  'llc',
+  'l.l.c',
+  'lp',
+  'l.p',
+  'nv',
+  'n.v',
+  'sa',
+  's.a',
+  'ag',
+  'se',
+]);
+
+/**
+ * Drop a lowercased company name's terminal entity-suffix token, and a comma before
+ * it (`itron, inc.` → `itron`), or return `undefined` when it has none. Applied to
+ * registry names only — never to the query, whose own suffix must still match, so
+ * `Toro Co` never meets `TORO CORP.` and `Rio Tinto plc` never meets RIO TINTO LTD (#155).
+ */
+function stripCompanySuffix(name: string): string | undefined {
+  const cut = name.lastIndexOf(' ');
+  if (cut < 0 || !DROPPABLE_SUFFIXES.has(name.slice(cut + 1).replace(/[.,]$/, ''))) return;
+  return name.slice(0, cut).replace(/,$/, '').trimEnd();
+}
+
+/** Name-search tiers, strongest first: exact, prefix, substring. */
+type NameTier = 0 | 1 | 2;
+const NAME_TIERS: readonly NameTier[] = [0, 1, 2];
+
 // ---------------------------------------------------------------------------
 // Near-match company suggestions
 // ---------------------------------------------------------------------------
@@ -355,7 +394,8 @@ class EdgarApiService {
    * Resolve a query (ticker, name, or CIK) to company match(es).
    * - Numeric input → direct CIK lookup
    * - 1-5 uppercase letters → ticker lookup (O(1))
-   * - Otherwise → name search (prefix, then substring, then trigram suggestions)
+   * - Otherwise → name search (exact, prefix, substring — resolved within the best
+   *   tier a current name reaches), then the catch-all ticker lookup
    * Returns a single match, an array of multiple matches, or an empty array (no match).
    * On no-result name search, the returned empty array carries `suggestions` on
    * the thrown error at the handler layer — call `suggestCompanies` there.
@@ -381,34 +421,47 @@ class EdgarApiService {
       if (match) return match;
     }
 
-    // Name search: exact → prefix → substring (current names + former names).
-    // The exact tier also accepts a suffix-normalized equality, so a query differing
-    // from the registry title only in suffix form resolves as an exact hit rather than
-    // ranking behind unrelated prefix hits or falling through to a suggestion (#107).
+    // Name search, tiered exact → prefix → substring. The exact tier also accepts a
+    // suffix-normalized equality (#107) and the registry name minus its terminal suffix,
+    // so `Apple` names `Apple Inc.` exactly (#155); the query's own suffix is never
+    // dropped, so `Toro Co` never meets `TORO CORP.`.
     const lower = trimmed.toLowerCase();
     const lowerNormalized = normalizeCompanySuffix(lower);
-    const exact: CikMatch[] = [];
-    const prefix: CikMatch[] = [];
-    const substring: CikMatch[] = [];
+    // A suffix-dropped name is a prefix of the full one, so the strip runs on prefix hits only.
+    const tierOf = (name: string): NameTier | undefined => {
+      if (name === lower || normalizeCompanySuffix(name) === lowerNormalized) return 0;
+      if (name.startsWith(lower)) return stripCompanySuffix(name) === lower ? 0 : 1;
+      return name.includes(lower) ? 2 : undefined;
+    };
 
+    // Current names are registry rows, which carry a ticker; former names (the committed
+    // asset) carry none. Resolution runs within the best tier a current name reaches —
+    // several CIKs there are the ambiguity, and the tiers below are not listed. A former
+    // name joins at that tier or better but never outranks a current name, so a company
+    // is never silently swapped for a former holder of its name; former names decide
+    // alone only when no current name matches (#155).
+    const current: Record<NameTier, CikMatch[]> = { 0: [], 1: [], 2: [] };
+    const former: Record<NameTier, CikMatch[]> = { 0: [], 1: [], 2: [] };
     for (const entry of cache.allEntries) {
       if (!entry.name) continue;
-      const name = entry.name.toLowerCase();
-      if (name === lower || normalizeCompanySuffix(name) === lowerNormalized) {
-        exact.push(entry);
-      } else if (name.startsWith(lower)) {
-        prefix.push(entry);
-      } else if (name.includes(lower)) {
-        substring.push(entry);
-      }
+      const tier = tierOf(entry.name.toLowerCase());
+      if (tier === undefined) continue;
+      (entry.ticker === undefined ? former : current)[tier].push(entry);
     }
 
-    const combined = [...exact, ...prefix, ...substring];
+    const bestCurrent = NAME_TIERS.find((tier) => current[tier].length > 0);
+    const candidates =
+      bestCurrent === undefined
+        ? (NAME_TIERS.map((tier) => former[tier]).find((hits) => hits.length > 0) ?? [])
+        : [
+            ...current[bestCurrent],
+            ...NAME_TIERS.filter((tier) => tier <= bestCurrent).flatMap((tier) => former[tier]),
+          ];
 
     // Dedup by CIK (current + former names may match the same registrant).
     const seen = new Set<string>();
     const deduped: CikMatch[] = [];
-    for (const entry of combined) {
+    for (const entry of candidates) {
       if (!seen.has(entry.cik)) {
         seen.add(entry.cik);
         deduped.push(entry);
@@ -660,11 +713,7 @@ class EdgarApiService {
 
   /** Fetch a filing's document index. Returns `null` if the filing does not exist. */
   tryGetFilingIndex(cik: string, accessionNumber: string): Promise<FilingIndex | null> {
-    const padded = cik.padStart(10, '0');
-    const noDashes = accessionNumber.replace(/-/g, '');
-    return this.tryFetchJson<FilingIndex>(
-      `https://www.sec.gov/Archives/edgar/data/${padded}/${noDashes}/index.json`,
-    );
+    return this.tryFetchJson<FilingIndex>(filingArchiveUrl(cik, accessionNumber, 'index.json'));
   }
 
   /**
@@ -674,10 +723,8 @@ class EdgarApiService {
    * document TYPE values (e.g. "EX-21.1") that the directory listing JSON does not.
    */
   async tryGetFilingHeaders(cik: string, accessionNumber: string): Promise<FilingHeaders | null> {
-    const padded = cik.padStart(10, '0');
-    const noDashes = accessionNumber.replace(/-/g, '');
     const text = await this.tryFetchText(
-      `https://www.sec.gov/Archives/edgar/data/${padded}/${noDashes}/${accessionNumber}-index-headers.html`,
+      filingArchiveUrl(cik, accessionNumber, `${accessionNumber}-index-headers.html`),
     );
     return text ? parseFilingHeaders(text) : null;
   }
@@ -692,20 +739,14 @@ class EdgarApiService {
     cik: string,
     accessionNumber: string,
   ): Promise<SubmissionHeader | null> {
-    const padded = cik.padStart(10, '0');
-    const noDashes = accessionNumber.replace(/-/g, '');
     const text = await this.tryFetchText(
-      `https://www.sec.gov/Archives/edgar/data/${padded}/${noDashes}/${accessionNumber}.hdr.sgml`,
+      filingArchiveUrl(cik, accessionNumber, `${accessionNumber}.hdr.sgml`),
     );
     return text ? parseSubmissionHeader(text) : null;
   }
 
   getFilingDocument(cik: string, accessionNumber: string, document: string): Promise<string> {
-    const padded = cik.padStart(10, '0');
-    const noDashes = accessionNumber.replace(/-/g, '');
-    return this.fetchText(
-      `https://www.sec.gov/Archives/edgar/data/${padded}/${noDashes}/${document}`,
-    );
+    return this.fetchText(filingArchiveUrl(cik, accessionNumber, document));
   }
 
   /**
@@ -716,11 +757,7 @@ class EdgarApiService {
     accessionNumber: string,
     document: string,
   ): Promise<string | null> {
-    const padded = cik.padStart(10, '0');
-    const noDashes = accessionNumber.replace(/-/g, '');
-    return this.tryFetchText(
-      `https://www.sec.gov/Archives/edgar/data/${padded}/${noDashes}/${document}`,
-    );
+    return this.tryFetchText(filingArchiveUrl(cik, accessionNumber, document));
   }
 
   /**
@@ -747,12 +784,7 @@ class EdgarApiService {
     document: string,
     options: { maxBytes: number; stopAt: string },
   ): Promise<string | null> {
-    const padded = cik.padStart(10, '0');
-    const noDashes = accessionNumber.replace(/-/g, '');
-    const response = await this.rawFetch(
-      `https://www.sec.gov/Archives/edgar/data/${padded}/${noDashes}/${document}`,
-      false,
-    );
+    const response = await this.rawFetch(filingArchiveUrl(cik, accessionNumber, document), false);
     if (response.status === 404) return null;
     if (!response.body) return response.text();
 
@@ -1394,6 +1426,18 @@ export function parseSeriesFilingFeed(xml: string): SeriesFilingFeed {
 export function rawDocumentName(primaryDocument: string | undefined): string {
   const base = primaryDocument?.slice(primaryDocument.lastIndexOf('/') + 1);
   return base || 'primary_doc.xml';
+}
+
+/**
+ * URL of a file in a filing's archive directory. The path carries the CIK with its
+ * leading zeros stripped: SEC answers the zero-padded path with a 301 to the
+ * unpadded one, which `fetch` follows inside the same pacer slot, so a padded URL
+ * costs two requests (#156). Only the `data.sec.gov` APIs take the padded form.
+ */
+export function filingArchiveUrl(cik: string, accessionNumber: string, file: string): string {
+  const unpadded = cik.replace(/^0+(?=\d)/, '');
+  const noDashes = accessionNumber.replace(/-/g, '');
+  return `https://www.sec.gov/Archives/edgar/data/${unpadded}/${noDashes}/${file}`;
 }
 
 /**

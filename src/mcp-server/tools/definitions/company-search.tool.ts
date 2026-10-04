@@ -61,7 +61,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       .string()
       .optional()
       .describe(
-        'Guidance when include_filings=true but no filings matched the forms filter, or when filing_limit withheld some.',
+        'Guidance when no filings matched the forms filter, or when filing_limit withheld some.',
       ),
     truncated: z
       .boolean()
@@ -77,7 +77,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       code: JsonRpcErrorCode.NotFound,
       when: 'No company matches the query',
       recovery:
-        'Check `data.suggestions` for near matches. SEC\'s ticker index reflects the filer\'s own submissions record, which can differ from the exchange-listed symbol. ETFs and mutual funds resolve only by ticker (e.g. "VOO"); operating companies also resolve by full legal name or 10-digit CIK.',
+        'SEC\'s ticker index reflects the filer\'s own submissions record, which can differ from the exchange-listed symbol. ETFs and mutual funds resolve only by ticker (e.g. "VOO"); operating companies also resolve by full legal name or 10-digit CIK.',
     },
     {
       reason: 'multiple_matches',
@@ -102,7 +102,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       .trim()
       .min(1, 'Query cannot be blank')
       .describe(
-        'Company ticker symbol (e.g., "AAPL", "VOO"), name (e.g., "Apple"), or CIK number (e.g., "320193"). Ticker is the fastest lookup and works for equities, ETFs, and mutual funds; a multi-class share ticker resolves in either form ("BRK-B" or "BRK.B"). Name search matches current and former names, and the corporate suffix does not have to match the registry\'s form ("Beacon Financial Corporation" finds "Beacon Financial Corp") — but Corp, Inc, Co, and Ltd stay distinct from each other, since separate registrants differ only by which one they use.',
+        'Company ticker symbol (e.g., "AAPL", "VOO"), name (e.g., "Apple"), or CIK number (e.g., "320193"). Ticker is the fastest lookup and works for equities, ETFs, and mutual funds; a multi-class share ticker resolves in either form ("BRK-B" or "BRK.B"). Name search matches current and former names, preferring a name the query matches exactly over one it only starts or appears in. The corporate suffix (Inc, Corp, Co, Ltd, PLC, LLC, LP, N.V., S.A., AG, SE) can be left off ("Apple" finds "Apple Inc."; "Rio Tinto" lists both the Ltd and the PLC) or spelled out ("Beacon Financial Corporation" finds "Beacon Financial Corp"), but a suffix you include must match — Corp, Inc, Co, and Ltd stay distinct from each other, since separate registrants differ only by which one they use.',
       ),
     include_filings: z
       .boolean()
@@ -148,8 +148,16 @@ export const companySearchTool = tool('secedgar_company_search', {
         'Only include filings filed on or before this date (YYYY-MM-DD). Use alone or with filed_after; together they bound the archive-page scan.',
       ),
   }),
-  // Other spellings of the form and filing-date parameters in use across tools (#115).
+  // Other spellings of the form and filing-date parameters in use across tools (#115), and
+  // the company-identifier keys other tools take — `query` is this tool's only company
+  // input, so each maps one-to-one (#152).
   inputAliases: {
+    company: 'query',
+    ticker: 'query',
+    cik: 'query',
+    ticker_or_cik: 'query',
+    name: 'query',
+    search: 'query',
     form_types: 'forms',
     start_date: 'filed_after',
     date_from: 'filed_after',
@@ -168,26 +176,24 @@ export const companySearchTool = tool('secedgar_company_search', {
       .string()
       .optional()
       .describe(
-        'State of incorporation (US two-letter code, e.g. "DE"). Omitted for some entities, including many foreign filers and individuals.',
+        'State of incorporation (US two-letter code, e.g. "DE"). Absent for many foreign filers and individuals.',
       ),
     fiscal_year_end: z
       .string()
       .optional()
       .describe(
-        'Fiscal year end (MM-DD format, e.g., "09-26"). Absent for filers SEC records no fiscal year end for (e.g. private or pre-IPO entities).',
+        'Fiscal year end (MM-DD, e.g. "09-26"). Absent when SEC records none (e.g., private or pre-IPO entities).',
       ),
     series_id: z
       .string()
       .optional()
       .describe(
-        'SEC fund series ID (e.g. "S000002839"). Present when the query resolved via a fund ticker (ETF or mutual fund).',
+        'SEC fund series ID (e.g. "S000002839"), when the query resolved via a fund ticker (ETF or mutual fund).',
       ),
     class_id: z
       .string()
       .optional()
-      .describe(
-        'SEC fund class ID (e.g. "C000092055"). Present when the query resolved via a fund ticker (ETF or mutual fund).',
-      ),
+      .describe('SEC fund class ID (e.g. "C000092055"), present alongside series_id.'),
     filings: z
       .array(
         z
@@ -195,7 +201,7 @@ export const companySearchTool = tool('secedgar_company_search', {
             accession_number: z
               .string()
               .describe(
-                'Filing accession number, dash format (e.g., 0000320193-23-000106). Pass to secedgar_get_filing.',
+                'Accession number, dash format (e.g., 0000320193-23-000106). Pass to secedgar_get_filing.',
               ),
             form: z.string().describe('Form type (e.g., 10-K).'),
             filing_date: z.string().describe('Date the filing was submitted (YYYY-MM-DD).'),
@@ -203,7 +209,7 @@ export const companySearchTool = tool('secedgar_company_search', {
               .string()
               .optional()
               .describe(
-                'Period of report (YYYY-MM-DD). Absent for filings without a reporting period (proxy statements, ownership reports).',
+                'Period of report (YYYY-MM-DD). Absent for forms without one (proxy statements, ownership reports).',
               ),
             primary_document: z.string().describe('Primary document filename.'),
             description: z
@@ -218,33 +224,31 @@ export const companySearchTool = tool('secedgar_company_search', {
     total_filings: z
       .number()
       .optional()
-      .describe(
-        'Total filings matching the filter across everything scanned (recent window + any archive pages), which may exceed filing_limit and the inline list.',
-      ),
+      .describe('Filings matching the filter across everything scanned; can exceed filing_limit.'),
     history_scanned_through: z
       .string()
       .optional()
       .describe(
-        'Oldest filing date reached by the scan (YYYY-MM-DD). Filings older than this were not examined: the recent window holds the last year or 1,000 filings, whichever is more, and older filings live in archive pages fetched only when a date filter or an under-filled form filter requires them. Absent when no filings were scanned.',
+        'Oldest filing date the scan reached (YYYY-MM-DD); nothing older was examined. Archive pages past the recent window (last year or 1,000 filings) are read only for a date filter or an under-filled form filter. Absent when nothing was scanned.',
       ),
     dataset: z
       .object({
         name: z
           .string()
           .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
           ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
         truncated: z
           .boolean()
           .describe(
-            'True when the archive scan hit its page cap before exhausting the manifest — older matching filings exist beyond the dataframe.',
+            'True when the archive scan hit its page cap, so older matching filings exist beyond the dataframe.',
           ),
       })
       .optional()
       .describe(
-        'Canvas dataframe holding the full filtered filing history (recent + archive pages), registered only when the scan reached beyond the recent window and the history exceeds filing_limit. Query the complete history — filings by form by year — with secedgar_dataframe_query; the inline `filings` list stays capped at filing_limit.',
+        'Dataframe of the full filtered history (recent window plus archive pages), staged only when the scan went past the recent window and the history exceeds filing_limit.',
       ),
   }),
 
@@ -261,10 +265,19 @@ export const companySearchTool = tool('secedgar_company_search', {
           suggestions.length > 0
             ? ` Near matches: ${suggestions.map((s) => `${s.name ?? s.cik}${s.ticker ? ` (${s.ticker})` : ''}`).join(', ')}.`
             : '';
-        throw ctx.fail('no_match', `No company found for '${input.query}'.${suggestionNote}`, {
-          ...ctx.recoveryFor('no_match'),
-          ...(suggestions.length > 0 ? { suggestions } : {}),
-        });
+        // Only this throw can attach suggestions, so only it points the caller at them (#153).
+        throw ctx.fail(
+          'no_match',
+          `No company found for '${input.query}'.${suggestionNote}`,
+          suggestions.length > 0
+            ? {
+                suggestions,
+                recovery: {
+                  hint: `Check \`data.suggestions\` for near matches. ${ctx.recoveryFor('no_match').recovery.hint}`,
+                },
+              }
+            : ctx.recoveryFor('no_match'),
+        );
       }
       if (resolved.length > 1) {
         const matches = resolved

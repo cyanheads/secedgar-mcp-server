@@ -3,9 +3,11 @@
  * Every tool naming a company, a filing-date bound, or a form filter uses the
  * canonical key — `company`, `filed_after` / `filed_before`, `forms` — and
  * accepts the same set of other spellings as aliases, so a caller carrying a
- * parameter name from one tool to the next is never rejected for it. The
- * per-tool test files drive each alias through the argument parser; this file
- * pins that the declarations agree across tools.
+ * parameter name from one tool to the next is never rejected for it. A tool whose
+ * only company input carries another name (`query`, `issuer`) accepts the
+ * company-identifier spellings on it too (#152). The per-tool test files drive
+ * each alias through the argument parser; this file pins that the declarations
+ * agree across tools.
  * @module tests/mcp-server/tools/input-aliases
  */
 
@@ -21,6 +23,22 @@ const ALIASES_BY_KEY: Record<string, string[]> = {
 };
 
 const RETIRED_KEYS = ['ticker_or_cik', 'start_date', 'end_date', 'form_types'];
+
+/** Tools whose single company input is not named `company` → that key and the spellings it takes (#152). */
+const COMPANY_INPUT_UNDER_ANOTHER_NAME: Record<string, { key: string; spellings: string[] }> = {
+  secedgar_company_search: {
+    key: 'query',
+    spellings: ['company', 'ticker', 'cik', 'ticker_or_cik', 'name', 'search'],
+  },
+  secedgar_find_holders: {
+    key: 'issuer',
+    spellings: ['company', 'ticker', 'cik', 'ticker_or_cik'],
+  },
+  secedgar_get_beneficial_owners: {
+    key: 'issuer',
+    spellings: ['company', 'ticker', 'cik', 'ticker_or_cik'],
+  },
+};
 
 const tools = buildToolDefinitions({ dropEnabled: true }).map((def) => ({
   name: def.name,
@@ -65,6 +83,26 @@ describe('parameter names across tools (#115)', () => {
       'secedgar_search_filings.filed_before',
       'secedgar_search_filings.forms',
     ]);
+  });
+
+  it('maps the company-identifier spellings onto a company input under another name (#152)', () => {
+    for (const [name, { key, spellings }] of Object.entries(COMPANY_INPUT_UNDER_ANOTHER_NAME)) {
+      const tool = tools.find((t) => t.name === name);
+      expect(tool?.keys, `${name} declares ${key}`).toContain(key);
+      for (const spelling of spellings) {
+        expect(tool?.aliases[spelling], `${name}: ${spelling} → ${key}`).toBe(key);
+      }
+    }
+  });
+
+  it('leaves a fund and a company list unaliased (#152)', () => {
+    // `fund` names a fund or series and `companies` is an array: neither takes the
+    // single-company spellings.
+    for (const name of ['secedgar_get_fund_holdings', 'secedgar_compare_companies']) {
+      const tool = tools.find((t) => t.name === name);
+      expect(tool?.aliases, name).not.toHaveProperty('company');
+      expect(tool?.aliases, name).not.toHaveProperty('ticker');
+    }
   });
 
   it('declares aliases only on tools carrying their target', () => {

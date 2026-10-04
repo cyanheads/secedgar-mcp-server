@@ -2,9 +2,11 @@
  * @fileoverview `EdgarApiService.resolveCik` exercised against the real service with
  * `globalThis.fetch` stubbed, rather than mocked away at a tool-test call site. Covers
  * the name passes (exact → prefix → substring, including corporate-suffix normalization,
- * #107) and the catch-all ticker fallback (including the dotted share-class retry, #110).
- * The registry fixture mirrors live `company_tickers.json` rows verbatim — the suffix and
- * share-class shapes these behaviors turn on only exist in real registrant titles.
+ * #107), resolution within the best tier — a suffix-dropped exact match, and former names
+ * that tie current ones but never outrank them (#155) — and the catch-all ticker fallback
+ * (including the dotted share-class retry, #110). The registry fixture mirrors live
+ * `company_tickers.json` rows verbatim, and the former names are the committed asset —
+ * the suffix and share-class shapes these behaviors turn on only exist in real titles.
  * @module tests/services/edgar/edgar-api-service.resolve-cik
  */
 
@@ -48,6 +50,33 @@ const REGISTRY: Array<{ cik_str: number; ticker: string; title: string }> = [
   { cik_str: 1067983, ticker: 'BRK-A', title: 'BERKSHIRE HATHAWAY INC' },
   { cik_str: 14693, ticker: 'BF-B', title: 'BROWN FORMAN CORP' },
   { cik_str: 789019, ticker: 'MSFT', title: 'MICROSOFT CORP' },
+  // Name tiers (#155): each group holds an exact or sole-prefix hit beside weaker ones.
+  { cik_str: 320193, ticker: 'AAPL', title: 'Apple Inc.' },
+  { cik_str: 1418121, ticker: 'APLE', title: 'Apple Hospitality REIT, Inc.' },
+  { cik_str: 63330, ticker: 'MLP', title: 'MAUI LAND & PINEAPPLE CO INC' },
+  { cik_str: 1134982, ticker: 'AAPI', title: 'Apple iSports Group, Inc.' },
+  { cik_str: 1938109, ticker: 'PAPL', title: 'Pineapple Financial Inc.' },
+  { cik_str: 1710495, ticker: 'PNXP', title: 'PINEAPPLE EXPRESS CANNABIS Co' },
+  { cik_str: 780571, ticker: 'ITRI', title: 'ITRON, INC.' },
+  { cik_str: 91668, ticker: 'SODI', title: 'SOLITRON DEVICES INC' },
+  { cik_str: 844985, ticker: 'POSC', title: 'POSITRON CORP' },
+  { cik_str: 942126, ticker: 'TAIT', title: 'TAITRON COMPONENTS INC' },
+  { cik_str: 1866633, ticker: 'CCSI', title: 'Consensus Cloud Solutions, Inc.' },
+  { cik_str: 1494891, ticker: 'SRTS', title: 'Sensus Healthcare, Inc.' },
+  { cik_str: 1001838, ticker: 'SCCO', title: 'SOUTHERN COPPER CORP/' },
+  { cik_str: 92122, ticker: 'SO', title: 'SOUTHERN CO' },
+  { cik_str: 702165, ticker: 'NSC', title: 'NORFOLK SOUTHERN CORP' },
+  { cik_str: 92122, ticker: 'SOJC', title: 'SOUTHERN CO' },
+  { cik_str: 1747777, ticker: 'OTF', title: 'Blue Owl Technology Finance Corp.' },
+  { cik_str: 86312, ticker: 'TRV', title: 'TRAVELERS COMPANIES, INC.' },
+  { cik_str: 1326801, ticker: 'META', title: 'Meta Platforms, Inc.' },
+  // Suffixes outside the four buckets (#107): dropped for a bare query, never merged.
+  { cik_str: 312069, ticker: 'BCS', title: 'BARCLAYS PLC' },
+  { cik_str: 312070, ticker: 'ATMP', title: 'BARCLAYS BANK PLC' },
+  { cik_str: 1552275, ticker: 'SUN', title: 'Sunoco LP' },
+  { cik_str: 2089661, ticker: 'SUNC', title: 'SunocoCorp LLC' },
+  { cik_str: 887028, ticker: 'RTNTF', title: 'RIO TINTO LTD' },
+  { cik_str: 863064, ticker: 'RIO', title: 'RIO TINTO PLC' },
 ];
 
 const jsonResponse = (body: unknown) =>
@@ -109,13 +138,72 @@ describe('EdgarApiService.resolveCik', () => {
     expect(await getEdgarApiService().resolveCik('zzzzzzzz not a company')).toEqual([]);
   });
 
-  it('keeps a name prefix hit ranked behind the exact hit', async () => {
+  it('resolves an exact hit alone, without the prefix hits behind it (#155)', async () => {
     // 'toro co' matches TORO CO exactly, and TORO CORP. plus the committed former
-    // name 'toro combineco, inc.' by prefix — a pre-existing multi-match this
-    // change does not alter. Exact stays first.
-    const ciks = await resolveCiks('Toro Co');
-    expect(ciks[0]).toBe('0000737758');
-    expect(ciks.length).toBeGreaterThan(1);
+    // name 'toro combineco, inc.' only by prefix — a weaker tier, so not ambiguity.
+    expect(await resolveCiks('Toro Co')).toEqual(['0000737758']);
+  });
+
+  // --- Best-tier resolution (#155) ---
+
+  it.each([
+    // Exact once the registry's terminal suffix (and a comma before it) is dropped.
+    ['Apple', '0000320193', 'Apple Inc.'],
+    ['Itron', '0000780571', 'ITRON, INC.'],
+    ['Southern', '0000092122', 'SOUTHERN CO'],
+    // The only prefix hit; Consensus Cloud Solutions merely contains the query.
+    ['Sensus', '0001494891', 'Sensus Healthcare, Inc.'],
+  ])(
+    'resolves %s within its best tier rather than listing weaker hits',
+    async (query, cik, name) => {
+      const match = await resolveOne(query);
+      expect(match.cik).toBe(cik);
+      expect(match.name).toBe(name);
+    },
+  );
+
+  it('lists the CIKs sharing the winning tier, without the tiers below it (#155)', async () => {
+    // Two current prefix hits, plus the former names 'pineapple energy inc.' and
+    // 'pineapple holdings, inc.' (CIK 22701) at the same tier; MAUI LAND & PINEAPPLE
+    // only contains the query and stays out.
+    expect(await resolveCiks('Pineapple')).toEqual(['0001938109', '0001710495', '0000022701']);
+  });
+
+  it('keeps two suffix variants that both drop to the query ambiguous (#155)', async () => {
+    // Dropping a suffix compares the registry name with the query as typed, so the
+    // two registrants tie rather than one bucket winning.
+    expect(await resolveCiks('Blue Owl Capital')).toEqual(['0001823945', '0001655888']);
+    expect(await resolveCiks('Fluent')).toEqual(['0001460329', '0001758124']);
+  });
+
+  it('lets a former name tie a current one but never outrank it (#155)', async () => {
+    // 'travelers inc' (a former name of CIK 831001) is exact once its suffix drops;
+    // TRAVELERS COMPANIES, INC. is only a prefix hit. The current holder still wins
+    // the tier choice, the former name joins as a tie, and current names list first.
+    expect(await resolveCiks('Travelers')).toEqual(['0000086312', '0000831001']);
+  });
+
+  it('resolves a name only a former name matches (#155)', async () => {
+    const match = await resolveOne('Facebook Inc');
+    expect(match.cik).toBe('0001326801');
+    expect(match.ticker).toBeUndefined();
+  });
+
+  it('drops plc and lp for a bare query, like the four buckets (#155)', async () => {
+    // BARCLAYS PLC and Sunoco LP are exact once their suffix drops; BARCLAYS BANK PLC
+    // and SunocoCorp LLC stay prefix hits.
+    expect(await resolveCiks('Barclays')).toEqual(['0000312069']);
+    expect(await resolveCiks('Sunoco')).toEqual(['0001552275']);
+  });
+
+  it('ties registrants whose suffixes fall in different sets (#155)', async () => {
+    // `ltd` and `plc` both drop for a bare query, so neither registrant wins silently.
+    expect(await resolveCiks('Rio Tinto')).toEqual(['0000887028', '0000863064']);
+  });
+
+  it('never drops the query suffix or merges plc into a bucket (#155)', async () => {
+    expect(await resolveCiks('Rio Tinto plc')).toEqual(['0000863064']);
+    expect(await resolveCiks('Rio Tinto Limited')).toEqual(['0000887028']);
   });
 
   // --- Corporate-suffix normalization (#107) ---

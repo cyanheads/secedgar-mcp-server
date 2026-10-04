@@ -132,6 +132,9 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
         'Number of filings to fetch and parse, newest first. Each filing is a separate document fetch, so this is the cost of the call as well as its depth. Default 10; a widely-held company can have dozens of blockholder filings a year.',
       ),
   }),
+  // The company-identifier keys other tools take. `issuer` is this tool's only company
+  // input, so each maps one-to-one (#152).
+  inputAliases: { company: 'issuer', ticker: 'issuer', cik: 'issuer', ticker_or_cik: 'issuer' },
 
   output: z.object({
     issuer: z.string().describe('The issuer input, echoed.'),
@@ -143,20 +146,20 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     total_structured_filings: z
       .number()
       .describe(
-        "Structured SCHEDULE 13D/13G filings matching the form filter in the issuer's recent submissions window, before the limit. The population the returned filings are the newest slice of.",
+        'Structured 13D/13G filings matching form_kind in the recent submissions window, before limit.',
       ),
     filings_parsed: z
       .number()
-      .describe('Filings actually fetched and parsed — total_structured_filings capped by limit.'),
+      .describe('Filings fetched and parsed: total_structured_filings capped by limit.'),
     structured_coverage_from: z
       .string()
       .describe(
-        'First filing date on which SEC required this XML format (YYYY-MM-DD). Blockholder filings before it exist but are not parseable into this schema.',
+        'First date SEC required this XML format (YYYY-MM-DD); earlier blockholder filings cannot be parsed here.',
       ),
     legacy_filings_before_coverage: z
       .number()
       .describe(
-        "Legacy SC 13D / SC 13G filings in the issuer's recent submissions window — pre-2024-12-18 stakes this tool cannot parse. Reach them with secedgar_search_filings and read them with secedgar_get_filing. A floor, not a lifetime count: the submissions window holds the last year or 1,000 filings of every type, whichever is more.",
+        'Legacy SC 13D / SC 13G filings (pre-2024-12-18) in the recent submissions window, which this tool cannot parse; find them with secedgar_search_filings. A floor: the window holds the last year or 1,000 filings.',
       ),
     filings: z
       .array(
@@ -179,13 +182,13 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
               .string()
               .optional()
               .describe(
-                'Date of the event that required the filing (YYYY-MM-DD) — when the position actually crossed or changed, which precedes filing_date. Absent when the cover page omits it.',
+                'Date of the event that required the filing (YYYY-MM-DD). Absent when the cover page omits it.',
               ),
             security_class: z
               .string()
               .optional()
               .describe(
-                'Title of the class of securities the schedule covers. A multi-class issuer has a separate schedule per class, so percentages are of this class only.',
+                'Class of securities the schedule covers; percentages are of this class only.',
               ),
             cusips: z
               .array(z.string())
@@ -194,12 +197,12 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
               .string()
               .optional()
               .describe(
-                'Item 4 purpose-of-transaction prose — what the holder says it intends. Present on 13D filings only; 13G has no such field, which is what makes it the passive form. Absent on an amendment that restates no purpose.',
+                'Item 4 purpose of transaction, 13D only. Absent on 13G and on an amendment that restates none.',
               ),
             purpose_truncated: z
               .boolean()
               .describe(
-                'True when purpose_of_transaction was clipped to fit — read the full item with secedgar_get_filing on this accession number.',
+                'True when purpose_of_transaction was clipped; read the full item with secedgar_get_filing.',
               ),
             reporting_persons: z
               .array(
@@ -210,25 +213,25 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
                       .string()
                       .optional()
                       .describe(
-                        'Reporting person CIK, when the schedule carries one. SCHEDULE 13G never does — its cover page has no CIK field — so this is populated on 13D filings only.',
+                        'Reporting person CIK. 13D only; the 13G cover page has no CIK field.',
                       ),
                     citizenship: z
                       .string()
                       .optional()
                       .describe(
-                        'SEC citizenship or place-of-organization code — a US state ("DE"), or an SEC country code ("X1" United States, "E9" Cayman Islands).',
+                        'SEC citizenship or place-of-organization code: a US state ("DE") or SEC country code ("E9" Cayman Islands).',
                       ),
                     percent_of_class: z
                       .number()
                       .optional()
                       .describe(
-                        'Percent of the class this person beneficially owns (0-100), as this person reports it. Per person, not per filing: joint filers report overlapping shares, so these do not sum to a group total.',
+                        'Percent of the class this person beneficially owns (0-100). Joint filers report overlapping shares, so these do not sum.',
                       ),
                     aggregate_amount_owned: z
                       .number()
                       .optional()
                       .describe(
-                        'Shares beneficially owned by this person. Absent when the person reports no amount, which happens on an exit amendment reporting a zero position.',
+                        'Shares beneficially owned by this person. Absent when none is reported, as on an exit amendment.',
                       ),
                     sole_voting_power: z
                       .number()
@@ -251,25 +254,25 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
                     person_types: z
                       .array(z.string())
                       .describe(
-                        'SEC type-of-reporting-person codes — IN individual, CO corporation, PN partnership, IA investment adviser, HC holding company, OO other. One person can carry several.',
+                        'SEC reporting-person codes: IN individual, CO corporation, PN partnership, IA investment adviser, HC holding company, OO other.',
                       ),
                     excludes_certain_shares: z
                       .boolean()
                       .optional()
                       .describe(
-                        'True when the reported aggregate deliberately excludes shares this person disclaims beneficial ownership of. Absent when the filing does not answer.',
+                        'True when the aggregate excludes shares this person disclaims. Absent when the filing does not say.',
                       ),
                     notes: z
                       .string()
                       .optional()
                       .describe(
-                        "The filer's own cover-page footnote, usually the share count the percentage was computed against. Clipped when long — the full text is in the filing.",
+                        "The filer's cover-page footnote, often the share count behind the percentage. Clipped when long.",
                       ),
                   })
                   .describe('One reporting person from the schedule cover page.'),
               )
               .describe(
-                'Every reporting person on this filing. A joint filing lists a fund, its adviser, and its controlling principal separately, each reporting the same underlying shares.',
+                'Every reporting person; a joint filing lists a fund, its adviser, and its principal separately, each reporting the same shares.',
               ),
           })
           .describe('One SCHEDULE 13D or 13G filing made about this issuer.'),
@@ -280,19 +283,17 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
         name: z
           .string()
           .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
           ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
         truncated: z
           .boolean()
-          .describe(
-            'True when the issuer has more structured filings than limit fetched — the dataframe holds the parsed filings only, not the whole history.',
-          ),
+          .describe('True when more structured filings exist than limit fetched.'),
       })
       .optional()
       .describe(
-        "Canvas dataframe holding one row per reporting person across every parsed filing, each row carrying the issuer, form, accession, and dates alongside the person's powers. Joins against the insider and 13F dataframes on issuer_cik. Absent when canvas is unavailable or nothing parsed.",
+        'Dataframe with one row per reporting person across parsed filings; joins insider and 13F dataframes on issuer_cik. Absent when canvas is unavailable or nothing parsed.',
       ),
   }),
 
@@ -300,7 +301,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance when no filings matched — names the coverage boundary and the fallback.'),
+      .describe('Guidance when no filings matched, naming the coverage boundary and the fallback.'),
     truncated: z.boolean().optional().describe('True when filings were capped by limit.'),
     shown: z.number().optional().describe('Number of filings returned.'),
     cap: z.number().optional().describe('The limit cap applied.'),

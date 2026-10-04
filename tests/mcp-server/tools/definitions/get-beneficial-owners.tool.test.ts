@@ -2,15 +2,17 @@
  * @fileoverview Tests for get-beneficial-owners — filing selection off the issuer's own
  * submissions feed, the form_kind and amendment filters, the December 2024 coverage
  * boundary the legacy form names sit behind, per-person canvas rows, and the free-text
- * clipping that keeps one filing's Item 4 from crowding out every other filing.
+ * clipping that keeps one filing's Item 4 from crowding out every other filing, and the
+ * company-identifier aliases on `issuer` (#152).
  * @module tests/mcp-server/tools/definitions/get-beneficial-owners.tool
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getBeneficialOwnersTool } from '@/mcp-server/tools/definitions/get-beneficial-owners.tool.js';
 import type { FilingsRecent } from '@/services/edgar/types.js';
+import { blockText, wireError } from '../../../support/assertions.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
   const actual = await importActual<typeof import('@/services/edgar/edgar-api-service.js')>();
@@ -470,5 +472,37 @@ describe('getBeneficialOwnersTool', () => {
     expect(rendered).toContain('13G is the passive form and has no purpose item');
     expect(rendered).toContain('7.48% of class');
     expect(rendered).toContain('23 legacy SC 13D/SC 13G filings');
+  });
+});
+
+// Through the real argument-parsing path, where `inputAliases` is applied (#152).
+describe('getBeneficialOwnersTool parameter names (#152)', () => {
+  const call = (args: Record<string, unknown>) =>
+    runToolContract(getBeneficialOwnersTool, args as never);
+
+  it.each(['issuer', 'company', 'ticker', 'cik', 'ticker_or_cik'])(
+    'resolves the issuer from %s',
+    async (key) => {
+      const result = await call({ [key]: 'AAPL' });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockApi.resolveCik).toHaveBeenCalledWith('AAPL');
+      expect(result.structuredContent).toMatchObject({
+        issuer: 'AAPL',
+        issuer_cik: '0000320193',
+        issuer_name: 'Apple Inc.',
+      });
+      expect(blockText(result.content)).toContain(
+        '**5%+ beneficial owners of Apple Inc.** (CIK 0000320193) — input "AAPL"',
+      );
+    },
+  );
+
+  it('rejects an alias sent beside issuer by name rather than picking one', async () => {
+    const result = await call({ issuer: 'AAPL', company: 'MSFT' });
+
+    expect(wireError(result).data.reason).toBe('invalid_arguments');
+    expect(blockText(result.content)).toContain('"company"');
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
   });
 });

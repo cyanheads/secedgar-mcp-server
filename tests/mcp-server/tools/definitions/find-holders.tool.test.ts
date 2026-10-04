@@ -1,15 +1,17 @@
 /**
  * @fileoverview Tests for find-holders — the 13F reverse lookup. Covers quarter
  * defaulting and the filing window, the reporting-period filter, CUSIP vs name
- * search modes, the paging budget, and both zero-hit causes.
+ * search modes, the paging budget, both zero-hit causes, and the company-identifier
+ * aliases on `issuer` (#152).
  * @module tests/mcp-server/tools/definitions/find-holders.tool
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { findHoldersTool } from '@/mcp-server/tools/definitions/find-holders.tool.js';
 import type { EftsHit, EftsResponse } from '@/services/edgar/types.js';
+import { blockText, wireError } from '../../../support/assertions.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
   const actual = await importActual<typeof import('@/services/edgar/edgar-api-service.js')>();
@@ -452,5 +454,34 @@ describe('findHoldersTool', () => {
     expect(rendered).toContain('6652 filings in the window');
     expect(rendered).toContain('477 managers reporting 2026-Q1');
     expect(rendered).toContain('BERKSHIRE HATHAWAY INC (CIK 0001067983)');
+  });
+});
+
+// Through the real argument-parsing path, where `inputAliases` is applied (#152).
+describe('findHoldersTool parameter names (#152)', () => {
+  const call = (args: Record<string, unknown>) => runToolContract(findHoldersTool, args as never);
+
+  it.each(['issuer', 'company', 'ticker', 'cik', 'ticker_or_cik'])(
+    'resolves the issuer from %s',
+    async (key) => {
+      const result = await call({ [key]: 'AAPL' });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockApi.resolveCik).toHaveBeenCalledWith('AAPL');
+      expect(result.structuredContent).toMatchObject({
+        issuer: 'AAPL',
+        resolved_issuer_name: 'Apple Inc.',
+        resolved_issuer_cik: '0000320193',
+      });
+      expect(blockText(result.content)).toContain('Resolved issuer: Apple Inc. (CIK 0000320193)');
+    },
+  );
+
+  it('rejects an alias sent beside issuer by name rather than picking one', async () => {
+    const result = await call({ issuer: 'AAPL', company: 'MSFT' });
+
+    expect(wireError(result).data.reason).toBe('invalid_arguments');
+    expect(blockText(result.content)).toContain('"company"');
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
   });
 });

@@ -38,7 +38,15 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService, suggestCompanies } from '@/services/edgar/edgar-api-service.js';
-import { at, blockAt, blockText, caught, recoveryHint } from '../../../support/assertions.js';
+import {
+  at,
+  bag,
+  blockAt,
+  blockText,
+  caught,
+  recoveryHint,
+  wireError,
+} from '../../../support/assertions.js';
 
 const mockSubmissions: SubmissionsResponse = {
   cik: '0000320193',
@@ -416,7 +424,8 @@ describe('companySearchTool', () => {
 
     expect(err.data.reason).toBe('no_match');
     const hint = recoveryHint(err);
-    expect(hint).toContain('data.suggestions');
+    // Only the throw that attaches suggestions points at them (#153).
+    expect(hint.startsWith('Check `data.suggestions` for near matches. ')).toBe(true);
     // The ETF/mutual-fund ticker guidance survives the rewrite.
     expect(hint).toContain('VOO');
     expect(err.data.suggestions).toHaveLength(1);
@@ -430,15 +439,14 @@ describe('companySearchTool', () => {
     const ctx = createMockContext({ errors: companySearchTool.errors });
     const input = companySearchTool.input.parse({ query: 'XYZNOTREAL' });
 
-    let caught: unknown;
-    try {
-      await companySearchTool.handler(input, ctx);
-    } catch (e) {
-      caught = e;
-    }
+    const err = await caught(companySearchTool.handler(input, ctx));
 
-    const err = caught as { data?: { suggestions?: unknown } };
-    expect(err.data?.suggestions).toBeUndefined();
+    expect(err.data.reason).toBe('no_match');
+    expect(err.data.suggestions).toBeUndefined();
+    // The hint names no field the error does not carry (#153).
+    const hint = recoveryHint(err);
+    expect(hint).not.toContain('data.suggestions');
+    expect(hint).toContain('VOO');
   });
 
   // --- Suffix-form resolution reaching both output surfaces (#107) ---
@@ -527,9 +535,11 @@ describe('companySearchTool', () => {
     };
     // Must surface as no_match, not a raw 404
     expect(err.data?.reason).toBe('no_match');
-    // Recovery hint must be present
+    // Recovery hint must be present, and must not point at suggestions it lacks (#153)
     expect(typeof err.data?.recovery?.hint).toBe('string');
     expect(err.data!.recovery!.hint!.length).toBeGreaterThan(0);
+    expect(err.data!.recovery!.hint).not.toContain('data.suggestions');
+    expect(err.data).not.toHaveProperty('suggestions');
     // Internal SEC URL must NOT appear in the error message
     expect(err.message).not.toContain('data.sec.gov');
     expect(err.message).not.toContain('CIK0000099999');
@@ -756,6 +766,52 @@ describe('companySearchTool', () => {
   });
 });
 
+// The assembled error result, where the declared recovery fill lands (#153).
+describe('companySearchTool no_match recovery on the wire (#153)', () => {
+  const call = (args: Record<string, unknown>) => runToolContract(companySearchTool, args as never);
+
+  it.each([
+    ['a zero-hit name with no near match', [] as CikMatch[], 'Nonexistent Widget Makers of Ohio'],
+    ['an unknown bare CIK', { cik: '9999999999' }, '9999999999'],
+  ])('names no data.suggestions for %s', async (_case, resolved, query) => {
+    mockApi.resolveCik.mockResolvedValue(resolved);
+    mockApi.getSubmissions.mockRejectedValue(
+      new McpError(JsonRpcErrorCode.NotFound, 'SEC EDGAR API returned 404', { status: 404 }),
+    );
+
+    const result = await call({ query, include_filings: false });
+
+    const error = wireError(result);
+    expect(error.data.reason).toBe('no_match');
+    expect(error.data).not.toHaveProperty('suggestions');
+    expect(bag(error.data.recovery).hint).not.toContain('data.suggestions');
+    const text = blockText(result.content);
+    expect(text).toContain('Recovery:');
+    expect(text).not.toContain('data.suggestions');
+  });
+
+  it('points at data.suggestions when the zero-hit throw attaches them', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+    vi.mocked(suggestCompanies).mockReturnValue([
+      { cik: '0000789019', name: 'MICROSOFT CORP', ticker: 'MSFT' },
+    ]);
+
+    const result = await call({ query: 'Microsfot', include_filings: false });
+
+    const error = wireError(result);
+    expect(error.data.reason).toBe('no_match');
+    expect(error.data.suggestions).toEqual([
+      { cik: '0000789019', name: 'MICROSOFT CORP', ticker: 'MSFT' },
+    ]);
+    const hint = String(bag(error.data.recovery).hint);
+    expect(hint.startsWith('Check `data.suggestions` for near matches. ')).toBe(true);
+    expect(hint).toContain('VOO');
+    const text = blockText(result.content);
+    expect(text).toContain('MICROSOFT CORP (MSFT)');
+    expect(text).toContain('Check `data.suggestions` for near matches.');
+  });
+});
+
 // Through the real argument-parsing path, where `inputAliases` is applied (#115).
 describe('companySearchTool parameter names (#115)', () => {
   const call = (args: Record<string, unknown>) => runToolContract(companySearchTool, args as never);
@@ -797,6 +853,39 @@ describe('companySearchTool parameter names (#115)', () => {
 
     expect(result.isError).toBe(true);
     expect(blockText(result.content)).toContain('bogus');
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
+  });
+
+  // The company-identifier spellings other tools take, rewritten onto `query` (#152).
+  it.each(['query', 'company', 'ticker', 'cik', 'ticker_or_cik', 'name', 'search'])(
+    'resolves the company with %s',
+    async (key) => {
+      const result = await call({ [key]: 'AAPL', include_filings: false });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockApi.resolveCik).toHaveBeenCalledWith('AAPL');
+      expect(result.structuredContent).toMatchObject({ cik: '0000320193', name: 'Apple Inc.' });
+      expect(blockText(result.content)).toContain('**Apple Inc.** (AAPL)');
+    },
+  );
+
+  it('accepts a numeric cik, repaired to the string query expects (#152)', async () => {
+    const result = await call({ cik: 320193, include_filings: false });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.resolveCik).toHaveBeenCalledWith('320193');
+    expect(result.structuredContent).toMatchObject({ cik: '0000320193' });
+  });
+
+  it.each([
+    [{ query: 'AAPL', company: 'MSFT' }, 'company'],
+    [{ company: 'AAPL', ticker: 'MSFT' }, 'ticker'],
+  ])('rejects %o by naming the leftover %s rather than picking one (#152)', async (args, key) => {
+    const result = await call({ ...args, include_filings: false });
+
+    const error = wireError(result);
+    expect(error.data.reason).toBe('invalid_arguments');
+    expect(blockText(result.content)).toContain(`"${key}"`);
     expect(mockApi.resolveCik).not.toHaveBeenCalled();
   });
 });

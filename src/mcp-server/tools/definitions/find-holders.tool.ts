@@ -168,6 +168,9 @@ export const findHoldersTool = tool('secedgar_find_holders', {
         'Filer rows returned inline. The full fetched set (up to 500 rows) is materialized as a dataframe when a canvas is available. Default 20.',
       ),
   }),
+  // The company-identifier keys other tools take. `issuer` is this tool's only company
+  // input (`cusip` is a separate 9-character key), so each maps one-to-one (#152).
+  inputAliases: { company: 'issuer', ticker: 'issuer', cik: 'issuer', ticker_or_cik: 'issuer' },
 
   output: z.object({
     issuer: z.string().describe('The issuer input, echoed.'),
@@ -175,7 +178,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
       .string()
       .optional()
       .describe(
-        'EDGAR-conformed company name the issuer resolved to, and the phrase that was searched. Absent when cusip was supplied (no company lookup runs).',
+        'EDGAR-conformed name the issuer resolved to, also the phrase searched. Absent when cusip was supplied.',
       ),
     resolved_issuer_cik: z
       .string()
@@ -186,33 +189,29 @@ export const findHoldersTool = tool('secedgar_find_holders', {
     search_mode: z
       .enum(['cusip', 'name'])
       .describe(
-        'Which key matched the information tables. "cusip" matches the identifier the table itself carries; "name" phrase-matches the filing text and is looser in both directions.',
+        '"cusip" matches the information table\'s identifier; "name" phrase-matches filing text, looser both ways.',
       ),
     search_key: z.string().describe('The exact term searched — the CUSIP, or the quoted phrase.'),
     quarter: z
       .string()
-      .describe(
-        'Reporting quarter searched, "YYYY-QN" — the requested one, or the applied default.',
-      ),
+      .describe('Reporting quarter searched, "YYYY-QN": the requested one or the default.'),
     filed_from: z.string().describe('Start of the filing window searched (YYYY-MM-DD).'),
     filed_to: z.string().describe('End of the filing window searched (YYYY-MM-DD).'),
     total_filings: z
       .number()
       .describe(
-        "Total 13F-HR filings matching the search key inside the filing window, as reported by the index. A slight over-count of this quarter's holders on two counts, both of which the returned rows correct for: a few percent are amendments restating an older quarter, and a few more are managers amending their own report for this quarter, which puts them in the window twice.",
+        '13F-HR filings matching the search key in the window, per the index; slightly over-counts holders (amendments of older quarters, managers amending this one), which holders_in_quarter corrects.',
       ),
     total_is_exact: z
       .boolean()
       .describe('False when total_filings is a lower bound (the index capped the count).'),
     fetched: z
       .number()
-      .describe(
-        'Filings retrieved from the index, capped by the fetch budget of 500. Equals total_filings when the whole window fit inside the budget.',
-      ),
+      .describe('Filings retrieved, at most 500; equals total_filings when the window fit.'),
     holders_in_quarter: z
       .number()
       .describe(
-        'Distinct managers among the fetched filings reporting this quarter as their period — the set paged by limit and materialized on the dataframe. Lower than fetched by the filings dropped as amendments restating other quarters, and by managers that amended this quarter (kept once, at their latest filing).',
+        'Distinct managers reporting this quarter among fetched filings: the set limit pages and the dataframe holds. Other-quarter amendments drop; a manager that amended counts once, at its latest filing.',
       ),
     holders: z
       .array(
@@ -220,13 +219,11 @@ export const findHoldersTool = tool('secedgar_find_holders', {
           .object({
             filer_name: z
               .string()
-              .describe(
-                'Institutional manager that filed, with ticker/CIK parentheticals stripped.',
-              ),
+              .describe('Institutional manager that filed, ticker/CIK parentheticals stripped.'),
             filer_cik: z
               .string()
               .describe(
-                "Filer CIK, zero-padded to 10 digits. Pass as company to secedgar_get_institutional_holdings for this manager's positions.",
+                'Filer CIK, zero-padded to 10 digits; pass as company to secedgar_get_institutional_holdings.',
               ),
             accession_number: z
               .string()
@@ -236,32 +233,28 @@ export const findHoldersTool = tool('secedgar_find_holders', {
               .string()
               .optional()
               .describe(
-                'Form type, "13F-HR" or "13F-HR/A" for an amendment. Absent when the index carries no form tag.',
+                '"13F-HR", or "13F-HR/A" for an amendment. Absent when the index carries no form tag.',
               ),
           })
           .describe('One institutional manager reporting a position in this issuer.'),
       )
-      .describe(
-        'One page of filers, capped at limit. Order carries no position-size meaning — see the ordering note.',
-      ),
+      .describe('One page of filers, capped at limit; order says nothing about position size.'),
     dataset: z
       .object({
         name: z
           .string()
           .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) — inspect its columns with secedgar_dataframe_describe, then query it with secedgar_dataframe_query.',
+            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
           ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
         truncated: z
           .boolean()
-          .describe(
-            'True when more filers exist beyond the fetch budget — total_filings exceeds fetched.',
-          ),
+          .describe('True when total_filings exceeds fetched, so more filers exist.'),
       })
       .optional()
       .describe(
-        'Canvas dataframe holding every fetched filer row, each carrying the issuer key and quarter so it joins across issuers and quarters. Absent when the result fits inline, canvas is unavailable, or materialization failed. Query with secedgar_dataframe_query.',
+        'Dataframe of every fetched filer row, keyed by issuer and quarter for cross-issuer joins. Absent when the result fits inline, canvas is unavailable, or staging failed.',
       ),
   }),
 
