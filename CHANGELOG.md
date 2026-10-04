@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.15.10](changelog/0.15.x/0.15.10.md) — 2026-10-04
+
+Framework mcp-ts-core 0.13.6 → 0.13.11. Multi-arch Docker images now install each architecture's DuckDB binding without relying on the OTel step (#150) and drop unused musl bindings; tool errors carry their request ID; server.json's HTTP entry selects the HTTP transport.
+
 ## [0.15.9](changelog/0.15.x/0.15.9.md) — 2026-09-25
 
 Annual XBRL values no longer come from a proxy statement's pay-versus-performance figure or a 10-Q's trailing-twelve-month total. Adds ppe_net, pretax_income, and shares_diluted, successor tags for capex and interest_expense, early unknown_concept errors with suggestions, and a taxonomy input on secedgar_fetch_frames.

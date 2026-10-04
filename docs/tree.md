@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-09-25 11:49:39
+Generated on: 2026-10-04 07:36:26
 
 ```text
 secedgar-mcp-server/
@@ -146,9 +146,11 @@ secedgar-mcp-server/
 │   ├── edgar-mirror-refresh.ts
 │   ├── edgar-mirror-verify.ts
 │   ├── gen-former-names.ts
+│   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
 │   ├── list-skills.ts
+│   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
