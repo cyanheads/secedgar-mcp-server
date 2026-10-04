@@ -319,8 +319,12 @@ const BARE_ITEM_MARKER_RE = /^(item[^\S\n]+\d{1,2}[a-z]?\.?)[^\S\n]*$/gim;
  * character of what follows. Non-global: a predicate, not a scanner.
  */
 const UNPUNCTUATED_ITEM_RE = /^item[^\S\n]+\d{1,2}[a-z]?(?![.:\w])[^\S\n]*(\S)/i;
-/** A line that ends mid-sentence — on a lowercase word, a comma, or a semicolon. */
-const MID_SENTENCE_END_RE = /[a-z,;]$/;
+/**
+ * A line that ends mid-sentence — on a comma or a semicolon. A line ending on a
+ * lowercase word is no evidence: running page headers end that way ("Table of
+ * Contents" above "Item 5 — Other information" at the top of a page).
+ */
+const MID_SENTENCE_END_RE = /[,;]$/;
 
 /**
  * Whether an Item line that starts at `lineStart` is a wrapped sentence, not a
@@ -331,7 +335,7 @@ const MID_SENTENCE_END_RE = /[a-z,;]$/;
  * heading puts a period or colon after its marker, or a capitalized title ("Item 6
  * Selected Financial Data", "Item 1 - Legal Proceedings"). An unpunctuated marker
  * reads as prose when the word after it starts lowercase ("Item 1 is the election
- * of…") or when the line before it ends mid-sentence.
+ * of…") or when the line before it ends on a comma or semicolon.
  */
 function isWrappedProse(text: string, lineStart: number, line: string): boolean {
   const marker = UNPUNCTUATED_ITEM_RE.exec(line);

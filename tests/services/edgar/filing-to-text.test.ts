@@ -607,10 +607,6 @@ describe('detectHeadings — a wrapped sentence that starts a line with an Item 
       'Proxy matters.\n\nItem 1 is the election of directors.\n',
     ],
     [
-      'the line before ends on a lowercase word',
-      'For liquidity, see\nItem 7 "Liquidity and Capital Resources."\n',
-    ],
-    [
       'the line before ends on a comma',
       'as described in Part III,\nItem 13 - Certain Relationships.\n',
     ],
@@ -641,6 +637,11 @@ describe('detectHeadings — a wrapped sentence that starts a line with an Item 
       'a punctuated Item under a running page header',
       'Table of Contents\nItem 7. Management’s Discussion and Analysis\n',
       'Item 7. Management’s Discussion and Analysis',
+    ],
+    [
+      'an unpunctuated Item under a running page header',
+      'Table of Contents\nItem 5 — Other information\n',
+      'Item 5 — Other information',
     ],
   ])('keeps %s', (_label, text, heading) => {
     expect(detectHeadings(text).map((h) => h.heading)).toContain(heading);
