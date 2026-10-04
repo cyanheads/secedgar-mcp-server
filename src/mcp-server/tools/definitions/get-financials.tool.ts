@@ -242,9 +242,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     // Resolve company to CIK
     const resolved = await api.resolveCik(input.company);
     if (Array.isArray(resolved) && resolved.length === 0) {
-      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`, {
-        ...ctx.recoveryFor('company_not_found'),
-      });
+      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
     }
     if (Array.isArray(resolved) && resolved.length > 1) {
       // Render the candidates into the message itself, not just structured data —
@@ -259,7 +257,6 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
         'ambiguous_company',
         `'${input.company}' matches multiple companies: ${list}. Retry with one of these tickers or 10-digit CIKs.`,
         {
-          ...ctx.recoveryFor('ambiguous_company'),
           matches: shown.map((m) => ({
             cik: m.cik,
             name: m.name,
@@ -270,9 +267,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     }
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
     if (!match) {
-      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`, {
-        ...ctx.recoveryFor('company_not_found'),
-      });
+      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
     }
 
     // Resolve concept to taxonomy + XBRL tag(s). The mapping's own taxonomy wins
@@ -423,10 +418,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       throw ctx.fail(
         'no_frame_data',
         `'${conceptTag}' exists for this company but has no standard-period data.`,
-        {
-          ...ctx.recoveryFor('no_frame_data'),
-          tag: conceptTag,
-        },
+        { tag: conceptTag },
       );
     }
 

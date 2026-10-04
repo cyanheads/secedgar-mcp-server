@@ -880,7 +880,6 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       throw ctx.fail(
         'invalid_date_range',
         'Both filed_after and filed_before are required when filtering by date.',
-        { ...ctx.recoveryFor('invalid_date_range') },
       );
     }
 
@@ -893,7 +892,6 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       throw ctx.fail(
         'missing_criteria',
         'A full-text query or a forms filter is required — a date range alone is not a valid search.',
-        { ...ctx.recoveryFor('missing_criteria') },
       );
     }
 
@@ -922,7 +920,6 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         throw ctx.fail(
           'pre2001_full_text_unscoped',
           `Full-text search is unavailable before ${EFTS_FULLTEXT_FLOOR} (where the EFTS index starts), so the ${startDate}..${archiveEnd} part of this range has no index to search. Add ticker:/cik: entity scope to match those filings by reading them, drop the text terms to browse by form and date, or start the range at ${EFTS_FULLTEXT_FLOOR}.`,
-          { ...ctx.recoveryFor('pre2001_full_text_unscoped') },
         );
       }
 

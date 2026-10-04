@@ -384,17 +384,12 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       throw ctx.fail(
         'ambiguous_entity',
         `'${input.company}' matches multiple EDGAR entities: ${list}. Retry with the exact 10-digit CIK.`,
-        {
-          ...ctx.recoveryFor('ambiguous_entity'),
-          matches: shown.map((c) => ({ cik: c.cik, name: c.name, ticker: c.ticker })),
-        },
+        { matches: shown.map((c) => ({ cik: c.cik, name: c.name, ticker: c.ticker })) },
       );
     }
     const [match] = candidates;
     if (!match) {
-      throw ctx.fail('company_not_found', `Entity '${input.company}' not found.`, {
-        ...ctx.recoveryFor('company_not_found'),
-      });
+      throw ctx.fail('company_not_found', `Entity '${input.company}' not found.`);
     }
 
     // Validate the requested quarter's format before any lookup (fail fast on bad input).
@@ -424,7 +419,6 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
         throw ctx.fail(
           'company_not_found',
           `No 13F filer found for CIK ${match.cik}. If this looks like an accession-number prefix, it's the filer/agent, not the issuer — use secedgar_company_search to find the institution.`,
-          { ...ctx.recoveryFor('company_not_found') },
         );
       }
       // A cache-hit or name-resolved match that 404s signals an EDGAR-side problem, not
@@ -529,7 +523,6 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
         throw ctx.fail(
           'no_filings_found',
           `No 13F-HR filings found for '${input.company}' (resolves to ${submissions.name}). This entity is not a 13F institutional filer.`,
-          { ...ctx.recoveryFor('no_filings_found') },
         );
       }
       // 13F filings exist, but none for the requested quarter (#31) — a real 13F filer.
@@ -540,7 +533,6 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       throw ctx.fail(
         'no_filings_found',
         `No 13F-HR filings found for '${input.company}' for quarter "${input.quarter}".${searched}`,
-        { ...ctx.recoveryFor('no_filings_found') },
       );
     }
 
@@ -550,7 +542,6 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       throw ctx.fail(
         'no_info_table',
         `Filing ${filingMeta.accessionNumber} index could not be fetched.`,
-        { ...ctx.recoveryFor('no_info_table') },
       );
     }
 
@@ -562,7 +553,6 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
         {
           accession_number: filingMeta.accessionNumber,
           available_documents: filingIndex.directory.item.map((i) => i.name),
-          ...ctx.recoveryFor('no_info_table'),
         },
       );
     }
@@ -576,7 +566,6 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       throw ctx.fail(
         'no_info_table',
         `Information table document '${infoTableDoc}' could not be fetched.`,
-        { ...ctx.recoveryFor('no_info_table') },
       );
     }
 
@@ -599,7 +588,6 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       throw ctx.fail(
         'no_info_table',
         `Failed to parse information table XML for filing ${filingMeta.accessionNumber}.`,
-        { ...ctx.recoveryFor('no_info_table') },
       );
     }
 

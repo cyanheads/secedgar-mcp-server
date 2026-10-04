@@ -312,9 +312,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     const resolved = await api.resolveCik(input.company);
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
     if (!match || (Array.isArray(resolved) && resolved.length === 0)) {
-      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`, {
-        ...ctx.recoveryFor('company_not_found'),
-      });
+      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
     }
 
     const filedAfter = input.filed_after || undefined;
@@ -401,9 +399,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     const filingsToScan = filingBatch.slice(0, scanCap);
 
     if (filingBatch.length === 0 && !dateWindow) {
-      throw ctx.fail('no_filings_found', `No Form 4 filings found for '${input.company}'.`, {
-        ...ctx.recoveryFor('no_filings_found'),
-      });
+      throw ctx.fail('no_filings_found', `No Form 4 filings found for '${input.company}'.`);
     }
 
     const transactions: Array<{

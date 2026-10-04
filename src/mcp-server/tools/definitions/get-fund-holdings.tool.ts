@@ -513,17 +513,12 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
         throw ctx.fail(
           'ambiguous_fund',
           `'${input.fund}' matches multiple EDGAR companies: ${list}.`,
-          {
-            ...ctx.recoveryFor('ambiguous_fund'),
-            matches: shown.map((c) => ({ cik: c.cik, name: c.name, ticker: c.ticker })),
-          },
+          { matches: shown.map((c) => ({ cik: c.cik, name: c.name, ticker: c.ticker })) },
         );
       }
       const match = candidates[0];
       if (!match) {
-        throw ctx.fail('fund_not_found', `Fund '${input.fund}' not found in EDGAR.`, {
-          ...ctx.recoveryFor('fund_not_found'),
-        });
+        throw ctx.fail('fund_not_found', `Fund '${input.fund}' not found in EDGAR.`);
       }
       registrantCik = match.cik;
       targetSeries ??= match.seriesId?.toUpperCase();
@@ -546,7 +541,6 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
           'series_required',
           `'${input.fund}' is a registrant with ${listed.length} fund series, each filing its own NPORT-P report. Name one: ${list}${more}.`,
           {
-            ...ctx.recoveryFor('series_required'),
             registrant_cik: registrantCik,
             series: shown.map((s) => ({ series_id: s.seriesId, ticker: s.ticker })),
           },
@@ -572,7 +566,6 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       throw ctx.fail(
         'fund_not_found',
         `No EDGAR registrant found for fund series ${targetSeries ?? input.fund}.`,
-        { ...ctx.recoveryFor('fund_not_found') },
       );
     }
 
@@ -584,7 +577,6 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
         throw ctx.fail(
           'no_filings_found',
           `${submissions.name} (CIK ${registrantCik}) has no NPORT-P portfolio reports in its recent submissions window. Money-market funds report their portfolios on N-MFP instead, and an issuer that is not a registered investment company files neither.`,
-          { ...ctx.recoveryFor('no_filings_found') },
         );
       }
       const ordered = [...rows].sort(byReportPeriod);
@@ -606,7 +598,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
           throw ctx.fail(
             'no_filings_found',
             `No NPORT-P report for series ${targetSeries} found under ${submissions.name} (CIK ${registrantCik}) ${bound}. A fund launched since the registrant's last reporting period has not filed one yet; otherwise the series may belong to a different registrant.`,
-            { ...ctx.recoveryFor('no_filings_found'), registrant_cik: registrantCik },
+            { registrant_cik: registrantCik },
           );
         }
         candidates = [hit.candidate];
@@ -636,7 +628,6 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
             'series_required',
             `${submissions.name} (CIK ${registrantCik}) files ${newestBatch.length} NPORT-P reports for period ${newestPeriod}, one per fund series. Name one: ${list}${bound}.`,
             {
-              ...ctx.recoveryFor('series_required'),
               registrant_cik: registrantCik,
               series: series.map((s) => ({ series_id: s.id, series_name: s.name })),
             },
@@ -679,10 +670,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       throw ctx.fail(
         'no_filings_found',
         `No NPORT-P report for period ${input.report_date} under ${submissions.name}. Reported periods: ${availablePeriods.join(', ') || 'none identified'}.${undatedNote}`,
-        {
-          ...ctx.recoveryFor('no_filings_found'),
-          available_report_periods: availablePeriods,
-        },
+        { available_report_periods: availablePeriods },
       );
     }
 
@@ -696,7 +684,6 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       throw ctx.fail(
         'no_filings_found',
         `NPORT-P document '${target.document}' for filing ${target.accessionNumber} could not be fetched.`,
-        { ...ctx.recoveryFor('no_filings_found') },
       );
     }
     const report = parseNportXml(xml);

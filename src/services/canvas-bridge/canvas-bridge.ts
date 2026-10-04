@@ -305,8 +305,8 @@ export class CanvasBridge {
             },
           );
         }
-        // (#60) Contract recovery hints only attach via ctx.fail/ctx.recoveryFor, so
-        // framework-origin errors reach clients without the declared guidance. Rebuild
+        // (#60) A framework-origin error arrives with the gate's generic hint, which
+        // the contract fill never replaces, or with none. Rebuild
         // both remaining declared reasons with their contract recovery text, mirroring
         // the missing_table treatment above.
         if (data?.reason === 'register_as_clash') {

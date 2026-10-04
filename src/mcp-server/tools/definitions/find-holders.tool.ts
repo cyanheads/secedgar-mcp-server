@@ -295,10 +295,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
         throw ctx.fail(
           'ambiguous_issuer',
           `'${input.issuer}' matches multiple EDGAR companies: ${list}.`,
-          {
-            ...ctx.recoveryFor('ambiguous_issuer'),
-            matches: shown.map((c) => ({ cik: c.cik, name: c.name, ticker: c.ticker })),
-          },
+          { matches: shown.map((c) => ({ cik: c.cik, name: c.name, ticker: c.ticker })) },
         );
       }
       const match = candidates[0];
@@ -308,7 +305,6 @@ export const findHoldersTool = tool('secedgar_find_holders', {
         throw ctx.fail(
           'issuer_not_found',
           `No EDGAR company name found for issuer '${input.issuer}', so there is nothing to match against 13F information tables.`,
-          { ...ctx.recoveryFor('issuer_not_found') },
         );
       }
       resolvedName = match.name;

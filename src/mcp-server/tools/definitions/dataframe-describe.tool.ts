@@ -74,9 +74,7 @@ export const dataframeDescribeTool = tool('secedgar_dataframe_describe', {
   async handler(input, ctx) {
     const bridge = getCanvasBridge();
     if (!bridge) {
-      throw ctx.fail('canvas_unavailable', 'DataCanvas is not configured on this server.', {
-        ...ctx.recoveryFor('canvas_unavailable'),
-      });
+      throw ctx.fail('canvas_unavailable', 'DataCanvas is not configured on this server.');
     }
 
     const entries = await bridge.describe(ctx, input.name);

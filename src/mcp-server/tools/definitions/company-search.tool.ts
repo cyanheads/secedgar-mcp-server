@@ -271,7 +271,6 @@ export const companySearchTool = tool('secedgar_company_search', {
           .map((m) => `${m.ticker ?? m.cik} (${m.name ?? 'Unknown'})`)
           .join(', ');
         throw ctx.fail('multiple_matches', `Multiple matches for '${input.query}': ${matches}.`, {
-          ...ctx.recoveryFor('multiple_matches'),
           query: input.query,
           matches: resolved.map((m) => ({ cik: m.cik, name: m.name, ticker: m.ticker })),
         });
@@ -280,9 +279,7 @@ export const companySearchTool = tool('secedgar_company_search', {
 
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
     if (!match) {
-      throw ctx.fail('no_match', `No company found for '${input.query}'.`, {
-        ...ctx.recoveryFor('no_match'),
-      });
+      throw ctx.fail('no_match', `No company found for '${input.query}'.`);
     }
 
     // Bare-CIK fallback: resolveCik returns { cik } with no name/ticker when a numeric

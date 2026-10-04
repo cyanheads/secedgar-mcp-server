@@ -281,17 +281,17 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
           suggestions.length > 0
             ? ` Near matches: ${suggestions.map((s) => `${s.name ?? s.cik}${s.ticker ? ` (${s.ticker})` : ''}`).join(', ')}.`
             : '';
-        throw ctx.fail('no_match', `No company found for '${input.company}'.${suggestionNote}`, {
-          ...ctx.recoveryFor('no_match'),
-          ...(suggestions.length > 0 ? { suggestions } : {}),
-        });
+        throw ctx.fail(
+          'no_match',
+          `No company found for '${input.company}'.${suggestionNote}`,
+          suggestions.length > 0 ? { suggestions } : {},
+        );
       }
       if (resolved.length > 1) {
         const matches = resolved
           .map((m) => `${m.ticker ?? m.cik} (${m.name ?? 'Unknown'})`)
           .join(', ');
         throw ctx.fail('multiple_matches', `Multiple matches for '${input.company}': ${matches}.`, {
-          ...ctx.recoveryFor('multiple_matches'),
           matches: resolved.map((m) => ({ cik: m.cik, name: m.name, ticker: m.ticker })),
         });
       }
@@ -299,9 +299,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
 
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
     if (!match) {
-      throw ctx.fail('no_match', `No company found for '${input.company}'.`, {
-        ...ctx.recoveryFor('no_match'),
-      });
+      throw ctx.fail('no_match', `No company found for '${input.company}'.`);
     }
 
     // A numeric query that missed the ticker cache resolves to a bare CIK; only
@@ -314,9 +312,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
     } catch (err) {
       if (isBareCikFallback && err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
         ctx.log.debug('CIK not found in EDGAR submissions', { cik: match.cik });
-        throw ctx.fail('no_match', `No company found for '${input.company}'.`, {
-          ...ctx.recoveryFor('no_match'),
-        });
+        throw ctx.fail('no_match', `No company found for '${input.company}'.`);
       }
       throw err;
     }

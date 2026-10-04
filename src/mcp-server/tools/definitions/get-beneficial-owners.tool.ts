@@ -317,17 +317,12 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       throw ctx.fail(
         'ambiguous_issuer',
         `'${input.issuer}' matches multiple EDGAR companies: ${list}.`,
-        {
-          ...ctx.recoveryFor('ambiguous_issuer'),
-          matches: shown.map((c) => ({ cik: c.cik, name: c.name, ticker: c.ticker })),
-        },
+        { matches: shown.map((c) => ({ cik: c.cik, name: c.name, ticker: c.ticker })) },
       );
     }
     const match = candidates[0];
     if (!match) {
-      throw ctx.fail('issuer_not_found', `Issuer '${input.issuer}' not found in EDGAR.`, {
-        ...ctx.recoveryFor('issuer_not_found'),
-      });
+      throw ctx.fail('issuer_not_found', `Issuer '${input.issuer}' not found in EDGAR.`);
     }
 
     const submissions = await api.getSubmissions(match.cik);
@@ -371,7 +366,6 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
         'no_filings_found',
         `No structured ${kindLabel} filings found for ${submissions.name} (CIK ${match.cik}). ${legacyHint}`,
         {
-          ...ctx.recoveryFor('no_filings_found'),
           issuer_cik: match.cik,
           issuer_name: submissions.name,
           legacy_filings_before_coverage: legacyCount,

@@ -417,7 +417,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       throw ctx.fail(
         'no_companies_resolved',
         `None of the ${input.companies.length} supplied companies resolved to a CIK.`,
-        { ...ctx.recoveryFor('no_companies_resolved'), failed_companies: failed },
+        { failed_companies: failed },
       );
     }
 
@@ -565,7 +565,6 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
         'no_comparable_data',
         `None of the ${included.length} resolved companies report any of the requested concepts for ${input.period_type} periods.${unknownNote}`,
         {
-          ...ctx.recoveryFor('no_comparable_data'),
           gaps,
           ...(unknownConcepts.length > 0 ? { unknown_concepts: unknownConcepts } : {}),
         },

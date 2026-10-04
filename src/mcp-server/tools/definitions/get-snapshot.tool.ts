@@ -192,9 +192,7 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
 
     const resolved = await api.resolveCik(input.company);
     if (Array.isArray(resolved) && resolved.length === 0) {
-      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`, {
-        ...ctx.recoveryFor('company_not_found'),
-      });
+      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
     }
     if (Array.isArray(resolved) && resolved.length > 1) {
       const shown = resolved.slice(0, 10);
@@ -204,23 +202,17 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
       throw ctx.fail(
         'ambiguous_company',
         `'${input.company}' matches multiple companies: ${list}. Retry with one of these tickers or 10-digit CIKs.`,
-        {
-          ...ctx.recoveryFor('ambiguous_company'),
-          matches: shown.map((m) => ({ cik: m.cik, name: m.name, ticker: m.ticker })),
-        },
+        { matches: shown.map((m) => ({ cik: m.cik, name: m.name, ticker: m.ticker })) },
       );
     }
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
     if (!match) {
-      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`, {
-        ...ctx.recoveryFor('company_not_found'),
-      });
+      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
     }
 
     const facts = await api.tryGetCompanyFacts(match.cik);
     if (!facts || Object.keys(facts.facts).length === 0) {
       throw ctx.fail('no_company_facts', `No XBRL facts on file for CIK ${match.cik}.`, {
-        ...ctx.recoveryFor('no_company_facts'),
         cik: match.cik,
       });
     }

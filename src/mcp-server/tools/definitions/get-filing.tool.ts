@@ -442,7 +442,6 @@ export const getFilingTool = tool('secedgar_get_filing', {
         throw ctx.fail('filing_not_found', `Filing '${accn}' could not be resolved.`, {
           accession_number: accn,
           cik: input.cik,
-          recovery: { hint: 'Verify the accession number and pass the company CIK explicitly.' },
         });
       }
       resolvedCik = metaResolved.cik;
@@ -491,7 +490,6 @@ export const getFilingTool = tool('secedgar_get_filing', {
         {
           offset: effectiveOffset,
           content_total_length: fullText.length,
-          ...ctx.recoveryFor('offset_out_of_range'),
         },
       );
     }
