@@ -3,6 +3,10 @@
 /.claude/
 /.agents/
 /framework-skills/
+/docs/idea.md
+/logs/
+/.cache/
+/data/
 /Dockerfile
 /bun.lock
 /bunfig.toml
