@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/secedgar-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/secedgar-mcp-server) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/secedgar-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/secedgar-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/secedgar-mcp-server) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/secedgar-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -91,7 +91,6 @@ SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only 
 - `accession_number` in dash or 18-digit form, optional `cik` to speed the lookup, `document` for an exhibit, `include_xbrl` for XBRL artifacts; `content_limit` 1,000–200,000 characters per page (default 50,000)
 - Page with `offset` / `next_offset` until `content_truncated` is false, or jump with `section` (substring match on detected headings); the first page of a truncated document carries an `outline` of up to 50 headings with offsets
 - `documents` splits the filing into primary, exhibits, and auxiliary; entries marked `binary` (scans, PDFs, archives) fail as `binary_document`, and a `section` miss returns `section_not_found` with the outline
-- `form`, `filing_date`, and `period_ending` come from the company's submissions feed for a recent filing and from the filing's own SEC header for an older one
 
 ---
 
@@ -159,10 +158,8 @@ SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only 
 
 ### `secedgar_fetch_frames` <sub>tool</sub>
 
-- `concept` as a friendly name or raw tag, `period` as `CY2023`, `CY2024Q2`, or `CY2023Q4I`, `unit` (default `USD`), `sort` `desc` / `asc`; `limit` 1–100 (default 25) with `offset` / `next_offset` down the ranking
-- One call queries one tag: `unqueried_tags` lists same-meaning variants to fetch separately, and `related_tags` lists alternate-definition tags some filers report instead
-- `value_distribution.max_to_p95_ratio` flags scale-factor outliers, `period_end_range` shows fiscal-year mixing, and `caveats` names the fiscal-Q4 gap in quarterly frames, the proxy-statement rows in annual `NetIncomeLoss` frames, and the 10-Q trailing-twelve-month rows an annual frame can hold while its year is still open
-- SEC publishes frames for us-gaap and dei tags only: `taxonomy` `us-gaap` (default) or `dei` picks the namespace for a raw tag (`EntityCommonStockSharesOutstanding` is dei), a friendly name keeps its own mapped taxonomy (`shares_outstanding` reads dei), and an explicit `dei` reads a friendly name's tags from dei, as in `secedgar_get_financials`; IFRS filers are read per company with `taxonomy` `ifrs-full`
+- `concept` as a friendly name or raw tag, `period` as `CY2023`, `CY2024Q2`, or `CY2023Q4I`, `taxonomy` `us-gaap` (default) or `dei` (SEC publishes frames for no other namespace; IFRS filers are read per company), `unit` (default `USD`), `sort` `desc` / `asc`; `limit` 1–100 (default 25) with `offset` / `next_offset` down the ranking
+- One call queries one tag: `unqueried_tags` lists same-meaning variants to fetch separately and `related_tags` alternate-definition tags; `value_distribution.max_to_p95_ratio` flags scale-factor outliers, `period_end_range` shows fiscal-year mixing, and `caveats` flags fiscal-Q4 gaps in quarterly frames and annual frames a proxy statement or a 10-Q can hold
 - A `concept` that is neither a friendly name nor an UpperCamelCase tag fails as `unknown_concept` before the frames request, with the same formula or closest-name hint as `secedgar_get_financials`; a well-formed tag with no frame is `no_data`
 
 ---
@@ -172,7 +169,6 @@ SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only 
 - 2–10 `companies` × 1–8 `concepts`; `taxonomy` `us-gaap` (default) or `ifrs-full`; `period_type` `annual` (default) or `quarterly`; `periods` 1–12 (default 4), trimmed further when the inline matrix gets too large
 - `cells` align each value on a calendar `period` and keep its `frame`, `period_end`, and source `tag`; `failed_companies` (reason `not_found`, `ambiguous`, or `no_company_facts`) and `gaps` (no value in any period) report what's missing, and `caveats` flag differing period ends, unit mismatches, and, once per concept, the companies whose values all predate the inline window, each with its newest period
 - A concept that is neither a friendly name nor an UpperCamelCase tag is listed once in `unknown_concepts` with its hint, never as a gap per company; the call fails as `unknown_concept` only when every concept is one
-- Inputs naming the same concept (`revenue` and `Revenue`, or one raw tag spelled twice) are compared once under the first spelling, with a caveat naming the merged inputs; a friendly name and a raw tag it maps to (`revenue` and `Revenues`) stay separate
 
 ---
 
@@ -375,6 +371,10 @@ cp .env.example .env
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
+| `LOG_TOOL_FAILURE_PAYLOADS` | Log each failed tool call's arguments and result, redacted by key name and capped at `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES` (default `16384`). A secret inside a free-form value is not redacted. | `false` |
+| `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry) (spans, metrics, completion logs). | `false` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP base URL; traces go to `/v1/traces` and metrics to `/v1/metrics`. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` override either one. | — |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Opt-in OTLP log export (e.g. `http://localhost:4318/v1/logs`); the base endpoint never enables it. | — |
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
 
