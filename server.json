@@ -18,7 +18,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/secedgar-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "0.15.9",
       "environmentVariables": [
         {
@@ -50,7 +50,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/secedgar-mcp-server",
-      "runtimeHint": "bun",
+      "runtimeHint": "npx",
       "version": "0.15.9",
       "environmentVariables": [
         {
@@ -65,6 +65,12 @@
           "format": "number",
           "isRequired": false,
           "default": "600"
+        },
+        {
+          "name": "MCP_TRANSPORT_TYPE",
+          "description": "Selects the HTTP transport.",
+          "format": "string",
+          "value": "http"
         },
         {
           "name": "MCP_HTTP_HOST",
