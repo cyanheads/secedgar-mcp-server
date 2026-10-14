@@ -24,6 +24,35 @@ interface FilingEntry {
   report_date?: string | undefined;
 }
 
+/** Most filings the inline list holds; a larger `filing_limit` is served at this (#168). */
+const INLINE_FILING_CAP = 50;
+
+/**
+ * Point a caller at the filings the inline list withheld when neither a dataframe nor a
+ * larger `filing_limit` can reach them: a `secedgar_search_filings` call over the same
+ * entity, forms, and dates, ending at the oldest filing shown (inclusive, so that day's
+ * shown filings repeat and none is skipped). That tool requires both date bounds and has
+ * no `company` key, so the call carries `cik:` scope and a lower bound even when the
+ * caller gave none. One call serves one window of up to 100 filings, so the notice says
+ * how to page on (#168).
+ */
+function searchFilingsRecipe(args: {
+  cik: string;
+  filedAfter: string;
+  filedBefore: string;
+  forms: string[] | undefined;
+}): string {
+  const call = {
+    query: `cik:${args.cik}`,
+    ...(args.forms ? { forms: args.forms } : {}),
+    filed_after: args.filedAfter,
+    filed_before: args.filedBefore,
+    limit: 100,
+  };
+  const amendments = args.forms ? ', and its forms filter also matches amendments' : '';
+  return `The inline list holds at most ${INLINE_FILING_CAP}. Call secedgar_search_filings with ${JSON.stringify(call)} — it also returns the filings shown here from ${args.filedBefore}${amendments}. Each call returns up to ${call.limit} filings; for older ones, repeat it with filed_before moved to the oldest filing_date it returns.`;
+}
+
 /** Format SEC's MMDD fiscal year end string as MM-DD (e.g., "0926" → "09-26"). */
 function formatFiscalYearEnd(raw: string): string {
   if (/^\d{4}$/.test(raw)) {
@@ -61,14 +90,14 @@ export const companySearchTool = tool('secedgar_company_search', {
       .string()
       .optional()
       .describe(
-        'Guidance when no filings matched the forms filter, or when filing_limit withheld some.',
+        'Guidance when no filings matched the forms filter, or when the inline list withheld some — naming the dataframe, a larger filing_limit, or a secedgar_search_filings call to page through the rest.',
       ),
     truncated: z
       .boolean()
       .optional()
-      .describe('True when more filings matched than `filing_limit` allowed into the inline list.'),
+      .describe('True when more filings matched than the inline list holds.'),
     shown: z.number().optional().describe('Number of filings returned inline.'),
-    cap: z.number().optional().describe('The `filing_limit` that was applied.'),
+    cap: z.number().optional().describe('The inline limit applied: `filing_limit`, at most 50.'),
   },
 
   errors: [
@@ -120,9 +149,11 @@ export const companySearchTool = tool('secedgar_company_search', {
       .number()
       .int()
       .min(1)
-      .max(50)
+      .max(1000)
       .default(10)
-      .describe('Maximum number of filings to return in the inline list.'),
+      .describe(
+        'Maximum number of filings to return in the inline list. The list holds at most 50; a larger value returns 50, and the notice names where the rest are.',
+      ),
     filed_after: z
       .union([
         z.literal(''),
@@ -224,7 +255,9 @@ export const companySearchTool = tool('secedgar_company_search', {
     total_filings: z
       .number()
       .optional()
-      .describe('Filings matching the filter across everything scanned; can exceed filing_limit.'),
+      .describe(
+        'Filings matching the filter across everything scanned; can exceed the inline list.',
+      ),
     history_scanned_through: z
       .string()
       .optional()
@@ -248,7 +281,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       })
       .optional()
       .describe(
-        'Dataframe of the full filtered history (recent window plus archive pages), staged only when the scan went past the recent window and the history exceeds filing_limit.',
+        'Dataframe of the full filtered history (recent window plus archive pages), staged only when the scan went past the recent window and the history exceeds the inline list (filing_limit, at most 50).',
       ),
   }),
 
@@ -328,12 +361,18 @@ export const companySearchTool = tool('secedgar_company_search', {
     let dataset:
       | { name: string; row_count: number; expires_at: string; truncated: boolean }
       | undefined;
+    // Oldest filing date among every match — the lower edge of what `total_filings` counted.
+    let oldestMatched: string | undefined;
+
+    // Every read of the limit takes the applied value, so a call above the cap answers
+    // exactly as the same call at the cap does (#168).
+    const filingLimit = Math.min(input.filing_limit, INLINE_FILING_CAP);
+    const filedAfter = input.filed_after || undefined;
+    const filedBefore = input.filed_before || undefined;
+    const formTypes = input.forms?.length ? input.forms : undefined;
 
     if (input.include_filings) {
-      const filedAfter = input.filed_after || undefined;
-      const filedBefore = input.filed_before || undefined;
       const hasDateFilter = Boolean(filedAfter || filedBefore);
-      const formTypes = input.forms?.length ? input.forms : undefined;
 
       const matches = (f: FilingEntry) =>
         (!formTypes || formTypes.some((ft) => f.form.toUpperCase() === ft.toUpperCase())) &&
@@ -345,7 +384,7 @@ export const companySearchTool = tool('secedgar_company_search', {
 
       // Walk the older archive pages when the caller targets a date range (which may
       // predate the recent window) or when a form filter under-fills that window (#78).
-      const underFill = Boolean(formTypes) && recentMatched.length < input.filing_limit;
+      const underFill = Boolean(formTypes) && recentMatched.length < filingLimit;
       const bridge = getCanvasBridge();
 
       const archiveMatched: FilingEntry[] = [];
@@ -365,7 +404,7 @@ export const companySearchTool = tool('secedgar_company_search', {
           if (
             !hasDateFilter &&
             !bridge &&
-            recentMatched.length + archiveMatched.length >= input.filing_limit
+            recentMatched.length + archiveMatched.length >= filingLimit
           ) {
             break;
           }
@@ -381,13 +420,14 @@ export const companySearchTool = tool('secedgar_company_search', {
       );
 
       totalFilings = fullMatched.length;
-      filings = fullMatched.slice(0, input.filing_limit);
+      filings = fullMatched.slice(0, filingLimit);
+      oldestMatched = fullMatched.at(-1)?.filing_date;
 
       // Register the full filtered history to the canvas when the scan reached beyond
       // the recent window and there is more than fits inline — a multi-decade history is
       // SQL shape (filings by form by year). Mirror the ownership tools' preview +
-      // full-set pattern; the inline `filings` list stays capped at filing_limit.
-      if (bridge && scannedBeyondRecent && fullMatched.length > input.filing_limit) {
+      // full-set pattern; the inline `filings` list stays capped at the applied limit.
+      if (bridge && scannedBeyondRecent && fullMatched.length > filingLimit) {
         const registered = await bridge.registerDataframe(ctx, {
           rows: fullMatched.map((f) => ({
             accession_number: f.accession_number,
@@ -419,14 +459,31 @@ export const companySearchTool = tool('secedgar_company_search', {
       totalFilings !== undefined &&
       totalFilings > filings.length
     ) {
+      // The pointer only rides along when a dataframe was actually registered — it is
+      // not, for a history that never left the recent window (#104). Without one, a
+      // larger filing_limit reaches the rest only while they fit inline (#168).
+      let route: string;
+      if (dataset) {
+        route = dataframeGuidance(dataset);
+      } else if (totalFilings <= INLINE_FILING_CAP) {
+        route = 'Raise filing_limit to see more inline.';
+      } else {
+        // Reaching here means filings exist, so the scan reached some date. A manifest
+        // page can start a day after its own rows, so take the older of the two edges.
+        const scannedFrom = [historyScannedThrough, oldestMatched]
+          .filter((d): d is string => d !== undefined)
+          .sort()[0] as string;
+        route = searchFilingsRecipe({
+          cik: match.cik,
+          filedAfter: filedAfter ?? scannedFrom,
+          filedBefore: (filings.at(-1) as FilingEntry).filing_date,
+          forms: formTypes,
+        });
+      }
       ctx.enrich.truncated({
         shown: filings.length,
-        cap: input.filing_limit,
-        // The pointer only rides along when a dataframe was actually registered —
-        // it is not, for a history that never left the recent window (#104).
-        guidance: `Showing ${filings.length} of ${totalFilings} matching filings. ${
-          dataset ? dataframeGuidance(dataset) : 'Raise filing_limit to see more inline.'
-        }`,
+        cap: filingLimit,
+        guidance: `Showing ${filings.length} of ${totalFilings} matching filings. ${route}`,
       });
     }
 

@@ -42,9 +42,11 @@ vi.mock('@/services/edgar/filing-to-text.js', async (importOriginal) => {
     extractCacheSize: vi.fn(),
     detectHeadings: vi.fn(),
     windowText: vi.fn(),
-    // Pure comparison helper the section matcher calls — a stub would make the
-    // mock an incomplete surface of the module under test.
+    // The pure comparisons the section matcher calls run real — a stub would
+    // make the mock an incomplete surface of the module under test.
     foldForHeadingMatch: actual.foldForHeadingMatch,
+    headingKey: actual.headingKey,
+    findSectionLine: actual.findSectionLine,
   };
 });
 
@@ -136,8 +138,12 @@ describe('companySearchTool — input validation', () => {
     expect(() => companySearchTool.input.parse({ query: 'AAPL', filing_limit: 0 })).toThrow();
   });
 
-  it('rejects filing_limit above 50', () => {
-    expect(() => companySearchTool.input.parse({ query: 'AAPL', filing_limit: 51 })).toThrow();
+  // Above the 50-filing inline list the call is served at 50 (#168); only absurd values fail.
+  it('accepts filing_limit 51 and 1000, and rejects 1001', () => {
+    for (const filing_limit of [51, 1000]) {
+      expect(() => companySearchTool.input.parse({ query: 'AAPL', filing_limit })).not.toThrow();
+    }
+    expect(() => companySearchTool.input.parse({ query: 'AAPL', filing_limit: 1001 })).toThrow();
   });
 
   it('SQL injection in query does not expose internals in error data', async () => {

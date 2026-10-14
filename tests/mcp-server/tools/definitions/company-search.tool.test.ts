@@ -957,3 +957,277 @@ describe('companySearchTool — one-day manifest drift (#137)', () => {
     expect(text).not.toContain('[feb19]');
   });
 });
+
+// A filing_limit above the 50-filing inline list is served at 50, and the notice names a
+// route to the rest that the caller can actually follow (#168).
+describe('companySearchTool — filing_limit above the inline cap (#168)', () => {
+  /** `n` filings of one form, one per day, newest first from `newest`. */
+  const daily = (n: number, newest: string, form: string, prefix: string): FilingsRecent => {
+    const dates = Array.from({ length: n }, (_, i) => {
+      const d = new Date(`${newest}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() - i);
+      return d.toISOString().slice(0, 10);
+    });
+    return {
+      accessionNumber: dates.map((_, i) => `${prefix}-${String(i).padStart(3, '0')}`),
+      filingDate: dates,
+      form: dates.map(() => form),
+      primaryDocDescription: dates.map(() => form),
+      primaryDocument: dates.map((_, i) => `${prefix}-${i}.htm`),
+      reportDate: dates.map(() => ''),
+    };
+  };
+
+  /** 100 Form 4 filings, 2026-09-30 back to 2026-06-23, all in the recent window. */
+  const recentOnly: SubmissionsResponse = {
+    ...mockSubmissions,
+    cik: '0001045810',
+    name: 'NVIDIA CORP',
+    tickers: ['NVDA'],
+    filings: { recent: daily(100, '2026-09-30', '4', 'r'), files: [] },
+  };
+
+  /**
+   * Ten 10-Qs in the recent window and three archive pages of 30 each, so a 10-Q
+   * filter under-fills the recent window and walks the archive.
+   */
+  const archivePages: Record<string, FilingsRecent> = {
+    p1: daily(30, '2025-06-30', '10-Q', 'p1'),
+    p2: daily(30, '2025-03-31', '10-Q', 'p2'),
+    p3: daily(30, '2024-12-31', '10-Q', 'p3'),
+  };
+  const withArchive: SubmissionsResponse = {
+    ...recentOnly,
+    filings: {
+      recent: daily(10, '2026-09-30', '10-Q', 'r'),
+      files: [
+        { name: 'p1', filingCount: 30, filingFrom: '2025-06-01', filingTo: '2025-06-30' },
+        { name: 'p2', filingCount: 30, filingFrom: '2025-03-02', filingTo: '2025-03-31' },
+        { name: 'p3', filingCount: 30, filingFrom: '2024-12-02', filingTo: '2024-12-31' },
+      ],
+    },
+  };
+
+  /** The `secedgar_search_filings` arguments the notice spells out, parsed back. */
+  const recipe = (notice: unknown) => {
+    const json = String(notice).match(/secedgar_search_filings with (\{.*?\}) —/)?.[1];
+    expect(json).toBeDefined();
+    return JSON.parse(json as string) as Record<string, unknown>;
+  };
+
+  /** The handler result and enrichment for one call, plus the archive pages it read. */
+  const run = async (args: Record<string, unknown>) => {
+    mockApi.fetchArchivePage.mockClear();
+    const ctx = createMockContext({ errors: companySearchTool.errors });
+    const result = await companySearchTool.handler(companySearchTool.input.parse(args), ctx);
+    return {
+      result,
+      enrichment: getEnrichment(ctx),
+      pagesRead: mockApi.fetchArchivePage.mock.calls.map(([name]) => name),
+    };
+  };
+
+  beforeEach(() => {
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0001045810',
+      name: 'NVIDIA CORP',
+      ticker: 'NVDA',
+    });
+    mockApi.fetchArchivePage.mockImplementation(async (name: string) => {
+      const page = archivePages[name];
+      if (!page) throw new Error(`unexpected archive page ${name}`);
+      return page;
+    });
+  });
+
+  it('accepts filing_limit up to 1000 and rejects past it', () => {
+    for (const filing_limit of [51, 100, 1000]) {
+      expect(companySearchTool.input.parse({ query: 'NVDA', filing_limit }).filing_limit).toBe(
+        filing_limit,
+      );
+    }
+    expect(() => companySearchTool.input.parse({ query: 'NVDA', filing_limit: 1001 })).toThrow();
+  });
+
+  it('at 50, returns the newest 50 of a larger history with cap 50 and no dataset', async () => {
+    mockApi.getSubmissions.mockResolvedValue(recentOnly);
+    const { result, enrichment } = await run({
+      query: 'NVDA',
+      filed_after: '2026-07-01',
+      filed_before: '2026-09-24',
+      filing_limit: 50,
+    });
+
+    expect(result.total_filings).toBe(86);
+    expect(result.filings).toHaveLength(50);
+    expect(at(result.filings, 0).filing_date).toBe('2026-09-24');
+    expect(result.filings?.at(-1)?.filing_date).toBe('2026-08-06');
+    expect(result.dataset).toBeUndefined();
+    expect(enrichment).toMatchObject({ truncated: true, shown: 50, cap: 50 });
+  });
+
+  it('answers a call at 100 exactly as the same call at 50, within the recent window', async () => {
+    mockApi.getSubmissions.mockResolvedValue(recentOnly);
+    const args = { query: 'NVDA', filed_after: '2026-07-01', filed_before: '2026-09-24' };
+
+    const at50 = await run({ ...args, filing_limit: 50 });
+    const at100 = await run({ ...args, filing_limit: 100 });
+
+    expect(at100).toEqual(at50);
+    expect(at100.result.filings).toHaveLength(50);
+    expect(at100.enrichment.cap).toBe(50);
+  });
+
+  it('answers a call at 100 exactly as at 50 when the forms filter walks the archive without a canvas', async () => {
+    mockApi.getSubmissions.mockResolvedValue(withArchive);
+    const args = { query: 'NVDA', forms: ['10-Q'] };
+
+    const at50 = await run({ ...args, filing_limit: 50 });
+    const at100 = await run({ ...args, filing_limit: 100 });
+
+    // The no-canvas archive stop fires at the applied 50: two pages fill it, the third is unread.
+    expect(at50.pagesRead).toEqual(['p1', 'p2']);
+    expect(at100).toEqual(at50);
+    expect(at100.result.total_filings).toBe(70);
+    expect(at100.result.filings).toHaveLength(50);
+  });
+
+  it('answers a call at 100 exactly as at 50 when the full history is staged as a dataframe', async () => {
+    mockApi.getSubmissions.mockResolvedValue(withArchive);
+    const registerDataframe = vi.fn().mockResolvedValue({
+      tableName: 'df_FULL1_FULL2',
+      rowCount: 100,
+      expiresAt: '2026-11-01T00:00:00.000Z',
+      columnSchema: [],
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+    const args = { query: 'NVDA', forms: ['10-Q'] };
+
+    const at50 = await run({ ...args, filing_limit: 50 });
+    const at100 = await run({ ...args, filing_limit: 100 });
+
+    expect(registerDataframe).toHaveBeenCalledTimes(2);
+    expect(registerDataframe.mock.calls[1]![1]).toEqual(registerDataframe.mock.calls[0]![1]);
+    expect(at100).toEqual(at50);
+    expect(at100.result.dataset?.name).toBe('df_FULL1_FULL2');
+    expect(at100.result.total_filings).toBe(100);
+    const notice = String(at100.enrichment.notice);
+    expect(notice).toContain('secedgar_dataframe_describe');
+    expect(notice).not.toContain('secedgar_search_filings');
+    expect(notice).not.toContain('Raise filing_limit');
+  });
+
+  it('spells out a secedgar_search_filings call with both date bounds when more than 50 match, and how to page on past its 100', async () => {
+    mockApi.getSubmissions.mockResolvedValue(recentOnly);
+    const { enrichment } = await run({
+      query: 'NVDA',
+      filed_after: '2026-07-01',
+      filed_before: '2026-09-24',
+      filing_limit: 100,
+    });
+
+    // The caller's lower bound and the oldest filing shown as the upper one; no
+    // forms filter was given, so there is no amendment matching to disclose.
+    expect(enrichment.notice).toBe(
+      'Showing 50 of 86 matching filings. The inline list holds at most 50. Call secedgar_search_filings with {"query":"cik:0001045810","filed_after":"2026-07-01","filed_before":"2026-08-06","limit":100} — it also returns the filings shown here from 2026-08-06. Each call returns up to 100 filings; for older ones, repeat it with filed_before moved to the oldest filing_date it returns.',
+    );
+    expect(String(companySearchTool.enrichment?.notice?.description)).not.toContain(
+      'returns the rest',
+    );
+  });
+
+  it('bounds an undated recipe below by history_scanned_through', async () => {
+    mockApi.getSubmissions.mockResolvedValue(recentOnly);
+    const { result, enrichment } = await run({ query: 'NVDA', filing_limit: 50 });
+
+    expect(result.history_scanned_through).toBe('2026-06-23');
+    expect(recipe(enrichment.notice)).toEqual({
+      query: 'cik:0001045810',
+      filed_after: '2026-06-23',
+      filed_before: '2026-08-12',
+      limit: 100,
+    });
+  });
+
+  it('carries the forms filter into the recipe and discloses amendment matching', async () => {
+    mockApi.getSubmissions.mockResolvedValue(withArchive);
+    const { result, enrichment } = await run({
+      query: 'NVDA',
+      forms: ['10-Q'],
+      filed_before: '2026-12-31',
+      filing_limit: 60,
+    });
+
+    // filed_before alone walks every page: 10 recent + 90 archived 10-Qs.
+    expect(result.total_filings).toBe(100);
+    expect(result.history_scanned_through).toBe('2024-12-02');
+    expect(result.filings?.at(-1)?.filing_date).toBe('2025-03-22');
+    const notice = String(enrichment.notice);
+    expect(recipe(notice)).toEqual({
+      query: 'cik:0001045810',
+      forms: ['10-Q'],
+      filed_after: '2024-12-02',
+      filed_before: '2025-03-22',
+      limit: 100,
+    });
+    expect(notice).toContain('its forms filter also matches amendments');
+  });
+
+  it('starts the recipe at the oldest match when a page lists a start later than its own rows', async () => {
+    // The manifest says p1 starts 2025-06-05; its oldest row is 2025-06-01.
+    mockApi.getSubmissions.mockResolvedValue({
+      ...withArchive,
+      filings: {
+        recent: daily(60, '2026-09-30', '10-Q', 'r'),
+        files: [{ name: 'p1', filingCount: 30, filingFrom: '2025-06-05', filingTo: '2025-06-30' }],
+      },
+    });
+    const { result, enrichment } = await run({
+      query: 'NVDA',
+      filed_before: '2026-12-31',
+      filing_limit: 50,
+    });
+
+    expect(result.history_scanned_through).toBe('2025-06-05');
+    expect(result.total_filings).toBe(90);
+    // The recipe's window must still hold every counted filing, 2025-06-01 included.
+    expect(recipe(enrichment.notice)).toMatchObject({
+      filed_after: '2025-06-01',
+      filed_before: '2026-08-12',
+    });
+  });
+
+  it('keeps "Raise filing_limit" when every match fits in 50 inline', async () => {
+    mockApi.getSubmissions.mockResolvedValue(recentOnly);
+    const { result, enrichment } = await run({
+      query: 'NVDA',
+      filed_after: '2026-09-01',
+      filing_limit: 10,
+    });
+
+    expect(result.total_filings).toBe(30);
+    expect(String(enrichment.notice)).toBe(
+      'Showing 10 of 30 matching filings. Raise filing_limit to see more inline.',
+    );
+  });
+
+  it('serves a call at 100 through the wire with the recipe in content[]', async () => {
+    mockApi.getSubmissions.mockResolvedValue(recentOnly);
+    const result = await runToolContract(companySearchTool, {
+      query: 'NVDA',
+      filed_after: '2026-07-01',
+      filed_before: '2026-09-24',
+      filing_limit: 100,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as { filings: unknown[]; total_filings: number };
+    expect(structured.filings).toHaveLength(50);
+    expect(structured.total_filings).toBe(86);
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain('Filings (50 of 86)');
+    expect(text).toContain(
+      'secedgar_search_filings with {"query":"cik:0001045810","filed_after":"2026-07-01","filed_before":"2026-08-06","limit":100}',
+    );
+  });
+});
