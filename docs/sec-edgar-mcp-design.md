@@ -139,7 +139,7 @@ input: z.object({
   forms: z.array(z.string()).optional()
     .describe('Filter filings to specific form types (e.g., ["10-K", "10-Q", "8-K"]). '
       + 'Without this, returns all form types.'),
-  filing_limit: z.number().int().min(1).max(50).default(10)
+  filing_limit: z.number().int().min(1).max(1000).default(10) // served at min(filing_limit, 50)
     .describe('Maximum number of filings to return. The API\'s recent window holds the last year or 1,000 filings per company, whichever is more.'),
 })
 
@@ -161,7 +161,7 @@ output: z.object({
     description: z.string().optional(),
   })).optional().describe('Recent filings, filtered by forms if specified.'),
   total_filings: z.number().optional()
-    .describe('Total number of filings matching the filter (may exceed filing_limit).'),
+    .describe('Filings matching the filter across everything scanned; can exceed the inline list.'),
 })
 ```
 
@@ -171,7 +171,7 @@ output: z.object({
 3. Otherwise → case-insensitive name search over `company_tickers.json` titles and committed former names, tiered exact (including the registry title with its corporate suffix dropped, so "Apple" matches "Apple Inc."), then prefix, then substring. Resolve within the best tier a current title reaches and return up to 5 matches from it; a former name can tie a current title but never outrank one. No fuzzy-matching library needed — prefix + substring covers practical cases across ~10K entries.
 4. Fetch `data.sec.gov/submissions/CIK{padded}.json`
 5. Filter `filings.recent` parallel arrays by `forms` if provided
-6. Slice to `filing_limit`
+6. Slice to `filing_limit`, served at most 50 inline; past that, a dataframe or a `secedgar_search_filings` recipe covers the rest
 
 **Error guidance:**
 - No match → `"No company found for '{query}'. Try a ticker symbol (e.g., 'AAPL'), full company name, or 10-digit CIK."`
@@ -326,8 +326,8 @@ input: z.object({
       + 'See secedgar://concepts for the full list of supported names and mappings.'),
   taxonomy: z.enum(['us-gaap', 'ifrs-full', 'dei']).default('us-gaap')
     .describe('XBRL taxonomy. us-gaap for US companies, ifrs-full for foreign filers, dei for entity info (shares outstanding).'),
-  period_type: z.enum(['annual', 'quarterly', 'all']).default('annual')
-    .describe('Filter to annual (FY) or quarterly (Q1-Q4) data. "all" returns both.'),
+  period_type: z.enum(['annual', 'quarterly', 'all']).optional()
+    .describe('Filter to annual (FY) or quarterly (Q1-Q4) data. "all" returns both. When omitted, annual, except that an instant concept returns its full series.'),
   unit: z.string().optional()
     .describe('SEC unit key to read the series in, for a concept reported in more than one (e.g. "ZAR" and a "USD" convenience translation).'),
 })
@@ -505,7 +505,7 @@ output: z.object({
 | EFTS search | `https://efts.sec.gov/LATEST/search-index?q=...` | `secedgar_search_filings` |
 | Filing archive | `https://www.sec.gov/Archives/edgar/data/{cik}/{accn}/` (CIK unpadded) | `secedgar_get_filing` |
 | Company concept | `https://data.sec.gov/api/xbrl/companyconcept/CIK{cik}/{taxonomy}/{tag}.json` | `secedgar_get_financials` |
-| Company facts | `https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json` | `secedgar_get_snapshot`, `secedgar_compare_companies`, `secedgar_get_financials` (tags companyconcept serves empty, the fiscal-year ends a 10-Q-held annual frame is tested against, and the no-data probe) |
+| Company facts | `https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json` | `secedgar_get_snapshot`, `secedgar_compare_companies`, `secedgar_get_financials` (tags companyconcept serves empty, the fiscal-year ends a 10-Q-held annual frame is tested against or an instant concept's annual view is selected on, and the no-data probe) |
 | Frames | `https://data.sec.gov/api/xbrl/frames/{taxonomy}/{tag}/{unit}/{period}.json` | `secedgar_fetch_frames` |
 
 ### API Quirks

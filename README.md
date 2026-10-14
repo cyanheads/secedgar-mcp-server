@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/secedgar-mcp-server</h1>
-  <p><b>Query SEC EDGAR filings, XBRL financials, and company data through MCP. STDIO & Streamable HTTP.</b>
+  <p><b>Query SEC EDGAR filings, XBRL financials, and company data via MCP. STDIO or Streamable HTTP.</b>
   <div>16 Tools (+1 opt-in) • 2 Resources • 1 Prompt</div>
   </p>
 </div>
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/secedgar-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/secedgar-mcp-server) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/secedgar-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/secedgar-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/secedgar-mcp-server) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/secedgar-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -47,7 +47,7 @@ SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only 
 | `secedgar_get_beneficial_owners` | 5%+ blockholders of an issuer from structured SCHEDULE 13D / 13G filings |
 | `secedgar_get_fund_holdings` | ETF and mutual fund portfolio holdings from the quarterly NPORT-P report |
 | `secedgar_fetch_frames` | One XBRL concept × one period across every reporting company |
-| `secedgar_compare_companies` | Compare named companies across several concepts, aligned on calendar periods |
+| `secedgar_compare_companies` | Compare named companies across several concepts, aligned on fiscal years or calendar quarters |
 | `secedgar_search_concepts` | Discover supported XBRL concept names or reverse-lookup a raw tag |
 | `secedgar_dataframe_describe` | List canvas dataframes with provenance, TTL, and schema |
 | `secedgar_dataframe_query` | Run a single-statement SELECT across dataframes |
@@ -72,7 +72,7 @@ SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only 
 
 ### `secedgar_company_search` <sub>tool</sub>
 
-- `query` takes a ticker (equities, ETFs, and mutual funds; `BRK-B` or `BRK.B`), a current or former company name (the corporate suffix can be left off: `Apple` finds Apple Inc.), or a CIK; `include_filings` (default on) adds up to `filing_limit` filings (1–50, default 10), filtered by exact `forms` match and `filed_after` / `filed_before`
+- `query` takes a ticker (equities, ETFs, and mutual funds; `BRK-B` or `BRK.B`), a current or former company name (the corporate suffix can be left off: `Apple` finds Apple Inc.), or a CIK; `include_filings` (default on) adds up to `filing_limit` filings (default 10; at most 50 inline, and a larger value up to 1000 is served at 50 with a notice naming where the rest are), filtered by exact `forms` match and `filed_after` / `filed_before`
 - Returns SIC code, exchanges, fiscal year end, and state of incorporation, plus `series_id` / `class_id` for a fund ticker; fails as `no_match` (with near matches in `data.suggestions` when a name scores close enough) or `multiple_matches`
 - A date filter or an under-filled form filter scans past the recent window (the last year or 1,000 filings, whichever holds more) into the archive, up to 10 archive pages, and `history_scanned_through` reports how far it reached
 
@@ -90,7 +90,7 @@ SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only 
 ### `secedgar_get_filing` <sub>tool</sub>
 
 - `accession_number` in dash or 18-digit form, optional `cik` to speed the lookup, `document` for an exhibit, `include_xbrl` for XBRL artifacts; `content_limit` 1,000–200,000 characters per page (default 50,000)
-- Page with `offset` / `next_offset` until `content_truncated` is false, or jump with `section` (substring match on detected headings; `item 1` never lands on Items 10–16); the first page of a truncated document carries an `outline` of up to 50 headings with offsets, plain-text legacy filings included
+- Page with `offset` / `next_offset` until `content_truncated` is false, or jump with `section` (matched against every detected heading, an exact heading first, then a line of the document such as a subheading the outline omits; `item 1` never lands on Items 10–16, nor `part i` on Part II); the first page of a truncated document carries an `outline` of up to 50 headings with offsets — every Item and Part heading kept when it is cut (bare table-of-contents copies of titled ones aside), and the notice says how many were detected — plain-text legacy filings included; when `section` lands on a document line rather than a detected heading, the notice says so
 - `documents` splits the filing into primary, exhibits, and auxiliary; entries marked `binary` (scans, PDFs, archives) fail as `binary_document`, and a `section` miss returns `section_not_found` with the outline
 - When the archive doesn't serve the primary document a filing's index names (common in 2000–2001 filings), the full submission `<accession>.txt` is read instead and the response notice says so
 
@@ -98,8 +98,8 @@ SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only 
 
 ### `secedgar_get_financials` <sub>tool</sub>
 
-- `company` (ticker or CIK) plus `concept` as a friendly name or raw XBRL tag; `taxonomy` `us-gaap` (default), `ifrs-full`, or `dei`; `period_type` `annual`, `quarterly`, or `all`, defaulting to annual with a fallback to the full series for instant concepts; `unit` picks one SEC unit key (`ZAR`, `USD`, `USD/EUR`) for a concept reported in several; `limit` 1–100 trims the inline series
-- A deduplicated series, newest first, one value per calendar period with its source `form`, `filed` date, `accession_number`, and `tag`, all in one `unit` — by default the unit of the newest value, with any other units named in `caveats`; `tags_tried` names the tags walked, and an empty result fails as `no_concept_data`, `no_frame_data`, or `no_period_data` (`no_unit_data`, listing the reported units, for a `unit` the concept isn't reported in)
+- `company` (ticker or CIK) plus `concept` as a friendly name or raw XBRL tag; `taxonomy` `us-gaap` (default), `ifrs-full`, or `dei`; `period_type` `annual`, `quarterly`, or `all` — `annual` reads an instant (balance-sheet) concept at the filer's fiscal-year ends, and when omitted it defaults to annual with the full series for instant concepts; `unit` picks one SEC unit key (`ZAR`, `USD`, `USD/EUR`) for a concept reported in several; `limit` 1–100 trims the inline series
+- A deduplicated series, newest first, one value per calendar period with its source `form`, `filed` date, `accession_number`, and `tag`, all in one `unit` — by default the unit of the newest value, with any other units named in `caveats`; `tags_tried` names the tags walked, and an empty result fails as `no_concept_data` (naming the taxonomy to retry when another one carries the concept), `no_frame_data`, or `no_period_data` (`no_unit_data`, listing the reported units, for a `unit` the concept isn't reported in)
 - A `concept` that is neither a friendly name nor an UpperCamelCase tag fails as `unknown_concept` before any SEC request, with a formula for standard combinations (`free_cash_flow`, `ebitda`, `working_capital`) or up to three closest friendly names
 
 ---
@@ -169,7 +169,7 @@ SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only 
 ### `secedgar_compare_companies` <sub>tool</sub>
 
 - 2–10 `companies` × 1–8 `concepts`; `taxonomy` `us-gaap` (default) or `ifrs-full`; `period_type` `annual` (default) or `quarterly`; `periods` 1–12 (default 4), trimmed further when the inline matrix gets too large
-- `cells` align each value on a calendar `period` and keep its `frame`, `period_end`, and source `tag`; `failed_companies` (reason `not_found`, `ambiguous`, or `no_company_facts`) and `gaps` (no value in any period) report what's missing, and `caveats` flag differing period ends, unit mismatches between companies (each company reads one unit per concept), and, once per concept, the companies whose values all predate the inline window, each with its newest period
+- `cells` align each value on a calendar `period` and keep its `frame`, `period_end`, and source `tag`; an annual matrix holds each company's fiscal year under the calendar-year key SEC frames it as, with balance-sheet values taken only at fiscal-year ends and placed beside the income lines of the year they close (interim and cover-date snapshots stay out, and a call left with nothing else fails `no_comparable_data` with a hint naming `period_type: "quarterly"`), while a quarterly matrix aligns snapshots on the calendar quarter they fall in; `failed_companies` (reason `not_found`, `ambiguous`, or `no_company_facts`) and `gaps` (no value in any period) report what's missing, and `caveats` flag differing period ends in any inline column, unit mismatches between companies (each company reads one unit per concept), and, once per concept, the companies whose values all predate the inline window, each with its newest period
 - A concept that is neither a friendly name nor an UpperCamelCase tag is listed once in `unknown_concepts` with its hint, never as a gap per company; the call fails as `unknown_concept` only when every concept is one
 
 ---
