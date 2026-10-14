@@ -8,6 +8,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   type FramedUnit,
+  filerFiscalYearEnds,
+  filerFiscalYearEndsWithComparatives,
   fiscalYearEnds,
   isProxyForm,
   isQuarterlyForm,
@@ -630,6 +632,99 @@ describe('fiscalYearEnds (#148)', () => {
 
   it('skips a unit served as an object instead of an array (#141)', () => {
     expect(fiscalYearEnds([{ USD: {} }])).toEqual([]);
+  });
+});
+
+describe('filerFiscalYearEndsWithComparatives (#167, #171)', () => {
+  /** A companyfacts payload holding one tag per entry of `byTag`, in USD unless a units map is given. */
+  const payload = (
+    byTag: Record<string, CompanyConceptUnit[] | Record<string, unknown>>,
+  ): CompanyFactsResponse => ({
+    facts: {
+      'us-gaap': Object.fromEntries(
+        Object.entries(byTag).map(([tag, values]) => [
+          tag,
+          { label: tag, units: Array.isArray(values) ? { USD: values } : values },
+        ]),
+      ) as CompanyFactsResponse['facts'][string],
+    },
+  });
+
+  /** Microsoft's first XBRL 10-K restates fiscal 2009 and 2008 beside its own fiscal 2010. */
+  const firstXbrl = payload({
+    Revenues: [
+      fact({ accn: 'k-2010', start: '2007-07-01', end: '2008-06-30', filed: '2010-07-30' }),
+      fact({ accn: 'k-2010', start: '2008-07-01', end: '2009-06-30', filed: '2010-07-30' }),
+      fact({ accn: 'k-2010', start: '2009-07-01', end: '2010-06-30', filed: '2010-07-30' }),
+      fact({ accn: 'k-2011', start: '2009-07-01', end: '2010-06-30', filed: '2011-07-28' }),
+      fact({ accn: 'k-2011', start: '2010-07-01', end: '2011-06-30', filed: '2011-07-28' }),
+    ],
+  });
+
+  it('adds the comparative years each report restates to its own year', () => {
+    expect(filerFiscalYearEndsWithComparatives(firstXbrl)).toEqual([
+      '2008-06-30',
+      '2009-06-30',
+      '2010-06-30',
+      '2011-06-30',
+    ]);
+  });
+
+  it('leaves the #148 set at each report’s own year for the same payload', () => {
+    expect(filerFiscalYearEnds(firstXbrl)).toEqual(['2010-06-30', '2011-06-30']);
+  });
+
+  it('leaves out a year-long figure ending off the report’s fiscal calendar', () => {
+    const ends = filerFiscalYearEndsWithComparatives(
+      payload({
+        Revenues: [
+          fact({ accn: 'k', start: '2009-01-01', end: '2009-12-31', filed: '2011-02-20' }),
+          // A trailing year to 09-30 in a December filer's 10-K, and one ending 9 days off.
+          fact({ accn: 'k', start: '2008-10-01', end: '2009-09-30', filed: '2011-02-20' }),
+          fact({ accn: 'k', start: '2009-12-23', end: '2010-12-22', filed: '2011-02-20' }),
+          fact({ accn: 'k', start: '2010-01-01', end: '2010-12-31', filed: '2011-02-20' }),
+          // A forward-looking year ends after the report was filed.
+          fact({ accn: 'k', start: '2011-01-01', end: '2011-12-31', filed: '2011-02-20' }),
+        ],
+      }),
+    );
+    expect(ends).toEqual(['2009-12-31', '2010-12-31']);
+  });
+
+  it('keeps a 52/53-week filer’s comparatives that drift within a week', () => {
+    const ends = filerFiscalYearEndsWithComparatives(
+      payload({
+        Revenues: [
+          fact({ accn: 'k', start: '2021-09-26', end: '2022-09-24', filed: '2024-11-01' }),
+          fact({ accn: 'k', start: '2022-09-25', end: '2023-09-30', filed: '2024-11-01' }),
+          fact({ accn: 'k', start: '2023-10-01', end: '2024-09-28', filed: '2024-11-01' }),
+        ],
+      }),
+    );
+    expect(ends).toEqual(['2022-09-24', '2023-09-30', '2024-09-28']);
+  });
+
+  it('reads annual reports only, across every tag and unit, skipping a unit served as an object (#141)', () => {
+    const ends = filerFiscalYearEndsWithComparatives(
+      payload({
+        Revenues: [
+          fact({ form: '10-Q', start: '2021-01-01', end: '2021-12-31', filed: '2022-04-30' }),
+          fact({ form: '10-Q', start: '2022-01-01', end: '2022-12-31', filed: '2022-04-30' }),
+        ],
+        Assets: { USD: {} },
+        EarningsPerShareDiluted: {
+          'USD/shares': [
+            fact({ accn: 'f', form: '20-F', start: '2022-01-01', end: '2022-12-31' }),
+            fact({ accn: 'f', form: '20-F', start: '2023-01-01', end: '2023-12-31' }),
+          ].map((f) => ({ ...f, filed: '2024-04-30' })),
+        },
+      }),
+    );
+    expect(ends).toEqual(['2022-12-31', '2023-12-31']);
+  });
+
+  it('returns nothing for a payload with no annual report', () => {
+    expect(filerFiscalYearEndsWithComparatives({ facts: {} })).toEqual([]);
   });
 });
 

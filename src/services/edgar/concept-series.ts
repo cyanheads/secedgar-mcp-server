@@ -135,18 +135,15 @@ function isYearLong(fact: CompanyConceptUnit): boolean {
 const ANNUAL_REPORT_FORM = /^(10-KT?|20-F|40-F)(\/A)?$/;
 
 /**
- * A filer's fiscal-year ends, sorted and each listed once: for every annual
- * report accession, the latest end among its year-long facts that ended before
- * it was filed, across every tag and unit. That is the report's own fiscal year
- * — the comparatives end earlier, and the before-filing guard drops a
- * forward-looking year-long figure (Walmart and P&G each carry one). Taking
- * every year-long fact from an annual report instead would admit off-cycle ends
- * that sit on quarter ends (Merck's and P&G's 09-30, Toyota's 06-30) and keep a
- * trailing-twelve-month figure ending there (#148). Units served as anything but
- * an array are skipped (#141).
+ * For every annual report accession, the ends of its year-long facts that ended
+ * before it was filed, across every tag and unit. The before-filing guard drops a
+ * forward-looking year-long figure (Walmart and P&G each carry one). Units served
+ * as anything but an array are skipped (#141).
  */
-export function fiscalYearEnds(unitMaps: Iterable<Readonly<Record<string, unknown>>>): string[] {
-  const latestByAccession = new Map<string, string>();
+function annualReportYearEnds(
+  unitMaps: Iterable<Readonly<Record<string, unknown>>>,
+): Map<string, Set<string>> {
+  const endsByAccession = new Map<string, Set<string>>();
   for (const units of unitMaps) {
     for (const facts of Object.values(units)) {
       if (!Array.isArray(facts)) continue;
@@ -154,33 +151,90 @@ export function fiscalYearEnds(unitMaps: Iterable<Readonly<Record<string, unknow
         if (!ANNUAL_REPORT_FORM.test(fact.form) || fact.end >= fact.filed || !isYearLong(fact)) {
           continue;
         }
-        const latest = latestByAccession.get(fact.accn);
-        if (!latest || fact.end > latest) latestByAccession.set(fact.accn, fact.end);
+        const ends = endsByAccession.get(fact.accn) ?? new Set<string>();
+        ends.add(fact.end);
+        endsByAccession.set(fact.accn, ends);
       }
     }
   }
-  return [...new Set(latestByAccession.values())].sort();
+  return endsByAccession;
 }
 
-/** {@link fiscalYearEnds} per companyfacts payload, so one payload is scanned at most once. */
-const yearEndsByPayload = new WeakMap<CompanyFactsResponse, string[]>();
+/** The latest of a report's year-long ends — its own fiscal year. */
+function ownYearEnd(ends: ReadonlySet<string>): string {
+  return [...ends].reduce((latest, end) => (end > latest ? end : latest));
+}
+
+/** Each report's own year end, sorted and each listed once. */
+function ownYearEnds(endsByAccession: ReadonlyMap<string, ReadonlySet<string>>): string[] {
+  return [...new Set([...endsByAccession.values()].map(ownYearEnd))].sort();
+}
 
 /**
- * The fiscal-year ends a companyfacts payload shows ({@link fiscalYearEnds}),
- * computed once per payload — `get_snapshot` resolves every catalog concept from
- * the same one.
+ * A filer's fiscal-year ends, sorted and each listed once: for every annual
+ * report accession, the latest end among its year-long facts that ended before
+ * it was filed ({@link annualReportYearEnds}). That is the report's own fiscal
+ * year — the comparatives end earlier. Taking every year-long fact from an
+ * annual report instead would admit off-cycle ends that sit on quarter ends
+ * (Merck's and P&G's 09-30, Toyota's 06-30) and keep a trailing-twelve-month
+ * figure ending there (#148).
  */
-export function filerFiscalYearEnds(facts: CompanyFactsResponse): string[] {
-  let ends = yearEndsByPayload.get(facts);
+export function fiscalYearEnds(unitMaps: Iterable<Readonly<Record<string, unknown>>>): string[] {
+  return ownYearEnds(annualReportYearEnds(unitMaps));
+}
+
+/** {@link annualReportYearEnds} per companyfacts payload, so one payload is scanned at most once. */
+const reportYearEndsByPayload = new WeakMap<CompanyFactsResponse, Map<string, Set<string>>>();
+
+function payloadReportYearEnds(facts: CompanyFactsResponse): Map<string, Set<string>> {
+  let ends = reportYearEndsByPayload.get(facts);
   if (!ends) {
-    ends = fiscalYearEnds(
+    ends = annualReportYearEnds(
       Object.values(facts.facts).flatMap((namespace) =>
         Object.values(namespace).map((concept) => concept.units),
       ),
     );
-    yearEndsByPayload.set(facts, ends);
+    reportYearEndsByPayload.set(facts, ends);
   }
   return ends;
+}
+
+/**
+ * The fiscal-year ends a companyfacts payload shows ({@link fiscalYearEnds}),
+ * scanned once per payload — `get_snapshot` resolves every catalog concept from
+ * the same one.
+ */
+export function filerFiscalYearEnds(facts: CompanyFactsResponse): string[] {
+  return ownYearEnds(payloadReportYearEnds(facts));
+}
+
+/** Whether `end` falls a whole number of years before `yearEnd`, give or take a week. */
+function onEarlierYearEnd(end: string, yearEnd: string): boolean {
+  const days = (Date.parse(yearEnd) - Date.parse(end)) / 86_400_000;
+  const drift = days - Math.round(days / 365.25) * 365.25;
+  return days > 0 && Math.abs(drift) <= FISCAL_YEAR_END_TOLERANCE_DAYS;
+}
+
+/**
+ * Every fiscal year a companyfacts payload closes, by its end date, sorted and
+ * each listed once: each annual report's own year ({@link filerFiscalYearEnds})
+ * plus the comparative years it restates — its year-long facts ending a whole
+ * number of years before its own end, within a week — so the prior years of a
+ * filer's first XBRL report count too (Microsoft's fiscal 2010 10-K closes 2009
+ * and 2008 as well). A year-long figure ending anywhere else in the report's
+ * year (a trailing twelve months to 09-30 in a December filer's 10-K) is no
+ * fiscal-year end and stays out. This is the set a balance-sheet value is
+ * selected on for an annual view (#167, #171). The 10-Q test of #148 keeps
+ * {@link filerFiscalYearEnds}: it matches day of year only, where a comparative
+ * year adds nothing but a wider tolerance.
+ */
+export function filerFiscalYearEndsWithComparatives(facts: CompanyFactsResponse): string[] {
+  const ends = new Set<string>();
+  for (const reported of payloadReportYearEnds(facts).values()) {
+    const own = ownYearEnd(reported);
+    for (const end of reported) if (end === own || onEarlierYearEnd(end, own)) ends.add(end);
+  }
+  return [...ends].sort();
 }
 
 /**

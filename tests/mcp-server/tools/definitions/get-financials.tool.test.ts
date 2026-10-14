@@ -4,11 +4,20 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createMockContext,
+  getEnrichment,
+  type MockContextLogger,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials.tool.js';
 import { resolveConcept } from '@/services/edgar/concept-map.js';
-import type { CompanyConceptResponse } from '@/services/edgar/types.js';
+import type {
+  CompanyConceptResponse,
+  CompanyConceptUnit,
+  CompanyFactsResponse,
+} from '@/services/edgar/types.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', () => ({
   getEdgarApiService: vi.fn(),
@@ -25,7 +34,15 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import { at, bag, blockText, caught, records, wireError } from '../../../support/assertions.js';
+import {
+  at,
+  bag,
+  blockText,
+  caught,
+  records,
+  recoveryHint,
+  wireError,
+} from '../../../support/assertions.js';
 
 const mockConceptResponse: CompanyConceptResponse = {
   cik: 320193,
@@ -343,7 +360,7 @@ describe('getFinancialsTool', () => {
     expect(result.data.every((d) => /^CY\d{4}$/.test(d.period))).toBe(true);
   });
 
-  it('explicit period_type: annual on an instant concept still throws no_period_data (#48)', async () => {
+  it('explicit period_type: annual on an instant concept returns its fiscal-year-end values (#48, #167)', async () => {
     const balanceSheetResponse: CompanyConceptResponse = {
       cik: 320193,
       entityName: 'Apple Inc.',
@@ -362,25 +379,54 @@ describe('getFinancialsTool', () => {
             fy: 2023,
             val: 352755000000,
           },
+          {
+            accn: '0000320193-23-000077',
+            end: '2023-07-01',
+            filed: '2023-08-04',
+            form: '10-Q',
+            fp: 'Q3',
+            frame: 'CY2023Q2I',
+            fy: 2023,
+            val: 335038000000,
+          },
         ],
       },
     };
     mockApi.tryGetCompanyConcept.mockResolvedValue(balanceSheetResponse);
+    // Apple's FY2023 10-K closes its year on 2023-09-30.
+    mockApi.tryGetCompanyFacts.mockResolvedValue({
+      facts: {
+        'us-gaap': {
+          NetIncomeLoss: {
+            label: 'Net Income (Loss)',
+            units: {
+              USD: [
+                {
+                  start: '2022-09-25',
+                  end: '2023-09-30',
+                  accn: '0000320193-23-000106',
+                  filed: '2023-11-03',
+                  form: '10-K',
+                  fp: 'FY',
+                  frame: 'CY2023',
+                  fy: 2023,
+                  val: 96995000000,
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
     const ctx = createMockContext({ errors: getFinancialsTool.errors });
     const input = getFinancialsTool.input.parse({
       company: 'AAPL',
       concept: 'assets',
       period_type: 'annual',
     });
+    const result = await getFinancialsTool.handler(input, ctx);
 
-    await expect(getFinancialsTool.handler(input, ctx)).rejects.toMatchObject({
-      message: /No annual data for 'Assets'/,
-      data: {
-        reason: 'no_period_data',
-        period_type: 'annual',
-        recovery: { hint: expect.stringMatching(/balance sheet \(instant\) item/) },
-      },
-    });
+    expect(result.data.map((d) => [d.period, d.value])).toEqual([['CY2023Q3I', 352755000000]]);
   });
 
   // ---- #44: tag-priority-aware frame dedup ----
@@ -2799,4 +2845,1225 @@ describe('concept names that are neither a friendly name nor an XBRL tag (#128)'
       );
     },
   );
+});
+
+// Through the real tool pipeline, so the hint is asserted as a client receives it (#164).
+describe('no_concept_data names the taxonomy to retry (#164)', () => {
+  /** Each filer's companyfacts, trimmed to a few of the tags SEC served on 2026-10-14. */
+  const sophFacts: CompanyFactsResponse = {
+    facts: {
+      dei: {
+        EntityCommonStockSharesOutstanding: {
+          label: 'Entity Common Stock, Shares Outstanding',
+          units: {
+            shares: [
+              {
+                end: '2025-12-31',
+                val: 68_486_338,
+                accn: '0001840706-26-000006',
+                fy: 2025,
+                fp: 'FY',
+                form: '20-F',
+                filed: '2026-03-03',
+                frame: 'CY2025Q4I',
+              },
+            ],
+          },
+        },
+      },
+      'ifrs-full': {
+        DilutedEarningsLossPerShare: {
+          units: {
+            'USD/shares': [
+              {
+                start: '2025-01-01',
+                end: '2025-12-31',
+                val: -1.17,
+                accn: '0001840706-26-000006',
+                fy: 2025,
+                fp: 'FY',
+                form: '20-F',
+                filed: '2026-03-03',
+                frame: 'CY2025',
+              },
+              {
+                start: '2024-01-01',
+                end: '2024-12-31',
+                val: -0.95,
+                accn: '0001840706-26-000006',
+                fy: 2025,
+                fp: 'FY',
+                form: '20-F',
+                filed: '2026-03-03',
+                frame: 'CY2024',
+              },
+            ],
+          },
+        },
+        Equity: {
+          units: {
+            USD: [
+              {
+                end: '2025-12-31',
+                val: 47_145_000,
+                accn: '0001840706-26-000006',
+                fy: 2025,
+                fp: 'FY',
+                form: '20-F',
+                filed: '2026-03-03',
+                frame: 'CY2025Q4I',
+              },
+            ],
+          },
+        },
+      },
+    },
+  };
+  const aaplFacts: CompanyFactsResponse = {
+    facts: {
+      dei: {
+        EntityCommonStockSharesOutstanding: {
+          label: 'Entity Common Stock, Shares Outstanding',
+          units: {
+            shares: [
+              {
+                end: '2026-07-17',
+                val: 14_594_180_000,
+                accn: '0000320193-26-000020',
+                fy: 2026,
+                fp: 'Q3',
+                form: '10-Q',
+                filed: '2026-07-31',
+                frame: 'CY2026Q2I',
+              },
+            ],
+          },
+        },
+      },
+      'us-gaap': {
+        EarningsPerShareDiluted: {
+          label: 'Earnings Per Share, Diluted',
+          units: {
+            'USD/shares': [
+              {
+                start: '2024-09-29',
+                end: '2025-09-27',
+                val: 7.46,
+                accn: '0000320193-25-000079',
+                fy: 2025,
+                fp: 'FY',
+                form: '10-K',
+                filed: '2025-10-31',
+                frame: 'CY2025',
+              },
+            ],
+          },
+        },
+        RevenueFromContractWithCustomerExcludingAssessedTax: {
+          label: 'Revenue from Contract with Customer, Excluding Assessed Tax',
+          units: {
+            USD: [
+              {
+                start: '2024-09-29',
+                end: '2025-09-27',
+                val: 416_161_000_000,
+                accn: '0000320193-25-000079',
+                fy: 2025,
+                fp: 'FY',
+                form: '10-K',
+                filed: '2025-10-31',
+                frame: 'CY2025',
+              },
+            ],
+          },
+        },
+      },
+    },
+  };
+  /** Toyota reports both namespaces, and cost of sales only under us-gaap. */
+  const tmFacts: CompanyFactsResponse = {
+    facts: {
+      dei: {
+        EntityCommonStockSharesOutstanding: {
+          label: 'Entity Common Stock, Shares Outstanding',
+          units: {
+            shares: [
+              {
+                end: '2026-03-31',
+                val: 13_033_931_974,
+                accn: '0001193125-26-264811',
+                fy: 2026,
+                fp: 'FY',
+                form: '20-F',
+                filed: '2026-06-10',
+                frame: 'CY2026Q1I',
+              },
+            ],
+          },
+        },
+      },
+      'ifrs-full': {
+        Revenue: {
+          units: {
+            JPY: [
+              {
+                start: '2024-04-01',
+                end: '2025-03-31',
+                val: 48_036_704_000_000,
+                accn: '0001193125-25-142326',
+                fy: 2025,
+                fp: 'FY',
+                form: '20-F',
+                filed: '2025-06-18',
+                frame: 'CY2024',
+              },
+            ],
+          },
+        },
+      },
+      'us-gaap': {
+        CostOfGoodsAndServicesSold: {
+          label: 'Cost of Goods and Services Sold',
+          units: {
+            JPY: [
+              {
+                start: '2017-04-01',
+                end: '2018-03-31',
+                val: 22_600_474_000_000,
+                accn: '0001193125-18-201591',
+                fy: 2018,
+                fp: 'FY',
+                form: '20-F',
+                filed: '2018-06-25',
+                frame: 'CY2017',
+              },
+            ],
+          },
+        },
+      },
+    },
+  };
+  /** Boston Scientific's lone `srt` tag, framed, beside a us-gaap tag. */
+  const bsxFacts: CompanyFactsResponse = {
+    facts: {
+      'us-gaap': {
+        StockholdersEquity: {
+          label: "Stockholders' Equity Attributable to Parent",
+          units: {
+            USD: [
+              {
+                end: '2025-12-31',
+                val: 24_233_000_000,
+                accn: '0000885725-26-000053',
+                fy: 2026,
+                fp: 'Q2',
+                form: '10-Q',
+                filed: '2026-08-03',
+                frame: 'CY2025Q4I',
+              },
+            ],
+          },
+        },
+      },
+      srt: {
+        StockRepurchaseProgramAuthorizedAmount1: {
+          label: 'Stock Repurchase Program, Authorized Amount',
+          units: {
+            USD: [
+              {
+                end: '2020-12-14',
+                val: 1_000_000_000,
+                accn: '0000885725-26-000053',
+                fy: 2026,
+                fp: 'Q2',
+                form: '10-Q',
+                filed: '2026-08-03',
+                frame: 'CY2020Q4I',
+              },
+            ],
+          },
+        },
+      },
+    },
+  };
+  const filers: Record<string, { cik: string; name: string; facts: CompanyFactsResponse }> = {
+    SOPH: { cik: '0001840706', name: 'SOPHiA GENETICS SA', facts: sophFacts },
+    AAPL: { cik: '0000320193', name: 'Apple Inc.', facts: aaplFacts },
+    TM: { cik: '0001094517', name: 'TOYOTA MOTOR CORP/', facts: tmFacts },
+    BSX: { cik: '0000885725', name: 'BOSTON SCIENTIFIC CORPORATION', facts: bsxFacts },
+  };
+  const byCik = (cik: string) => Object.values(filers).find((filer) => filer.cik === cik);
+
+  beforeEach(() => {
+    mockApi.resolveCik.mockImplementation(async (company: string) => {
+      const filer = filers[company];
+      return filer ? { cik: filer.cik, name: filer.name, ticker: company } : [];
+    });
+    // companyconcept answers exactly what the filer's companyfacts holds, as SEC does.
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (cik: string, taxonomy: string, tag: string) => {
+        const concept = byCik(cik)?.facts.facts[taxonomy]?.[tag];
+        return concept
+          ? {
+              cik: Number(cik),
+              entityName: '',
+              label: concept.label ?? '',
+              tag,
+              taxonomy,
+              units: concept.units,
+            }
+          : null;
+      },
+    );
+    mockApi.tryGetCompanyFacts.mockImplementation(async (cik: string) => byCik(cik)?.facts ?? null);
+  });
+
+  const call = (company: string, concept: string, taxonomy: string) =>
+    runToolContract(getFinancialsTool, { company, concept, taxonomy } as never);
+
+  it.each([
+    [
+      'SOPH',
+      'eps_diluted',
+      'us-gaap',
+      'ifrs-full',
+      'Retry with taxonomy: "ifrs-full" — eps_diluted resolves there to DilutedEarningsLossPerShare.',
+    ],
+    [
+      'AAPL',
+      'eps_diluted',
+      'ifrs-full',
+      'us-gaap',
+      'Retry with taxonomy: "us-gaap" — eps_diluted resolves there to EarningsPerShareDiluted.',
+    ],
+    [
+      'TM',
+      'cogs',
+      'ifrs-full',
+      'us-gaap',
+      'Retry with taxonomy: "us-gaap" — cogs resolves there to CostOfGoodsAndServicesSold.',
+    ],
+    [
+      'SOPH',
+      'shares_outstanding',
+      'ifrs-full',
+      'dei',
+      'Retry with taxonomy: "dei" — shares_outstanding resolves there to EntityCommonStockSharesOutstanding.',
+    ],
+    [
+      'AAPL',
+      'revenue',
+      'dei',
+      'us-gaap',
+      'Retry with taxonomy: "us-gaap" — revenue resolves there to RevenueFromContractWithCustomerExcludingAssessedTax.',
+    ],
+    [
+      'SOPH',
+      'DilutedEarningsLossPerShare',
+      'us-gaap',
+      'ifrs-full',
+      'DilutedEarningsLossPerShare is reported under ifrs-full — retry with taxonomy: "ifrs-full".',
+    ],
+    [
+      'AAPL',
+      'EarningsPerShareDiluted',
+      'ifrs-full',
+      'us-gaap',
+      'EarningsPerShareDiluted is reported under us-gaap — retry with taxonomy: "us-gaap".',
+    ],
+    // Past the first other taxonomy: SOPH reports nothing under us-gaap.
+    [
+      'SOPH',
+      'EntityCommonStockSharesOutstanding',
+      'ifrs-full',
+      'dei',
+      'EntityCommonStockSharesOutstanding is reported under dei — retry with taxonomy: "dei".',
+    ],
+  ])(
+    '%s %s under %s leads the hint with a retry under %s, on both surfaces',
+    async (company, concept, taxonomy, retryTaxonomy, retry) => {
+      const result = await call(company, concept, taxonomy);
+
+      const error = wireError(result);
+      expect(error.data.reason).toBe('no_concept_data');
+      const hint = String(bag(error.data.recovery).hint);
+      expect(hint.startsWith(`${retry} This filer reports under: `)).toBe(true);
+      expect(blockText(result.content)).toContain(retry);
+      expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledTimes(1);
+
+      // The retry the hint names answers.
+      const retried = await call(company, concept, retryTaxonomy);
+      expect(retried.isError).toBeFalsy();
+      expect(getFinancialsTool.output.parse(retried.structuredContent).data.length).toBeGreaterThan(
+        0,
+      );
+    },
+  );
+
+  it('keeps the error data fields and the namespace summary after the retry line', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const err = await caught(
+      getFinancialsTool.handler(
+        getFinancialsTool.input.parse({ company: 'SOPH', concept: 'eps_diluted' }),
+        ctx,
+      ),
+    );
+
+    expect(err.data).toEqual({
+      reason: 'no_concept_data',
+      recovery: {
+        hint: 'Retry with taxonomy: "ifrs-full" — eps_diluted resolves there to DilutedEarningsLossPerShare. This filer reports under: dei (1 tags); ifrs-full (2 tags). Try a raw XBRL tag from one of these namespaces, or switch taxonomy to match.',
+      },
+      concept: 'eps_diluted',
+      taxonomy: 'us-gaap',
+      tags_tried: ['EarningsPerShareDiluted'],
+      available_namespaces: ['dei', 'ifrs-full'],
+    });
+  });
+
+  // Characterization: the namespace summary the probe already returned stands alone.
+  it.each([
+    ['SOPH', 'notes_payable', 'ifrs-full'],
+    ['SOPH', 'notes_payable', 'us-gaap'],
+  ])(
+    'names no retry for %s %s under %s, which no accepted taxonomy carries',
+    async (company, concept, taxonomy) => {
+      const ctx = createMockContext({ errors: getFinancialsTool.errors });
+      const err = await caught(
+        getFinancialsTool.handler(
+          getFinancialsTool.input.parse({ company, concept, taxonomy }),
+          ctx,
+        ),
+      );
+
+      expect(err.data.reason).toBe('no_concept_data');
+      expect(recoveryHint(err)).toBe(
+        'This filer reports under: dei (1 tags); ifrs-full (2 tags). Try a raw XBRL tag from one of these namespaces, or switch taxonomy to match.',
+      );
+      expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('names no retry for a raw tag the filer never reports', async () => {
+    const result = await call('AAPL', 'NoSuchTagAnywhere', 'us-gaap');
+
+    const hint = String(bag(wireError(result).data.recovery).hint);
+    expect(hint).toBe(
+      'This filer reports under: dei (1 tags); us-gaap (2 tags). Try a raw XBRL tag from one of these namespaces, or switch taxonomy to match.',
+    );
+    expect(blockText(result.content)).not.toContain('Retry with taxonomy');
+  });
+
+  it('names no namespace outside the taxonomy input, though companyfacts carries it', async () => {
+    const result = await call('BSX', 'StockRepurchaseProgramAuthorizedAmount1', 'us-gaap');
+
+    const hint = String(bag(wireError(result).data.recovery).hint);
+    expect(hint.startsWith('This filer reports under: ')).toBe(true);
+    expect(hint).not.toContain('retry with taxonomy');
+    expect(hint).not.toContain('taxonomy: "srt"');
+  });
+
+  it('names no retry where the other taxonomy holds the tag with no framed value', async () => {
+    mockApi.tryGetCompanyFacts.mockResolvedValue({
+      facts: {
+        'ifrs-full': {
+          DilutedEarningsLossPerShare: {
+            units: {
+              // Unframed only, plus a unit served as an object where an array belongs (#141).
+              'USD/shares': [
+                {
+                  start: '2025-01-01',
+                  end: '2025-12-31',
+                  val: -1.17,
+                  accn: '0001840706-26-000006',
+                  fy: 2025,
+                  fp: 'FY',
+                  form: '20-F',
+                  filed: '2026-03-03',
+                },
+              ],
+              EUR: {} as never,
+            },
+          },
+        },
+      },
+    } satisfies CompanyFactsResponse);
+
+    for (const concept of ['eps_diluted', 'DilutedEarningsLossPerShare']) {
+      const result = await call('SOPH', concept, 'us-gaap');
+      const hint = String(bag(wireError(result).data.recovery).hint);
+      expect(hint).toMatch(/^This filer reports under: ifrs-full \(1 tags/);
+    }
+  });
+
+  it('names the first tag of the ladder the other taxonomy reports, past the first', async () => {
+    // Revenue tagged only under the ladder's second tag.
+    const { RevenueFromContractWithCustomerExcludingAssessedTax: excluding, ...rest } =
+      aaplFacts.facts['us-gaap'] ?? {};
+    mockApi.tryGetCompanyFacts.mockResolvedValue({
+      facts: { ...aaplFacts.facts, 'us-gaap': { ...rest, Revenues: excluding! } },
+    });
+
+    const result = await call('AAPL', 'revenue', 'dei');
+
+    expect(String(bag(wireError(result).data.recovery).hint)).toMatch(
+      /^Retry with taxonomy: "us-gaap" — revenue resolves there to Revenues\. /,
+    );
+  });
+
+  // Characterization: with no companyfacts payload the probe's static hints stand.
+  it.each([
+    ['ifrs-full', 'Try a raw XBRL tag instead of a friendly name, or check the company uses IFRS.'],
+    [
+      'us-gaap',
+      "This company may use a different tag or taxonomy. Try 'ifrs-full' for foreign filers.",
+    ],
+  ])('keeps the static hint under %s when companyfacts holds nothing', async (taxonomy, hint) => {
+    mockApi.tryGetCompanyFacts.mockResolvedValue(null);
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const err = await caught(
+      getFinancialsTool.handler(
+        getFinancialsTool.input.parse({ company: 'SOPH', concept: 'cogs', taxonomy }),
+        ctx,
+      ),
+    );
+
+    expect(recoveryHint(err)).toBe(hint);
+    expect(err.data.available_namespaces).toBeUndefined();
+  });
+});
+
+describe('explicit annual on an instant concept (#167)', () => {
+  /** A fixture row's space-separated fields, checked for count so a typo fails loudly. */
+  const fields = (row: string, count: number): string[] => {
+    const parts = row.split(' ');
+    if (parts.length !== count) throw new Error(`Fixture row needs ${count} fields: ${row}`);
+    return parts;
+  };
+  /**
+   * Framed instants as SEC served them, one row each: end, value, frame, then the
+   * frame holder's form, fiscal period, fiscal year (`-` when the filing encodes
+   * none), filed date, and accession.
+   */
+  const instants = (rows: readonly string[]): CompanyConceptUnit[] =>
+    rows.map((row) => {
+      const [end, val, frame, form, fp, fy, filed, accn] = fields(row, 8) as [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ];
+      return {
+        end,
+        val: Number(val),
+        frame,
+        form,
+        fp: fp === '-' ? null : fp,
+        fy: fy === '-' ? null : Number(fy),
+        filed,
+        accn,
+      };
+    });
+  /**
+   * Annual reports' own year-long facts, which the filer's fiscal-year ends are
+   * read from, one row each: start, end, form, filed date, accession, and value.
+   */
+  const reportYears = (rows: readonly string[]): CompanyConceptUnit[] =>
+    rows.map((row) => {
+      const [start, end, form, filed, accn, val] = fields(row, 6) as [
+        string,
+        string,
+        string,
+        string,
+        string,
+        string,
+      ];
+      return {
+        start,
+        end,
+        form,
+        filed,
+        accn,
+        val: Number(val),
+        fp: 'FY',
+        fy: Number(end.slice(0, 4)),
+      };
+    });
+  /** A companyfacts payload holding the given concepts, each `[taxonomy, tag, unit, values, label?]`. */
+  const companyFacts = (
+    ...concepts: ReadonlyArray<
+      readonly [
+        taxonomy: string,
+        tag: string,
+        unit: string,
+        values: CompanyConceptUnit[],
+        label?: string,
+      ]
+    >
+  ): CompanyFactsResponse => {
+    const facts: CompanyFactsResponse['facts'] = {};
+    for (const [taxonomy, tag, unit, values, label] of concepts) {
+      facts[taxonomy] = {
+        ...facts[taxonomy],
+        [tag]: { ...(label === undefined ? {} : { label }), units: { [unit]: values } },
+      };
+    }
+    return { facts };
+  };
+
+  /**
+   * Each filer's equity (Apple's assets) and the annual-report facts its fiscal-year
+   * ends come from, trimmed from what SEC served on 2026-10-14. Boston Scientific's
+   * 2025-12-31 instant is framed on its Q2-2026 10-Q, and the 10-K's own fact for
+   * that date carries no frame.
+   */
+  const bsxEquity = [
+    ...instants([
+      '2021-12-31 16622000000 CY2021Q4I 10-K FY 2023 2024-02-20 0000885725-24-000017',
+      '2022-03-31 16735000000 CY2022Q1I 10-Q Q1 2023 2023-05-04 0000885725-23-000026',
+      '2022-06-30 17251000000 CY2022Q2I 10-Q Q2 2023 2023-08-03 0000885725-23-000043',
+      '2022-09-30 17640000000 CY2022Q3I 10-Q Q3 2023 2023-11-01 0000885725-23-000048',
+      '2022-12-31 17573000000 CY2022Q4I 10-K FY 2024 2025-02-18 0000885725-25-000011',
+      '2023-03-31 17850000000 CY2023Q1I 10-Q Q1 2024 2024-05-01 0000885725-24-000046',
+      '2023-06-30 18226000000 CY2023Q2I 10-Q Q2 2024 2024-08-01 0000885725-24-000068',
+      '2023-09-30 18886000000 CY2023Q3I 10-Q Q3 2024 2024-11-01 0000885725-24-000073',
+      '2023-12-31 19282000000 CY2023Q4I 10-K FY 2024 2025-02-18 0000885725-25-000011',
+      '2024-03-31 19926000000 CY2024Q1I 10-Q Q1 2024 2024-05-01 0000885725-24-000046',
+      '2024-06-30 20371000000 CY2024Q2I 10-Q Q2 2025 2025-08-01 0000885725-25-000041',
+      '2024-09-30 20708000000 CY2024Q3I 10-Q Q3 2025 2025-11-03 0000885725-25-000050',
+      '2024-12-31 21770000000 CY2024Q4I 10-K FY 2025 2026-02-17 0000885725-26-000010',
+      '2025-03-31 22212000000 CY2025Q1I 10-Q Q1 2025 2025-05-01 0000885725-25-000026',
+      '2025-06-30 22418000000 CY2025Q2I 10-Q Q2 2026 2026-08-03 0000885725-26-000053',
+      '2025-09-30 23394000000 CY2025Q3I 10-Q Q3 2025 2025-11-03 0000885725-25-000050',
+      '2025-12-31 24233000000 CY2025Q4I 10-Q Q2 2026 2026-08-03 0000885725-26-000053',
+      '2026-03-31 25864000000 CY2026Q1I 10-Q Q1 2026 2026-05-01 0000885725-26-000033',
+      '2026-06-30 24930000000 CY2026Q2I 10-Q Q2 2026 2026-08-03 0000885725-26-000053',
+    ]),
+    {
+      end: '2025-12-31',
+      val: 24_233_000_000,
+      accn: '0000885725-26-000010',
+      fy: 2025,
+      fp: 'FY',
+      form: '10-K',
+      filed: '2026-02-17',
+    },
+  ];
+  /** Boston Scientific's cover-page share counts, dated weeks after each year end. */
+  const bsxShares = instants([
+    '2025-01-31 1475778104 CY2024Q4I 10-K FY 2024 2025-02-18 0000885725-25-000011',
+    '2025-04-29 1479446345 CY2025Q1I 10-Q Q1 2025 2025-05-01 0000885725-25-000026',
+    '2025-07-29 1481751634 CY2025Q2I 10-Q Q2 2025 2025-08-01 0000885725-25-000041',
+    '2025-10-30 1482442039 CY2025Q3I 10-Q Q3 2025 2025-11-03 0000885725-25-000050',
+    '2026-01-30 1483885456 CY2025Q4I 10-K FY 2025 2026-02-17 0000885725-26-000010',
+    '2026-04-29 1486355179 CY2026Q1I 10-Q Q1 2026 2026-05-01 0000885725-26-000033',
+    '2026-07-30 1449229526 CY2026Q2I 10-Q Q2 2026 2026-08-03 0000885725-26-000053',
+  ]);
+  const bsxYears = reportYears([
+    '2020-01-01 2020-12-31 10-K 2021-02-23 0000885725-21-000008 0.01',
+    '2021-01-01 2021-12-31 10-K 2022-02-23 0000885725-22-000006 0.01',
+    '2022-01-01 2022-12-31 10-K 2023-02-23 0000885725-23-000008 0.01',
+    '2023-01-01 2023-12-31 10-K 2024-02-20 0000885725-24-000017 0.01',
+    '2023-01-01 2023-12-31 10-K/A 2024-02-21 0000885725-24-000020 0.01',
+    '2024-01-01 2024-12-31 10-K 2025-02-18 0000885725-25-000011 0.01',
+    '2025-01-01 2025-12-31 10-K 2026-02-17 0000885725-26-000010 0.01',
+  ]);
+  const EQUITY_LABEL = "Stockholders' Equity Attributable to Parent";
+
+  const filers: Record<string, { cik: string; name: string; facts: CompanyFactsResponse }> = {
+    BSX: {
+      cik: '0000885725',
+      name: 'BOSTON SCIENTIFIC CORPORATION',
+      facts: companyFacts(
+        ['us-gaap', 'StockholdersEquity', 'USD', bsxEquity, EQUITY_LABEL],
+        ['dei', 'EntityCommonStockSharesOutstanding', 'shares', bsxShares],
+        ['dei', 'EntityListingParValuePerShare', 'USD/shares', bsxYears],
+      ),
+    },
+    MSFT: {
+      cik: '0000789019',
+      name: 'MICROSOFT CORPORATION',
+      facts: companyFacts(
+        [
+          'us-gaap',
+          'StockholdersEquity',
+          'USD',
+          instants([
+            '2023-06-30 206223000000 CY2023Q2I 10-K FY 2025 2025-07-30 0000950170-25-100235',
+            '2023-09-30 220714000000 CY2023Q3I 10-Q Q1 2025 2024-10-30 0000950170-24-118967',
+            '2023-12-31 238268000000 CY2023Q4I 10-Q Q2 2025 2025-01-29 0000950170-25-010491',
+            '2024-03-31 253152000000 CY2024Q1I 10-Q Q3 2025 2025-04-30 0000950170-25-061046',
+            '2024-06-30 268477000000 CY2024Q2I 10-K FY 2026 2026-07-29 0001193125-26-323660',
+            '2024-09-30 287723000000 CY2024Q3I 10-Q Q1 2026 2025-10-29 0001193125-25-256321',
+            '2024-12-31 302695000000 CY2024Q4I 10-Q Q2 2026 2026-01-28 0001193125-26-027207',
+            '2025-03-31 321891000000 CY2025Q1I 10-Q Q3 2026 2026-04-29 0001193125-26-191507',
+            '2025-06-30 343479000000 CY2025Q2I 10-K FY 2026 2026-07-29 0001193125-26-323660',
+            '2025-09-30 363076000000 CY2025Q3I 10-Q Q1 2026 2025-10-29 0001193125-25-256321',
+            '2025-12-31 390875000000 CY2025Q4I 10-Q Q2 2026 2026-01-28 0001193125-26-027207',
+            '2026-03-31 414367000000 CY2026Q1I 10-Q Q3 2026 2026-04-29 0001193125-26-191507',
+            '2026-06-30 442387000000 CY2026Q2I 10-K FY 2026 2026-07-29 0001193125-26-323660',
+          ]),
+          EQUITY_LABEL,
+        ],
+        [
+          'dei',
+          'EntityListingParValuePerShare',
+          'USD/shares',
+          reportYears([
+            '2022-07-01 2023-06-30 10-K 2023-07-27 0000950170-23-035122 0.000006',
+            '2023-07-01 2024-06-30 10-K 2024-07-30 0000950170-24-087843 0.000006',
+            '2024-07-01 2025-06-30 10-K 2025-07-30 0000950170-25-100235 0.000006',
+            '2025-07-01 2026-06-30 10-K 2026-07-29 0001193125-26-323660 0.000006',
+          ]),
+        ],
+      ),
+    },
+    AAPL: {
+      cik: '0000320193',
+      name: 'Apple Inc.',
+      facts: companyFacts(
+        [
+          'us-gaap',
+          'Assets',
+          'USD',
+          instants([
+            '2023-07-01 335038000000 CY2023Q2I 10-Q Q3 2023 2023-08-04 0000320193-23-000077',
+            '2023-09-30 352583000000 CY2023Q3I 10-K FY 2024 2024-11-01 0000320193-24-000123',
+            '2023-12-30 353514000000 CY2023Q4I 10-Q Q1 2024 2024-02-02 0000320193-24-000006',
+            '2024-03-30 337411000000 CY2024Q1I 10-Q Q2 2024 2024-05-03 0000320193-24-000069',
+            '2024-06-29 331612000000 CY2024Q2I 10-Q Q3 2024 2024-08-02 0000320193-24-000081',
+            '2024-09-28 364980000000 CY2024Q3I 10-K FY 2025 2025-10-31 0000320193-25-000079',
+            '2024-12-28 344085000000 CY2024Q4I 10-Q Q1 2025 2025-01-31 0000320193-25-000008',
+            '2025-03-29 331233000000 CY2025Q1I 10-Q Q2 2025 2025-05-02 0000320193-25-000057',
+            '2025-06-28 331495000000 CY2025Q2I 10-Q Q3 2025 2025-08-01 0000320193-25-000073',
+            '2025-09-27 359241000000 CY2025Q3I 10-Q Q3 2026 2026-07-31 0000320193-26-000020',
+            '2025-12-27 379297000000 CY2025Q4I 10-Q Q1 2026 2026-01-30 0000320193-26-000006',
+            '2026-03-28 371082000000 CY2026Q1I 10-Q Q2 2026 2026-05-01 0000320193-26-000013',
+            '2026-06-27 383266000000 CY2026Q2I 10-Q Q3 2026 2026-07-31 0000320193-26-000020',
+          ]),
+          'Assets',
+        ],
+        [
+          'us-gaap',
+          'AllocatedShareBasedCompensationExpense',
+          'USD',
+          reportYears([
+            '2021-09-26 2022-09-24 10-K 2022-10-28 0000320193-22-000108 9038000000',
+            '2022-09-25 2023-09-30 10-K 2023-11-03 0000320193-23-000106 10833000000',
+            '2023-10-01 2024-09-28 10-K 2024-11-01 0000320193-24-000123 11688000000',
+            '2024-09-29 2025-09-27 10-K 2025-10-31 0000320193-25-000079 12863000000',
+          ]),
+        ],
+      ),
+    },
+    WMT: {
+      cik: '0000104169',
+      name: 'WALMART INC.',
+      facts: companyFacts(
+        [
+          'us-gaap',
+          'StockholdersEquity',
+          'USD',
+          instants([
+            '2024-01-31 83861000000 CY2023Q4I 10-K FY 2025 2025-03-14 0000104169-25-000021',
+            '2024-04-30 81293000000 CY2024Q1I 10-Q Q1 2026 2025-06-06 0000104169-25-000090',
+            '2024-07-31 84423000000 CY2024Q2I 10-Q Q2 2026 2025-08-29 0000104169-25-000137',
+            '2024-10-31 88108000000 CY2024Q3I 10-Q Q3 2026 2025-12-03 0000104169-25-000191',
+            '2025-01-31 91013000000 CY2024Q4I 10-K FY 2026 2026-03-13 0000104169-26-000055',
+            '2025-04-30 83793000000 CY2025Q1I 10-Q Q1 2027 2026-05-29 0000104169-26-000102',
+            '2025-07-31 90110000000 CY2025Q2I 10-Q Q2 2027 2026-08-28 0000104169-26-000154',
+            '2025-10-31 96094000000 CY2025Q3I 10-Q Q3 2026 2025-12-03 0000104169-25-000191',
+            '2026-01-31 99617000000 CY2025Q4I 10-Q Q2 2027 2026-08-28 0000104169-26-000154',
+            '2026-04-30 94330000000 CY2026Q1I 10-Q Q1 2027 2026-05-29 0000104169-26-000102',
+            '2026-07-31 98238000000 CY2026Q2I 10-Q Q2 2027 2026-08-28 0000104169-26-000154',
+          ]),
+          EQUITY_LABEL,
+        ],
+        [
+          'us-gaap',
+          'AdvertisingExpense',
+          'USD',
+          reportYears([
+            '2022-02-01 2023-01-31 10-K 2023-03-17 0000104169-23-000020 4100000000',
+            '2023-02-01 2024-01-31 10-K 2024-03-15 0000104169-24-000056 4400000000',
+            '2024-02-01 2025-01-31 10-K 2025-03-14 0000104169-25-000021 5100000000',
+            '2025-02-01 2026-01-31 10-K 2026-03-13 0000104169-26-000055 5400000000',
+          ]),
+        ],
+      ),
+    },
+    ORCL: {
+      cik: '0001341439',
+      name: 'Oracle Corporation',
+      facts: companyFacts(
+        [
+          'us-gaap',
+          'StockholdersEquity',
+          'USD',
+          instants([
+            '2024-05-31 8704000000 CY2024Q2I 10-K FY 2025 2025-06-18 0000950170-25-087926',
+            '2024-08-31 10816000000 CY2024Q3I 10-Q Q1 2025 2024-09-10 0000950170-24-104905',
+            '2024-11-30 13746000000 CY2024Q4I 10-Q Q2 2025 2024-12-10 0000950170-24-134973',
+            '2025-02-28 16730000000 CY2025Q1I 10-Q Q3 2025 2025-03-11 0000950170-25-037143',
+            '2025-05-31 20451000000 CY2025Q2I 10-K FY 2026 2026-06-22 0001193125-26-277521',
+            '2025-08-31 24154000000 CY2025Q3I 10-Q Q1 2026 2025-09-10 0001193125-25-200095',
+            '2025-11-30 29951000000 CY2025Q4I 10-Q Q2 2026 2025-12-11 0001193125-25-315925',
+            '2026-02-28 38495000000 CY2026Q1I 10-Q Q3 2026 2026-03-11 0001193125-26-101045',
+            '2026-05-31 42508000000 CY2026Q2I 10-Q Q1 2026 2026-09-11 0001193125-26-389274',
+            '2026-08-31 66772000000 CY2026Q3I 10-Q Q1 2026 2026-09-11 0001193125-26-389274',
+          ]),
+          EQUITY_LABEL,
+        ],
+        [
+          'us-gaap',
+          'AdjustmentsRelatedToTaxWithholdingForShareBasedCompensation',
+          'USD',
+          reportYears([
+            '2022-06-01 2023-05-31 10-K 2023-06-20 0000950170-23-028914 1203000000',
+            '2023-06-01 2024-05-31 10-K 2024-06-20 0000950170-24-075605 2040000000',
+            '2024-06-01 2025-05-31 10-K 2025-06-18 0000950170-25-087926 900000000',
+            '2025-06-01 2026-05-31 10-K 2026-06-22 0001193125-26-277521 111000000',
+          ]),
+        ],
+      ),
+    },
+    SOPH: {
+      cik: '0001840706',
+      name: 'SOPHiA GENETICS SA',
+      facts: companyFacts(
+        [
+          'ifrs-full',
+          'Equity',
+          'USD',
+          // 6-K interim reports encode no fiscal period or year.
+          instants([
+            '2023-03-31 184912000 CY2023Q1I 6-K - - 2024-08-06 0001840706-24-000123',
+            '2023-06-30 171702000 CY2023Q2I 6-K - - 2024-08-06 0001840706-24-000123',
+            '2023-12-31 151442000 CY2023Q4I 20-F FY 2025 2026-03-03 0001840706-26-000006',
+            '2024-03-31 132232000 CY2024Q1I 6-K - - 2025-08-05 0001840706-25-000026',
+            '2024-06-30 121443000 CY2024Q2I 6-K - - 2025-08-05 0001840706-25-000026',
+            '2024-12-31 96490000 CY2024Q4I 20-F FY 2025 2026-03-03 0001840706-26-000006',
+            '2025-03-31 85613000 CY2025Q1I 6-K - - 2025-08-05 0001840706-25-000026',
+            '2025-06-30 76692000 CY2025Q2I 6-K - - 2025-08-05 0001840706-25-000026',
+            '2025-12-31 47145000 CY2025Q4I 20-F FY 2025 2026-03-03 0001840706-26-000006',
+          ]),
+        ],
+        [
+          'dei',
+          'EntityCommonStockSharesOutstanding',
+          'shares',
+          instants([
+            '2023-12-31 65230559 CY2023Q4I 20-F FY 2023 2024-03-05 0001840706-24-000012',
+            '2024-12-31 66687085 CY2024Q4I 20-F FY 2024 2025-03-04 0001840706-25-000009',
+            '2025-12-31 68486338 CY2025Q4I 20-F FY 2025 2026-03-03 0001840706-26-000006',
+          ]),
+          'Entity Common Stock, Shares Outstanding',
+        ],
+        [
+          'ifrs-full',
+          'AccountingProfit',
+          'USD',
+          reportYears([
+            '2023-01-01 2023-12-31 20-F 2024-03-05 0001840706-24-000012 -77893000',
+            '2024-01-01 2024-12-31 20-F 2025-03-04 0001840706-25-000009 -61270000',
+            '2025-01-01 2025-12-31 20-F 2026-03-03 0001840706-26-000006 -77487000',
+          ]),
+        ],
+      ),
+    },
+  };
+  const byCik = (cik: string) => Object.values(filers).find((filer) => filer.cik === cik);
+
+  beforeEach(() => {
+    vi.setSystemTime(new Date('2026-10-14T00:00:00.000Z'));
+    vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+    mockApi.resolveCik.mockImplementation(async (company: string) => {
+      const filer = filers[company];
+      return filer ? { cik: filer.cik, name: filer.name, ticker: company } : [];
+    });
+    // companyconcept answers exactly what the filer's companyfacts holds, as SEC does.
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (cik: string, taxonomy: string, tag: string) => {
+        const concept = byCik(cik)?.facts.facts[taxonomy]?.[tag];
+        return concept
+          ? {
+              cik: Number(cik),
+              entityName: '',
+              label: concept.label ?? '',
+              tag,
+              taxonomy,
+              units: concept.units,
+            }
+          : null;
+      },
+    );
+    mockApi.tryGetCompanyFacts.mockImplementation(async (cik: string) => byCik(cik)?.facts ?? null);
+  });
+  afterAll(() => {
+    vi.setSystemTime(new Date(NOW));
+  });
+
+  const annual = (company: string, concept: string, extra: Record<string, unknown> = {}) =>
+    getFinancialsTool.input.parse({ company, concept, period_type: 'annual', ...extra });
+
+  it.each([
+    [
+      'BSX',
+      'equity',
+      'us-gaap',
+      [
+        ['CY2025Q4I', 24_233_000_000],
+        ['CY2024Q4I', 21_770_000_000],
+        ['CY2023Q4I', 19_282_000_000],
+      ],
+    ],
+    [
+      'MSFT',
+      'equity',
+      'us-gaap',
+      [
+        ['CY2026Q2I', 442_387_000_000],
+        ['CY2025Q2I', 343_479_000_000],
+        ['CY2024Q2I', 268_477_000_000],
+      ],
+    ],
+    [
+      'AAPL',
+      'assets',
+      'us-gaap',
+      [
+        ['CY2025Q3I', 359_241_000_000],
+        ['CY2024Q3I', 364_980_000_000],
+        ['CY2023Q3I', 352_583_000_000],
+      ],
+    ],
+    [
+      'WMT',
+      'equity',
+      'us-gaap',
+      [
+        ['CY2025Q4I', 99_617_000_000],
+        ['CY2024Q4I', 91_013_000_000],
+        ['CY2023Q4I', 83_861_000_000],
+      ],
+    ],
+    [
+      'ORCL',
+      'equity',
+      'us-gaap',
+      [
+        ['CY2026Q2I', 42_508_000_000],
+        ['CY2025Q2I', 20_451_000_000],
+        ['CY2024Q2I', 8_704_000_000],
+      ],
+    ],
+    [
+      'SOPH',
+      'equity',
+      'ifrs-full',
+      [
+        ['CY2025Q4I', 47_145_000],
+        ['CY2024Q4I', 96_490_000],
+        ['CY2023Q4I', 151_442_000],
+      ],
+    ],
+  ] as const)(
+    '%s %s under %s returns its fiscal-year-end values, newest first, on both surfaces',
+    async (company, concept, taxonomy, expected) => {
+      const result = await runToolContract(getFinancialsTool, {
+        company,
+        concept,
+        taxonomy,
+        period_type: 'annual',
+        limit: 3,
+      });
+
+      expect(result.isError).toBeFalsy();
+      const output = getFinancialsTool.output.parse(result.structuredContent);
+      expect(output.data.map((d) => [d.period, d.value])).toEqual(expected);
+      const text = blockText(result.content);
+      for (const [period] of expected) expect(text).toContain(`\n${period}: `);
+      expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('selects every year end the filer reported, keeping the frame holder’s provenance', async () => {
+    const result = await getFinancialsTool.handler(
+      annual('BSX', 'equity'),
+      createMockContext({ errors: getFinancialsTool.errors }),
+    );
+
+    // 2021 and 2022 are framed on later 10-Ks; 2025 on a 10-Q, beside the 10-K's unframed fact.
+    expect(result.data.map((d) => [d.period, d.end])).toEqual([
+      ['CY2025Q4I', '2025-12-31'],
+      ['CY2024Q4I', '2024-12-31'],
+      ['CY2023Q4I', '2023-12-31'],
+      ['CY2022Q4I', '2022-12-31'],
+      ['CY2021Q4I', '2021-12-31'],
+    ]);
+    expect(at(result.data)).toEqual({
+      period: 'CY2025Q4I',
+      value: 24_233_000_000,
+      end: '2025-12-31',
+      fiscal_year: 2026,
+      fiscal_period: 'Q2',
+      form: '10-Q',
+      filed: '2026-08-03',
+      accession_number: '0000885725-26-000053',
+      tag: 'StockholdersEquity',
+    });
+    // An annual view: no missing-quarter caveat.
+    expect(result.caveats).toBeUndefined();
+  });
+
+  it('keeps the first 10-K’s comparative year-end balances, on both surfaces', async () => {
+    /**
+     * Microsoft's first XBRL 10-K (fiscal 2010, filed 2010-07-30) restates
+     * fiscal 2009 and 2008 beside its own year, as SEC served it on 2026-10-14.
+     * The fiscal 2011 10-K adds a year-long figure ending 2009-09-30, off the
+     * filer's calendar (Merck's and P&G's 09-30 shape), which closes no year.
+     */
+    const firstXbrl = companyFacts(
+      [
+        'us-gaap',
+        'StockholdersEquity',
+        'USD',
+        instants([
+          '2008-06-30 36286000000 CY2008Q2I 10-K FY 2010 2010-07-30 0001193125-10-171791',
+          '2008-09-30 33594000000 CY2008Q3I 10-Q Q1 2010 2009-10-23 0001193125-09-212454',
+          '2009-06-30 39558000000 CY2009Q2I 10-K FY 2011 2011-07-28 0001193125-11-200680',
+          '2009-09-30 41212000000 CY2009Q3I 10-Q Q1 2011 2010-10-28 0001193125-10-239825',
+          '2010-06-30 46175000000 CY2010Q2I 10-K FY 2012 2012-07-26 0001193125-12-316848',
+        ]),
+        EQUITY_LABEL,
+      ],
+      [
+        'us-gaap',
+        'Revenues',
+        'USD',
+        reportYears([
+          '2007-07-01 2008-06-30 10-K 2010-07-30 0001193125-10-171791 60420000000',
+          '2008-07-01 2009-06-30 10-K 2010-07-30 0001193125-10-171791 58437000000',
+          '2009-07-01 2010-06-30 10-K 2010-07-30 0001193125-10-171791 62484000000',
+          '2008-10-01 2009-09-30 10-K 2011-07-28 0001193125-11-200680 60000000000',
+          '2010-07-01 2011-06-30 10-K 2011-07-28 0001193125-11-200680 69943000000',
+        ]),
+      ],
+    );
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0000789019',
+      name: 'MICROSOFT CORPORATION',
+      ticker: 'MSFT',
+    });
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, taxonomy: string, tag: string) => {
+        const concept = firstXbrl.facts[taxonomy]?.[tag];
+        return concept ? conceptPayload(tag, concept.label ?? '', concept.units) : null;
+      },
+    );
+    mockApi.tryGetCompanyFacts.mockResolvedValue(firstXbrl);
+
+    const result = await runToolContract(getFinancialsTool, {
+      company: 'MSFT',
+      concept: 'equity',
+      period_type: 'annual',
+    });
+
+    expect(result.isError).toBeFalsy();
+    const output = getFinancialsTool.output.parse(result.structuredContent);
+    expect(output.data.map((d) => [d.period, d.value, d.end])).toEqual([
+      ['CY2010Q2I', 46_175_000_000, '2010-06-30'],
+      ['CY2009Q2I', 39_558_000_000, '2009-06-30'],
+      ['CY2008Q2I', 36_286_000_000, '2008-06-30'],
+    ]);
+    const text = blockText(result.content);
+    expect(text).toContain('\nCY2009Q2I: ');
+    expect(text).toContain('\nCY2008Q2I: ');
+    expect(text).not.toContain('CY2009Q3I');
+    expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledTimes(1);
+  });
+
+  it('caps the inline year ends at limit, disclosing the full count', async () => {
+    const ctx = createMockContext({ errors: getFinancialsTool.errors });
+    const result = await getFinancialsTool.handler(annual('BSX', 'equity', { limit: 3 }), ctx);
+
+    expect(result.data).toHaveLength(3);
+    const enrichment = getEnrichment(ctx);
+    expect(enrichment).toMatchObject({ truncated: true, shown: 3, cap: 3 });
+    expect(String(enrichment.notice)).toContain('most-recent of 5 periods');
+  });
+
+  it('stages the year ends as an annual dataframe', async () => {
+    const registerDataframe = vi.fn().mockResolvedValue({
+      name: 'df_ABCDE_FGHIJ',
+      rowCount: 5,
+      expiresAt: '2026-10-15T00:00:00.000Z',
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+    vi.mocked(toDatasetField).mockReturnValue({
+      name: 'df_ABCDE_FGHIJ',
+      row_count: 5,
+      expires_at: '2026-10-15T00:00:00.000Z',
+    });
+
+    await getFinancialsTool.handler(
+      annual('BSX', 'equity'),
+      createMockContext({ errors: getFinancialsTool.errors }),
+    );
+
+    const [, registration] = at(registerDataframe.mock.calls);
+    expect(registration.queryParams).toMatchObject({
+      period_type: 'annual',
+      concept: 'StockholdersEquity',
+    });
+    expect(registration.rows.map((row: { period: string }) => row.period)).toEqual([
+      'CY2025Q4I',
+      'CY2024Q4I',
+      'CY2023Q4I',
+      'CY2022Q4I',
+      'CY2021Q4I',
+    ]);
+  });
+
+  it('reads a year-end cover-page count only where the filer dates it at the year end', async () => {
+    const result = await getFinancialsTool.handler(
+      annual('SOPH', 'shares_outstanding'),
+      createMockContext({ errors: getFinancialsTool.errors }),
+    );
+
+    expect(result.data.map((d) => [d.period, d.value])).toEqual([
+      ['CY2025Q4I', 68_486_338],
+      ['CY2024Q4I', 66_687_085],
+      ['CY2023Q4I', 65_230_559],
+    ]);
+  });
+
+  it('fails a cover-page count dated after each year end as no_period_data, on both surfaces', async () => {
+    const result = await runToolContract(getFinancialsTool, {
+      company: 'BSX',
+      concept: 'shares_outstanding',
+      period_type: 'annual',
+    });
+
+    const error = wireError(result);
+    expect(error.data).toMatchObject({
+      reason: 'no_period_data',
+      tag: 'EntityCommonStockSharesOutstanding',
+      period_type: 'annual',
+    });
+    const hint = String(bag(error.data.recovery).hint);
+    expect(hint).toContain('fiscal-year end');
+    expect(hint).toContain('period_type: "quarterly" or "all"');
+    expect(blockText(result.content)).toContain(hint);
+    expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledTimes(1);
+  });
+
+  // Characterization: calls that succeed today return the same values and read no companyfacts.
+  it.each([
+    ['omitted', {}],
+    ['quarterly', { period_type: 'quarterly' }],
+    ['all', { period_type: 'all' }],
+  ] as const)(
+    'keeps the full instant series with period_type %s, with no companyfacts request',
+    async (_label, periodType) => {
+      const result = await getFinancialsTool.handler(
+        getFinancialsTool.input.parse({ company: 'BSX', concept: 'equity', ...periodType }),
+        createMockContext({ errors: getFinancialsTool.errors }),
+      );
+
+      expect(result.data).toHaveLength(19);
+      expect(at(result.data)).toMatchObject({ period: 'CY2026Q2I', value: 24_930_000_000 });
+      expect(mockApi.tryGetCompanyFacts).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps an explicit annual duration series unchanged, with no companyfacts request', async () => {
+    mockApi.tryGetCompanyConcept.mockResolvedValue(mockConceptResponse);
+    const result = await getFinancialsTool.handler(
+      annual('AAPL', 'revenue'),
+      createMockContext({ errors: getFinancialsTool.errors }),
+    );
+
+    expect(result.data.map((d) => [d.period, d.value])).toEqual([
+      ['CY2023', 383285000000],
+      ['CY2022', 394328000000],
+    ]);
+    expect(mockApi.tryGetCompanyFacts).not.toHaveBeenCalled();
+  });
+
+  it('reuses the companyfacts payload a served-empty tag already read', async () => {
+    // companyconcept names the tag with no values, so the series itself comes from companyfacts.
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _taxonomy: string, tag: string) =>
+        tag === 'StockholdersEquity' ? conceptPayload(tag, EQUITY_LABEL, {}) : null,
+    );
+    const result = await getFinancialsTool.handler(
+      annual('BSX', 'equity', { limit: 1 }),
+      createMockContext({ errors: getFinancialsTool.errors }),
+    );
+
+    expect(result.data.map((d) => [d.period, d.value])).toEqual([['CY2025Q4I', 24_233_000_000]]);
+    expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledTimes(1);
+  });
+
+  describe('when the fiscal-year ends cannot be read', () => {
+    it('fails as no_period_data when companyfacts holds nothing for the filer', async () => {
+      mockApi.tryGetCompanyFacts.mockResolvedValue(null);
+      const err = await caught(
+        getFinancialsTool.handler(
+          annual('BSX', 'equity'),
+          createMockContext({ errors: getFinancialsTool.errors }),
+        ),
+      );
+
+      expect(err.message).toBe("No annual data for 'StockholdersEquity'.");
+      expect(err.data).toMatchObject({ reason: 'no_period_data', period_type: 'annual' });
+      expect(recoveryHint(err)).toContain('fiscal-year ends could not be read');
+    });
+
+    it('fails as no_period_data, logging the failed read, when companyfacts fails', async () => {
+      mockApi.tryGetCompanyFacts.mockRejectedValue(
+        new McpError(
+          JsonRpcErrorCode.ServiceUnavailable,
+          'SEC EDGAR API request failed after retries',
+        ),
+      );
+      const ctx = createMockContext({ errors: getFinancialsTool.errors });
+      const err = await caught(getFinancialsTool.handler(annual('BSX', 'equity'), ctx));
+
+      expect(err.data.reason).toBe('no_period_data');
+      expect(recoveryHint(err)).toContain('fiscal-year ends could not be read');
+      const log = ctx.log as MockContextLogger;
+      expect(log.calls).toContainEqual(
+        expect.objectContaining({
+          level: 'warning',
+          msg: expect.stringContaining('fiscal-year ends'),
+        }),
+      );
+    });
+
+    it('fails a cancelled call with its own error rather than no_period_data', async () => {
+      const controller = new AbortController();
+      mockApi.tryGetCompanyFacts.mockImplementation(async () => {
+        controller.abort();
+        throw new McpError(
+          JsonRpcErrorCode.ServiceUnavailable,
+          'SEC EDGAR API request failed after retries',
+        );
+      });
+      const err = await caught(
+        getFinancialsTool.handler(
+          annual('BSX', 'equity'),
+          createMockContext({ errors: getFinancialsTool.errors, signal: controller.signal }),
+        ),
+      );
+
+      expect(err.message).toBe('SEC EDGAR API request failed after retries');
+      expect(err.data.reason).toBeUndefined();
+    });
+  });
 });

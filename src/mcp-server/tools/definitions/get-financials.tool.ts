@@ -14,12 +14,14 @@ import {
 import {
   describeUnknownConcepts,
   findUnknownConcept,
+  resolveConcept,
   resolveConceptTarget,
 } from '@/services/edgar/concept-map.js';
 import {
   describingTag,
   type FramedUnit,
   filerFiscalYearEnds,
+  filerFiscalYearEndsWithComparatives,
   isQuarterlyForm,
   matchesPeriodType,
   rankSeriesUnits,
@@ -29,7 +31,48 @@ import {
 } from '@/services/edgar/concept-series.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { missingQuarterCaveats } from '@/services/edgar/fiscal-periods.js';
-import type { CompanyConceptUnit, CompanyFactsResponse } from '@/services/edgar/types.js';
+import type {
+  CompanyConceptUnit,
+  CompanyFactsConcept,
+  CompanyFactsResponse,
+  ConceptTaxonomy,
+} from '@/services/edgar/types.js';
+
+/** The taxonomies the `taxonomy` input accepts — the only ones a retry hint may name. */
+const TAXONOMIES = ['us-gaap', 'ifrs-full', 'dei'] as const satisfies readonly ConceptTaxonomy[];
+
+/** Whether a companyfacts concept carries any frame-aligned value (#141: non-array units skipped). */
+function hasFramedValue(concept: CompanyFactsConcept | undefined): boolean {
+  return Object.values(concept?.units ?? {}).some(
+    (values) => Array.isArray(values) && values.some((value) => value.frame),
+  );
+}
+
+/**
+ * The retry that answers a concept missing under the taxonomy tried, read from
+ * the filer's companyfacts (#164): the first other accepted taxonomy where a
+ * friendly name resolves to a tag carrying framed values, or where a raw tag
+ * itself does. `undefined` when none does.
+ */
+function taxonomyRetry(
+  concept: string,
+  tried: ConceptTaxonomy,
+  namespaces: CompanyFactsResponse['facts'],
+): string | undefined {
+  const name = concept.trim();
+  if (resolveConcept(name)) {
+    for (const requested of TAXONOMIES) {
+      const target = resolveConceptTarget(name, requested);
+      if (target.taxonomy === tried) continue;
+      const tag = target.tags.find((t) => hasFramedValue(namespaces[target.taxonomy]?.[t]));
+      if (tag)
+        return `Retry with taxonomy: "${target.taxonomy}" — ${name} resolves there to ${tag}.`;
+    }
+    return undefined;
+  }
+  const taxonomy = TAXONOMIES.find((t) => t !== tried && hasFramedValue(namespaces[t]?.[name]));
+  return taxonomy && `${name} is reported under ${taxonomy} — retry with taxonomy: "${taxonomy}".`;
+}
 
 /**
  * The reported unit key a `unit` input names: exact after `fetch_frames`' dashed
@@ -96,7 +139,8 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       reason: 'no_concept_data',
       code: JsonRpcErrorCode.NotFound,
       when: 'The company does not report any XBRL data for the resolved concept and taxonomy',
-      recovery: 'Try a raw XBRL tag, switch taxonomy to ifrs-full, or use a related concept.',
+      recovery:
+        'Retry with the taxonomy the hint names, try a raw XBRL tag, or use a related concept.',
     },
     {
       reason: 'no_frame_data',
@@ -107,8 +151,8 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     {
       reason: 'no_period_data',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Concept has data but the period_type filter excluded all of it',
-      recovery: 'Switch period_type to "quarterly" or "all" for balance sheet items.',
+      when: 'Concept has data but the period_type filter excluded all of it — under "annual", an instant concept with no value dated on a fiscal-year end',
+      recovery: 'Switch period_type to "quarterly" or "all" to read every reported period.',
     },
     {
       reason: 'no_unit_data',
@@ -139,7 +183,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
         'Financial concept — friendly name (e.g., "revenue", "net_income", "assets", "eps_diluted") or raw XBRL tag (e.g., "AccountsPayableCurrent"). Friendly names auto-resolve to the correct XBRL tags and handle historical tag changes.',
       ),
     taxonomy: z
-      .enum(['us-gaap', 'ifrs-full', 'dei'])
+      .enum(TAXONOMIES)
       .default('us-gaap')
       .describe(
         'XBRL taxonomy. us-gaap for US companies, ifrs-full for foreign filers, dei for entity info (shares outstanding).',
@@ -148,7 +192,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       .enum(['annual', 'quarterly', 'all'])
       .optional()
       .describe(
-        'Filter to annual (FY) or quarterly (Q1-Q4) data. "all" returns both. When omitted, defaults to "annual"; instant (balance-sheet) concepts automatically fall back to returning the full series on the first call when the annual filter yields nothing (#48).',
+        'Filter to annual (FY) or quarterly (Q1-Q4) data. "all" returns both. For an instant (balance-sheet) concept, "annual" returns the values dated on the filer\'s fiscal-year ends. When omitted, defaults to "annual", except that an instant concept returns its full series.',
       ),
     unit: z
       .string()
@@ -223,7 +267,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
           .describe('One reported value with its period, source filing, and tag.'),
       )
       .describe(
-        "Deduplicated series, newest first, one value per calendar period. A period SEC framed on a proxy statement figure takes the filer's own report instead; an annual period framed on a 10-Q trailing-twelve-month figure is left out.",
+        "Deduplicated series, newest first, one value per calendar period. A proxy-framed period takes the filer's own report; an annual frame held by a 10-Q trailing-twelve-month figure is left out. An instant's annual values are its fiscal-year-end values (CY2025Q2I for a June year end).",
       ),
     tags_tried: z
       .array(z.string())
@@ -361,7 +405,8 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
      * The filer's companyfacts payload, read at most once: it answers every tag
      * companyconcept served empty — the same filer's companyfacts carries those
      * facts well-formed — supplies the fiscal-year ends a 10-Q-held annual frame
-     * may need, and backs the no-data probe below. `undefined` until read.
+     * or an instant concept's annual view may need, and backs the no-data probe
+     * below. `undefined` until read.
      */
     let facts: CompanyFactsResponse | null | undefined;
     /** Set when the fiscal-year-end read below fails, leaving those frames untested (#148). */
@@ -379,6 +424,26 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
         });
       }
     }
+
+    /**
+     * Reads companyfacts for the filer's fiscal-year ends unless a payload is
+     * already in hand. Best-effort: a failed read is logged and sets
+     * `yearEndsUnread`, which also stops a second attempt, and each caller falls
+     * back to the answer it gives without the ends; a cancelled call still fails.
+     */
+    const readFactsForYearEnds = async () => {
+      if (facts !== undefined || yearEndsUnread) return;
+      try {
+        facts = await api.tryGetCompanyFacts(match.cik);
+      } catch (err) {
+        if (ctx.signal.aborted) throw err;
+        yearEndsUnread = true;
+        ctx.log.warning('companyfacts read for fiscal-year ends failed', {
+          cik: match.cik,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    };
 
     /**
      * Collapse to one value per standard calendar period within each unit key —
@@ -399,23 +464,8 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       needsYearEnds = true;
     });
     if (needsYearEnds) {
-      if (facts === undefined) {
-        /**
-         * Best-effort: the first pass is already a complete series, so a failed
-         * read keeps those frames untested and a caveat names them; a cancelled
-         * call still fails.
-         */
-        try {
-          facts = await api.tryGetCompanyFacts(match.cik);
-        } catch (err) {
-          if (ctx.signal.aborted) throw err;
-          yearEndsUnread = true;
-          ctx.log.warning('companyfacts read for fiscal-year ends failed', {
-            cik: match.cik,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
+      // A failed read keeps those frames untested, and a caveat names them.
+      await readFactsForYearEnds();
       if (!yearEndsUnread) {
         const yearEnds = facts ? filerFiscalYearEnds(facts) : undefined;
         byUnit = resolveFrameSeriesByUnit(allUnits, tagSelection, () => yearEnds);
@@ -435,8 +485,9 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     const conceptResponse = conceptTag !== undefined ? responses.get(conceptTag) : undefined;
 
     if (conceptTag === undefined || !conceptResponse) {
-      // Probe companyfacts to discover what namespaces and tags this filer actually reports.
-      // Only on the error path — one extra request, never on the happy path.
+      // Probe companyfacts to discover what namespaces and tags this filer actually reports,
+      // and which other taxonomy carries the concept (#164). Only on the error path — one
+      // extra request, never on the happy path.
       if (facts === undefined) facts = await api.tryGetCompanyFacts(match.cik);
       const availableNamespaces = facts ? Object.keys(facts.facts) : [];
 
@@ -456,7 +507,9 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
               : `${ns} (${nsTags.length} tags)`;
           })
           .join('; ');
-        hint = `This filer reports under: ${namespaceSummary}. Try a raw XBRL tag from one of these namespaces, or switch taxonomy to match.`;
+        const summary = `This filer reports under: ${namespaceSummary}. Try a raw XBRL tag from one of these namespaces, or switch taxonomy to match.`;
+        const retry = taxonomyRetry(input.concept, taxonomy, namespaces);
+        hint = retry ? `${retry} ${summary}` : summary;
       } else {
         hint =
           taxonomy === 'ifrs-full'
@@ -533,16 +586,39 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
         filtered = Array.from(byFrameClean.values());
         resolvedPeriodType = 'all';
       } else {
-        const hint = hasInstant
-          ? 'This is a balance sheet (instant) item — try period_type: "quarterly" or "all".'
-          : effectivePeriodType === 'annual'
-            ? 'No annual data found — try period_type: "quarterly" or "all".'
-            : 'No quarterly data found — try period_type: "annual" or "all".';
-        throw ctx.fail('no_period_data', `No ${effectivePeriodType} data for '${conceptTag}'.`, {
-          recovery: { hint },
-          tag: conceptTag,
-          period_type: effectivePeriodType,
-        });
+        let hint: string;
+        if (hasInstant) {
+          /**
+           * An explicit annual view of an instant concept is its values dated on
+           * the filer's fiscal-year ends (#167) — each annual report's own year
+           * and the comparative years it restates, the same set
+           * `compare_companies` aligns on, read from companyfacts only here, where
+           * the call otherwise fails, and reusing a payload already read. Keyed
+           * on the framed value's `end`, never its holder's form or quarter: a
+           * year end SEC framed on a later 10-Q keeps that holder's provenance,
+           * and a June year end lands on `Q2I`.
+           */
+          await readFactsForYearEnds();
+          const yearEnds = facts ? new Set(filerFiscalYearEndsWithComparatives(facts)) : undefined;
+          filtered = yearEnds
+            ? [...byFrameClean.values()].filter((u) => /I$/.test(u.frame) && yearEnds.has(u.end))
+            : [];
+          hint = yearEnds
+            ? 'No value is dated on one of the filer\'s fiscal-year ends — a cover-page figure such as shares outstanding is dated after the year closes. Try period_type: "quarterly" or "all" for every reported date.'
+            : 'The filer\'s fiscal-year ends could not be read from companyfacts, so its year-end values cannot be picked out — try period_type: "quarterly" or "all" for every reported date.';
+        } else {
+          hint =
+            effectivePeriodType === 'annual'
+              ? 'No annual data found — try period_type: "quarterly" or "all".'
+              : 'No quarterly data found — try period_type: "annual" or "all".';
+        }
+        if (filtered.length === 0) {
+          throw ctx.fail('no_period_data', `No ${effectivePeriodType} data for '${conceptTag}'.`, {
+            recovery: { hint },
+            tag: conceptTag,
+            period_type: effectivePeriodType,
+          });
+        }
       }
     }
 
