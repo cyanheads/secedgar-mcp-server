@@ -208,7 +208,11 @@ export function filerFiscalYearEnds(facts: CompanyFactsResponse): string[] {
   return ownYearEnds(payloadReportYearEnds(facts));
 }
 
-/** Whether `end` falls a whole number of years before `yearEnd`, give or take a week. */
+/**
+ * Whether `end` falls a whole number of years before `yearEnd`, give or take a
+ * week — zero years included, so a 52/53-week year end a few days before the
+ * report's own counts as a year end in its own right.
+ */
 function onEarlierYearEnd(end: string, yearEnd: string): boolean {
   const days = (Date.parse(yearEnd) - Date.parse(end)) / 86_400_000;
   const drift = days - Math.round(days / 365.25) * 365.25;
