@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.15.12](changelog/0.15.x/0.15.12.md) — 2026-10-14
+
+compare_companies and get_financials read annual balance-sheet values at fiscal-year ends, get_filing finds more headings and sections, company_search serves filing_limit above 50, and dataframe_query rejects more SQL via mcp-ts-core 0.13.15.
+
 ## [0.15.11](changelog/0.15.x/0.15.11.md) — 2026-10-04
 
 search_filings counts filings rather than matching documents, company names resolve to their exact match, and legacy plain-text filings keep their line structure for outlines and section navigation.
