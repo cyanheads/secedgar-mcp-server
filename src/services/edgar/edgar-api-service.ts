@@ -1194,7 +1194,7 @@ class EdgarApiService {
     logger.warning(
       'Fund-ticker file (company_tickers_mf.json) failed to load; ETF and mutual-fund tickers stay unresolved until it is retried.',
       withExtra(requestContextService.createRequestContext({ operation: 'loadMfTickers' }), {
-        url: MF_TICKERS_URL,
+        endpoint: 'company_tickers_mf',
         retryInSeconds: Math.ceil(retryMs / 1000),
         ...cause,
       }),

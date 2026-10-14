@@ -141,7 +141,7 @@ describe('EdgarApiService — fund-ticker slice', () => {
       ['a 429', [429], 50, { status: 429, retryInSeconds: 600 }],
       ['a malformed body', [{ unexpected: true }], 50, { reason: 'malformed_body' }],
     ] as const)(
-      'warns once with the URL and cause after %s',
+      'warns once with the endpoint and cause after %s',
       async (_label, mf, settle, fields) => {
         const warning = spyWarnings();
         stubTickerFiles({ mf: [...mf] });
@@ -155,7 +155,7 @@ describe('EdgarApiService — fund-ticker slice', () => {
         expect(message).toContain('ETF and mutual-fund tickers');
         expect(context).toMatchObject({
           operation: 'loadMfTickers',
-          extra: { url: MF_URL, ...fields },
+          extra: { endpoint: 'company_tickers_mf', ...fields },
         });
       },
     );

@@ -1,8 +1,8 @@
 /**
  * @fileoverview Run a single-statement SELECT against the canvas dataframes
  * registered by SEC EDGAR data-returning tools. Layered SQL gate: framework
- * (single-statement → SELECT only → plan-walk allowlist + denied table
- * functions + system-catalog denial via `denySystemCatalogs`) so callers
+ * (single-statement → SELECT only → parse-tree check → plan-walk allowlist +
+ * denied functions + system-catalog denial via `denySystemCatalogs`) so callers
  * cannot enumerate every df_<id> on the shared canvas.
  * @module mcp-server/tools/definitions/dataframe-query
  */
@@ -118,9 +118,17 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
     {
       reason: 'denied_function',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The SQL calls a file-reading or external-data table function such as read_csv, read_parquet, or glob',
+      when: 'The SQL calls a file-reading or external-data table function (read_csv, read_parquet, glob), a function that reads an engine setting (current_setting, current_schema), or one that runs SQL or names a table from a string (query_table, or query() over anything but a single string literal)',
       recovery:
-        'Remove the file-reading function and query only the df_<id> tables secedgar_dataframe_describe lists.',
+        'Remove the function the message names and query only the df_<id> tables secedgar_dataframe_describe lists.',
+      thrownBy: 'service',
+    },
+    {
+      reason: 'sql_read_only',
+      code: JsonRpcErrorCode.ValidationError,
+      when: "The SQL names a file as a table (FROM 'data.csv') — the dataframe engine reads no files",
+      recovery:
+        'Query only the df_<id> tables secedgar_dataframe_describe lists, referenced by bare name.',
       thrownBy: 'service',
     },
     {
