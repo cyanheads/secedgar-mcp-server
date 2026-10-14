@@ -25,13 +25,14 @@ import {
 } from '@/services/edgar/concept-map.js';
 import {
   type FramedUnit,
+  filerFiscalYearEndsWithComparatives,
   newestReportedPeriod,
   seriesFromCompanyFacts,
   seriesStalenessCaveats,
 } from '@/services/edgar/concept-series.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { missingQuarterCaveats } from '@/services/edgar/fiscal-periods.js';
-import type { CikMatch, ConceptMapping } from '@/services/edgar/types.js';
+import type { CikMatch, CompanyFactsResponse, ConceptMapping } from '@/services/edgar/types.js';
 
 /** Full-year duration frame — `CY2024`. */
 const ANNUAL_FRAME = /^CY(\d{4})$/;
@@ -53,25 +54,76 @@ const MAX_INLINE_CELLS = 120;
 const MAX_PERIODS = 12;
 
 /**
- * Map a frame to the calendar period key the matrix aligns on, or undefined when
- * the frame does not belong in this period type.
+ * The calendar year SEC frames a fiscal year ending on `end` under: the year its
+ * second half starts in. A year ending 2025-06-30 is `CY2025`, one ending
+ * 2025-06-27 or 2026-05-31 is `CY2024` / `CY2025` — the day after the end, six
+ * months back, lands in that year. Checked against SEC's frames for two
+ * late-June 52/53-week filers (Seagate, Western Digital): every year ending
+ * 2008-06-27 through 2026-07-03 matches but the one both ended 2012-06-29, which
+ * SEC frames `CY2012` — why a framed duration's own key wins in {@link fiscalYearKeys}.
+ */
+function frameYearOfFiscalYear(end: string): string {
+  const day = new Date(`${end}T00:00:00Z`);
+  day.setUTCDate(day.getUTCDate() + 1);
+  day.setUTCMonth(day.getUTCMonth() - 6);
+  return `CY${day.getUTCFullYear()}`;
+}
+
+/**
+ * The annual period key of each fiscal year a companyfacts payload closes, by its
+ * end date — each annual report's own year and the comparative years it restates
+ * ({@link filerFiscalYearEndsWithComparatives}), so the first XBRL report's
+ * prior-year balance keys too.
+ *
+ * The key is the frame SEC gives an annual duration ending that day, read from
+ * any concept in the payload — so a balance lands beside its fiscal year's income
+ * lines whether or not those lines are in the matrix. A year with no framed
+ * duration ending on its last day takes the year SEC's framing would give it
+ * ({@link frameYearOfFiscalYear}), so the balance still sits where that year's
+ * income lines would.
+ */
+function fiscalYearKeys(facts: CompanyFactsResponse): Map<string, string> {
+  const keys = new Map<string, string | undefined>(
+    filerFiscalYearEndsWithComparatives(facts).map((end) => [end, undefined]),
+  );
+  for (const namespace of Object.values(facts.facts)) {
+    for (const concept of Object.values(namespace)) {
+      for (const values of Object.values(concept.units)) {
+        if (!Array.isArray(values)) continue;
+        for (const { end, frame } of values) {
+          if (frame && keys.has(end) && keys.get(end) === undefined && ANNUAL_FRAME.test(frame)) {
+            keys.set(end, frame);
+          }
+        }
+      }
+    }
+  }
+  return new Map([...keys].map(([end, frame]) => [end, frame ?? frameYearOfFiscalYear(end)]));
+}
+
+/**
+ * Map a value to the period key the matrix aligns on, or undefined when it does
+ * not belong in this period type.
  *
  * Duration frames key on themselves. Instant frames (balance-sheet and
  * entity-info concepts, which are only ever filed as point-in-time values) key
- * on the calendar year for an annual comparison and on the calendar quarter for
- * a quarterly one — so `assets` lines up with `revenue` in the same matrix
- * instead of dropping out of it.
+ * on the calendar quarter for a quarterly comparison. An annual comparison takes
+ * only the instants on a fiscal-year end, under the key of that fiscal year's
+ * annual duration — so a balance sits beside the income lines of the year it
+ * closes, and an interim or cover-date snapshot stays out of the annual matrix
+ * (#171).
  */
-function periodKey(frame: string, periodType: 'annual' | 'quarterly'): string | undefined {
+function periodKey(
+  unit: FramedUnit,
+  periodType: 'annual' | 'quarterly',
+  fiscalYearKey: () => ReadonlyMap<string, string>,
+): string | undefined {
   if (periodType === 'annual') {
-    const annual = ANNUAL_FRAME.exec(frame);
-    if (annual) return frame;
-    const instant = INSTANT_FRAME.exec(frame);
-    return instant?.[1] ? `CY${instant[1]}` : undefined;
+    if (ANNUAL_FRAME.test(unit.frame)) return unit.frame;
+    return INSTANT_FRAME.test(unit.frame) ? fiscalYearKey().get(unit.end) : undefined;
   }
-  const quarter = QUARTER_FRAME.exec(frame);
-  if (quarter) return frame;
-  const instant = INSTANT_FRAME.exec(frame);
+  if (QUARTER_FRAME.test(unit.frame)) return unit.frame;
+  const instant = INSTANT_FRAME.exec(unit.frame);
   return instant?.[1] && instant[2] ? `CY${instant[1]}${instant[2]}` : undefined;
 }
 
@@ -93,7 +145,7 @@ interface Cell {
 
 export const compareCompaniesTool = tool('secedgar_compare_companies', {
   description:
-    'Compare 2-10 named companies across 1-8 XBRL concepts, aligned on calendar periods. This is the middle shape between secedgar_get_financials (one company, one concept, full history) and secedgar_fetch_frames (one concept, one period, every reporting company) — reach for it when the question names the companies. One companyfacts read per company, resolved through the same frame dedup and tag priority as secedgar_get_financials so the numbers agree. Balance-sheet and entity-info concepts are filed as point-in-time values and align on the calendar year (annual) or quarter (quarterly) their snapshot falls in, so they sit in the same matrix as income-statement lines. The inline matrix covers the most recent periods up to `periods`, trimmed further when companies x concepts x periods is too large to return in one response; the full aligned series is materialized as df_<id> for growth rates and spreads — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query. A company that fails to resolve is reported in failed_companies and the comparison proceeds with the rest, and a company that does not report a concept is reported in gaps with the tags that were tried — never interpolated or zero-filled. A company that reports a concept only for periods older than the inline window is named in caveats with its newest period. A concept that is neither a friendly name nor an XBRL tag is reported once in unknown_concepts with the closest supported names, and fails the call only when every concept is one. Off-calendar filers and unit mismatches are surfaced in caveats rather than silently mixed.',
+    'Compare 2-10 named companies across 1-8 XBRL concepts, aligned on fiscal years (annual) or calendar quarters (quarterly). This is the middle shape between secedgar_get_financials (one company, one concept, full history) and secedgar_fetch_frames (one concept, one period, every reporting company) — reach for it when the question names the companies. One companyfacts read per company, resolved through the same frame dedup and tag priority as secedgar_get_financials so the numbers agree. Balance-sheet and entity-info concepts are filed as point-in-time values: an annual matrix takes each company’s fiscal-year-end snapshot and places it in the period of the fiscal year it closes, beside that year’s income-statement lines (interim and cover-date snapshots stay out), and a quarterly matrix aligns each snapshot on the calendar quarter it falls in. The inline matrix covers the most recent periods up to `periods`, trimmed further when companies x concepts x periods is too large to return in one response; the full aligned series is materialized as df_<id> for growth rates and spreads — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query. A company that fails to resolve is reported in failed_companies and the comparison proceeds with the rest, and a company that does not report a concept is reported in gaps with the tags that were tried — never interpolated or zero-filled. A company that reports a concept only for periods older than the inline window is named in caveats with its newest period. A concept that is neither a friendly name nor an XBRL tag is reported once in unknown_concepts with the closest supported names, and fails the call only when every concept is one. Off-calendar filers and unit mismatches are surfaced in caveats rather than silently mixed.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   enrichment: {
@@ -171,7 +223,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       .enum(['annual', 'quarterly'])
       .default('annual')
       .describe(
-        'Align on full calendar years (annual) or calendar quarters (quarterly). Quarterly comparisons of off-calendar filers are missing at least one calendar quarter per year — see caveats.',
+        'Align on fiscal years, each under the calendar-year key SEC frames it as (annual), or on calendar quarters (quarterly). Quarterly comparisons of off-calendar filers are missing at least one calendar quarter per year — see caveats.',
       ),
     periods: z
       .number()
@@ -311,7 +363,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     caveats: z
       .array(z.string())
       .describe(
-        "Comparability warnings (company-specific ones prefixed with the name), else empty: missing quarters; a concept stopping 2+ years behind the company's other reporting; period ends differing within a period; units differing across companies; values only before the inline window; merged inputs.",
+        "Comparability warnings (company ones prefixed with the name), else empty: missing quarters; a concept 2+ years behind the company's other lines; an instant with no fiscal-year-end value (annual); differing period ends or units; values only before the inline window; merged inputs.",
       ),
     dataset: z
       .object({
@@ -426,6 +478,8 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     const unitsByConcept = new Map<string, Set<string>>();
     /** Deduped so a caveat shared by several concepts is stated once. */
     const caveatSet = new Set<string>();
+    /** Company-concept pairs an annual matrix left empty for holding only off-year-end snapshots. */
+    const offYearEndPairs: string[] = [];
     for (const { concept, merged } of knownConcepts) {
       if (merged.length === 0) continue;
       const one = merged.length === 1;
@@ -453,6 +507,12 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       });
 
       const quarterFrames: string[] = [];
+      /** Read once, and only when an annual matrix meets an instant. */
+      let yearKeys: Map<string, string> | undefined;
+      const fiscalYearKey = () => {
+        yearKeys ??= fiscalYearKeys(facts);
+        return yearKeys;
+      };
       /** Held until this company's concepts are all read — see the reference below. */
       const resolvedLines: Array<{
         concept: string;
@@ -479,14 +539,20 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
 
         /**
          * Series is newest-first, so the first frame mapping to a period key wins
-         * and later (older) frames for the same key are skipped — the year-end
-         * instant beats an interim snapshot inside the same calendar year.
+         * and later (older) frames for the same key are skipped. An annual matrix
+         * keys only fiscal-year-end instants, one per fiscal year, so no interim
+         * snapshot can take a year's place.
          */
         const seen = new Set<string>();
         const units = unitsByConcept.get(concept) ?? new Set<string>();
+        /** Newest instant an annual matrix left out for not falling on a fiscal-year end. */
+        let offYearEnd: FramedUnit | undefined;
         for (const unit of series.series) {
           if (QUARTER_FRAME.test(unit.frame)) quarterFrames.push(unit.frame);
-          const period = periodKey(unit.frame, input.period_type);
+          const period = periodKey(unit, input.period_type, fiscalYearKey);
+          if (!period && input.period_type === 'annual' && INSTANT_FRAME.test(unit.frame)) {
+            offYearEnd ??= unit;
+          }
           if (!period || seen.has(period)) continue;
           seen.add(period);
           units.add(unit.unit);
@@ -513,6 +579,13 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
             concept,
             tags_tried: series.tagsTried,
           });
+          // The gap alone would read as "never reported" for a cover-date or interim-only line.
+          if (offYearEnd) {
+            caveatSet.add(
+              `${name} / ${concept}: every value is a point-in-time snapshot off the company’s fiscal-year ends (newest ${offYearEnd.end}, frame ${offYearEnd.frame}), so the annual matrix holds none — period_type "quarterly" aligns them on calendar quarters.`,
+            );
+            offYearEndPairs.push(`${name} / ${concept} (newest ${offYearEnd.end})`);
+          }
           continue;
         }
         unitsByConcept.set(concept, units);
@@ -555,14 +628,26 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     if (cells.length === 0) {
       const unknownNote =
         unknownConcepts.length > 0 ? ` ${describeUnknownConcepts(unknownConcepts).message}` : '';
-      throw ctx.fail(
-        'no_comparable_data',
-        `None of the ${included.length} resolved companies report any of the requested concepts for ${input.period_type} periods.${unknownNote}`,
-        {
-          gaps,
-          ...(unknownConcepts.length > 0 ? { unknown_concepts: unknownConcepts } : {}),
-        },
-      );
+      /**
+       * Caveats never reach an error, so a matrix emptied only by leaving out
+       * cover-date and interim snapshots says so here — "report none of the
+       * concepts" would be false for those pairs (#171).
+       */
+      const message =
+        offYearEndPairs.length > 0
+          ? `None of the ${included.length} resolved companies has a value an annual matrix can hold. Every value found is a point-in-time snapshot dated off its company’s fiscal-year ends — a cover-page or interim date, which an annual matrix cannot pair with fiscal-year-end income lines: ${offYearEndPairs.join('; ')}.`
+          : `None of the ${included.length} resolved companies report any of the requested concepts for ${input.period_type} periods.`;
+      throw ctx.fail('no_comparable_data', `${message}${unknownNote}`, {
+        gaps,
+        ...(unknownConcepts.length > 0 ? { unknown_concepts: unknownConcepts } : {}),
+        ...(offYearEndPairs.length > 0
+          ? {
+              recovery: {
+                hint: 'Retry with period_type: "quarterly" — it aligns point-in-time snapshots on the calendar quarter they fall in. Omitting period_type does not help: it defaults to annual.',
+              },
+            }
+          : {}),
+      });
     }
 
     const allPeriods = [...new Set(cells.map((c) => c.period))].sort((a, b) => b.localeCompare(a));
@@ -583,24 +668,35 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     const inlineCells = cells.filter((c) => inlineSet.has(c.period));
 
     /**
-     * Period ends inside ONE aligned period, not fiscal year ends: the alignment
-     * key is a calendar year or quarter, so filers on different fiscal calendars
-     * land in it with cut-off dates weeks apart. Read from the newest inline
-     * period so every company is compared on the same key — a company's newest
-     * cell overall can sit in a period the others have not reached.
+     * Period ends inside each inline period. An annual key holds each company's
+     * fiscal year under the calendar year SEC frames it as, so fiscal years ending
+     * up to a year apart share it; a quarterly key holds calendar quarters, whose
+     * cut-offs differ by weeks across fiscal calendars. Every column is checked —
+     * the newest can hold one company alone, the filer that has reached it — and
+     * one caveat spells out the newest mixed column and names the others.
      */
-    const endsInNewestPeriod = new Map<string, { company: string; end: string }>();
+    const endsByPeriod = new Map<string, Map<string, { company: string; end: string }>>();
     for (const cell of inlineCells) {
-      if (cell.period !== inlinePeriods[0] || endsInNewestPeriod.has(cell.cik)) continue;
-      endsInNewestPeriod.set(cell.cik, { company: cell.company, end: cell.period_end });
+      const ends =
+        endsByPeriod.get(cell.period) ?? new Map<string, { company: string; end: string }>();
+      if (!ends.has(cell.cik)) ends.set(cell.cik, { company: cell.company, end: cell.period_end });
+      endsByPeriod.set(cell.period, ends);
     }
-    const endMonths = new Set([...endsInNewestPeriod.values()].map((e) => e.end.slice(0, 7)));
-    if (endMonths.size > 1) {
-      const spread = [...endsInNewestPeriod.values()]
-        .map((e) => `${e.company} ends ${e.end}`)
-        .join(', ');
+    const mixedPeriods = inlinePeriods.flatMap((period) => {
+      const ends = [...(endsByPeriod.get(period)?.values() ?? [])];
+      return new Set(ends.map((e) => e.end.slice(0, 7))).size > 1 ? [{ period, ends }] : [];
+    });
+    const [newestMixed, ...olderMixed] = mixedPeriods;
+    if (newestMixed) {
+      const spread = newestMixed.ends.map((e) => `${e.company} ends ${e.end}`).join(', ');
+      const also =
+        olderMixed.length > 0 ? `; also inside ${olderMixed.map((m) => m.period).join(', ')}` : '';
+      const why =
+        input.period_type === 'annual'
+          ? 'Each company’s fiscal year sits under the calendar year SEC frames it as, and fiscal years ending months apart share that column'
+          : 'Filers on different fiscal calendars land in the same aligned period with cut-off dates weeks apart';
       caveatSet.add(
-        `Period ends differ inside ${inlinePeriods[0]} — ${spread}. Filers on different fiscal calendars land in the same aligned period with cut-off dates weeks apart, so the comparison is approximate; each cell carries its own period_end.`,
+        `Period ends differ inside ${newestMixed.period} — ${spread}${also}. ${why}, so the comparison is approximate; each cell carries its own period_end.`,
       );
     }
     // Each company's series reads one unit (#146), so a second unit here is another company's.

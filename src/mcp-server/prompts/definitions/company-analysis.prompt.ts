@@ -52,7 +52,7 @@ export const companyAnalysisPrompt = prompt('secedgar_company_analysis', {
       );
     }
     steps.push(
-      '**Industry Context** — Choose a few comparable companies and use `secedgar_compare_companies` with this company and those peers as `companies` (2-10 in all) and the key metrics as `concepts` (up to 8), aligned on calendar periods. To see where one metric ranks across every reporting company in a single period, use `secedgar_fetch_frames`.',
+      '**Industry Context** — Choose a few comparable companies and use `secedgar_compare_companies` with this company and those peers as `companies` (2-10 in all) and the key metrics as `concepts` (up to 8), aligned on fiscal years (or calendar quarters). To see where one metric ranks across every reporting company in a single period, use `secedgar_fetch_frames`.',
     );
 
     const findings: string[] = [

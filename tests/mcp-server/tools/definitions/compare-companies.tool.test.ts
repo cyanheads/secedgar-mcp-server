@@ -26,7 +26,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import { at, blockText, records, wireError } from '../../../support/assertions.js';
+import { at, bag, blockText, records, wireError } from '../../../support/assertions.js';
 
 function fact(overrides: Partial<CompanyConceptUnit> & { frame: string }): CompanyConceptUnit {
   return {
@@ -41,6 +41,21 @@ function fact(overrides: Partial<CompanyConceptUnit> & { frame: string }): Compa
   };
 }
 
+/**
+ * A December-year 10-K's full-year fact, filed in its own accession after the year
+ * closes — the shape the filer's fiscal-year ends are read from (#148).
+ */
+function calendarYear10K(prefix: string, year: number, val: number): CompanyConceptUnit {
+  return fact({
+    frame: `CY${year}`,
+    start: `${year}-01-01`,
+    end: `${year}-12-31`,
+    filed: `${year + 1}-02-01`,
+    accn: `${prefix}-${year}`,
+    val,
+  });
+}
+
 /** December-fiscal-year-end filer with four annual periods of revenue and assets. */
 const calendarFiler: CompanyFactsResponse = {
   cik: 789019,
@@ -51,7 +66,7 @@ const calendarFiler: CompanyFactsResponse = {
         label: 'Revenues',
         units: {
           USD: [2021, 2022, 2023, 2024, 2025].map((year) =>
-            fact({ frame: `CY${year}`, end: `${year}-12-31`, val: year * 100 }),
+            calendarYear10K('cal', year, year * 100),
           ),
         },
       },
@@ -59,7 +74,13 @@ const calendarFiler: CompanyFactsResponse = {
         label: 'Total Assets',
         units: {
           USD: [2023, 2024].map((year) =>
-            fact({ frame: `CY${year}Q4I`, end: `${year}-12-31`, val: year * 10 }),
+            fact({
+              frame: `CY${year}Q4I`,
+              end: `${year}-12-31`,
+              filed: `${year + 1}-02-01`,
+              accn: `cal-${year}`,
+              val: year * 10,
+            }),
           ),
         },
       },
@@ -162,7 +183,7 @@ describe('compareCompaniesTool', () => {
       frame: 'CY2025',
       period_end: '2025-12-31',
       form: '10-K',
-      accession_number: 'acc-1',
+      accession_number: 'cal-2025',
     });
     expect(result.concepts).toEqual([{ concept: 'revenue', label: 'Revenue', units: ['USD'] }]);
   });
@@ -876,6 +897,28 @@ describe('compareCompaniesTool', () => {
     });
   });
 
+  it('says plainly that nobody reports the concept when no snapshot was left out', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['CAL', 'JUN'],
+      concepts: ['goodwill'],
+    });
+
+    const error = wireError(result);
+    expect(error.message).toBe(
+      'None of the 2 resolved companies report any of the requested concepts for annual periods.',
+    );
+    expect(bag(error.data.recovery).hint).toBe(
+      'Switch period_type, or discover reported concept names with secedgar_search_concepts.',
+    );
+  });
+
+  it('describes annual alignment on fiscal years, not calendar periods', () => {
+    expect(compareCompaniesTool.description).toMatch(
+      /^Compare 2-10 named companies across 1-8 XBRL concepts, aligned on fiscal years \(annual\) or calendar quarters \(quarterly\)\. /,
+    );
+    expect(compareCompaniesTool.description).not.toContain('aligned on calendar periods');
+  });
+
   it('records a company-concept pair with no data as a gap, never as a value', async () => {
     const ctx = createMockContext({ errors: compareCompaniesTool.errors });
     const input = compareCompaniesTool.input.parse({
@@ -946,9 +989,7 @@ describe('compareCompaniesTool', () => {
           Revenues: {
             label: 'Revenues',
             units: {
-              USD: [2024, 2025].map((year) =>
-                fact({ frame: `CY${year}`, end: `${year}-12-31`, val: year }),
-              ),
+              USD: [2021, 2022, 2023, 2024, 2025].map((year) => calendarYear10K('lag', year, year)),
             },
           },
           Assets: {
@@ -1251,5 +1292,1028 @@ describe('concept inputs that resolve to the same concept (#145)', () => {
     // JUNE CO reports no assets at all.
     expect(output.gaps.map((g) => [g.company, g.concept])).toEqual([['JUNE CO', 'assets']]);
     expect(blockText(result.content).match(/reports no assets/g)).toHaveLength(1);
+  });
+});
+
+/**
+ * An annual matrix places each fiscal-year-end balance under its fiscal year's
+ * annual key, beside that year's income lines, and leaves interim snapshots out
+ * (#171). Values are SEC's, from each filer's companyfacts.
+ */
+describe('annual alignment of point-in-time concepts (#171)', () => {
+  /** [start, end, val, frame, form, accn, filed] — start and frame absent where SEC has none. */
+  type Row = [string | undefined, string, number, string | undefined, string, string, string];
+  const units = (rows: Row[]): CompanyConceptUnit[] =>
+    rows.map(([start, end, val, frame, form, accn, filed]) => ({
+      ...(start ? { start } : {}),
+      end,
+      val,
+      ...(frame ? { frame } : {}),
+      form,
+      accn,
+      filed,
+      fp: null,
+      fy: null,
+    }));
+  const filer = (
+    entityName: string,
+    revenue: Row[],
+    equity: Row[],
+    dei?: CompanyFactsResponse['facts'][string],
+  ): CompanyFactsResponse => ({
+    entityName,
+    facts: {
+      'us-gaap': {
+        ...(revenue.length > 0
+          ? {
+              RevenueFromContractWithCustomerExcludingAssessedTax: {
+                label: 'Revenue',
+                units: { USD: units(revenue) },
+              },
+            }
+          : {}),
+        StockholdersEquity: { label: "Stockholders' Equity", units: { USD: units(equity) } },
+      },
+      ...(dei ? { dei } : {}),
+    },
+  });
+
+  /** Fiscal year ends June 30. */
+  const msft = filer(
+    'MICROSOFT CORP',
+    [
+      [
+        '2022-07-01',
+        '2023-06-30',
+        211915000000,
+        undefined,
+        '10-K',
+        '0000950170-23-035122',
+        '2023-07-27',
+      ],
+      [
+        '2022-07-01',
+        '2023-06-30',
+        211915000000,
+        undefined,
+        '10-K',
+        '0000950170-24-087843',
+        '2024-07-30',
+      ],
+      [
+        '2023-07-01',
+        '2024-06-30',
+        245122000000,
+        undefined,
+        '10-K',
+        '0000950170-24-087843',
+        '2024-07-30',
+      ],
+      [
+        '2022-07-01',
+        '2023-06-30',
+        211915000000,
+        'CY2023',
+        '10-K',
+        '0000950170-25-100235',
+        '2025-07-30',
+      ],
+      [
+        '2024-07-01',
+        '2025-06-30',
+        281724000000,
+        undefined,
+        '10-K',
+        '0000950170-25-100235',
+        '2025-07-30',
+      ],
+      [
+        '2023-07-01',
+        '2024-06-30',
+        245122000000,
+        'CY2024',
+        '10-K',
+        '0001193125-26-323660',
+        '2026-07-29',
+      ],
+      [
+        '2024-07-01',
+        '2025-06-30',
+        281724000000,
+        'CY2025',
+        '10-K',
+        '0001193125-26-323660',
+        '2026-07-29',
+      ],
+      [
+        '2025-07-01',
+        '2026-06-30',
+        331839000000,
+        'CY2026',
+        '10-K',
+        '0001193125-26-323660',
+        '2026-07-29',
+      ],
+    ],
+    [
+      [
+        undefined,
+        '2023-06-30',
+        206223000000,
+        'CY2023Q2I',
+        '10-K',
+        '0000950170-25-100235',
+        '2025-07-30',
+      ],
+      [
+        undefined,
+        '2023-09-30',
+        220714000000,
+        'CY2023Q3I',
+        '10-Q',
+        '0000950170-24-118967',
+        '2024-10-30',
+      ],
+      [
+        undefined,
+        '2023-12-31',
+        238268000000,
+        'CY2023Q4I',
+        '10-Q',
+        '0000950170-25-010491',
+        '2025-01-29',
+      ],
+      [
+        undefined,
+        '2024-03-31',
+        253152000000,
+        'CY2024Q1I',
+        '10-Q',
+        '0000950170-25-061046',
+        '2025-04-30',
+      ],
+      [
+        undefined,
+        '2024-06-30',
+        268477000000,
+        'CY2024Q2I',
+        '10-K',
+        '0001193125-26-323660',
+        '2026-07-29',
+      ],
+      [
+        undefined,
+        '2024-09-30',
+        287723000000,
+        'CY2024Q3I',
+        '10-Q',
+        '0001193125-25-256321',
+        '2025-10-29',
+      ],
+      [
+        undefined,
+        '2024-12-31',
+        302695000000,
+        'CY2024Q4I',
+        '10-Q',
+        '0001193125-26-027207',
+        '2026-01-28',
+      ],
+      [
+        undefined,
+        '2025-03-31',
+        321891000000,
+        'CY2025Q1I',
+        '10-Q',
+        '0001193125-26-191507',
+        '2026-04-29',
+      ],
+      [
+        undefined,
+        '2025-06-30',
+        343479000000,
+        'CY2025Q2I',
+        '10-K',
+        '0001193125-26-323660',
+        '2026-07-29',
+      ],
+      [
+        undefined,
+        '2025-09-30',
+        363076000000,
+        'CY2025Q3I',
+        '10-Q',
+        '0001193125-25-256321',
+        '2025-10-29',
+      ],
+      [
+        undefined,
+        '2025-12-31',
+        390875000000,
+        'CY2025Q4I',
+        '10-Q',
+        '0001193125-26-027207',
+        '2026-01-28',
+      ],
+      [
+        undefined,
+        '2026-03-31',
+        414367000000,
+        'CY2026Q1I',
+        '10-Q',
+        '0001193125-26-191507',
+        '2026-04-29',
+      ],
+      [
+        undefined,
+        '2026-06-30',
+        442387000000,
+        'CY2026Q2I',
+        '10-K',
+        '0001193125-26-323660',
+        '2026-07-29',
+      ],
+    ],
+  );
+
+  /** Fiscal year ends May 31; the newest year-end balance is framed from a later 10-Q. */
+  const orcl = filer(
+    'ORACLE CORP',
+    [
+      [
+        '2022-06-01',
+        '2023-05-31',
+        49954000000,
+        undefined,
+        '10-K',
+        '0000950170-23-028914',
+        '2023-06-20',
+      ],
+      [
+        '2022-06-01',
+        '2023-05-31',
+        49954000000,
+        undefined,
+        '10-K',
+        '0000950170-24-075605',
+        '2024-06-20',
+      ],
+      [
+        '2023-06-01',
+        '2024-05-31',
+        52961000000,
+        undefined,
+        '10-K',
+        '0000950170-24-075605',
+        '2024-06-20',
+      ],
+      [
+        '2022-06-01',
+        '2023-05-31',
+        49954000000,
+        'CY2022',
+        '10-K',
+        '0000950170-25-087926',
+        '2025-06-18',
+      ],
+      [
+        '2024-06-01',
+        '2025-05-31',
+        57399000000,
+        undefined,
+        '10-K',
+        '0000950170-25-087926',
+        '2025-06-18',
+      ],
+      [
+        '2023-06-01',
+        '2024-05-31',
+        52961000000,
+        'CY2023',
+        '10-K',
+        '0001193125-26-277521',
+        '2026-06-22',
+      ],
+      [
+        '2024-06-01',
+        '2025-05-31',
+        57399000000,
+        'CY2024',
+        '10-K',
+        '0001193125-26-277521',
+        '2026-06-22',
+      ],
+      [
+        '2025-06-01',
+        '2026-05-31',
+        67357000000,
+        'CY2025',
+        '10-K',
+        '0001193125-26-277521',
+        '2026-06-22',
+      ],
+    ],
+    [
+      [
+        undefined,
+        '2023-05-31',
+        1073000000,
+        'CY2023Q2I',
+        '10-K',
+        '0000950170-24-075605',
+        '2024-06-20',
+      ],
+      [
+        undefined,
+        '2023-08-31',
+        2370000000,
+        'CY2023Q3I',
+        '10-Q',
+        '0000950170-23-047713',
+        '2023-09-12',
+      ],
+      [
+        undefined,
+        '2023-11-30',
+        3866000000,
+        'CY2023Q4I',
+        '10-Q',
+        '0000950170-23-069682',
+        '2023-12-12',
+      ],
+      [
+        undefined,
+        '2024-02-29',
+        5623000000,
+        'CY2024Q1I',
+        '10-Q',
+        '0000950170-24-029904',
+        '2024-03-12',
+      ],
+      [
+        undefined,
+        '2024-05-31',
+        8704000000,
+        'CY2024Q2I',
+        '10-K',
+        '0000950170-25-087926',
+        '2025-06-18',
+      ],
+      [
+        undefined,
+        '2024-08-31',
+        10816000000,
+        'CY2024Q3I',
+        '10-Q',
+        '0000950170-24-104905',
+        '2024-09-10',
+      ],
+      [
+        undefined,
+        '2024-11-30',
+        13746000000,
+        'CY2024Q4I',
+        '10-Q',
+        '0000950170-24-134973',
+        '2024-12-10',
+      ],
+      [
+        undefined,
+        '2025-02-28',
+        16730000000,
+        'CY2025Q1I',
+        '10-Q',
+        '0000950170-25-037143',
+        '2025-03-11',
+      ],
+      [
+        undefined,
+        '2025-05-31',
+        20451000000,
+        'CY2025Q2I',
+        '10-K',
+        '0001193125-26-277521',
+        '2026-06-22',
+      ],
+      [
+        undefined,
+        '2025-08-31',
+        24154000000,
+        'CY2025Q3I',
+        '10-Q',
+        '0001193125-25-200095',
+        '2025-09-10',
+      ],
+      [
+        undefined,
+        '2025-11-30',
+        29951000000,
+        'CY2025Q4I',
+        '10-Q',
+        '0001193125-25-315925',
+        '2025-12-11',
+      ],
+      [
+        undefined,
+        '2026-02-28',
+        38495000000,
+        'CY2026Q1I',
+        '10-Q',
+        '0001193125-26-101045',
+        '2026-03-11',
+      ],
+      [
+        undefined,
+        '2026-05-31',
+        42508000000,
+        'CY2026Q2I',
+        '10-Q',
+        '0001193125-26-389274',
+        '2026-09-11',
+      ],
+      [
+        undefined,
+        '2026-08-31',
+        66772000000,
+        'CY2026Q3I',
+        '10-Q',
+        '0001193125-26-389274',
+        '2026-09-11',
+      ],
+    ],
+  );
+
+  /** December fiscal year, with 2026 still open; its cover page dates shares to 2026-01-30. */
+  const bsx = filer(
+    'BOSTON SCIENTIFIC CORP',
+    [
+      [
+        '2023-01-01',
+        '2023-12-31',
+        14240000000,
+        undefined,
+        '10-K',
+        '0000885725-24-000017',
+        '2024-02-20',
+      ],
+      [
+        '2023-01-01',
+        '2023-12-31',
+        14240000000,
+        undefined,
+        '10-K',
+        '0000885725-25-000011',
+        '2025-02-18',
+      ],
+      [
+        '2024-01-01',
+        '2024-12-31',
+        16747000000,
+        undefined,
+        '10-K',
+        '0000885725-25-000011',
+        '2025-02-18',
+      ],
+      [
+        '2023-01-01',
+        '2023-12-31',
+        14240000000,
+        'CY2023',
+        '10-K',
+        '0000885725-26-000010',
+        '2026-02-17',
+      ],
+      [
+        '2024-01-01',
+        '2024-12-31',
+        16747000000,
+        'CY2024',
+        '10-K',
+        '0000885725-26-000010',
+        '2026-02-17',
+      ],
+      [
+        '2025-01-01',
+        '2025-12-31',
+        20074000000,
+        'CY2025',
+        '10-K',
+        '0000885725-26-000010',
+        '2026-02-17',
+      ],
+    ],
+    [
+      [
+        undefined,
+        '2023-06-30',
+        18226000000,
+        'CY2023Q2I',
+        '10-Q',
+        '0000885725-24-000068',
+        '2024-08-01',
+      ],
+      [
+        undefined,
+        '2023-09-30',
+        18886000000,
+        'CY2023Q3I',
+        '10-Q',
+        '0000885725-24-000073',
+        '2024-11-01',
+      ],
+      [
+        undefined,
+        '2023-12-31',
+        19282000000,
+        'CY2023Q4I',
+        '10-K',
+        '0000885725-25-000011',
+        '2025-02-18',
+      ],
+      [
+        undefined,
+        '2024-03-31',
+        19926000000,
+        'CY2024Q1I',
+        '10-Q',
+        '0000885725-24-000046',
+        '2024-05-01',
+      ],
+      [
+        undefined,
+        '2024-06-30',
+        20371000000,
+        'CY2024Q2I',
+        '10-Q',
+        '0000885725-25-000041',
+        '2025-08-01',
+      ],
+      [
+        undefined,
+        '2024-09-30',
+        20708000000,
+        'CY2024Q3I',
+        '10-Q',
+        '0000885725-25-000050',
+        '2025-11-03',
+      ],
+      [
+        undefined,
+        '2024-12-31',
+        21770000000,
+        'CY2024Q4I',
+        '10-K',
+        '0000885725-26-000010',
+        '2026-02-17',
+      ],
+      [
+        undefined,
+        '2025-03-31',
+        22212000000,
+        'CY2025Q1I',
+        '10-Q',
+        '0000885725-25-000026',
+        '2025-05-01',
+      ],
+      [
+        undefined,
+        '2025-06-30',
+        22418000000,
+        'CY2025Q2I',
+        '10-Q',
+        '0000885725-26-000053',
+        '2026-08-03',
+      ],
+      [
+        undefined,
+        '2025-09-30',
+        23394000000,
+        'CY2025Q3I',
+        '10-Q',
+        '0000885725-25-000050',
+        '2025-11-03',
+      ],
+      [
+        undefined,
+        '2025-12-31',
+        24233000000,
+        'CY2025Q4I',
+        '10-Q',
+        '0000885725-26-000053',
+        '2026-08-03',
+      ],
+      [
+        undefined,
+        '2026-03-31',
+        25864000000,
+        'CY2026Q1I',
+        '10-Q',
+        '0000885725-26-000033',
+        '2026-05-01',
+      ],
+      [
+        undefined,
+        '2026-06-30',
+        24930000000,
+        'CY2026Q2I',
+        '10-Q',
+        '0000885725-26-000053',
+        '2026-08-03',
+      ],
+    ],
+    {
+      EntityCommonStockSharesOutstanding: {
+        label: 'Entity Common Stock, Shares Outstanding',
+        units: {
+          shares: units([
+            [
+              undefined,
+              '2026-01-30',
+              1482000000,
+              'CY2025Q4I',
+              '10-K',
+              '0000885725-26-000010',
+              '2026-02-17',
+            ],
+          ]),
+        },
+      },
+    },
+  );
+
+  const byTicker: Record<string, { cik: string; facts: CompanyFactsResponse }> = {
+    MSFT: { cik: '0000789019', facts: msft },
+    ORCL: { cik: '0001341439', facts: orcl },
+    BSX: { cik: '0000885725', facts: bsx },
+  };
+
+  beforeEach(() => {
+    mockApi.resolveCik.mockImplementation(async (q: string) => {
+      const known = byTicker[q];
+      return known ? { cik: known.cik, name: known.facts.entityName, ticker: q } : [];
+    });
+    mockApi.tryGetCompanyFacts.mockImplementation(
+      async (cik: string) => Object.values(byTicker).find((k) => k.cik === cik)?.facts ?? null,
+    );
+  });
+
+  /** [period, value, period_end, frame] of one company-concept's cells, newest first. */
+  const line = (
+    cells: Array<{
+      company: string;
+      concept: string;
+      period: string;
+      value: number;
+      period_end: string;
+      frame: string;
+    }>,
+    company: string,
+    concept: string,
+  ) =>
+    cells
+      .filter((c) => c.company === company && c.concept === concept)
+      .sort((a, b) => b.period.localeCompare(a.period))
+      .map((c) => [c.period, c.value, c.period_end, c.frame]);
+
+  const compare = async (args: Record<string, unknown>) => {
+    const result = await runToolContract(compareCompaniesTool, args as never);
+    expect(result.isError).toBeFalsy();
+    return {
+      output: compareCompaniesTool.output.parse(result.structuredContent),
+      text: blockText(result.content),
+    };
+  };
+
+  it('keeps a December filer’s closed-year balances as they were', async () => {
+    const { output } = await compare({
+      companies: ['BSX', 'MSFT'],
+      concepts: ['equity'],
+      periods: 12,
+    });
+
+    expect(
+      line(output.cells, 'BOSTON SCIENTIFIC CORP', 'equity').filter(([p]) => p !== 'CY2026'),
+    ).toEqual([
+      ['CY2025', 24233000000, '2025-12-31', 'CY2025Q4I'],
+      ['CY2024', 21770000000, '2024-12-31', 'CY2024Q4I'],
+      ['CY2023', 19282000000, '2023-12-31', 'CY2023Q4I'],
+    ]);
+  });
+
+  it('places a June year-end balance beside the income lines of the year it closes', async () => {
+    const { output, text } = await compare({
+      companies: ['MSFT', 'BSX'],
+      concepts: ['revenue', 'equity'],
+      periods: 4,
+    });
+
+    expect(line(output.cells, 'MICROSOFT CORP', 'equity')).toEqual([
+      ['CY2026', 442387000000, '2026-06-30', 'CY2026Q2I'],
+      ['CY2025', 343479000000, '2025-06-30', 'CY2025Q2I'],
+      ['CY2024', 268477000000, '2024-06-30', 'CY2024Q2I'],
+      ['CY2023', 206223000000, '2023-06-30', 'CY2023Q2I'],
+    ]);
+    // Each fiscal year's balance and revenue end on the same day.
+    const revenueEnds = line(output.cells, 'MICROSOFT CORP', 'revenue').map(([p, , end]) => [
+      p,
+      end,
+    ]);
+    const equityEnds = line(output.cells, 'MICROSOFT CORP', 'equity').map(([p, , end]) => [p, end]);
+    expect(equityEnds).toEqual(revenueEnds);
+    expect(text).toContain(
+      'equity | MICROSOFT CORP (CIK 0000789019) | CY2025 = 343479000000 USD | us-gaap:StockholdersEquity | frame CY2025Q2I | ends 2025-06-30 | 10-K [0001193125-26-323660]',
+    );
+    expect(text).not.toContain('390875000000');
+  });
+
+  it('places a May year-end balance under its fiscal year’s key, framed in the next calendar year', async () => {
+    const { output } = await compare({
+      companies: ['ORCL', 'BSX'],
+      concepts: ['revenue', 'equity'],
+      periods: 4,
+    });
+
+    expect(line(output.cells, 'ORACLE CORP', 'equity')).toEqual([
+      ['CY2025', 42508000000, '2026-05-31', 'CY2026Q2I'],
+      ['CY2024', 20451000000, '2025-05-31', 'CY2025Q2I'],
+      ['CY2023', 8704000000, '2024-05-31', 'CY2024Q2I'],
+      ['CY2022', 1073000000, '2023-05-31', 'CY2023Q2I'],
+    ]);
+    expect(line(output.cells, 'ORACLE CORP', 'revenue').map(([p, , end]) => [p, end])).toEqual([
+      ['CY2025', '2026-05-31'],
+      ['CY2024', '2025-05-31'],
+      ['CY2023', '2024-05-31'],
+      ['CY2022', '2023-05-31'],
+    ]);
+  });
+
+  it('gives a year still open no annual balance', async () => {
+    const { output, text } = await compare({
+      companies: ['BSX', 'ORCL'],
+      concepts: ['equity'],
+      periods: 2,
+    });
+
+    // BSX's 2026-06-30 and ORCL's 2026-08-31 snapshots close no fiscal year.
+    expect(output.periods).toEqual(['CY2025', 'CY2024']);
+    expect(output.cells.some((c) => c.period === 'CY2026')).toBe(false);
+    expect(text).not.toContain('24930000000');
+    expect(text).not.toContain('66772000000');
+  });
+
+  it('keys a balance requested without any income line from the payload’s own annual frames', async () => {
+    const { output } = await compare({
+      companies: ['MSFT', 'ORCL'],
+      concepts: ['equity'],
+      periods: 2,
+    });
+
+    expect(line(output.cells, 'MICROSOFT CORP', 'equity').map(([p, , end]) => [p, end])).toEqual([
+      ['CY2026', '2026-06-30'],
+      ['CY2025', '2025-06-30'],
+    ]);
+    expect(line(output.cells, 'ORACLE CORP', 'equity').map(([p, , end]) => [p, end])).toEqual([
+      ['CY2025', '2026-05-31'],
+    ]);
+  });
+
+  it('keys a year-end no framed duration ends on by the year SEC frames that fiscal year as', async () => {
+    /** One unframed year-long 10-K fact ending `end`, plus the balance on that day. */
+    const unframedYear = (name: string, start: string, end: string, frame: string) =>
+      filer(
+        name,
+        [[start, end, 1, undefined, '10-K', `${name}-10k`, '2026-08-20']],
+        [[undefined, end, 7, frame, '10-K', `${name}-10k`, '2026-08-20']],
+      );
+    const cases: Record<string, [string, CompanyFactsResponse]> = {
+      MAY: ['0000000001', unframedYear('MAY', '2024-06-01', '2025-05-31', 'CY2025Q2I')],
+      WEEK: ['0000000002', unframedYear('WEEK', '2024-06-29', '2025-06-27', 'CY2025Q2I')],
+      JUNE: ['0000000003', unframedYear('JUNE', '2024-07-01', '2025-06-30', 'CY2025Q2I')],
+    };
+    mockApi.resolveCik.mockImplementation(async (q: string) => ({ cik: cases[q]![0], name: q }));
+    mockApi.tryGetCompanyFacts.mockImplementation(
+      async (cik: string) => Object.values(cases).find(([c]) => c === cik)?.[1] ?? null,
+    );
+
+    const { output } = await compare({ companies: ['MAY', 'WEEK', 'JUNE'], concepts: ['equity'] });
+
+    expect(output.cells.map((c) => [c.company, c.period, c.period_end])).toEqual([
+      ['MAY', 'CY2024', '2025-05-31'],
+      ['WEEK', 'CY2024', '2025-06-27'],
+      ['JUNE', 'CY2025', '2025-06-30'],
+    ]);
+  });
+
+  it('follows the key SEC framed the fiscal year under, wherever the computed year differs', async () => {
+    /**
+     * SEC frames Seagate's and Western Digital's 2011-07-02 → 2012-06-29 year
+     * CY2012, where the computed year is CY2011 — SEC is not consistent for years
+     * ending in the last days of June (their 2024-06-28 and 2025-06-27 years are
+     * CY2023 and CY2024).
+     */
+    mockApi.tryGetCompanyFacts.mockResolvedValue(
+      filer(
+        'FRAMED CO',
+        [['2011-07-02', '2012-06-29', 5, 'CY2012', '10-K', 'framed-10k', '2012-08-10']],
+        [[undefined, '2012-06-29', 9, 'CY2012Q2I', '10-K', 'framed-10k', '2012-08-10']],
+      ),
+    );
+
+    const { output } = await compare({
+      companies: ['MSFT', 'BSX'],
+      concepts: ['revenue', 'equity'],
+    });
+
+    // Balance and revenue share the fiscal year's column.
+    expect(new Set(output.cells.map((c) => [c.concept, c.period].join(' ')))).toEqual(
+      new Set(['revenue CY2012', 'equity CY2012']),
+    );
+  });
+
+  describe('a balance dated on a comparative year end', () => {
+    /**
+     * A December filer whose first XBRL 10-K carries 2008 as its comparative year.
+     * Its second 10-K also tags a year-long figure ending 2009-09-30, off its
+     * fiscal calendar (Merck's and P&G's 09-30 shape).
+     */
+    const firstXbrl = filer(
+      'FIRST CO',
+      [
+        ['2008-01-01', '2008-12-31', 800, 'CY2008', '10-K', 'first-10k', '2010-02-20'],
+        ['2009-01-01', '2009-12-31', 900, undefined, '10-K', 'first-10k', '2010-02-20'],
+        ['2009-01-01', '2009-12-31', 900, 'CY2009', '10-K', 'second-10k', '2011-02-20'],
+        ['2008-10-01', '2009-09-30', 870, undefined, '10-K', 'second-10k', '2011-02-20'],
+        ['2010-01-01', '2010-12-31', 1000, 'CY2010', '10-K', 'second-10k', '2011-02-20'],
+      ],
+      [
+        [undefined, '2008-12-31', 80, 'CY2008Q4I', '10-K', 'first-10k', '2010-02-20'],
+        [undefined, '2009-09-30', 85, 'CY2009Q3I', '10-Q', 'q3-10q', '2009-11-01'],
+        [undefined, '2009-12-31', 90, 'CY2009Q4I', '10-K', 'second-10k', '2011-02-20'],
+        [undefined, '2010-12-31', 100, 'CY2010Q4I', '10-K', 'second-10k', '2011-02-20'],
+      ],
+    );
+
+    beforeEach(() => {
+      mockApi.resolveCik.mockImplementation(async (q: string) =>
+        q === 'FIRST' ? { cik: '0000000009', name: 'FIRST CO' } : { cik: '0000885725', name: q },
+      );
+      mockApi.tryGetCompanyFacts.mockImplementation(async (cik: string) =>
+        cik === '0000000009' ? firstXbrl : bsx,
+      );
+    });
+
+    it('keeps the first 10-K’s comparative year-end balance beside that year’s income line', async () => {
+      const { output } = await compare({
+        companies: ['FIRST', 'BSX'],
+        concepts: ['revenue', 'equity'],
+        periods: 12,
+      });
+
+      expect(line(output.cells, 'FIRST CO', 'equity')).toEqual([
+        ['CY2010', 100, '2010-12-31', 'CY2010Q4I'],
+        ['CY2009', 90, '2009-12-31', 'CY2009Q4I'],
+        ['CY2008', 80, '2008-12-31', 'CY2008Q4I'],
+      ]);
+      expect(line(output.cells, 'FIRST CO', 'revenue').map(([p, , end]) => [p, end])).toEqual([
+        ['CY2010', '2010-12-31'],
+        ['CY2009', '2009-12-31'],
+        ['CY2008', '2008-12-31'],
+      ]);
+    });
+
+    it('still leaves out a year-long figure that ends off the report’s fiscal calendar', async () => {
+      const { output, text } = await compare({
+        companies: ['FIRST', 'BSX'],
+        concepts: ['equity'],
+        periods: 12,
+      });
+
+      expect(output.cells.some((c) => c.period_end === '2009-09-30')).toBe(false);
+      expect(text).not.toContain('= 85 USD');
+    });
+  });
+
+  it('leaves a cover-date snapshot out of an annual matrix and says why', async () => {
+    const { output, text } = await compare({
+      companies: ['BSX', 'MSFT'],
+      concepts: ['equity', 'shares_outstanding'],
+    });
+
+    expect(output.cells.some((c) => c.concept === 'shares_outstanding')).toBe(false);
+    expect(output.gaps.map((g) => [g.company, g.concept])).toContainEqual([
+      'BOSTON SCIENTIFIC CORP',
+      'shares_outstanding',
+    ]);
+    const caveat =
+      'BOSTON SCIENTIFIC CORP / shares_outstanding: every value is a point-in-time snapshot off the company’s fiscal-year ends (newest 2026-01-30, frame CY2025Q4I), so the annual matrix holds none — period_type "quarterly" aligns them on calendar quarters.';
+    expect(output.caveats).toContain(caveat);
+    expect(text).toContain(`Caveat: ${caveat}`);
+    // A company that never reports the concept gets the gap alone.
+    expect(output.caveats.some((c) => c.startsWith('MICROSOFT CORP / shares_outstanding'))).toBe(
+      false,
+    );
+  });
+
+  it('says why an annual compare of cover-date concepts alone holds nothing, and names the call that works', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['BSX', 'MSFT'],
+      concepts: ['shares_outstanding'],
+    });
+
+    const error = wireError(result);
+    expect(error.data.reason).toBe('no_comparable_data');
+    const message =
+      'None of the 2 resolved companies has a value an annual matrix can hold. Every value found is a point-in-time snapshot dated off its company’s fiscal-year ends — a cover-page or interim date, which an annual matrix cannot pair with fiscal-year-end income lines: BOSTON SCIENTIFIC CORP / shares_outstanding (newest 2026-01-30).';
+    const hint =
+      'Retry with period_type: "quarterly" — it aligns point-in-time snapshots on the calendar quarter they fall in. Omitting period_type does not help: it defaults to annual.';
+    expect(error.message).toBe(message);
+    expect(bag(error.data.recovery).hint).toBe(hint);
+    const text = blockText(result.content);
+    expect(text).toContain(message);
+    expect(text).toContain(hint);
+
+    // The call the hint names returns the snapshot.
+    const { output } = await compare({
+      companies: ['BSX', 'MSFT'],
+      concepts: ['shares_outstanding'],
+      period_type: 'quarterly',
+    });
+    expect(line(output.cells, 'BOSTON SCIENTIFIC CORP', 'shares_outstanding')).toEqual([
+      ['CY2025Q4', 1482000000, '2026-01-30', 'CY2025Q4I'],
+    ]);
+  });
+
+  it('flags period ends that differ in any inline column, not only the newest', async () => {
+    const { output, text } = await compare({
+      companies: ['BSX', 'MSFT', 'ORCL'],
+      concepts: ['revenue', 'equity'],
+    });
+
+    // The newest column holds Microsoft alone, so it has nothing to compare.
+    expect(output.periods).toEqual(['CY2026', 'CY2025', 'CY2024', 'CY2023']);
+    expect(
+      new Set(output.cells.filter((c) => c.period === 'CY2026').map((c) => c.company)),
+    ).toEqual(new Set(['MICROSOFT CORP']));
+    const caveat =
+      'Period ends differ inside CY2025 — BOSTON SCIENTIFIC CORP ends 2025-12-31, MICROSOFT CORP ends 2025-06-30, ORACLE CORP ends 2026-05-31; also inside CY2024, CY2023. Each company’s fiscal year sits under the calendar year SEC frames it as, and fiscal years ending months apart share that column, so the comparison is approximate; each cell carries its own period_end.';
+    expect(output.caveats).toContain(caveat);
+    expect(text).toContain(`Caveat: ${caveat}`);
+  });
+
+  it('leaves quarterly alignment of snapshots as it was', async () => {
+    const { output } = await compare({
+      companies: ['MSFT', 'BSX'],
+      concepts: ['equity', 'shares_outstanding'],
+      period_type: 'quarterly',
+      periods: 3,
+    });
+
+    expect(line(output.cells, 'MICROSOFT CORP', 'equity')).toEqual([
+      ['CY2026Q2', 442387000000, '2026-06-30', 'CY2026Q2I'],
+      ['CY2026Q1', 414367000000, '2026-03-31', 'CY2026Q1I'],
+      ['CY2025Q4', 390875000000, '2025-12-31', 'CY2025Q4I'],
+    ]);
+    expect(line(output.cells, 'BOSTON SCIENTIFIC CORP', 'shares_outstanding')).toEqual([
+      ['CY2025Q4', 1482000000, '2026-01-30', 'CY2025Q4I'],
+    ]);
+  });
+
+  it('says fiscal years months apart share an annual column', async () => {
+    const { output } = await compare({ companies: ['BSX', 'ORCL'], concepts: ['equity'] });
+
+    const mix = output.caveats.find((c) => c.startsWith('Period ends differ inside CY2025'));
+    expect(mix).toBe(
+      'Period ends differ inside CY2025 — BOSTON SCIENTIFIC CORP ends 2025-12-31, ORACLE CORP ends 2026-05-31; also inside CY2024, CY2023. Each company’s fiscal year sits under the calendar year SEC frames it as, and fiscal years ending months apart share that column, so the comparison is approximate; each cell carries its own period_end.',
+    );
+  });
+
+  it('stages the same fiscal-year keys in the dataframe', async () => {
+    const registerDataframe = vi.fn().mockResolvedValue({
+      name: 'df_FYEND_ROWS1',
+      rowCount: 1,
+      expiresAt: '2026-11-01T00:00:00.000Z',
+    });
+    vi.mocked(getCanvasBridge).mockReturnValueOnce({ registerDataframe } as never);
+    vi.mocked(toDatasetField).mockReturnValueOnce({
+      name: 'df_FYEND_ROWS1',
+      row_count: 1,
+      expires_at: '2026-11-01T00:00:00.000Z',
+    });
+
+    await compare({ companies: ['ORCL', 'BSX'], concepts: ['equity'], periods: 1 });
+
+    const rows = at(registerDataframe.mock.calls, 0)[1].rows as Array<{
+      company: string;
+      period: string;
+      period_end: string;
+    }>;
+    expect(
+      rows.filter((r) => r.company === 'ORACLE CORP').map((r) => [r.period, r.period_end]),
+    ).toEqual([
+      ['CY2025', '2026-05-31'],
+      ['CY2024', '2025-05-31'],
+      ['CY2023', '2024-05-31'],
+      ['CY2022', '2023-05-31'],
+    ]);
   });
 });

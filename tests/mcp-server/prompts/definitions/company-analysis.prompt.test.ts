@@ -181,6 +181,12 @@ describe('companyAnalysisPrompt — profile and peer steps (#129)', () => {
     expect(Object.keys(companyAnalysisPrompt.args!.shape)).toEqual(['company', 'focus_areas']);
   });
 
+  it('says the peer comparison aligns fiscal years, as compare_companies’ annual default does', () => {
+    const line = step('Industry Context');
+    expect(line).toContain('aligned on fiscal years (or calendar quarters)');
+    expect(line).not.toContain('calendar periods');
+  });
+
   it('keeps Industry Context last, after the ownership steps', () => {
     const text = generatedText({ company: 'AAPL', focus_areas: 'ownership' });
     const order = [
