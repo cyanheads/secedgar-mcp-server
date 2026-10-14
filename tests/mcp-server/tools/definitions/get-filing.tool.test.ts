@@ -18,8 +18,9 @@ vi.mock('@/services/edgar/edgar-api-service.js', async (importOriginal) => ({
   initEdgarApiService: vi.fn(),
 }));
 
-// `foldForHeadingMatch` is not mocked: it is the comparison the section matcher
-// under test performs, so the real fold has to run (#106).
+// `foldForHeadingMatch`, `headingKey`, and `findSectionLine` are not mocked:
+// they are the comparisons the section matcher under test performs, so the real
+// ones have to run (#106, #166, #169).
 vi.mock('@/services/edgar/filing-to-text.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/edgar/filing-to-text.js')>();
   return {
@@ -33,6 +34,8 @@ vi.mock('@/services/edgar/filing-to-text.js', async (importOriginal) => {
     detectHeadings: vi.fn(),
     windowText: vi.fn(),
     foldForHeadingMatch: actual.foldForHeadingMatch,
+    headingKey: actual.headingKey,
+    findSectionLine: actual.findSectionLine,
   };
 });
 
@@ -1404,12 +1407,411 @@ describe('section targeting — a needle ending in a digit (#136)', () => {
     expect(await landingFor('item 1', both)).toBe(250);
   });
 
-  it('a needle ending in a letter keeps plain substring matching — "part i" reaches PART III', async () => {
-    expect(await landingFor('part i')).toBe(40);
-  });
-
   it('"item 12" still resolves to Item 12', async () => {
     expect(await landingFor('item 12')).toBe(60);
+  });
+});
+
+// ── A needle ending in a roman numeral never matches a longer one ────────────
+
+describe('section targeting — a needle ending in a roman numeral', () => {
+  async function landingFor(section: string, headings: Array<{ heading: string; offset: number }>) {
+    vi.mocked(detectHeadings).mockReturnValue(headings);
+    vi.mocked(filingToExtract).mockReturnValue('x'.repeat(2000));
+    vi.mocked(windowText).mockReturnValue({ text: 'page', truncated: false, totalLength: 2000 });
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({ accession_number: ACCN, cik: '320193', section });
+    await getFilingTool.handler(input, ctx);
+    return vi.mocked(windowText).mock.calls.at(-1)?.[1];
+  }
+
+  it('"part i" lands on PART I, not an earlier PART III TOC row', async () => {
+    const headings = [
+      { heading: 'PART III', offset: 40 },
+      { heading: 'PART I', offset: 300 },
+    ];
+    expect(await landingFor('part i', headings)).toBe(300);
+  });
+
+  it.each([
+    ['PART II', 'part i'],
+    ['PART III', 'part ii'],
+    ['PART IV', 'part i'],
+    ['PART II, III', 'part i'],
+  ])('never lands "%s" from %s', async (heading, section) => {
+    vi.mocked(detectHeadings).mockReturnValue([{ heading, offset: 80 }]);
+    vi.mocked(filingToExtract).mockReturnValue('x'.repeat(2000));
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({ accession_number: ACCN, cik: '320193', section });
+
+    const err = await caught(getFilingTool.handler(input, ctx));
+    expect(err.data.reason).toBe('section_not_found');
+    expect(err.message).toContain(`  [80] ${heading}`);
+  });
+
+  it.each([
+    ['PART I — FINANCIAL INFORMATION', 'part i'],
+    ['Part I.', 'part i'],
+    ['PART II, III', 'part ii'],
+    ['PART IV (continued)', 'part iv'],
+  ])(
+    'lands on "%s" from %s, a punctuation or space boundary after the numeral',
+    async (heading, section) => {
+      expect(await landingFor(section, [{ heading, offset: 80 }])).toBe(80);
+    },
+  );
+
+  // Characterization: a needle ending in any other letter keeps plain substring matching.
+  it('"risk factor" still reaches "Item 1A. Risk Factors"', async () => {
+    expect(
+      await landingFor('risk factor', [{ heading: 'Item 1A. Risk Factors', offset: 80 }]),
+    ).toBe(80);
+  });
+});
+
+// ── section reaches every detected heading; the outline cut keeps Items (#169) ──
+
+describe('section targeting — every detected heading, exact match first (#169)', () => {
+  /**
+   * A heavy 10-K's 60 detected headings, offset `index × 100`: financial-statement
+   * captions fill the first 50 slots, so Item 9A, Item 9B, PART III, Item 10, and
+   * a bare ITEM 15 sit past the 50th.
+   */
+  const STRUCTURAL: Record<number, string> = {
+    0: 'PART I',
+    1: 'Item 1. Business',
+    2: 'Item 1A. Risk Factors.',
+    10: 'PART II',
+    11: "Item 7. Management's Discussion and Analysis",
+    20: 'Item 8. Financial Statements and Supplementary Data',
+    52: 'Item 9A. Controls and Procedures.',
+    55: 'Item 9B. Other Information.',
+    57: 'PART III',
+    58: 'Item 10. Directors, Executive Officers and Corporate Governance',
+    59: 'ITEM 15',
+  };
+  const CUT_HEADINGS = Array.from({ length: 60 }, (_, i) => ({
+    heading: STRUCTURAL[i] ?? `CONSOLIDATED CAPTION ${String.fromCharCode(65 + (i % 26))}${i}`,
+    offset: i * 100,
+  }));
+  /** Every Item/Part heading, then the earliest captions up to 50: captions at 45–51, 53, 54, 56 drop. */
+  const CUT_OUTLINE = CUT_HEADINGS.filter(
+    (_, i) => ![45, 46, 47, 48, 49, 50, 51, 53, 54, 56].includes(i),
+  );
+  const CUT_SENTENCE =
+    'The outline lists 50 of 60 detected headings, every Item and Part heading among them; section matches all of them.';
+
+  /** `detectHeadings` returns every heading, as the real one does. */
+  function serveHeadings(headings: Array<{ heading: string; offset: number }>) {
+    vi.mocked(detectHeadings).mockReturnValue(headings);
+    vi.mocked(filingToExtract).mockReturnValue('x'.repeat(80_000));
+  }
+
+  /** A truncated first page, so the no-section call emits its outline. */
+  function serveFirstPage(totalLength = 8000) {
+    vi.mocked(windowText).mockReturnValue({
+      text: 'First page',
+      truncated: true,
+      totalLength,
+      nextOffset: 10,
+    });
+  }
+
+  async function landingFor(section: string, headings = CUT_HEADINGS) {
+    serveHeadings(headings);
+    vi.mocked(windowText).mockReturnValue({ text: 'page', truncated: false, totalLength: 8000 });
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({ accession_number: ACCN, cik: '320193', section });
+    await getFilingTool.handler(input, ctx);
+    return vi.mocked(windowText).mock.calls.at(-1)?.[1];
+  }
+
+  it.each([
+    ['Item 9B. Other Information', 5500],
+    ['item 9b', 5500],
+    ['item 10', 5800],
+    ['part iii', 5700],
+    ['item 15', 5900],
+  ])('"%s" reaches a heading past the 50th detected (offset %i)', async (section, offset) => {
+    expect(await landingFor(section)).toBe(offset);
+  });
+
+  it('runs heading detection once, over the whole list', async () => {
+    await landingFor('item 9b');
+    expect(vi.mocked(detectHeadings)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(detectHeadings)).toHaveBeenCalledWith(expect.any(String));
+  });
+
+  it('an exact title beats an earlier heading that only contains the needle', async () => {
+    const headings = [
+      {
+        heading: 'SPECIAL NOTE REGARDING FORWARD-LOOKING STATEMENTS AND RISK FACTORS',
+        offset: 7562,
+      },
+      { heading: 'Item 1A. Risk Factors.', offset: 67351 },
+    ];
+    expect(await landingFor('risk factors', headings)).toBe(67351);
+    expect(await landingFor('Risk Factors.', headings)).toBe(67351);
+  });
+
+  it('an exact whole heading beats an earlier substring hit, terminal punctuation aside', async () => {
+    const headings = [
+      { heading: 'Summary of Item 9B. Other Information matters', offset: 100 },
+      { heading: 'Item 9B. Other Information.', offset: 500 },
+    ];
+    expect(await landingFor('Item 9B. Other Information', headings)).toBe(500);
+  });
+
+  it('matches a titled Part heading by the title after its numeral', async () => {
+    const headings = [
+      { heading: 'OTHER INFORMATION ABOUT OUR DIRECTORS', offset: 100 },
+      { heading: 'PART II — OTHER INFORMATION', offset: 900 },
+    ];
+    expect(await landingFor('other information', headings)).toBe(900);
+  });
+
+  // Characterization: a bare marker carries no title, so it never wins the exact
+  // tier; the needle falls through to the first substring hit, as before #169.
+  it('never lets a bare marker win the exact tier', async () => {
+    const headings = [
+      { heading: 'Summary of Item 1A matters', offset: 10 },
+      { heading: 'ITEM 1A', offset: 20 },
+    ];
+    expect(await landingFor('item 1a', headings)).toBe(10);
+  });
+
+  it('cuts the first-page outline to every Item/Part heading plus the earliest others, in offset order, disclosed in structuredContent.notice and content[]', async () => {
+    serveHeadings(CUT_HEADINGS);
+    serveFirstPage();
+
+    const result = await runToolContract(getFilingTool, { accession_number: ACCN, cik: '320193' });
+    const sc = bag(result.structuredContent);
+    const text = result.content.map((b) => ('text' in b ? b.text : '')).join('\n');
+    expect(records(sc.outline)).toEqual(CUT_OUTLINE);
+    expect(vi.mocked(detectHeadings)).toHaveBeenCalledTimes(1);
+    expect(sc.notice).toContain(`next_offset (10)`);
+    expect(sc.notice).toContain(CUT_SENTENCE);
+    expect(text).toContain(CUT_SENTENCE);
+    expect(text).toContain('  [5500] Item 9B. Other Information.');
+    expect(text).not.toContain('  [4500] ');
+  });
+
+  it('renders an outline of 50 or fewer headings whole, with no cut sentence', async () => {
+    serveHeadings(CUT_HEADINGS.slice(0, 50));
+    serveFirstPage();
+
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({ accession_number: ACCN, cik: '320193' });
+    const result = await getFilingTool.handler(input, ctx);
+
+    expect(result.outline).toEqual(CUT_HEADINGS.slice(0, 50));
+    expect(getEnrichment(ctx).notice).not.toContain('detected headings');
+  });
+
+  it('a miss renders the same cut outline under its count, and error data carries it', async () => {
+    serveHeadings(CUT_HEADINGS);
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: ACCN,
+      cik: '320193',
+      section: 'nonexistent heading xyz',
+    });
+
+    const err = await caught(getFilingTool.handler(input, ctx));
+    expect(err.data.reason).toBe('section_not_found');
+    expect(err.data.outline).toEqual(CUT_OUTLINE);
+    expect(err.message).toContain('Outline (50 of 60 detected headings):\n  [0] PART I');
+    expect(err.message).toContain('  [5500] Item 9B. Other Information.');
+    expect(err.message).toContain('  [5900] ITEM 15');
+    expect(err.message).not.toContain('  [4500] ');
+  });
+
+  it('keeps the first 50 Item/Part headings when they alone pass the cap', async () => {
+    const itemHeavy = Array.from({ length: 60 }, (_, i) => ({
+      heading: i % 12 === 11 ? `CAPTION ${i}` : `Item ${i}. Title ${i}`,
+      offset: i * 100,
+    }));
+    serveHeadings(itemHeavy);
+    serveFirstPage();
+
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({ accession_number: ACCN, cik: '320193' });
+    const result = await getFilingTool.handler(input, ctx);
+
+    expect(result.outline).toEqual(
+      itemHeavy.filter((h) => h.heading.startsWith('Item ')).slice(0, 50),
+    );
+    expect(getEnrichment(ctx).notice).toContain(
+      'The outline lists 50 of 60 detected headings; section matches all of them.',
+    );
+  });
+
+  /**
+   * A 20-F shaped like DRDGOLD's 0001628280-26-064355: its TOC renders every
+   * Item as a bare marker (31 of them), and the body repeats each with its title,
+   * so Item/Part headings alone pass 50.
+   */
+  const CODES = [
+    ...Array.from({ length: 16 }, (_, i) => String(i + 1)),
+    '4A',
+    ...'ABCDEFGHIJK'.split('').map((l) => `16${l}`),
+    '17',
+    '18',
+    '19',
+  ];
+  const TOC_COPIES = CODES.map((code, i) => ({ heading: `ITEM ${code}.`, offset: 100 + i * 10 }));
+  const BODY_ITEMS = CODES.map((code, i) => ({
+    heading: `ITEM ${code}. TITLE ${code}`,
+    offset: 10_000 + i * 1000,
+  }));
+  const CAPTIONS = Array.from({ length: 12 }, (_, i) => ({
+    heading: `CAPTION ${String.fromCharCode(65 + i)}`,
+    offset: 5000 + i * 10,
+  }));
+  const TOC_HEAVY = [
+    ...TOC_COPIES,
+    { heading: 'PART I', offset: 9000 },
+    ...CAPTIONS,
+    ...BODY_ITEMS,
+  ].sort((a, b) => a.offset - b.offset);
+
+  it('keeps body Items over their bare TOC copies when Item/Part headings pass 50', async () => {
+    expect(TOC_COPIES).toHaveLength(31);
+    serveHeadings(TOC_HEAVY);
+    serveFirstPage(80_000);
+
+    const result = await runToolContract(getFilingTool, { accession_number: ACCN, cik: '320193' });
+    const sc = bag(result.structuredContent);
+    const outline = records(sc.outline);
+    const text = result.content.map((b) => ('text' in b ? b.text : '')).join('\n');
+
+    expect(outline).toEqual(
+      [{ heading: 'PART I', offset: 9000 }, ...CAPTIONS, ...BODY_ITEMS].sort(
+        (a, b) => a.offset - b.offset,
+      ),
+    );
+    for (const heading of ['ITEM 16A. TITLE 16A', 'ITEM 19. TITLE 19']) {
+      expect(text).toContain(`] ${heading}\n`);
+    }
+    expect(text).not.toContain('] ITEM 3.\n');
+    const sentence =
+      'The outline lists 44 of 75 detected headings, every Item and Part heading among them, bare table-of-contents copies of titled ones aside; section matches all of them.';
+    expect(sc.notice).toContain(sentence);
+    expect(text).toContain(sentence);
+  });
+
+  it('keeps a bare marker that no later titled heading repeats', async () => {
+    const lone = { heading: 'ITEM 20.', offset: 400 };
+    serveHeadings([...TOC_HEAVY, lone].sort((a, b) => a.offset - b.offset));
+    serveFirstPage(80_000);
+
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({ accession_number: ACCN, cik: '320193' });
+    const result = await getFilingTool.handler(input, ctx);
+
+    expect(result.outline).toContainEqual(lone);
+    expect(result.outline?.some((h) => h.heading === 'ITEM 3.')).toBe(false);
+  });
+});
+
+// ── A subheading the outline omits, by the document's own lines (#166) ────────
+
+describe('section targeting — the line fallback (#166)', () => {
+  const TEXT =
+    'Competition\n\nCover prose.\n\nItem 7. Competition and Markets\n\nMD&A prose.\n\n' +
+    'Liquidity and Capital Resources\nCash prose.\n\n' +
+    '•\ncompetitive pressures in our markets;\n';
+  const HEADINGS = [
+    { heading: 'Item 7. Competition and Markets', offset: TEXT.indexOf('Item 7.') },
+  ];
+
+  function serveText() {
+    vi.mocked(detectHeadings).mockReturnValue(HEADINGS);
+    vi.mocked(filingToExtract).mockReturnValue(TEXT);
+  }
+
+  async function landingFor(section: string) {
+    serveText();
+    vi.mocked(windowText).mockReturnValue({
+      text: 'page',
+      truncated: false,
+      totalLength: TEXT.length,
+    });
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({ accession_number: ACCN, cik: '320193', section });
+    await getFilingTool.handler(input, ctx);
+    return vi.mocked(windowText).mock.calls.at(-1)?.[1];
+  }
+
+  it('lands on a line when no heading matches', async () => {
+    expect(await landingFor('liquidity and capital resources')).toBe(
+      TEXT.indexOf('Liquidity and Capital Resources'),
+    );
+  });
+
+  // Characterization: a heading hit — even a substring one — wins over an
+  // earlier line that equals the needle, as it did before #166.
+  it('lets a substring heading hit win over an earlier equal line', async () => {
+    expect(await landingFor('competition')).toBe(TEXT.indexOf('Item 7.'));
+  });
+
+  it('still throws section_not_found when only a lowercase near line exists', async () => {
+    serveText();
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({
+      accession_number: ACCN,
+      cik: '320193',
+      section: 'Competitive Pressures',
+    });
+
+    const err = await caught(getFilingTool.handler(input, ctx));
+    expect(err.data.reason).toBe('section_not_found');
+    expect(err.data.outline).toEqual(HEADINGS);
+    expect(recoveryHint(err)).toBe(
+      'Pick a heading from the outline above and pass it as section; a subheading the outline omits matches when passed exactly as the document prints it.',
+    );
+  });
+
+  const LINE_NOTICE =
+    "No detected heading matches section 'liquidity and capital resources', so this page starts at the first document line that does.";
+
+  it.each([
+    ['a full page', false],
+    ['a truncated page', true],
+  ])('says in the notice that a landing came from a document line (%s)', async (_label, cut) => {
+    serveText();
+    vi.mocked(windowText).mockReturnValue({
+      text: 'Liquidity and Capital Resources',
+      truncated: cut,
+      totalLength: TEXT.length,
+      ...(cut ? { nextOffset: 120 } : {}),
+    });
+
+    const result = await runToolContract(getFilingTool, {
+      accession_number: ACCN,
+      cik: '320193',
+      section: 'liquidity and capital resources',
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = bag(result.structuredContent);
+    const text = result.content.map((b) => ('text' in b ? b.text : '')).join('\n');
+    expect(sc.notice).toContain(LINE_NOTICE);
+    expect(text).toContain(LINE_NOTICE);
+    if (cut) expect(sc.notice).toContain('next_offset (120)');
+  });
+
+  // Characterization: a heading landing carries no line notice.
+  it('adds no line notice to a heading landing', async () => {
+    serveText();
+    vi.mocked(windowText).mockReturnValue({ text: 'page', truncated: false, totalLength: 9 });
+
+    const result = await runToolContract(getFilingTool, {
+      accession_number: ACCN,
+      cik: '320193',
+      section: 'competition',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(bag(result.structuredContent).notice).toBeUndefined();
   });
 });
 

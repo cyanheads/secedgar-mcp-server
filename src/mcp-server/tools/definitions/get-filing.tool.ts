@@ -10,9 +10,12 @@ import type { FilingDocumentHeader, FilingHeaders } from '@/services/edgar/filin
 import {
   type CachedExtract,
   detectHeadings,
+  type FilingHeading,
   filingToExtract,
+  findSectionLine,
   foldForHeadingMatch,
   getExtractCache,
+  headingKey,
   setExtractCache,
   windowText,
 } from '@/services/edgar/filing-to-text.js';
@@ -155,7 +158,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .string()
       .optional()
       .describe(
-        'How to read the next page, and which file was read when the archive does not serve the indexed primary.',
+        'How to read the next page, which file was read when the archive does not serve the indexed primary, when section landed on a document line rather than a detected heading, and how many headings were detected when the outline lists fewer.',
       ),
     truncated: z
       .boolean()
@@ -199,9 +202,9 @@ export const getFilingTool = tool('secedgar_get_filing', {
     {
       reason: 'section_not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The section string did not match any detected heading in the document',
+      when: 'The section string matched no detected heading and no line of the document',
       recovery:
-        'Pick a heading from the outline in the error message, or use offset paging instead.',
+        'Pick a heading from the outline in the error message, pass a subheading exactly as the document prints it, or use offset paging instead.',
     },
     {
       reason: 'rate_limited',
@@ -265,7 +268,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .min(1)
       .optional()
       .describe(
-        "Jump to a named section by case-insensitive substring match against detected headings (e.g. 'risk factors', 'item 7', 'certain relationships'). A value ending in a number matches only that number: 'item 1' reaches Item 1 and Item 1A, never Items 10–16. Matching also ignores whitespace and quote-style differences, so a heading copied from the outline resolves whether it carries the filing's non-breaking spaces and curly quotes or plain ones. Takes precedence over offset when both are provided. On a miss, the error message includes the detected outline so you can pick the correct heading.",
+        "Jump to a named section, matched case-insensitively against every detected heading (e.g. 'risk factors', 'item 7', 'item 2.02', 'certain relationships'): a heading equal to the value, or whose title after its Item/Part marker equals it, wins first; otherwise the first heading containing it. A value ending in a number matches only that number: 'item 1' reaches Item 1 and Item 1A, never Items 10–16, and 'part i' never reaches Part II. With no heading match, a line of the document equal to the value, or else starting with it, is used — a subheading the outline omits ('Liquidity and Capital Resources') — and the notice says so; table-of-contents rows and wrapped cross-references are skipped. Matching also ignores whitespace and quote-style differences, so a heading copied from the outline resolves whether it carries the filing's non-breaking spaces and curly quotes or plain ones. Takes precedence over offset when both are provided. On a miss, the error message includes the detected outline so you can pick the correct heading.",
       ),
   }),
 
@@ -350,7 +353,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       )
       .optional()
       .describe(
-        'Up to 50 headings, on the first page of a truncated response (offset=0, no section); pass a heading offset as offset, or its text as section.',
+        'Up to 50 detected headings, on the first page of a truncated response (offset=0, no section). Past 50, Item and Part headings come first (bare TOC copies of titled ones dropped), then the earliest others; the notice gives the detected count. Pass a heading offset as offset, or its text as section.',
       ),
     filing_url: z.string().describe('Direct URL to the filing on SEC.gov.'),
   }),
@@ -502,33 +505,43 @@ export const getFilingTool = tool('secedgar_get_filing', {
 
     // Determine effective offset (section wins over raw offset)
     let effectiveOffset = input.offset ?? 0;
+    let lineNotice: string | undefined;
 
     if (input.section) {
-      const headings = detectHeadings(fullText, 50);
-      // Fold both operands (Unicode whitespace runs, typographic quotes) so a
-      // heading re-sent from a rendered outline still matches the bytes it came
-      // from. The outline the error renders below stays verbatim (#106).
-      const needle = foldForHeadingMatch(input.section);
-      const match = headings.find((h) => sectionMatches(foldForHeadingMatch(h.heading), needle));
-      if (!match) {
+      // Every detected heading is a candidate; the 50-entry cap is the
+      // rendered outline's alone (#169).
+      const headings = detectHeadings(fullText);
+      // A heading always wins; only then the document's own lines (#166).
+      const headingLanding = resolveSectionHeading(headings, input.section)?.offset;
+      const landing = headingLanding ?? findSectionLine(fullText, input.section);
+      if (headingLanding === undefined && landing !== undefined) {
+        lineNotice = `No detected heading matches section '${input.section}', so this page starts at the first document line that does.`;
+      }
+      if (landing === undefined) {
         // Render the outline into the message itself — clients reliably see only
         // message + recovery hint, not error data (#70).
-        const outlineBlock = headings.length > 0 ? `\n\nOutline:\n${renderOutline(headings)}` : '';
+        const outline = selectOutline(headings);
+        const outlineLabel =
+          outline.length < headings.length
+            ? `Outline (${outline.length} of ${headings.length} detected headings):`
+            : 'Outline:';
+        const outlineBlock =
+          outline.length > 0 ? `\n\n${outlineLabel}\n${renderOutline(outline)}` : '';
         const hint =
           headings.length > 0
-            ? 'Pick a heading from the outline above and pass it as section.'
+            ? 'Pick a heading from the outline above and pass it as section; a subheading the outline omits matches when passed exactly as the document prints it.'
             : 'No headings were detected in this document — use offset paging instead.';
         throw ctx.fail(
           'section_not_found',
           `Section '${input.section}' not found in this document.${outlineBlock}`,
           {
             section: input.section,
-            outline: headings,
+            outline,
             recovery: { hint },
           },
         );
       }
-      effectiveOffset = match.offset;
+      effectiveOffset = landing;
     }
 
     // Validate offset
@@ -549,25 +562,29 @@ export const getFilingTool = tool('secedgar_get_filing', {
       input.content_limit,
     );
 
-    // `notice` is last-wins across notice/truncated, so the fallback disclosure
-    // rides inside the truncation guidance when both apply.
+    // Emit outline on first-page truncated responses (not on subsequent pages or section jumps)
+    const shouldEmitOutline = truncated && effectiveOffset === 0 && !input.section;
+    const detected = shouldEmitOutline ? detectHeadings(fullText) : undefined;
+    const outline = detected && selectOutline(detected);
+
+    // `notice` is last-wins across notice/truncated, so the fallback disclosure,
+    // the line-landing note, and the outline cut ride inside the truncation
+    // guidance. The outline is emitted only on a truncated page, so the cut
+    // always has guidance to join.
     const fallbackNotice = unservedPrimary
       ? `The filing index names ${unservedPrimary} as the primary document, but the SEC archive does not serve it, so this text is the full submission file ${targetName}.`
       : undefined;
     if (truncated) {
       const paging = `Showing ${text.length} of ${totalLength} characters. Pass next_offset (${nextOffset ?? '?'}) as offset to read the next page, or jump with section.`;
+      const outlineCut = detected && outline && outlineCutNote(outline, detected);
       ctx.enrich.truncated({
         shown: text.length,
         cap: input.content_limit,
-        guidance: fallbackNotice ? `${fallbackNotice} ${paging}` : paging,
+        guidance: [fallbackNotice, lineNotice, paging, outlineCut].filter(Boolean).join(' '),
       });
-    } else if (fallbackNotice) {
-      ctx.enrich.notice(fallbackNotice);
+    } else if (fallbackNotice || lineNotice) {
+      ctx.enrich.notice([fallbackNotice, lineNotice].filter(Boolean).join(' '));
     }
-
-    // Emit outline on first-page truncated responses (not on subsequent pages or section jumps)
-    const shouldEmitOutline = truncated && effectiveOffset === 0 && !input.section;
-    const outline = shouldEmitOutline ? detectHeadings(fullText, 50) : undefined;
 
     // Headers give canonical document types; without them categorization falls
     // back to name-pattern inference.
@@ -663,25 +680,138 @@ export const getFilingTool = tool('secedgar_get_filing', {
 
 /**
  * Whether a folded `section` needle matches a folded heading: a substring match,
- * except that a needle ending in a digit never continues into a longer number —
- * `item 1` matches `Item 1.` and `Item 1A`, never `Item 12`. Plain-text outlines
- * keep their TOC rows (they are worded differently from the body heading, so
- * dedup leaves them), and a TOC row for Item 10–16 precedes the body Item 1, so
- * a bare substring test landed `item 1` on the wrong Item (#136). Every
- * occurrence is checked, not just the first.
+ * except that a needle ending in a number never continues into a longer one.
+ * A trailing digit never runs on into another digit — `item 1` matches `Item 1.`
+ * and `Item 1A`, never `Item 12`. Plain-text outlines keep their TOC rows (they
+ * are worded differently from the body heading, so dedup leaves them), and a TOC
+ * row for Item 10–16 precedes the body Item 1, so a bare substring test landed
+ * `item 1` on the wrong Item (#136). A trailing roman numeral (`part i`, a word
+ * of `i`, `v`, and `x`) ends at a space, punctuation, or the heading's end, so
+ * `part i` never matches `PART II`, `PART III`, or `PART IV` — a 10-Q printing
+ * Part I only in its table of contents otherwise landed `part i` on its body
+ * `PART II - OTHER INFORMATION`. Every occurrence is checked, not just the first.
  */
 function sectionMatches(heading: string, needle: string): boolean {
-  const bounded = /\d$/.test(needle);
+  const continuation = /\d$/.test(needle)
+    ? /\d/
+    : /(?:^|\s)[ivx]{1,4}$/.test(needle)
+      ? /[\p{L}\p{N}]/u
+      : undefined;
   for (let at = heading.indexOf(needle); at !== -1; at = heading.indexOf(needle, at + 1)) {
-    if (!bounded || !/\d/.test(heading.charAt(at + needle.length))) return true;
+    if (!continuation?.test(heading.charAt(at + needle.length))) return true;
   }
   return false;
 }
 
 /**
+ * A folded heading key's Item or Part marker — an Item code with an optional
+ * 8-K paragraph suffix, or a Part numeral — capturing the marker and the title
+ * after it, past an optional period and a dash, colon, or period separator. A
+ * bare marker captures an empty title.
+ */
+const MARKER_TITLE_RE =
+  /^(item \d{1,2}(?:\.\d{2}|[a-z])?(?:\([a-z]\))?|part [ivx]{1,4}\b)\.? ?(?:[-–—:.] ?)?(.*)$/;
+
+/**
+ * The heading `section` lands on, searching every detected heading (#169):
+ * 1. Exact — the first heading whose {@link headingKey} equals the needle's, or
+ *    whose title after its Item/Part marker does. A bare marker ("ITEM 1.",
+ *    "Part II") has no title and is never a candidate here. This tier keeps
+ *    "risk factors" on "Item 1A. Risk Factors." when an earlier all-caps heading
+ *    merely contains the words.
+ * 2. Substring — the first heading by offset that {@link sectionMatches}.
+ */
+function resolveSectionHeading(
+  headings: FilingHeading[],
+  section: string,
+): FilingHeading | undefined {
+  const exactNeedle = headingKey(section);
+  const exact = headings.find((h) => {
+    const key = headingKey(h.heading);
+    const title = MARKER_TITLE_RE.exec(key)?.[2];
+    if (title === '') return false;
+    return key === exactNeedle || title === exactNeedle;
+  });
+  if (exact) return exact;
+  // Fold both operands (Unicode whitespace runs, typographic quotes) so a
+  // heading re-sent from a rendered outline still matches the bytes it came
+  // from (#106).
+  const needle = foldForHeadingMatch(section);
+  return headings.find((h) => sectionMatches(foldForHeadingMatch(h.heading), needle));
+}
+
+/** Most headings an outline renders, on the first page and in a section_not_found message. */
+const OUTLINE_MAX_ENTRIES = 50;
+/** An Item or Part heading, bare marker included — the document's structure. */
+const STRUCTURAL_HEADING_RE = /^(?:items?\s+\d|part\s+[ivx]{1,4}\b)/i;
+
+/**
+ * The Item and Part headings an outline keeps. Past {@link OUTLINE_MAX_ENTRIES}
+ * of them, each bare marker that a later titled heading for the same Item or
+ * Part repeats is left out — the table-of-contents copy of a body heading. A
+ * 20-F whose TOC renders every Item as a bare marker (31 of them in DRDGOLD's
+ * FY2026 20-F) otherwise filled the cut with TOC copies and pushed the body's
+ * Items 16A–19 out. A bare marker no titled heading repeats stays.
+ */
+function outlineStructuralHeadings(headings: FilingHeading[]): FilingHeading[] {
+  const structural = headings.filter((h) => STRUCTURAL_HEADING_RE.test(h.heading));
+  if (structural.length <= OUTLINE_MAX_ENTRIES) return structural;
+  const titledLater = new Set<string>();
+  const kept: FilingHeading[] = [];
+  for (const h of [...structural].reverse()) {
+    const [, marker, title] = MARKER_TITLE_RE.exec(headingKey(h.heading)) ?? [];
+    if (marker !== undefined && title === '' && titledLater.has(marker)) continue;
+    if (marker !== undefined && title) titledLater.add(marker);
+    kept.push(h);
+  }
+  return kept.reverse();
+}
+
+/**
+ * The outline for a document's detected headings: all of them up to
+ * {@link OUTLINE_MAX_ENTRIES}; past it, every Item and Part heading the outline
+ * keeps ({@link outlineStructuralHeadings}) plus the earliest other headings up
+ * to the cap, in offset order. A cut by offset alone let a heavy 10-K's
+ * financial-statement captions push Items 9B–16 out (#169).
+ */
+function selectOutline(headings: FilingHeading[]): FilingHeading[] {
+  if (headings.length <= OUTLINE_MAX_ENTRIES) return headings;
+  const structural = new Set(outlineStructuralHeadings(headings));
+  let otherSlots = OUTLINE_MAX_ENTRIES - structural.size;
+  const outline: FilingHeading[] = [];
+  for (const h of headings) {
+    if (structural.has(h)) outline.push(h);
+    else if (otherSlots > 0 && !STRUCTURAL_HEADING_RE.test(h.heading)) {
+      outline.push(h);
+      otherSlots--;
+    }
+  }
+  return outline.slice(0, OUTLINE_MAX_ENTRIES);
+}
+
+/**
+ * The guidance sentence disclosing an outline cut, or undefined when nothing was
+ * cut. It claims every Item and Part heading only when the outline holds them,
+ * and names the bare TOC copies {@link outlineStructuralHeadings} left out.
+ */
+function outlineCutNote(outline: FilingHeading[], detected: FilingHeading[]): string | undefined {
+  if (outline.length === detected.length) return;
+  const kept = outlineStructuralHeadings(detected).length;
+  const structural = detected.filter((h) => STRUCTURAL_HEADING_RE.test(h.heading)).length;
+  const scope =
+    kept > OUTLINE_MAX_ENTRIES
+      ? ''
+      : kept < structural
+        ? ', every Item and Part heading among them, bare table-of-contents copies of titled ones aside'
+        : ', every Item and Part heading among them';
+  return `The outline lists ${outline.length} of ${detected.length} detected headings${scope}; section matches all of them.`;
+}
+
+/**
  * Render outline entries as `  [offset] HEADING` lines. Shared by format()
  * and the section_not_found error message, so both surfaces read identically.
- * detectHeadings caps entries (50), which bounds the rendered block.
+ * Both render a {@link selectOutline} cut, which bounds the block at
+ * {@link OUTLINE_MAX_ENTRIES} entries.
  */
 function renderOutline(outline: Array<{ heading: string; offset: number }>): string {
   return outline.map((h) => `  [${h.offset}] ${h.heading}`).join('\n');

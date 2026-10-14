@@ -6,6 +6,7 @@
 
 import type { HtmlToTextOptions } from 'html-to-text';
 import { convert } from 'html-to-text';
+import { CURRENT_EIGHT_K_ITEMS } from './eight-k-items.js';
 
 /**
  * html-to-text walks the DOM recursively, so markup nested deeply enough overflows
@@ -279,24 +280,47 @@ export interface FilingHeading {
 }
 
 /**
+ * An Item marker's code: one or two digits with an optional letter suffix (the
+ * 20-F's `16A`–`16K`), or a current Form 8-K item's two-digit decimal (`5.02`,
+ * #165). Without the decimal, the `.02` of `Item 5.02` broke every Item pattern.
+ */
+const ITEM_CODE = String.raw`\d{1,2}(?:\.\d{2}|[a-z])?`;
+
+/**
  * Regexes that match SEC document headings, anchored to start-of-line:
  * - All-caps forms — "ITEM N" / "ITEM NA" lines (10-K, 10-Q structure) and
  *   all-caps lines of 9+ characters (registration statement TOC headings like
- *   "RISK FACTORS"; older filings).
+ *   "RISK FACTORS"; older filings). The all-caps line admits hyphens and en/em
+ *   dashes ("NON-GAAP FINANCIAL MEASURES", "PART II — OTHER INFORMATION"),
+ *   digits, and apostrophes; {@link isAllCapsHeadingText} then holds the last
+ *   two to a section number and a possessive (#170). A colon stays out: every
+ *   colon line it admitted across 26 sampled documents was a financial-statement
+ *   caption ("CURRENT ASSETS:").
  * - Mixed-case Item/Part forms — modern styled filings render headings as
  *   "Item 1A. Risk Factors" / "Part II" spans (#71). The Item arm requires a
- *   title after the marker on the same line and bounds the tail so unwrapped
- *   body paragraphs that begin with "Item ..." don't register.
+ *   title after the marker on the same line, and {@link sameLineTitleFits} bounds
+ *   it so unwrapped body paragraphs that begin with "Item ..." don't register. A
+ *   dotted 8-K marker may also abut its title or carry a paragraph suffix
+ *   ("Item 9.01Financial Statements…", "Item 9.01(d).    Financial…"), and then
+ *   the title must start with a letter, so a bare "Item 5.02." line never matches
+ *   on its own (#165). A Part line may carry a title after whitespace and an
+ *   optional dash, colon, or period ("Part II — Other Information"), which must
+ *   start uppercase (#170).
  * - Bare Item markers — a marker alone on its line, title supplied further
  *   down (see {@link titleAfterMarkerLine}).
  *
- * Every whitespace match is horizontal-only (`[^\S\n]`, alternated with the
- * literal members where a character class cannot nest one): a heading is one
+ * Every whitespace match is horizontal-only (`[^\S\n]`, or the class-set
+ * difference `[\s--\n]` nested in the all-caps arm's class): a heading is one
  * line, and a `\s` that matches `\n` fuses a run of consecutive all-caps lines
  * into one composite match (#105). Horizontal whitespace is not the same as
  * space-or-tab — filings put non-breaking spaces both between a marker and its
  * title and inside an all-caps heading (`MICROSOFT<NBSP>CORPORATION`), so the
- * all-caps arm has to admit them without admitting `\n`.
+ * all-caps arm has to admit them without admitting `\n`. That arm is one class
+ * (the `v` flag's set syntax) rather than an alternation of the class and
+ * `[^\S\n]`: the quantified alternation kept a backtrack frame per character
+ * and fell off a cliff past about 100,000 characters — a 160,000-character
+ * all-caps line ending in a lowercase letter took 25 ms against 0.4 ms at
+ * 80,000 — while a single class scans the line flat.
  *
  * The Item suffix spans the full 20-F range (`Item 16A`–`Item 16K`, not just
  * `[a-c]`) and the marker's trailing period is optional — 20-F filers write
@@ -305,26 +329,149 @@ export interface FilingHeading {
  * Both all-caps alternatives already absorb trailing whitespace, so that arm
  * ends at `$` with no `[^\S\n]*` of its own: the two quantifiers competing for one
  * whitespace run backtracked quadratically on a long run before a lowercase
- * letter — 3.5 s for an 80,000-character line.
+ * letter — 3.5 s for an 80,000-character line. The same-line Item title runs to
+ * the end of the line for the same reason; its bound is checked afterwards.
+ *
+ * Capture groups: the all-caps scan's 2 is the all-caps line (not an `ITEM N`
+ * line). The Item/Part scan's 2 is the Item code, 3 the Item title, and 4 the
+ * Part title.
  *
  * Heuristics — best-effort, not guaranteed to match all or only headings.
  */
-const ALL_CAPS_HEADING_RE = /^(ITEM[^\S\n]+\d+[A-Z]?\b[^\n]*|[A-Z](?:[A-Z,()&./]|[^\S\n]){8,})$/gm;
-const ITEM_PART_HEADING_RE =
-  /^(item[^\S\n]+\d{1,2}[a-z]?\.?[^\S\n]+\S[^\n]{0,140}|part[^\S\n]+[ivx]{1,4}\b\.?)[^\S\n]*$/gim;
-const BARE_ITEM_MARKER_RE = /^(item[^\S\n]+\d{1,2}[a-z]?\.?)[^\S\n]*$/gim;
+const ALL_CAPS_HEADING_RE =
+  /^(ITEM[^\S\n]+\d+[A-Z]?\b[^\n]*|([A-Z][[A-Z0-9,\(\)\&.\/'’–—\-][\s--\n]]{8,}))$/gmv;
+const ITEM_PART_HEADING_RE = new RegExp(
+  String.raw`^(item[^\S\n]+(${ITEM_CODE})(?:\.?[^\S\n]+|(?<=\.\d{2})(?:\([a-z]\))?\.?[^\S\n]*(?=[a-z]))(\S[^\n]*)` +
+    String.raw`|part[^\S\n]+[ivx]{1,4}\b\.?(?:[^\S\n]*(?:[-–—:.][^\S\n]*)?([a-z][^\n]{0,140}))?)[^\S\n]*$`,
+  'gim',
+);
+const BARE_ITEM_MARKER_RE = new RegExp(
+  String.raw`^(item[^\S\n]+(${ITEM_CODE})\.?)[^\S\n]*$`,
+  'gim',
+);
 
 /**
  * An Item marker with no period or colon after it, capturing the first
  * character of what follows. Non-global: a predicate, not a scanner.
  */
-const UNPUNCTUATED_ITEM_RE = /^item[^\S\n]+\d{1,2}[a-z]?(?![.:\w])[^\S\n]*(\S)/i;
+const UNPUNCTUATED_ITEM_RE = new RegExp(
+  String.raw`^item[^\S\n]+${ITEM_CODE}(?![.:\w])[^\S\n]*(\S)`,
+  'i',
+);
 /**
  * A line that ends mid-sentence — on a comma or a semicolon. A line ending on a
  * lowercase word is no evidence: running page headers end that way ("Table of
  * Contents" above "Item 5 — Other information" at the top of a page).
  */
 const MID_SENTENCE_END_RE = /[,;]$/;
+
+/** Whether the line before the one starting at `lineStart` ends mid-sentence. */
+function followsMidSentence(text: string, lineStart: number): boolean {
+  if (lineStart === 0) return false;
+  const previousLine = text.slice(text.lastIndexOf('\n', lineStart - 2) + 1, lineStart - 1);
+  return MID_SENTENCE_END_RE.test(previousLine.trimEnd());
+}
+
+/** A whitespace-delimited token holding a digit must be a section number: `10`, `14A`, `2.`. */
+const SECTION_NUMBER_TOKEN_RE = /^\d{1,2}[A-Z]?\.?$/;
+/** An apostrophe inside a word ("MANAGEMENT'S") or after a word-final S ("STOCKHOLDERS’ EQUITY"). */
+const HEADING_APOSTROPHE_RE = /(?<=[A-Z])['’](?=[A-Z])|(?<=S)['’](?=\s)/g;
+
+/**
+ * Whether an all-caps line's length, digits, and apostrophes fit a heading
+ * (#170). The heading text runs at most {@link MAX_TITLE_CHARS} characters: past
+ * it the line is a paragraph set in capitals (a 308-character risk-factor coda,
+ * an 860-character tax legend), which the widened class otherwise admits. A
+ * digit may appear only in a whitespace-delimited section-number token ("NOTE
+ * 10", "SCHEDULE 14A"), so table rows ("EMEA 2,222 2,365"), footnoted names
+ * ("FMR LLC(4)"), and cover-page lines ("WASHINGTON, D.C. 20549", "…ACT OF
+ * 1934") stay out: digits admitted freely added 61 lines across 26 sampled
+ * documents, 12 of them numeric table rows, against 20 and none under the token
+ * rule. The digits are judged on the whole line, a TOC row's page cell
+ * included. An apostrophe must sit inside a word or after a word-final S,
+ * judged on the heading text the line yields, so a heading never opens or
+ * closes on one.
+ */
+function isAllCapsHeadingText(line: string): boolean {
+  const heading = stripPageNumberTail(line).trim();
+  if (heading.length > MAX_TITLE_CHARS) return false;
+  const tokens = line.trim().split(/\s+/);
+  if (!tokens.every((token) => !/\d/.test(token) || SECTION_NUMBER_TOKEN_RE.test(token))) {
+    return false;
+  }
+  return !/['’]/.test(heading.replace(HEADING_APOSTROPHE_RE, ''));
+}
+
+/** A second Item marker after the one an Item line opens on. Non-global: a predicate. */
+const LATER_ITEM_MARKER_RE = /[^\S\n]item[^\S\n]+\d/i;
+/**
+ * A TOC page cell inside a line rather than at its end: a page number, a
+ * lettered page, or either after a `Page` word, set off by whitespace before it
+ * and two or more whitespace characters before the next cell. Non-global: a
+ * predicate.
+ */
+const MID_LINE_PAGE_CELL_RE =
+  /[^\S\n](?:(?:Page|PAGE)[^\S\n]+)?(?:\d{1,4}|[A-Z]-\d{1,3})[^\S\n]{2,}\S/;
+
+/**
+ * Whether an Item line is a table of contents run together on one line: it
+ * carries a second Item marker or a page cell mid-line. Amazon's 8-K
+ * 0001104659-26-107526 prints its whole TOC as one 238-character line ("ITEM
+ * 8.01. OTHER EVENTS. 3     ITEM 9.01. FINANCIAL STATEMENTS AND EXHIBITS. 4
+ * SIGNATURES 5 …"), which as one heading took `item 8`, `item 9`, and
+ * `exhibits` from the body Items. The test is on shape, not length: a proxy's
+ * proposal heading runs as long ("ITEM 1 – TO APPROVE THE PROPOSAL TO AMEND
+ * THE Amended and Restated Articles…", 185 characters) and is the meeting's one
+ * heading. Across 104 cached filings, 244 all-caps and 568 mixed-case Item lines,
+ * it flags only that TOC line.
+ */
+function isRunTogetherToc(line: string): boolean {
+  return LATER_ITEM_MARKER_RE.test(line) || MID_LINE_PAGE_CELL_RE.test(line);
+}
+
+/** A title that opens on another Item or Part marker. Non-global: a predicate. */
+const MARKER_OPENER_RE = /^(?:item|part)\b/i;
+
+/**
+ * Whether a titled Part line is a cross-reference rather than a heading: its
+ * title opens on another marker — a cross-reference index row ("Part II — Item 5.
+ * Market for Registrant’s Common Equity") — or it sits under a line ending
+ * mid-sentence, a wrapped reference ("…described in our Form 10-K,\nPART II —
+ * OTHER INFORMATION"). Either would take `section: "part ii"`, and the first
+ * would also displace the bare body Part it names (`dropBarePartsTitledLater`).
+ */
+function isPartCrossReference(text: string, lineStart: number, title: string): boolean {
+  return MARKER_OPENER_RE.test(title) || followsMidSentence(text, lineStart);
+}
+
+/**
+ * Whether a same-line Item title fits the title bound. That arm has always
+ * counted the bound after the title's first character (`\S[^\n]{0,140}`), one
+ * more than a title on a line of its own.
+ */
+function sameLineTitleFits(code: string, title: string): boolean {
+  return title.trimEnd().length <= maxTitleChars(code) + 1;
+}
+
+/**
+ * The title bound for a current Form 8-K item. Item 5.02's title runs 146
+ * characters, past {@link MAX_TITLE_CHARS} (#165), and is the longest any of 53
+ * sampled 8-Ks prints; the 14-character margin admits a short trailing note
+ * ("(continued)", a paragraph list) while a paragraph opening on the marker
+ * line ("Item 5.02(b) On June 2, 2026, the Board…") runs to hundreds of
+ * characters and stays out.
+ */
+const EIGHT_K_MAX_TITLE_CHARS = 160;
+
+/**
+ * The title bound for an Item code: {@link EIGHT_K_MAX_TITLE_CHARS} for a code
+ * in the current Form 8-K item table, {@link MAX_TITLE_CHARS} for every other
+ * marker. Keyed on the table rather than the dotted shape, so a dotted code
+ * outside it ("Item 7.09") keeps the tighter bound.
+ */
+function maxTitleChars(code: string): number {
+  return Object.hasOwn(CURRENT_EIGHT_K_ITEMS, code) ? EIGHT_K_MAX_TITLE_CHARS : MAX_TITLE_CHARS;
+}
 
 /**
  * Whether an Item line that starts at `lineStart` is a wrapped sentence, not a
@@ -341,9 +488,7 @@ function isWrappedProse(text: string, lineStart: number, line: string): boolean 
   const marker = UNPUNCTUATED_ITEM_RE.exec(line);
   if (marker === null) return false;
   if (/[a-z]/.test(marker[1] ?? '')) return true;
-  if (lineStart === 0) return false;
-  const previousLine = text.slice(text.lastIndexOf('\n', lineStart - 2) + 1, lineStart - 1);
-  return MID_SENTENCE_END_RE.test(previousLine.trimEnd());
+  return followsMidSentence(text, lineStart);
 }
 
 /**
@@ -362,12 +507,26 @@ const TIGHT_TITLE_RE = /\n[^\S\n]*(\S[^\n]*)\n?([^\n]*)/y;
 /** A whole line holding nothing but a page number — the TOC-cell tell. */
 const PAGE_NUMBER_LINE_RE = /^[^\S\n]*\d{1,4}[^\S\n]*$/;
 /**
- * A trailing bare page number, as a TOC line carries it ("Key Information      3").
- * The lookbehind starts a try only where a whitespace run begins; a try from
- * inside the run rescanned the rest of it, quadratic on a long run.
+ * A TOC row's page cell at the end of its line, set off by a tab or two or more
+ * spaces ("Key Information      3", "Consolidated Balance Sheets    F-3"), its
+ * number optionally after a `Page` word ("Item 8.01 Other Events      Page 1",
+ * the cell First Bancorp's 8-K TOC prints, which otherwise kept the row from
+ * deduping against its body Item and took `item 8`). One space is not enough: a
+ * heading can end in its own number ("PROPOSAL NO. 1", "ARTICLE 5", "…Exchange
+ * Act of 1934", "…as of June 30, 2026"), which a single-space rule stripped or
+ * read as a TOC row (#172, #166). The lookbehind starts a try only where a
+ * whitespace run begins; a try from inside the run rescanned the rest of it,
+ * quadratic on a long run.
  */
-const PAGE_NUMBER_TAIL_RE = /(?<![^\S\n])[^\S\n]+\d{1,4}[^\S\n]*$/;
-/** Same bound the same-line Item arm uses — past it the line reads as body prose. */
+const TOC_PAGE_TAIL_RE =
+  /(?<![^\S\n])(?:[^\S\n]{2,}|\t)(?:(?:Page|PAGE)[^\S\n]+)?(?:\d{1,4}|[A-Z]-\d{1,3})[^\S\n]*$/;
+/**
+ * The title bound for an Item marker's title, a titled Part's title, and an
+ * all-caps heading line — past it the line reads as body prose. The same-line
+ * Item arm counts it after the title's first character, one more
+ * ({@link sameLineTitleFits}), and a current 8-K item takes
+ * {@link EIGHT_K_MAX_TITLE_CHARS}.
+ */
 const MAX_TITLE_CHARS = 140;
 /**
  * A line repeated this many times is page furniture (a running header), not a
@@ -391,26 +550,65 @@ const MAX_TITLE_CHARS = 140;
 const RUNNING_HEADER_MIN_OCCURRENCES = 5;
 
 /**
- * A heading that is nothing but a structural marker, with no title of its own:
- * the `part …` arm of {@link ITEM_PART_HEADING_RE}, or an Item marker that
- * reached the outline unjoined. Non-global on purpose — a predicate, not a
- * scanner, so it carries no `lastIndex`.
+ * A line or heading that is nothing but a structural marker, with no title of
+ * its own: a bare Part line, or an Item marker alone on its line or reached the
+ * outline unjoined. Non-global on purpose — a predicate, not a scanner, so it
+ * carries no `lastIndex`.
  */
-const BARE_MARKER_HEADING_RE = /^(?:item[^\S\n]+\d{1,2}[a-z]?|part[^\S\n]+[ivx]{1,4})\.?$/i;
+const BARE_MARKER_HEADING_RE = new RegExp(
+  String.raw`^(?:item[^\S\n]+${ITEM_CODE}|part[^\S\n]+[ivx]{1,4})\.?$`,
+  'i',
+);
+/** A bare Part heading, capturing its numeral. */
+const BARE_PART_HEADING_RE = /^part[^\S\n]+([ivx]{1,4})\.?$/i;
+/**
+ * A Part heading with a title after its numeral ("PART II — OTHER INFORMATION",
+ * "Part I. Financial Information"), capturing the numeral and the title, which
+ * opens on a letter.
+ */
+const TITLED_PART_HEADING_RE =
+  /^part[^\S\n]+([ivx]{1,4})\b\.?[^\S\n]*(?:[-–—:.][^\S\n]*)?([a-z][^\n]*)/i;
 
-/** Drop a TOC line's trailing page number so it dedups against the body heading. */
+/**
+ * Drop each bare Part entry that a later titled heading for the same numeral
+ * follows (#170). A 10-Q's TOC prints "Part II" as a bare row and its body prints
+ * "PART II — OTHER INFORMATION"; the two keys differ, so dedup keeps both and
+ * `section: "part ii"` lands on the TOC row, 50,000 characters early (Apple's
+ * Q3 FY2026 10-Q). A bare Part with no later titled heading stays — it is the
+ * only entry for that Part. A title must open uppercase and on neither marker,
+ * the same test the detection arms apply ({@link isPartCrossReference}).
+ */
+function dropBarePartsTitledLater(headings: FilingHeading[]): FilingHeading[] {
+  const titledLater = new Set<string>();
+  const kept: FilingHeading[] = [];
+  for (const entry of [...headings].reverse()) {
+    const [, numeral, title = ''] = TITLED_PART_HEADING_RE.exec(entry.heading) ?? [];
+    if (numeral !== undefined && /^[A-Z]/.test(title) && !MARKER_OPENER_RE.test(title)) {
+      titledLater.add(numeral.toLowerCase());
+    } else {
+      const bare = BARE_PART_HEADING_RE.exec(entry.heading)?.[1]?.toLowerCase();
+      if (bare !== undefined && titledLater.has(bare)) continue;
+    }
+    kept.push(entry);
+  }
+  return kept.reverse();
+}
+
+/** Drop a TOC line's trailing page cell so it dedups against the body heading. */
 function stripPageNumberTail(heading: string): string {
-  return heading.replace(PAGE_NUMBER_TAIL_RE, '');
+  return heading.replace(TOC_PAGE_TAIL_RE, '');
 }
 
 /**
- * Dedup key for one detected heading. {@link foldForHeadingMatch} covers the
- * whitespace and quote differences a filing prints between its TOC and its body;
- * terminal sentence punctuation is the remaining one (C3is' 20-F writes
- * "Item 16J Insider Trading Policies" in the TOC and "…Policies." in the body).
- * Key-only — the entry keeps the document's own heading text.
+ * Comparison key for a heading, a line, or a `section` needle — the dedup key
+ * for detected headings and the operand of `section`'s exact tiers.
+ * {@link foldForHeadingMatch} covers the whitespace and quote differences a
+ * filing prints between its TOC and its body; terminal sentence punctuation is
+ * the remaining one (C3is' 20-F writes "Item 16J Insider Trading Policies" in the
+ * TOC and "…Policies." in the body). Key-only — the entry keeps the document's
+ * own heading text.
  */
-function headingKey(heading: string): string {
+export function headingKey(heading: string): string {
   return foldForHeadingMatch(heading).replace(/[.,;:]+$/, '');
 }
 
@@ -426,70 +624,108 @@ function headingKey(heading: string): string {
  * that puts a marker on its own line — a page footer, an unwrapped body
  * paragraph — is admitted too, taking the next line as its title; the entry's
  * offset is the marker's, so `section` still lands in the right place.
+ * `maxChars` is the marker's title bound ({@link maxTitleChars}).
  */
-function titleAfterMarkerLine(text: string, markerLineEnd: number): string | undefined {
+function titleAfterMarkerLine(
+  text: string,
+  markerLineEnd: number,
+  maxChars: number,
+): string | undefined {
   SEPARATED_TITLE_RE.lastIndex = markerLineEnd;
   const separated = SEPARATED_TITLE_RE.exec(text)?.[1];
-  if (separated !== undefined) return usableTitle(separated);
+  if (separated !== undefined) return usableTitle(separated, maxChars);
 
   TIGHT_TITLE_RE.lastIndex = markerLineEnd;
   const tight = TIGHT_TITLE_RE.exec(text);
   if (tight === null) return;
   const [, title = '', lineBelow = ''] = tight;
   if (PAGE_NUMBER_LINE_RE.test(lineBelow)) return;
-  return usableTitle(title);
+  return usableTitle(title, maxChars);
 }
 
 /**
  * A candidate title line reduced to heading text, or undefined when it is not a
- * title at all — empty, a bare page number, the next marker, or long enough to
- * read as body prose.
+ * title at all — empty, a bare page number, the next marker, or longer than
+ * `maxChars`, where it reads as body prose.
  */
-function usableTitle(raw: string): string | undefined {
+function usableTitle(raw: string, maxChars: number): string | undefined {
   const title = stripPageNumberTail(raw).trim();
-  if (title.length === 0 || title.length > MAX_TITLE_CHARS) return;
+  if (title.length === 0 || title.length > maxChars) return;
   if (/^\d+$/.test(title)) return;
-  if (/^(?:item|part)\b/i.test(title)) return;
+  if (MARKER_OPENER_RE.test(title)) return;
   return title;
 }
 
 /**
- * Detect headings in extracted text and return them with their offsets, sorted
- * by offset. Deduplicates by {@link headingKey}, keeping the later occurrence
- * (handles TOC vs body duplicate headings — the body occurrence is the more
- * useful landing spot), and drops running page headers. Caps output at
- * maxEntries.
+ * Detect every heading in extracted text and return them with their offsets,
+ * sorted by offset. Deduplicates by {@link headingKey}, keeping the later
+ * occurrence (handles TOC vs body duplicate headings — the body occurrence is
+ * the more useful landing spot), drops running page headers, and drops a bare
+ * Part entry that a later titled heading for the same Part follows. Uncapped:
+ * `section` matches every heading, and the rendered outline makes its own cut.
  */
-export function detectHeadings(text: string, maxEntries = 50): FilingHeading[] {
+export function detectHeadings(text: string): FilingHeading[] {
   const matches: Array<{ heading: string; index: number }> = [];
   const add = (heading: string, index: number): void => {
     const trimmed = stripPageNumberTail(heading).trim();
     if (trimmed.length > 0) matches.push({ heading: trimmed, index });
   };
 
-  for (const re of [ALL_CAPS_HEADING_RE, ITEM_PART_HEADING_RE]) {
-    re.lastIndex = 0;
-    for (let match = re.exec(text); match !== null; match = re.exec(text)) {
-      const heading = match[1];
-      if (heading !== undefined && !isWrappedProse(text, match.index, heading)) {
-        add(heading, match.index);
-      }
+  ALL_CAPS_HEADING_RE.lastIndex = 0;
+  for (
+    let match = ALL_CAPS_HEADING_RE.exec(text);
+    match !== null;
+    match = ALL_CAPS_HEADING_RE.exec(text)
+  ) {
+    const [, heading, capsLine] = match;
+    if (heading === undefined || isWrappedProse(text, match.index, heading)) continue;
+    if (capsLine === undefined) {
+      if (isRunTogetherToc(heading)) continue;
+    } else {
+      if (!isAllCapsHeadingText(capsLine)) continue;
+      const partTitle = TITLED_PART_HEADING_RE.exec(capsLine)?.[2];
+      if (partTitle !== undefined && isPartCrossReference(text, match.index, partTitle)) continue;
     }
+    add(heading, match.index);
+  }
+
+  ITEM_PART_HEADING_RE.lastIndex = 0;
+  for (
+    let match = ITEM_PART_HEADING_RE.exec(text);
+    match !== null;
+    match = ITEM_PART_HEADING_RE.exec(text)
+  ) {
+    const [, heading, itemCode, itemTitle = '', partTitle] = match;
+    if (heading === undefined || isWrappedProse(text, match.index, heading)) continue;
+    if (
+      itemCode !== undefined &&
+      (!sameLineTitleFits(itemCode, itemTitle) || isRunTogetherToc(heading))
+    ) {
+      continue;
+    }
+    if (
+      partTitle !== undefined &&
+      (!/^[A-Z]/.test(partTitle) || isPartCrossReference(text, match.index, partTitle))
+    ) {
+      continue;
+    }
+    add(heading, match.index);
   }
 
   // Bare marker, title on a later line — the shape every Item takes in a 20-F
   // rendered one cell per line, in both the TOC and the body (#105).
-  const bareMarkers: Array<{ marker: string; index: number; lineEnd: number }> = [];
+  const bareMarkers: Array<{ marker: string; code: string; index: number; lineEnd: number }> = [];
   BARE_ITEM_MARKER_RE.lastIndex = 0;
   for (
     let match = BARE_ITEM_MARKER_RE.exec(text);
     match !== null;
     match = BARE_ITEM_MARKER_RE.exec(text)
   ) {
-    const marker = match[1];
-    if (marker === undefined) continue;
+    const [, marker, code] = match;
+    if (marker === undefined || code === undefined) continue;
     bareMarkers.push({
       marker: marker.trim(),
+      code,
       index: match.index,
       lineEnd: match.index + match[0].length,
     });
@@ -508,11 +744,11 @@ export function detectHeadings(text: string, maxEntries = 50): FilingHeading[] {
     markerCounts.set(key, (markerCounts.get(key) ?? 0) + 1);
   }
 
-  for (const { marker, index, lineEnd } of bareMarkers) {
+  for (const { marker, code, index, lineEnd } of bareMarkers) {
     if ((markerCounts.get(foldForHeadingMatch(marker)) ?? 0) >= RUNNING_HEADER_MIN_OCCURRENCES) {
       continue;
     }
-    const title = titleAfterMarkerLine(text, lineEnd);
+    const title = titleAfterMarkerLine(text, lineEnd, maxTitleChars(code));
     if (title !== undefined) add(`${marker} ${title}`, index);
   }
 
@@ -544,7 +780,17 @@ export function detectHeadings(text: string, maxEntries = 50): FilingHeading[] {
     }
     byHeading.set(key, { heading, offset: index });
   }
-  return [...byHeading.values()].sort((a, b) => a.offset - b.offset).slice(0, maxEntries);
+  // An all-caps marker line ("ITEM 2.02") matches the all-caps arm on its own
+  // and also joins the title below it; when both survive dedup at one offset,
+  // the bare entry is the same heading listed twice.
+  const entries = [...byHeading.values()];
+  const titledOffsets = new Set(
+    entries.filter((h) => !BARE_MARKER_HEADING_RE.test(h.heading)).map((h) => h.offset),
+  );
+  const sorted = entries
+    .filter((h) => !(BARE_MARKER_HEADING_RE.test(h.heading) && titledOffsets.has(h.offset)))
+    .sort((a, b) => a.offset - b.offset);
+  return dropBarePartsTitledLater(sorted);
 }
 
 /**
@@ -567,6 +813,152 @@ export function foldForHeadingMatch(value: string): string {
     .replace(/\s+/g, ' ')
     .trim()
     .toLowerCase();
+}
+
+/**
+ * A TOC page cell on a line of its own: a page number, a lettered
+ * financial-statement page ("F-3"), or a lowercase roman front-matter page
+ * ("ii"), any of them optionally after a `Page` word ("Page 3"). Roman cells
+ * count only on their own line — at the end of a line set off by spaces,
+ * "Part    iv" would read as a page cell.
+ */
+const PAGE_CELL_LINE_RE =
+  /^[^\S\n]*(?:(?:Page|PAGE)[^\S\n]+)?(?:\d{1,4}|[A-Z]-\d{1,3}|[ivxlc]{1,7})[^\S\n]*$/;
+/** A line opening on an Item or Part marker, bare or titled. Non-global: a predicate. */
+const MARKER_LINE_RE = new RegExp(
+  String.raw`^(?:item[^\S\n]+${ITEM_CODE}|part[^\S\n]+[ivx]{1,4})\b`,
+  'i',
+);
+
+/** A line with content and the index just past its newline. */
+interface ContentLine {
+  end: number;
+  line: string;
+}
+
+/**
+ * The first line at or after `from` holding anything but whitespace (NBSP
+ * spacer rows count as whitespace), or undefined when none does. An HTML TOC
+ * table renders each cell on its own line with spacer lines between ("Legal
+ * Proceedings\n\n \n\n31"). A loop rather than a sticky `(?:[^\S\n]*\n)*`
+ * regex, which kept a backtrack frame per spacer line and stepped up past about
+ * 100,000 characters of them.
+ */
+function nextContentLine(text: string, from: number): ContentLine | undefined {
+  for (let at = from; at < text.length; ) {
+    const newline = text.indexOf('\n', at);
+    const end = newline === -1 ? text.length : newline;
+    const line = text.slice(at, end);
+    if (/\S/.test(line)) return { end: end + 1, line };
+    at = end + 1;
+  }
+  return;
+}
+
+/**
+ * Whether `line`, whose newline ends just before `after`, is a TOC row. Its page
+ * cell sits at its end ({@link TOC_PAGE_TAIL_RE}) or on the next line with
+ * content ({@link PAGE_CELL_LINE_RE}), spacer lines passed over. A line that is
+ * not itself a marker, followed directly by an Item/Part marker, is a title cell
+ * of a TOC with no page column ("Business Overview" above the next row's "Item
+ * 1A."). A marker line (a Part over its first Item) is a TOC row when that Item
+ * row is: the Item line ends in a page cell, or the line below it holds one or
+ * ends in one (a title cell, or a wrapped title: "Item 5. Market for…Issuer
+ * Purchases / of Equity Securities.......  12"), or — a bare marker — the line
+ * below its title holds one ("PART IV / Item 15. / Exhibit and Financial
+ * Statement Schedules / 93"). A body Part sits over its Item too, but prose, not
+ * a page cell, follows.
+ */
+function isTocRow(text: string, line: string, after: number): boolean {
+  if (TOC_PAGE_TAIL_RE.test(line)) return true;
+  const item = nextContentLine(text, after);
+  if (item === undefined) return false;
+  if (PAGE_CELL_LINE_RE.test(item.line)) return true;
+  if (!MARKER_LINE_RE.test(item.line.trim())) return false;
+  if (!MARKER_LINE_RE.test(line.trim())) return true;
+  if (TOC_PAGE_TAIL_RE.test(item.line)) return true;
+  const below = nextContentLine(text, item.end);
+  if (below === undefined) return false;
+  if (PAGE_CELL_LINE_RE.test(below.line) || TOC_PAGE_TAIL_RE.test(below.line)) return true;
+  if (!BARE_MARKER_HEADING_RE.test(item.line.trim())) return false;
+  const page = nextContentLine(text, below.end);
+  return page !== undefined && PAGE_CELL_LINE_RE.test(page.line);
+}
+
+/**
+ * Whether a prefix line runs on past a one-word needle into a longer Title Case
+ * title — the next word opens on a capital in a line that is not all caps. One
+ * word heads many unrelated titles: `business` reached "Business Combinations.",
+ * "Business Seasonality and Product Introductions", and a cross-reference line
+ * "Business Overview—Governmental regulations…" across the sampled filings. A
+ * needle of two or more words is specific enough to keep its continuation
+ * ("Human Capital" → "Human Capital Management"), and a suffix opening
+ * lowercase ("as of June 30, 2026") or on punctuation ("(continued)",
+ * "—Parent Company Only") continues the needle's own heading. `key` is the
+ * line's {@link headingKey}, which starts with `needle`; folding maps every
+ * whitespace run to one space, so the needle is exactly the line's first word.
+ */
+function continuesIntoLongerTitle(line: string, key: string, needle: string): boolean {
+  if (needle.includes(' ') || key.charAt(needle.length) !== ' ') return false;
+  if (!/\p{Ll}/u.test(line)) return false;
+  return /^\p{Lu}/u.test(line.trim().split(/\s+/)[1] ?? '');
+}
+
+/**
+ * The offset of the document line `section` names when no detected heading
+ * does — a mixed-case subheading ("Liquidity and Capital Resources") that
+ * {@link detectHeadings} never lists (#166). Lines compare by
+ * {@link headingKey} on both sides, in two tiers:
+ * 1. A line equal to the needle.
+ * 2. Only when no line is equal: a line that starts with the needle at a word
+ *    boundary and runs at most {@link MAX_TITLE_CHARS} characters — a heading
+ *    with a date suffix ("Consolidated Schedule of Investments as of June 30,
+ *    2026") — unless it runs on into a longer title
+ *    ({@link continuesIntoLongerTitle}). Equality goes first because the prefix
+ *    tier alone would take a bullet such as "Competition among vendors…" ahead
+ *    of the "Competition" heading.
+ *
+ * In both tiers a line is skipped when it opens on a lowercase letter (a
+ * wrapped sentence or bullet: "competition in our market…", a lone "business."
+ * ending a wrapped paragraph), sits under a line ending mid-sentence or opens on
+ * an unpunctuated Item marker followed by a lowercase word (a wrapped
+ * cross-reference, the guards heading detection applies: "…in Part II,\nItem 8
+ * on this Form 10-K…"), or is a TOC row ({@link isTocRow}). The first remaining
+ * line wins; its offset is the line's first non-blank character. One forward
+ * pass over the text; a line shorter than the needle is never folded.
+ */
+export function findSectionLine(text: string, section: string): number | undefined {
+  const needle = headingKey(section);
+  if (needle.length === 0) return;
+  let prefixHit: number | undefined;
+  for (let start = 0; start <= text.length; ) {
+    const newline = text.indexOf('\n', start);
+    const end = newline === -1 ? text.length : newline;
+    const line = text.slice(start, end);
+    const lineStart = start;
+    start = end + 1;
+    if (line.length < needle.length) continue;
+    const key = headingKey(line);
+    const equal = key === needle;
+    if (
+      !equal &&
+      (prefixHit !== undefined ||
+        key.length > MAX_TITLE_CHARS ||
+        !key.startsWith(needle) ||
+        /[\p{L}\p{N}]/u.test(key.charAt(needle.length)) ||
+        continuesIntoLongerTitle(line, key, needle))
+    ) {
+      continue;
+    }
+    const content = line.trimStart();
+    if (/^\p{Ll}/u.test(content)) continue;
+    if (followsMidSentence(text, lineStart) || isWrappedProse(text, lineStart, content)) continue;
+    if (isTocRow(text, line, start)) continue;
+    const offset = lineStart + line.length - content.length;
+    if (equal) return offset;
+    prefixHit = offset;
+  }
+  return prefixHit;
 }
 
 /** Convert filing HTML to plain text, optionally truncating to a character limit. */
