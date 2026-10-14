@@ -1,7 +1,7 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 title: secedgar-mcp-server
-abstract: "Model Context Protocol (MCP) server for SEC EDGAR, providing U.S. public company filings since 1993 — company resolution from ticker/name/CIK, full-text search across all filing documents with boolean operators and entity targeting, accession-number filing retrieval (HTML-to-text), historical XBRL financial data with friendly concept name resolution, and cross-company metric comparison."
+abstract: "Model Context Protocol (MCP) server for SEC EDGAR, providing U.S. public company filings since 1993: company resolution from ticker/name/CIK, full-text search across all filing documents with boolean operators and entity targeting, accession-number filing retrieval (HTML-to-text), historical XBRL financial data with friendly concept name resolution, and cross-company metric comparison."
 type: software
 authors:
   - family-names: Hand
