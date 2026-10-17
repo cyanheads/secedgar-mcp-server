@@ -29,7 +29,7 @@
 
 ## Overview
 
-SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only the User-Agent header SEC requires. Resolve companies by ticker, name, or CIK, search filings back to 1993, pull XBRL financials and cross-company comparisons by concept, and trace ownership through insider transactions, 13F holdings, 13D/13G blockholders, and fund portfolios. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+SEC EDGAR filings, financials, and ownership data. Look up companies by ticker, name, or CIK, search filings back to 1993, compare financials across companies, and trace ownership through insider trades, 13F holdings, 13D/13G blockholders, and fund portfolios. No API key required.
 
 ### Tools
 
@@ -72,35 +72,34 @@ SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only 
 
 ### `secedgar_company_search` <sub>tool</sub>
 
-- `query` takes a ticker (equities, ETFs, and mutual funds; `BRK-B` or `BRK.B`), a current or former company name (the corporate suffix can be left off: `Apple` finds Apple Inc.), or a CIK; `include_filings` (default on) adds up to `filing_limit` filings (default 10; at most 50 inline, and a larger value up to 1000 is served at 50 with a notice naming where the rest are), filtered by exact `forms` match and `filed_after` / `filed_before`
-- Returns SIC code, exchanges, fiscal year end, and state of incorporation, plus `series_id` / `class_id` for a fund ticker; fails as `no_match` (with near matches in `data.suggestions` when a name scores close enough) or `multiple_matches`
-- A date filter or an under-filled form filter scans past the recent window (the last year or 1,000 filings, whichever holds more) into the archive, up to 10 archive pages, and `history_scanned_through` reports how far it reached
+- `query` takes a ticker (equities, ETFs, mutual funds), a current or former company name, or a CIK; `include_filings` (default on) adds up to `filing_limit` filings (default 10, at most 50 inline), filtered by `forms`, `filed_after`, and `filed_before`
+- Returns SIC code, exchanges, fiscal year end, and state of incorporation, plus `series_id` / `class_id` for a fund ticker; fails as `no_match` (with near matches in `data.suggestions`) or `multiple_matches`
+- A date or form filter can reach into the archive (up to 10 pages); `history_scanned_through` reports how far it got
 
 ---
 
 ### `secedgar_search_filings` <sub>tool</sub>
 
-- Full-text `query` (phrases, `OR`, `-exclusion`, `wildcard*`, `ticker:` / `cik:` scoping), or browse by `forms` and/or entity with no query; `filed_after` and `filed_before` must be given together; `limit` up to 100, and `offset` (up to 9,999) pages server-side only under `sort: "relevance"` on a 2001-onward search, where it counts matching documents, so a filing can recur across pages
-- Full text covers 2001 onward. Earlier ranges, back to 1993, come from the archives, and pre-2001 free text needs `ticker:` / `cik:` scope and reads up to 50 documents (`scan` reports candidates, scanned, and matched)
-- One row per filing: a full-text row lists the documents that matched in `matched_documents` (filenames for `secedgar_get_filing`)
-- A range crossing 2001-01-01 is split and merged, each row tagged with `source` (`efts`, `submissions`, `full-index`); the response carries `total` and `form_distribution` (both counting filings), `total_is_exact`, and, when full text was searched, `total_documents`
+- Full-text `query` (phrases, `OR`, `-exclusion`, `wildcard*`, `ticker:` / `cik:` scoping), or browse by `forms` and/or entity with no query; `filed_after` and `filed_before` must be given together; `limit` up to 100, `offset` up to 9,999 (only with `sort: "relevance"` on a 2001-onward search)
+- Full text covers 2001 onward; earlier ranges back to 1993 come from the archives, where free text needs `ticker:` / `cik:` scope and reads up to 50 documents (`scan` reports the counts)
+- One row per filing, tagged with `source` (`efts`, `submissions`, `full-index`); full-text rows list `matched_documents` (filenames for `secedgar_get_filing`); the response carries `total`, `form_distribution`, `total_is_exact`, and `total_documents` for full-text searches
 
 ---
 
 ### `secedgar_get_filing` <sub>tool</sub>
 
 - `accession_number` in dash or 18-digit form, optional `cik` to speed the lookup, `document` for an exhibit, `include_xbrl` for XBRL artifacts; `content_limit` 1,000–200,000 characters per page (default 50,000)
-- Page with `offset` / `next_offset` until `content_truncated` is false, or jump with `section` (matched against every detected heading, an exact heading first, then a line of the document such as a subheading the outline omits; `item 1` never lands on Items 10–16, nor `part i` on Part II); the first page of a truncated document carries an `outline` of up to 50 headings with offsets — every Item and Part heading kept when it is cut (bare table-of-contents copies of titled ones aside), and the notice says how many were detected — plain-text legacy filings included; when `section` lands on a document line rather than a detected heading, the notice says so
-- `documents` splits the filing into primary, exhibits, and auxiliary; entries marked `binary` (scans, PDFs, archives) fail as `binary_document`, and a `section` miss returns `section_not_found` with the outline
-- When the archive doesn't serve the primary document a filing's index names (common in 2000–2001 filings), the full submission `<accession>.txt` is read instead and the response notice says so
+- Page with `offset` / `next_offset` until `content_truncated` is false, or jump with `section` (a heading such as `item 1` or `part i`); the first page of a truncated document carries an `outline` of up to 50 headings with offsets
+- `documents` splits the filing into primary, exhibits, and auxiliary; `binary` entries (scans, PDFs, archives) fail as `binary_document`, and a `section` miss returns `section_not_found` with the outline
+- If the archive doesn't serve a filing's primary document (common in 2000–2001), the full submission `<accession>.txt` is read instead and the notice says so
 
 ---
 
 ### `secedgar_get_financials` <sub>tool</sub>
 
-- `company` (ticker or CIK) plus `concept` as a friendly name or raw XBRL tag; `taxonomy` `us-gaap` (default), `ifrs-full`, or `dei`; `period_type` `annual`, `quarterly`, or `all` — `annual` reads an instant (balance-sheet) concept at the filer's fiscal-year ends, and when omitted it defaults to annual with the full series for instant concepts; `unit` picks one SEC unit key (`ZAR`, `USD`, `USD/EUR`) for a concept reported in several; `limit` 1–100 trims the inline series
-- A deduplicated series, newest first, one value per calendar period with its source `form`, `filed` date, `accession_number`, and `tag`, all in one `unit` — by default the unit of the newest value, with any other units named in `caveats`; `tags_tried` names the tags walked, and an empty result fails as `no_concept_data` (naming the taxonomy to retry when another one carries the concept), `no_frame_data`, or `no_period_data` (`no_unit_data`, listing the reported units, for a `unit` the concept isn't reported in)
-- A `concept` that is neither a friendly name nor an UpperCamelCase tag fails as `unknown_concept` before any SEC request, with a formula for standard combinations (`free_cash_flow`, `ebitda`, `working_capital`) or up to three closest friendly names
+- `company` (ticker or CIK) plus `concept` as a friendly name or raw XBRL tag; `taxonomy` `us-gaap` (default), `ifrs-full`, or `dei`; `period_type` `annual`, `quarterly`, or `all`; `unit` picks one SEC unit key (`ZAR`, `USD`, `USD/EUR`) when a concept is reported in several; `limit` 1–100 trims the inline series
+- Returns a deduplicated series, newest first, one value per calendar period with `form`, `filed`, `accession_number`, and `tag`, all in one `unit` (other units are named in `caveats`); `tags_tried` lists the tags checked, and an empty result fails as `no_concept_data`, `no_frame_data`, `no_period_data`, or `no_unit_data`
+- A `concept` that is neither a friendly name nor an UpperCamelCase tag fails as `unknown_concept`, with a formula for standard combinations (`free_cash_flow`, `ebitda`, `working_capital`) or up to three closest friendly names
 
 ---
 
@@ -114,23 +113,23 @@ SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only 
 ### `secedgar_get_material_events` <sub>tool</sub>
 
 - `company` plus up to 20 `items` codes, dotted (`2.02`) since 2004-08-23 and single integers (`12`) before; the two regimes don't overlap, so pair them across the changeover; `filed_after` / `filed_before` work alone and reach into the archive; `limit` 1–100 (default 20)
-- Each filing decodes its `items` to `code`, `label`, and `regime` (`current` / `legacy`); `item_distribution` counts every code in the window before the filter, and `total_8k_scanned` against `total_matched` shows what the filter removed
-- A date window reads every archive page overlapping it, up to 10; without one, the archive is read only to fill `limit` with filings passing the `items` filter, stopping on the page that fills it; `history_scanned_through` and `dataset.truncated` report what went unread, and a result short of `limit` with pages unread names how far the scan reached and the date window that goes further
+- Each filing decodes its `items` to `code`, `label`, and `regime` (`current` / `legacy`); `item_distribution` counts every code in the window, and `total_8k_scanned` against `total_matched` shows what the filter removed
+- A date window reads up to 10 archive pages; `history_scanned_through` and `dataset.truncated` report what went unread
 
 ---
 
 ### `secedgar_get_insider_transactions` <sub>tool</sub>
 
 - `company` is the issuer; `transaction_type` `purchase` (code P), `sale` (code S), or `all` (default); `limit` 1–100 (default 20); does not cover Forms 3 or 5
-- Without a date window it scans up to 100 of the newest Form 4 / 4-A filings; `filed_after` / `filed_before` (inclusive, either alone) read any period since mid-2003, paging into the archive (up to 10 pages) when the window predates the recent submissions window, and with a canvas every in-window filing is parsed, up to 100; `history_scanned_through` names the oldest filing parsed
-- Each transaction carries the reporting person, relationship, `transaction_code` and `transaction_type`, `is_derivative`, unsigned `shares_traded` with `direction` (`acquire` / `dispose`), price per share, and shares owned after; `dataset.truncated` flags Form 4 filings beyond those parsed, and `filings_other_issuer` counts scanned Form 4s the company filed as a reporting owner of another issuer, which add no rows
+- Without a date window it scans up to 100 of the newest Form 4 / 4-A filings; `filed_after` / `filed_before` (inclusive, either alone) read any period since mid-2003, up to 100 filings; `history_scanned_through` names the oldest filing parsed
+- Each transaction carries the reporting person, relationship, `transaction_code` and `transaction_type`, `is_derivative`, unsigned `shares_traded` with `direction` (`acquire` / `dispose`), price per share, and shares owned after; `dataset.truncated` flags filings beyond those parsed, and `filings_other_issuer` counts Form 4s the company filed as a reporting owner of another issuer, which add no rows
 
 ---
 
 ### `secedgar_get_institutional_holdings` <sub>tool</sub>
 
 - `company` is the 13F filer (a CIK is most reliable), not a portfolio company, which is `secedgar_find_holders`' job; `quarter` as `YYYY-QN`, defaulting to the newest filing; `limit` 1–500 (default 20) with `offset` / `next_offset`; `consolidate` (default true) merges sub-lines into positions sorted by value
-- A `quarter` older than the recent submissions window is found in the archive, read forward from the quarter end (up to 10 pages); a quarter the manager covered with a 13F-NT notice — or, with no `quarter`, a manager whose recent filings are notices only — fails as `no_filings_found` naming the notice's accession number and period
+- Older quarters are found in the archive (up to 10 pages); a quarter covered only by a 13F-NT notice fails as `no_filings_found` naming the notice's accession number and period
 - Holdings carry issuer, CUSIP, `market_value_usd` in whole USD, shares or principal, and `put_call`; `total_holdings_in_filing` counts raw rows and `total_positions` distinct positions; a shared legal name fails as `ambiguous_entity`
 
 ---
@@ -152,7 +151,7 @@ SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only 
 
 ### `secedgar_get_fund_holdings` <sub>tool</sub>
 
-- `fund` as a ticker (`VOO`), series ID (`S000002839`), or CIK; `series_id` picks one fund of a multi-series trust, which otherwise fails as `series_required` with the series listed; `report_date` targets a period from `available_report_periods`; `limit` 1–100 (default 20) with `offset` / `next_offset`
+- `fund` as a ticker (`VOO`), series ID (`S000002839`), or CIK; a multi-series trust fails as `series_required` with the series listed, so pass `series_id`; `report_date` picks a period from `available_report_periods`; `limit` 1–100 (default 20) with `offset` / `next_offset`
 - Positions come largest first by `percent_of_net_assets`, with name, CUSIP / ISIN / LEI, `balance` and `units`, `value_usd`, and asset and issuer category, alongside fund net assets, total assets, and total liabilities
 - Holdings are as of `report_period_date`, roughly two months before `filing_date`; `publication_lag_days` states the gap
 
@@ -160,17 +159,18 @@ SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only 
 
 ### `secedgar_fetch_frames` <sub>tool</sub>
 
-- `concept` as a friendly name or raw tag, `period` as `CY2023`, `CY2024Q2`, or `CY2023Q4I`, `taxonomy` `us-gaap` (default) or `dei` (SEC publishes frames for no other namespace; IFRS filers are read per company), `unit` (default `USD`), `sort` `desc` / `asc`; `limit` 1–100 (default 25) with `offset` / `next_offset` down the ranking
-- One call queries one tag: `unqueried_tags` lists same-meaning variants to fetch separately and `related_tags` alternate-definition tags; `value_distribution.max_to_p95_ratio` flags scale-factor outliers, `period_end_range` shows fiscal-year mixing, and `caveats` flags fiscal-Q4 gaps in quarterly frames and annual frames a proxy statement or a 10-Q can hold
-- A `concept` that is neither a friendly name nor an UpperCamelCase tag fails as `unknown_concept` before the frames request, with the same formula or closest-name hint as `secedgar_get_financials`; a well-formed tag with no frame is `no_data`
+- `concept` as a friendly name or raw tag, `period` as `CY2023`, `CY2024Q2`, or `CY2023Q4I`, `taxonomy` `us-gaap` (default) or `dei`, `unit` (default `USD`), `sort` `desc` / `asc`; `limit` 1–100 (default 25) with `offset` / `next_offset`
+- One call queries one tag: `unqueried_tags` and `related_tags` list variants to fetch separately; `value_distribution.max_to_p95_ratio` flags scale outliers, `period_end_range` shows fiscal-year mixing, and `caveats` flags fiscal-Q4 gaps
+- A `concept` that is neither a friendly name nor an UpperCamelCase tag fails as `unknown_concept`; a well-formed tag with no frame is `no_data`
 
 ---
 
 ### `secedgar_compare_companies` <sub>tool</sub>
 
 - 2–10 `companies` × 1–8 `concepts`; `taxonomy` `us-gaap` (default) or `ifrs-full`; `period_type` `annual` (default) or `quarterly`; `periods` 1–12 (default 4), trimmed further when the inline matrix gets too large
-- `cells` align each value on a calendar `period` and keep its `frame`, `period_end`, and source `tag`; an annual matrix holds each company's fiscal year under the calendar-year key SEC frames it as, with balance-sheet values taken only at fiscal-year ends and placed beside the income lines of the year they close (interim and cover-date snapshots stay out, and a call left with nothing else fails `no_comparable_data` with a hint naming `period_type: "quarterly"`), while a quarterly matrix aligns snapshots on the calendar quarter they fall in; `failed_companies` (reason `not_found`, `ambiguous`, or `no_company_facts`) and `gaps` (no value in any period) report what's missing, and `caveats` flag differing period ends in any inline column, unit mismatches between companies (each company reads one unit per concept), and, once per concept, the companies whose values all predate the inline window, each with its newest period
-- A concept that is neither a friendly name nor an UpperCamelCase tag is listed once in `unknown_concepts` with its hint, never as a gap per company; the call fails as `unknown_concept` only when every concept is one
+- `cells` align each value on a calendar `period` and keep its `frame`, `period_end`, and source `tag`; a call with no comparable annual data fails `no_comparable_data`
+- `failed_companies` (reason `not_found`, `ambiguous`, or `no_company_facts`) and `gaps` report what's missing, and `caveats` flag differing period ends and unit mismatches between companies
+- An unrecognized concept is listed in `unknown_concepts` with a hint; the call fails as `unknown_concept` only when every concept is unrecognized
 
 ---
 
@@ -199,7 +199,7 @@ SEC EDGAR filings, XBRL financials, and ownership data. No API key needed, only 
 ### `secedgar_dataframe_drop` <sub>tool</sub>
 
 - `name` of the dataframe to drop; idempotent, returning `dropped: false` when nothing matched
-- Off unless `EDGAR_DATAFRAME_DROP_ENABLED=true`; disabled, it is absent from `tools/list` and uncallable, but still listed on the HTTP landing page with the flag that enables it
+- Off unless `EDGAR_DATAFRAME_DROP_ENABLED=true`; when disabled it is absent from `tools/list`
 
 ---
 
@@ -228,9 +228,9 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 
 EDGAR-specific:
 
-- One process-wide queue paces SEC requests under the 10 req/s limit. A 429 is never retried: every SEC call is refused locally as `rate_limited` with a `retryAfter` countdown for `EDGAR_RATE_LIMIT_COOLDOWN_SECONDS`, then a single probe goes out. Reads served from the local mirror keep answering
-- CIK resolution from tickers (fund tickers included), current and former company names, or raw CIKs, with corporate-suffix normalization and near-match suggestions on a miss
-- Friendly XBRL concept names that handle historical tag changes. `secedgar_get_financials`, `secedgar_get_snapshot`, and `secedgar_compare_companies` share one frame dedup and tag priority, so their numbers agree; a series never mixes units, so a 20-F filer's convenience translation stays out of its reporting-currency series; a period whose frame SEC assigned to a proxy statement's pay-versus-performance figure is answered from the filer's own report instead, an annual frame holding a 10-Q's trailing-twelve-month figure is left out of the annual series, and each reports `caveats` for calendar quarters missing from the frame-tagged series (SEC files fiscal Q4 only as the 10-K residual) and for series that stop years short
+- Requests are paced under SEC's 10 req/s limit; after a 429, calls fail locally as `rate_limited` with a `retryAfter` countdown for `EDGAR_RATE_LIMIT_COOLDOWN_SECONDS`, then one probe goes out
+- CIK resolution from tickers (fund tickers included), current and former company names, or raw CIKs, with near-match suggestions on a miss
+- Friendly XBRL concept names that handle historical tag changes; `secedgar_get_financials`, `secedgar_get_snapshot`, and `secedgar_compare_companies` share the same dedup and tag priority, so their numbers agree, and `caveats` flag gaps in the series
 - Filing documents converted from HTML to text, with heading detection and offset paging for oversized filings
 - Opt-in local SQLite mirror of company tickers and XBRL company-facts (`EDGAR_MIRROR_ENABLED`) that serves CIK resolution and financials from disk
 
@@ -239,7 +239,7 @@ Agent-friendly output:
 - In-conversation SQL: any tool whose response carries a `dataset` field has staged its full result as a DuckDB dataframe (`df_<id>`), while the inline list stays capped at `limit`; inspect it with `secedgar_dataframe_describe`, then query it with `secedgar_dataframe_query`
 - Discriminated outputs and explicit gaps: `source` on filing-search rows, `search_mode`, 8-K item `regime`, typed `failed_companies` reasons, and `gaps` with `tags_tried` in place of zero-filled values
 - Completeness disclosure: `history_scanned_through`, `total_is_exact`, `publication_lag_days`, and `dataset.truncated` tell agents how deep a scan went and what it left out
-- One parameter name per concept: `company`, `filed_after` / `filed_before`, and `forms` mean the same thing on every tool, and common alternate spellings (`ticker`, `cik`, `start_date`, `end_date`, `form_types`, and others) are accepted as aliases — the company spellings also reach `secedgar_company_search`'s `query` and the `issuer` of `secedgar_find_holders` and `secedgar_get_beneficial_owners`
+- One parameter name per concept: `company`, `filed_after` / `filed_before`, and `forms` mean the same thing on every tool, and common alternate spellings (`ticker`, `cik`, `start_date`, `end_date`, `form_types`, and others) are accepted as aliases
 
 ## Getting started
 
@@ -360,9 +360,9 @@ cp .env.example .env
 |:---|:---|:---|
 | `EDGAR_USER_AGENT` | **Required.** User-Agent sent to SEC, as `"AppName contact@email.com"`. SEC blocks IPs without one. | — |
 | `EDGAR_RATE_LIMIT_RPS` | Max requests per second to SEC (1–10). | `10` |
-| `EDGAR_RATE_LIMIT_COOLDOWN_SECONDS` | Seconds to refuse calls locally after a 429 before one probe goes out. SEC lifts a block only after ten quiet minutes, so a shorter value probes into it. | `600` |
-| `EDGAR_TICKER_CACHE_TTL` | Seconds to cache the company and fund ticker files. A failed fund-file load is retried after a minute (or the rate-limit cool-down) instead of standing for the whole TTL. | `3600` |
-| `EDGAR_DATASET_TTL_SECONDS` | Per-table TTL for canvas dataframes, a sliding window renewed on every dataframe operation. | `86400` |
+| `EDGAR_RATE_LIMIT_COOLDOWN_SECONDS` | Seconds to refuse calls locally after a 429 before one probe goes out. | `600` |
+| `EDGAR_TICKER_CACHE_TTL` | Seconds to cache the company and fund ticker files. | `3600` |
+| `EDGAR_DATASET_TTL_SECONDS` | TTL for canvas dataframes, renewed on every dataframe operation. | `86400` |
 | `EDGAR_DATAFRAME_DROP_ENABLED` | Set `true` to expose `secedgar_dataframe_drop`, the only destructive tool. | `false` |
 | `EDGAR_MIRROR_ENABLED` | Enable the local SQLite mirror of company tickers and XBRL company-facts. Node/Bun only; bootstrap once with `bun run mirror:init`. | `false` |
 | `EDGAR_MIRROR_PATH` | Directory holding the mirror databases. | `./data/edgar-mirror` |
@@ -375,8 +375,8 @@ cp .env.example .env
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
 | `LOG_TOOL_FAILURE_PAYLOADS` | Log each failed tool call's arguments and result, redacted by key name and capped at `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES` (default `16384`). A secret inside a free-form value is not redacted. | `false` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry) (spans, metrics, completion logs). | `false` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP base URL; traces go to `/v1/traces` and metrics to `/v1/metrics`. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` override either one. | — |
-| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Opt-in OTLP log export (e.g. `http://localhost:4318/v1/logs`); the base endpoint never enables it. | — |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP base URL for traces and metrics. | — |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | OTLP log export endpoint (e.g. `http://localhost:4318/v1/logs`). | — |
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
 
