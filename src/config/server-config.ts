@@ -5,10 +5,57 @@
 
 import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
+import { runtimeCaps } from '@cyanheads/mcp-ts-core/utils';
+
+/** Whether a UTF-16 code unit is a control RFC 9110 bars from a field value: C0 other than tab, or DEL. */
+const isFieldValueControl = (unit: number) => (unit < 0x20 && unit !== 0x09) || unit === 0x7f;
+
+/**
+ * Whether this runtime's `fetch` sends `value` as a User-Agent rather than throwing
+ * before any request goes out (#173). Both runtimes refuse what the Fetch
+ * standard's `Headers` refuses — NUL, CR, or LF inside the value and anything past
+ * U+00FF — so constructing one decides that part exactly, Latin-1 included. Node's
+ * undici also refuses, at dispatch, the other controls RFC 9110 bars from the
+ * value `Headers` normalized; Bun 1.4 sends those, so they pass there.
+ */
+function fetchSendsUserAgent(value: string): boolean {
+  let normalized: string | null;
+  try {
+    normalized = new Headers({ 'User-Agent': value }).get('User-Agent');
+  } catch {
+    return false;
+  }
+  if (runtimeCaps.isBun || normalized === null) return true;
+  for (let i = 0; i < normalized.length; i++) {
+    if (isFieldValueControl(normalized.charCodeAt(i))) return false;
+  }
+  return true;
+}
+
+/**
+ * Why a User-Agent `fetch` cannot send was refused, naming the first character
+ * outside Latin-1 when there is one — an em dash or curly quote pasted into the
+ * value is the usual cause.
+ */
+function unsendableUserAgentMessage(value: string): string {
+  const characters = [...value];
+  const position = characters.findIndex((ch) => (ch.codePointAt(0) ?? 0) > 0xff);
+  const format = 'keep the "AppName contact@email.com" format';
+  if (position < 0) {
+    return `Cannot be sent as an HTTP header: it holds a line break or another control character. Remove it and ${format}.`;
+  }
+  const codePoint = (characters[position]?.codePointAt(0) ?? 0).toString(16).toUpperCase();
+  return `Cannot be sent as an HTTP header: character ${position + 1} is U+${codePoint.padStart(4, '0')}, outside the Latin-1 range a header can carry. Replace it with an ASCII equivalent (a hyphen for a dash, a straight quote for a curly one) and ${format}.`;
+}
 
 const ServerConfigSchema = z.object({
   userAgent: z
     .string()
+    .superRefine((value, ctx) => {
+      if (!fetchSendsUserAgent(value)) {
+        ctx.addIssue({ code: 'custom', message: unsendableUserAgentMessage(value) });
+      }
+    })
     .describe('User-Agent header for SEC compliance. Format: "AppName contact@email.com"'),
   rateLimitRps: z.coerce
     .number()

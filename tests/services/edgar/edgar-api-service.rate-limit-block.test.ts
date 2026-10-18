@@ -6,7 +6,9 @@
  * configured request rate implies, then the block cycle: a 429 closes a gate
  * that refuses calls locally with a counting-down `retryAfter`, the first call
  * after it reopens is a single probe, a probe 429 closes it again, and a probe
- * answer resumes ordinary pacing (#116).
+ * answer resumes ordinary pacing (#116). A probe that gets no HTTP response at all
+ * proves nothing, so the next call probes in its place, and a no-response retry
+ * goes through the gate like a 5xx one (#173).
  * @module tests/services/edgar/edgar-api-service.rate-limit-block
  */
 
@@ -48,20 +50,45 @@ function deferred<T>() {
   return { promise, reject, resolve };
 }
 
-type Answer = number | Promise<Response>;
+/**
+ * A status, a promise returned as-is, an `Error` thrown as the runtime's rejection
+ * (no HTTP response), or `'silent'` — no response headers ever (#173).
+ */
+type Answer = number | Promise<Response> | Error | 'silent';
+
+/** A request that never answers, rejecting with its signal's reason once aborted — as both runtimes do. */
+function neverAnswer(signal: AbortSignal | null | undefined): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+}
+
+/** Bun 1.4.3's own rejection for a reset connection: the code on the error, no `cause`. */
+function bunConnectionReset(): Error {
+  return Object.assign(
+    new TypeError(
+      'ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()',
+    ),
+    { code: 'ECONNRESET', errno: 0 },
+  );
+}
 
 /**
  * Stub `fetch` with a queue of answers — a status becomes a fresh `Response`, a
- * promise is returned as-is — falling back to 200 once the queue is empty.
- * Records the fake-clock time of every request start.
+ * promise is returned as-is, an `Error` is thrown, `'silent'` never answers —
+ * falling back to 200 once the queue is empty. Records the fake-clock time of
+ * every request start.
  */
 function stubFetch(...answers: Answer[]) {
   const queue = [...answers];
   const starts: number[] = [];
-  const fetchMock = vi.fn(async (_url: string) => {
+  const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
     starts.push(Date.now());
     const next = queue.shift() ?? 200;
-    return typeof next === 'number' ? new Response(`status ${next}`, { status: next }) : next;
+    if (typeof next === 'number') return new Response(`status ${next}`, { status: next });
+    if (next instanceof Error) throw next;
+    if (next === 'silent') return neverAnswer(init?.signal);
+    return next;
   });
   vi.stubGlobal('fetch', fetchMock);
   return { fetchMock, starts };
@@ -233,6 +260,23 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       expect(retryRefused?.code).toBe(JsonRpcErrorCode.RateLimited);
       expect(data(retryRefused).status).toBeUndefined();
     });
+
+    it('does not send a network-failure retry once another call has closed the gate (#173)', async () => {
+      // Call A gets no HTTP response and sleeps its 1s backoff; call B draws the 429 meanwhile.
+      const { fetchMock } = stubFetch(bunConnectionReset(), 429);
+      const api = getEdgarApiService();
+
+      const a = settle(api.fetchText(DOC(1)));
+      const b = settle(api.fetchText(DOC(2)));
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(data(await b)).toMatchObject({ reason: 'rate_limited', status: 429 });
+      const retryRefused = await a;
+      expect(retryRefused?.code).toBe(JsonRpcErrorCode.RateLimited);
+      expect(data(retryRefused)).toMatchObject({ reason: 'rate_limited', retryable: true });
+      expect(data(retryRefused).status).toBeUndefined();
+    });
   });
 
   describe('after the cool-down', () => {
@@ -282,7 +326,7 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
-    it('lets the next call probe again when the probe got no HTTP answer', async () => {
+    it('lets the next call probe again when the probe got no HTTP answer, counting it against every waiter', async () => {
       const probe = deferred<Response>();
       const nextProbe = deferred<Response>();
       const { fetchMock } = stubFetch(429, probe.promise, nextProbe.promise);
@@ -290,22 +334,85 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       await vi.advanceTimersByTimeAsync(COOLDOWN_MS);
       const api = getEdgarApiService();
 
-      const probing = settle(api.fetchText(DOC(1)));
-      const waiting = api.fetchText(DOC(2));
-      const alsoWaiting = api.fetchText(DOC(3));
+      const calls = [api.fetchText(DOC(1)), api.fetchText(DOC(2)), api.fetchText(DOC(3))];
       probe.reject(new TypeError('fetch failed'));
-      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(500);
 
-      // The network error proves nothing about the block: one waiter probes again, alone.
-      expect(await probing).toBeInstanceOf(TypeError);
+      // The network error proves nothing about the block, and each call waiting on the
+      // probe takes it as its own unanswered attempt (#173): nothing else has gone out.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      // After the 1 s backoff one of the three probes again, alone.
+      await vi.advanceTimersByTimeAsync(1_000);
       expect(fetchMock).toHaveBeenCalledTimes(3);
 
       nextProbe.resolve(new Response('answered', { status: 200 }));
       await vi.advanceTimersByTimeAsync(1_000);
-      await expect(Promise.all([waiting, alsoWaiting])).resolves.toEqual([
-        'answered',
-        'status 200',
-      ]);
+      const texts = await Promise.all(calls);
+      expect([...texts].sort()).toEqual(['answered', 'status 200', 'status 200']);
+      expect(fetchMock).toHaveBeenCalledTimes(5);
+    });
+
+    it('lets the next call probe when the probe’s attempt gets no response headers in time (#173)', async () => {
+      const nextProbe = deferred<Response>();
+      const { fetchMock } = stubFetch(429, 'silent', nextProbe.promise);
+      await closeGateWith429();
+      await vi.advanceTimersByTimeAsync(COOLDOWN_MS);
+      const api = getEdgarApiService();
+
+      const calls = [api.fetchText(DOC(1)), api.fetchText(DOC(2)), api.fetchText(DOC(3))];
+      await vi.advanceTimersByTimeAsync(14_900);
+      // Only the silent probe has gone out; the other calls wait on it.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(200);
+      // 15 s after dispatch the probe is aborted, and each waiter counts it as its own
+      // unanswered attempt: nothing else goes out before the 1 s backoff ends.
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      // Then one call probes, alone: a timeout proves nothing, so the gate stays shut.
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      // The other two stay held behind that probe rather than going out at the pacing rate.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+
+      nextProbe.resolve(new Response('answered', { status: 200 }));
+      await vi.advanceTimersByTimeAsync(1_000);
+      const texts = await Promise.all(calls);
+      expect([...texts].sort()).toEqual(['answered', 'status 200', 'status 200']);
+      expect(fetchMock).toHaveBeenCalledTimes(5);
+    });
+
+    it('settles every call queued behind a silent SEC within its own three attempts (#173)', async () => {
+      const { fetchMock } = stubFetch(429, ...Array<Answer>(9).fill('silent'));
+      await closeGateWith429();
+      await vi.advanceTimersByTimeAsync(COOLDOWN_MS);
+      const api = getEdgarApiService();
+      const t0 = Date.now();
+
+      const outcomes: Array<{ error: McpError | undefined; settledAfterMs: number }> = [];
+      const calls = [DOC(1), DOC(2), DOC(3)].map((url) =>
+        settle(api.fetchText(url)).then((error) => {
+          outcomes.push({ error, settledAfterMs: Date.now() - t0 });
+        }),
+      );
+      // Three probes of 15 s with the 1 s and 2 s backoffs between them: 48 s for every call,
+      // where probing in turn would leave the last of three waiting about 135 s.
+      await vi.advanceTimersByTimeAsync(48_500);
+
+      // The two waiters count each probe as one of their own attempts, so they settle with
+      // the probing call — neither sooner, as if one silent probe were their last, nor later.
+      expect(outcomes.map((outcome) => outcome.settledAfterMs)).toEqual([48_000, 48_000, 48_000]);
+      await Promise.all(calls);
+      for (const { error } of outcomes) {
+        expect(error?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(data(error)).toMatchObject({
+          reason: 'sec_unreachable',
+          retryable: true,
+        });
+      }
+      // One probe at a time, three in all, after the 429 that closed the gate.
       expect(fetchMock).toHaveBeenCalledTimes(4);
     });
 

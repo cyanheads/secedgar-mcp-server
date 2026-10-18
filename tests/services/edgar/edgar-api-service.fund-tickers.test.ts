@@ -50,13 +50,23 @@ const VOO_LIVE: CikMatch = {
   classId: 'C000092055',
 };
 
-/** A status becomes an empty response with that status; anything else is a 200 JSON body. */
-type Answer = number | object;
+/**
+ * A status becomes an empty response with that status, an `Error` is thrown as the
+ * runtime's rejection (no HTTP response, #173); anything else is a 200 JSON body.
+ */
+type Answer = number | Error | object;
 
-const toResponse = (answer: Answer) =>
-  typeof answer === 'number'
+const toResponse = (answer: Answer) => {
+  if (answer instanceof Error) throw answer;
+  return typeof answer === 'number'
     ? new Response(`status ${answer}`, { status: answer })
     : new Response(JSON.stringify(answer), { headers: { 'content-type': 'application/json' } });
+};
+
+/** Node 26's (undici) own rejection for a reset connection: `fetch failed`, the code on `cause`. */
+const NODE_RESET = new TypeError('fetch failed', {
+  cause: Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }),
+});
 
 /**
  * Serve the two ticker files from answer queues — the last answer repeats once a
@@ -140,6 +150,17 @@ describe('EdgarApiService — fund-ticker slice', () => {
       ['a 404', [404], 50, { status: 404, retryInSeconds: 60 }],
       ['a 429', [429], 50, { status: 429, retryInSeconds: 600 }],
       ['a malformed body', [{ unexpected: true }], 50, { reason: 'malformed_body' }],
+      [
+        'no HTTP response on any attempt (#173)',
+        [NODE_RESET],
+        5_000,
+        {
+          reason: 'sec_unreachable',
+          retryInSeconds: 60,
+          error:
+            'No HTTP response from SEC EDGAR (www.sec.gov) on the last of 3 attempts, which ended with ECONNRESET.',
+        },
+      ],
     ] as const)(
       'warns once with the endpoint and cause after %s',
       async (_label, mf, settle, fields) => {
@@ -185,6 +206,11 @@ describe('EdgarApiService — fund-ticker slice', () => {
       ['a 404', [404, MF_FILE], 50],
       ['a malformed body', [{ unexpected: true }, MF_FILE], 50],
       ['a 503 that outlasts the retries', [503, 503, 503, MF_FILE], 5_000],
+      [
+        'no HTTP response on any of the three attempts (#173)',
+        [NODE_RESET, NODE_RESET, NODE_RESET, MF_FILE],
+        5_000,
+      ],
     ] as const)(
       'after %s, retries once the window passes — equity index not refetched',
       async (_label, mf, settle) => {

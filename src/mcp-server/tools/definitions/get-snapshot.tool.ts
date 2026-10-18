@@ -89,6 +89,15 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
       retryable: true,
       thrownBy: 'service',
     },
+    {
+      reason: 'sec_unreachable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The last of three attempts to reach SEC EDGAR got no HTTP response — the connection failed, or no response headers arrived within 15 seconds',
+      recovery:
+        'Retry the same call in a minute — SEC EDGAR could not be reached, and nothing in the request needs to change.',
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
 
   input: z.object({

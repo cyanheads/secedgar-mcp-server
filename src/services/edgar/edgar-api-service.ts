@@ -47,9 +47,41 @@ const BASE_BACKOFF_MS = 1000;
  * Statuses worth a retry. 429 is deliberately absent: SEC holds a rate-limit block
  * until the request rate has stayed under the threshold for ten minutes, so the
  * ~3s retry budget cannot outlast it and every retry restarts the clock the caller
- * is waiting on (#112).
+ * is waiting on (#112). An attempt that gets no HTTP response at all retries on the
+ * same ladder (#173).
  */
 const RETRYABLE_STATUSES = new Set([500, 502, 503, 504]);
+
+/**
+ * How long one attempt may wait for response headers, counted from dispatch, before
+ * it is aborted and retried as a no-response failure (#173). Bun applies no connect
+ * timeout of its own — an unanswered connect waits out the OS TCP timeout, 75 s on
+ * macOS — and neither runtime bounds a server that accepts and never answers, so one
+ * attempt could outlast the MCP client's 60 s request timeout alone. Three capped
+ * attempts plus the 1 s and 2 s backoffs come to 48 s. The clock starts once the
+ * pacer dispatches the request, so queue time never counts, and stops at headers,
+ * so a multi-megabyte body is never cut off. SEC's slowest reads sampled send
+ * headers in under 2 s.
+ */
+const ATTEMPT_HEADERS_TIMEOUT_MS = 15_000;
+
+/**
+ * `data.reason` once every attempt got no HTTP response (#173). Declared retryable
+ * on every tool that reaches SEC; set on `data.retryable` here for the same reason
+ * as `rate_limited` (#122).
+ */
+const SEC_UNREACHABLE_REASON = 'sec_unreachable';
+
+/**
+ * One attempt's outcome: SEC's HTTP answer, whatever its status, or none at all — a
+ * runtime `fetch` rejection (connection refused or reset, DNS failure, a connect
+ * timeout) or no response headers within {@link ATTEMPT_HEADERS_TIMEOUT_MS}.
+ */
+type Attempt =
+  | { readonly kind: 'answered'; readonly response: Response }
+  | { readonly kind: 'unanswered'; readonly rejection: unknown; readonly timedOut: boolean };
+
+type UnansweredAttempt = Extract<Attempt, { kind: 'unanswered' }>;
 
 /**
  * `data.reason` on every SEC rate-limit failure — the upstream 429 and a call
@@ -68,20 +100,21 @@ const RATE_LIMITED_REASON = 'rate_limited';
  * - `closed` — refuse every call locally until `reopensAt`; the first call after
  *   that instant becomes the probe.
  * - `probing` — the probe is in flight; every other call waits on `settled`, then
- *   re-reads the gate.
+ *   re-reads the gate. `settled` carries the probe's attempt when it got no HTTP
+ *   response, which every waiter counts as one of its own (#173).
  */
 type BlockGate =
   | { readonly state: 'open' }
   | { readonly state: 'closed'; readonly reopensAt: number }
-  | { readonly state: 'probing'; readonly settled: Promise<void> };
+  | { readonly state: 'probing'; readonly settled: Promise<UnansweredAttempt | undefined> };
 
 const OPEN_GATE: BlockGate = { state: 'open' };
 
 /** A call cleared to send: the gate it was admitted under, and — for the probe — how to settle it. */
 interface Admission {
   gate: BlockGate;
-  /** Present on the probe only. `answered` is true when SEC replied with anything but a 429. */
-  releaseProbe?: (answered: boolean) => void;
+  /** Present on the probe only: the probe's attempt, or `undefined` when it threw before one. */
+  releaseProbe?: (outcome: Attempt | undefined) => void;
 }
 
 /**
@@ -959,24 +992,32 @@ class EdgarApiService {
   // --- Internals ---
 
   /**
-   * Paced fetch with retry/backoff. Returns the response on 2xx or 404; throws a
-   * status-classified `McpError` on other non-OK statuses after retries are
-   * exhausted, and the local refusal while SEC's rate-limit block is active.
+   * Paced fetch with retry/backoff. Returns the response on 2xx or 404. A 5xx, and
+   * an attempt that got no HTTP response, retry up to `MAX_RETRIES` attempts; then
+   * the 5xx throws its status-classified `McpError` and the no-response case throws
+   * `sec_unreachable`. Other non-OK statuses throw at once, as does the local
+   * refusal while SEC's rate-limit block is active, and the pacer's
+   * `RequestCancelled` — those are `McpError`s from `send()`, never retried.
    */
   private async rawFetch(url: string, acceptJson: boolean): Promise<Response> {
     const headers: Record<string, string> = { 'User-Agent': getServerConfig().userAgent };
     if (acceptJson) headers.Accept = 'application/json';
 
-    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-      const response = await this.send(url, headers);
+    for (let attempt = 0; ; attempt++) {
+      const outcome = await this.send(url, headers);
+      if (outcome.kind === 'answered' && (outcome.response.ok || outcome.response.status === 404)) {
+        return outcome.response;
+      }
 
-      if (response.ok || response.status === 404) return response;
-
-      if (RETRYABLE_STATUSES.has(response.status) && attempt < MAX_RETRIES - 1) {
+      const transient =
+        outcome.kind === 'unanswered' || RETRYABLE_STATUSES.has(outcome.response.status);
+      if (transient && attempt < MAX_RETRIES - 1) {
         await sleep(BASE_BACKOFF_MS * 2 ** attempt);
         continue;
       }
+      if (outcome.kind === 'unanswered') throw secUnreachable(url, outcome);
 
+      const { response } = outcome;
       const data: Record<string, unknown> = { url };
       if (response.status === 403) {
         const host = new URL(url).hostname;
@@ -999,65 +1040,73 @@ class EdgarApiService {
         captureBody: response.status !== 429,
       });
     }
-
-    throw serviceUnavailable('SEC EDGAR API request failed after retries', { url });
   }
 
   /**
-   * One request through the block gate and the pacer. A 429 closes the gate
-   * before the response is handed back, so no call admitted after it sends.
+   * One attempt through the block gate and the pacer. A 429 closes the gate
+   * before the response is handed back, so no call admitted after it sends. A
+   * `fetch` rejection comes back as an unanswered attempt, and so does a probe
+   * this call waited on that got no HTTP response; the gate's refusal and the
+   * pacer's `RequestCancelled` throw.
    */
-  private async send(url: string, headers: Record<string, string>): Promise<Response> {
+  private async send(url: string, headers: Record<string, string>): Promise<Attempt> {
     const admission = await this.admit();
-    let answered = false;
+    if ('kind' in admission) return admission;
+    let outcome: Attempt | undefined;
     try {
-      const response = await this.pacer.run(() => {
+      outcome = await this.pacer.run(() => {
         // Re-read at dispatch: a 429 may have landed while this call waited for its
         // slot, and a call queued before the block must not go out inside it.
         if (this.gate !== admission.gate) throw this.cooldownRefusal();
-        return globalThis.fetch(url, { headers });
+        return fetchUntilHeaders(url, headers);
       });
-      if (response.status === 429) {
+      if (outcome.kind === 'answered' && outcome.response.status === 429) {
         this.gate = { state: 'closed', reopensAt: Date.now() + this.cooldownMs };
-      } else {
-        answered = true;
       }
-      return response;
+      return outcome;
     } finally {
-      admission.releaseProbe?.(answered);
+      admission.releaseProbe?.(outcome);
     }
   }
 
   /**
    * Wait until this call may send, or throw the local refusal while the
    * cool-down runs. The first call after the cool-down becomes the probe; every
-   * call behind it waits for the probe to resolve and then reads the gate again.
+   * call behind it waits for the probe to resolve and then reads the gate again —
+   * unless the probe got no HTTP response, which each waiter takes as its own
+   * unanswered attempt. Otherwise calls queued behind a silent SEC would probe one
+   * at a time, 15 s each, and the last of N would wait about 45·N s (#173).
    */
-  private async admit(): Promise<Admission> {
+  private async admit(): Promise<Admission | UnansweredAttempt> {
     for (;;) {
       const gate = this.gate;
       if (gate.state === 'open') return { gate };
       if (gate.state === 'probing') {
-        await gate.settled;
+        const unanswered = await gate.settled;
+        if (unanswered) return unanswered;
         continue;
       }
       if (gate.reopensAt > Date.now()) throw this.cooldownRefusal();
 
-      const { promise: settled, resolve: settle } = Promise.withResolvers<void>();
+      const { promise: settled, resolve: settle } = Promise.withResolvers<
+        UnansweredAttempt | undefined
+      >();
       const probe: BlockGate = { state: 'probing', settled };
       this.gate = probe;
       return {
         gate: probe,
-        releaseProbe: (answered) => {
+        releaseProbe: (outcome) => {
           /**
            * A probe 429 has already closed the gate for a full cool-down. Any other
-           * reply means SEC is serving again; no reply at all (a network error)
-           * proves nothing, so the next call probes in its place.
+           * reply means SEC is serving again; no reply at all (a network error, or
+           * no headers within the per-attempt cap) proves nothing about the block,
+           * so the gate stays shut for the next call to probe in its place.
            */
           if (this.gate === probe) {
-            this.gate = answered ? OPEN_GATE : { state: 'closed', reopensAt: Date.now() };
+            this.gate =
+              outcome?.kind === 'answered' ? OPEN_GATE : { state: 'closed', reopensAt: Date.now() };
           }
-          settle();
+          settle(outcome?.kind === 'unanswered' ? outcome : undefined);
         },
       };
     }
@@ -1167,11 +1216,12 @@ class EdgarApiService {
   /**
    * Fetch company_tickers_mf.json (ETFs and mutual funds) as fund rows carrying
    * series and class IDs. Never throws: operating-company resolution must not
-   * depend on the fund file. A failed load — any HTTP failure, a malformed body,
-   * or the block gate's local refusal — returns no rows and a `retryAt`, so the
-   * index without funds stands for the retry window rather than the whole TTL
-   * (#119). The window is at least the error's `retryAfter`, so a load refused
-   * by the rate-limit gate is not retried until the cool-down ends.
+   * depend on the fund file. A failed load — any HTTP failure, no HTTP response
+   * at all (#173), a malformed body, or the block gate's local refusal — returns
+   * no rows and a `retryAt`, so the index without funds stands for the retry
+   * window rather than the whole TTL (#119). The window is at least the error's
+   * `retryAfter`, so a load refused by the rate-limit gate is not retried until
+   * the cool-down ends.
    */
   private async loadMfTickers(): Promise<FundSlice> {
     let retryAfterMs = 0;
@@ -1495,6 +1545,78 @@ export function pickPreferredTicker(a: CikMatch, b: CikMatch): CikMatch {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * One `fetch`, aborted when no response headers arrive within
+ * {@link ATTEMPT_HEADERS_TIMEOUT_MS}. The timer is cleared once `fetch` settles, so
+ * the body read is never bounded by it. `fetch` rejects with whatever reason the
+ * signal carries, so the abort is recognized by the reason's identity. A
+ * controller and `setTimeout` rather than `AbortSignal.timeout()`, as the
+ * framework's `fetchWithTimeout` does: the latter can fail on a realm mismatch
+ * under Bun.
+ */
+async function fetchUntilHeaders(url: string, headers: Record<string, string>): Promise<Attempt> {
+  const controller = new AbortController();
+  const deadline = new DOMException(
+    `No response headers within ${ATTEMPT_HEADERS_TIMEOUT_MS}ms.`,
+    'TimeoutError',
+  );
+  const timer = setTimeout(() => controller.abort(deadline), ATTEMPT_HEADERS_TIMEOUT_MS);
+  try {
+    const response = await globalThis.fetch(url, { headers, signal: controller.signal });
+    return { kind: 'answered', response };
+  } catch (rejection) {
+    return { kind: 'unanswered', rejection, timedOut: controller.signal.reason === deadline };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * The failure once the last attempt got no HTTP response (#173). The earlier
+ * attempts may have drawn a 5xx: a 503, a 502, then a reset ends here too, so
+ * the message claims only the last. Message and `data` are composed here from
+ * the host, the attempt count, and the last attempt's transport code or
+ * timeout: the runtime's own text is developer-facing (Bun's advice to pass
+ * `verbose: true`, its "Is the computer able to access the url?"), and Bun's
+ * rejection carries the full request URL on `path`. The rejection rides
+ * `cause`, which the log records and the caller never sees.
+ */
+function secUnreachable(url: string, last: UnansweredAttempt): McpError {
+  const host = new URL(url).hostname;
+  const ending = last.timedOut
+    ? `got no response headers within ${ATTEMPT_HEADERS_TIMEOUT_MS / 1000} s`
+    : `ended with ${transportCode(last.rejection) ?? 'a network error that carried no code'}`;
+  return serviceUnavailable(
+    `No HTTP response from SEC EDGAR (${host}) on the last of ${MAX_RETRIES} attempts, which ${ending}.`,
+    {
+      reason: SEC_UNREACHABLE_REASON,
+      retryable: true,
+      url,
+      recovery: {
+        hint: `SEC EDGAR (${host}) sent no HTTP response to the last attempt — a network failure between this server and SEC, not a problem with the request. Retry the same call in a minute.`,
+      },
+    },
+    { cause: last.rejection },
+  );
+}
+
+/** An identifier-shaped transport code: `ECONNRESET`, `EAI_AGAIN`, `UND_ERR_CONNECT_TIMEOUT`. */
+const TRANSPORT_CODE = /^[A-Za-z][A-Za-z0-9_]*$/;
+
+/**
+ * The transport code on a `fetch` rejection. Bun sets it on the rejection itself
+ * (`code: 'ECONNRESET'`, no `cause`); Node's undici rejects with
+ * `TypeError('fetch failed')` and sets it on `cause`. Read from the field, never
+ * the message, whose wording differs by runtime and version.
+ */
+function transportCode(rejection: unknown): string | undefined {
+  const codeOf = (value: unknown) => {
+    const code = typeof value === 'object' && value !== null && 'code' in value && value.code;
+    return typeof code === 'string' && TRANSPORT_CODE.test(code) ? code : undefined;
+  };
+  return codeOf(rejection) ?? (rejection instanceof Error ? codeOf(rejection.cause) : undefined);
 }
 
 // Init/accessor pattern

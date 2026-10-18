@@ -3,8 +3,10 @@
  * that reaches SEC declares the reason on its contract, and a call made during
  * SEC's rate-limit block arrives on both client surfaces — `structuredContent`
  * and `content[]` — with the same reason whether SEC answered the 429 or the
- * server refused the call without sending it. Driven through `runToolContract`
- * over the real `EdgarApiService` with `globalThis.fetch` stubbed.
+ * server refused the call without sending it. The same tools declare
+ * `sec_unreachable`, the failure once the last of three attempts gets no HTTP
+ * response (#173). Driven through `runToolContract` over the real `EdgarApiService` with
+ * `globalThis.fetch` stubbed.
  * @module tests/mcp-server/tools/rate-limit-contract
  */
 
@@ -59,6 +61,95 @@ describe('rate_limited on the tool contracts (#116)', () => {
         thrownBy: 'service',
       });
     }
+  });
+});
+
+describe('sec_unreachable on the tool contracts (#173)', () => {
+  it('is declared by exactly the tools that declare rate_limited', () => {
+    const defs = buildToolDefinitions({ dropEnabled: true });
+    const declaring = (reason: string) =>
+      defs.filter((def) => def.errors?.some((e) => e.reason === reason)).map((def) => def.name);
+
+    expect(declaring('rate_limited').length).toBeGreaterThan(0);
+    expect(declaring('sec_unreachable')).toEqual(declaring('rate_limited'));
+    for (const def of defs) {
+      const entry = def.errors?.find((e) => e.reason === 'sec_unreachable');
+      if (!entry) continue;
+      expect(entry, def.name).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        retryable: true,
+        thrownBy: 'service',
+      });
+    }
+  });
+
+  // A 503, a 502, then a reset ends here too, so the text claims only the last attempt.
+  it('says the same of every ladder that ends this way, in one string on every tool', () => {
+    const whens = buildToolDefinitions({ dropEnabled: true }).flatMap(
+      (def) => def.errors?.filter((e) => e.reason === 'sec_unreachable').map((e) => e.when) ?? [],
+    );
+    expect(whens).toHaveLength(13);
+    expect(new Set(whens)).toEqual(
+      new Set([
+        'The last of three attempts to reach SEC EDGAR got no HTTP response — the connection failed, or no response headers arrived within 15 seconds',
+      ]),
+    );
+  });
+});
+
+describe('a call SEC never answers (#173)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('unmocked fetch')));
+    initEdgarApiService();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('fails as sec_unreachable on both surfaces after three attempts, with none of the runtime’s text', async () => {
+    // Bun 1.4.3's own rejection for a reset connection, the request URL on `path`.
+    const fetchMock = vi.fn(async (url: string) => {
+      throw Object.assign(
+        new TypeError(
+          'ECONNRESET: The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()',
+        ),
+        { code: 'ECONNRESET', errno: 0, path: url },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pending = runToolContract(companySearchTool, { query: 'AAPL' });
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await pending;
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.isError).toBe(true);
+    const message =
+      'No HTTP response from SEC EDGAR (www.sec.gov) on the last of 3 attempts, which ended with ECONNRESET.';
+    const hint =
+      'SEC EDGAR (www.sec.gov) sent no HTTP response to the last attempt — a network failure between this server and SEC, not a problem with the request. Retry the same call in a minute.';
+    expect(envelope(result)).toEqual({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message,
+      data: {
+        reason: 'sec_unreachable',
+        retryable: true,
+        url: 'https://www.sec.gov/files/company_tickers.json',
+        recovery: { hint },
+      },
+    });
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: `Error: ${message}\n\nRecovery: ${hint}\n\n(reason sec_unreachable · retryable)`,
+      },
+    ]);
+    const wire = JSON.stringify(result);
+    expect(wire).not.toContain('verbose');
+    expect(wire).not.toContain('socket connection');
   });
 });
 
