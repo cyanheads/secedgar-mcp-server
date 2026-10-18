@@ -46,7 +46,10 @@ vi.mock('@/services/edgar/filing-to-text.js', async (importOriginal) => {
     // make the mock an incomplete surface of the module under test.
     foldForHeadingMatch: actual.foldForHeadingMatch,
     headingKey: actual.headingKey,
-    findSectionLine: actual.findSectionLine,
+    MARKER_TITLE_RE: actual.MARKER_TITLE_RE,
+    withoutSubItemLabel: actual.withoutSubItemLabel,
+    isTocHeading: actual.isTocHeading,
+    matchSectionLine: actual.matchSectionLine,
   };
 });
 

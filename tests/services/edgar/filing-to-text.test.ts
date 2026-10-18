@@ -18,8 +18,12 @@ import {
   foldForHeadingMatch,
   getExtractCache,
   hasExtractCache,
+  headingKey,
+  isTocHeading,
+  matchSectionLine,
   setExtractCache,
   windowText,
+  withoutSubItemLabel,
 } from '@/services/edgar/filing-to-text.js';
 import { at } from '../../support/assertions.js';
 
@@ -706,16 +710,53 @@ describe('detectHeadings — a wrapped sentence that starts a line with an Item 
   });
 });
 
-describe('detectHeadings — heading scans stay linear on long lines (#136)', () => {
-  const cpuMs = (text: string): number => {
+/** `unit` repeated to at least `chars` characters. */
+const fill = (unit: string, chars: number) => unit.repeat(Math.ceil(chars / unit.length));
+
+/**
+ * Thread CPU milliseconds `run` takes, best of three: wall clock is noise under a
+ * parallel suite, and one scheduler hiccup cannot fail a bound.
+ */
+function bestOf3CpuMs(run: () => unknown): number {
+  const cpuMs = () => {
     const start = process.threadCpuUsage();
-    detectHeadings(text);
+    run();
     const used = process.threadCpuUsage(start);
     return (used.user + used.system) / 1000;
   };
-  const bestOf3 = (text: string) => Math.min(cpuMs(text), cpuMs(text), cpuMs(text));
-  const fill = (unit: string, chars: number) => unit.repeat(Math.ceil(chars / unit.length));
+  return Math.min(cpuMs(), cpuMs(), cpuMs());
+}
 
+/**
+ * Asserts that `run` stays linear over `build(n)`. Doubles n from 5,000 to
+ * `maxChars`, checking `boundMs` of thread CPU at each size before building the
+ * next, so a quadratic shape fails in seconds instead of hanging the suite, then
+ * holds the full-span ratio under four times the span: 256 over 5k → 320k, 64
+ * over 5k → 80k, where a quadratic scan reaches the span squared.
+ */
+function expectLinear(
+  run: (text: string) => unknown,
+  build: (n: number) => string,
+  maxChars: number,
+  boundMs: number,
+): void {
+  const small = build(5_000);
+  run(small); // warm the JIT
+  // Floored so a sub-millisecond baseline cannot inflate the ratio on noise.
+  const t5k = Math.max(
+    bestOf3CpuMs(() => run(small)),
+    0.25,
+  );
+  let last = t5k;
+  for (let n = 10_000; n <= maxChars; n *= 2) {
+    const text = build(n);
+    last = bestOf3CpuMs(() => run(text));
+    expect(last, `${n} characters`).toBeLessThan(boundMs);
+  }
+  expect(last / t5k).toBeLessThan((4 * maxChars) / 5_000);
+}
+
+describe('detectHeadings — heading scans stay linear on long lines (#136)', () => {
   it.each([
     ['wrapped Item lines under prose lines', (n: number) => fill('see\nItem 1 Business\n', n)],
     [
@@ -723,20 +764,14 @@ describe('detectHeadings — heading scans stay linear on long lines (#136)', ()
       (n: number) => `${'a'.repeat(n)}\nItem 1 Business\n`,
     ],
     ['an Item marker before a long whitespace run', (n: number) => `Item 1${' '.repeat(n)}X\n`],
-    // The page-number strip and the all-caps arm each went quadratic on these.
+    // The page-number strip went quadratic on this one; the all-caps arm's form
+    // ending lowercase is timed with the #165/#170 scans.
     ['an all-caps line with a long whitespace run', (n: number) => `ABCDEFGHIJ${' '.repeat(n)}X\n`],
-    [
-      'an all-caps start, a long whitespace run, then lowercase',
-      (n: number) => `ABCDEFGHIJ${' '.repeat(n)}x\n`,
-    ],
-  ])('%s', (_label, build) => {
-    detectHeadings(build(5_000)); // warm the JIT
-    const t5k = Math.max(bestOf3(build(5_000)), 0.25);
-    bestOf3(build(20_000));
-    const t80k = bestOf3(build(80_000));
-
-    expect(t80k / t5k).toBeLessThan(64);
-    expect(t80k).toBeLessThan(200);
+    ['one ITEM line holding a long digit run', (n: number) => `ITEM ${'1'.repeat(n)}\ny`],
+    ['one long line ending in a break', (n: number) => `${fill('§1 x', n)}\ny`],
+    ['breaks throughout', (n: number) => fill('  \r\n', n)],
+  ])('%s (5k → 320k)', (_label, build) => {
+    expectLinear(detectHeadings, build, 320_000, 200);
   });
 });
 
@@ -1227,7 +1262,7 @@ describe('detectHeadings — an all-caps line is a heading only within the title
     }
   });
 
-  const NBSP = ' ';
+  const NBSP = ' ';
   /**
    * The shape of Amazon's 8-K 0001104659-26-107526: the whole table of contents
    * on one line, each row's page cell, then the exhibit list.
@@ -1240,7 +1275,7 @@ describe('detectHeadings — an all-caps line is a heading only within the title
     `${NBSP} ${NBSP} EXHIBIT 4.1`,
     `${NBSP} ${NBSP} EXHIBIT 4.2`,
     `${NBSP} ${NBSP} EXHIBIT 23.1 ${NBSP}`,
-  ].join(` ${NBSP} ${NBSP} `);
+  ].join(`${NBSP} ${NBSP} ${NBSP}`);
 
   it.each([
     [
@@ -1251,7 +1286,10 @@ describe('detectHeadings — an all-caps line is a heading only within the title
     ['one Item marker and a page cell mid-line', 'ITEM 8.01. OTHER EVENTS. 3     SIGNATURES 4'],
     ['a mixed-case row and a page cell mid-line', 'Item 8.01 Other Events  1     Signatures  2'],
   ])('leaves out an Item line that runs a table of contents together: %s', (_label, line) => {
-    expect(detectHeadings(`Preceding paragraph.\n\n${line}\n\nFollowing paragraph.\n`)).toEqual([]);
+    const text = `Preceding paragraph.\n\n${line}\n\nSIGNATURES\n`;
+    expect(detectHeadings(text)).toEqual([
+      { heading: 'SIGNATURES', offset: text.lastIndexOf('SIGNATURES') },
+    ]);
   });
 
   it('lands get_filing "item 8" and "item 9" on the body Items past a run-together TOC line', async () => {
@@ -1260,8 +1298,6 @@ describe('detectHeadings — an all-caps line is a heading only within the title
       'TABLE OF CONTENTS',
       '',
       AMAZON_TOC,
-      '',
-      '2',
       '',
       'ITEM 8.01. OTHER EVENTS.',
       '',
@@ -1438,7 +1474,7 @@ describe('detectHeadings — a trailing number is dropped only as a page cell (#
     ]);
   });
 
-  const NBSP = ' ';
+  const NBSP = ' ';
   /**
    * The shape of First Bancorp's 8-K 0000765207-26-000110: TOC rows whose page
    * cell reads "Page 1" after an NBSP run, then the body Items.
@@ -1514,16 +1550,170 @@ describe('detectHeadings — a trailing number is dropped only as a page cell (#
   });
 });
 
-describe('detectHeadings — the widened heading scans stay linear (#165, #170)', () => {
-  const cpuMs = (text: string): number => {
-    const start = process.threadCpuUsage();
-    detectHeadings(text);
-    const used = process.threadCpuUsage(start);
-    return (used.user + used.system) / 1000;
-  };
-  const bestOf3 = (text: string) => Math.min(cpuMs(text), cpuMs(text), cpuMs(text));
-  const fill = (unit: string, chars: number) => unit.repeat(Math.ceil(chars / unit.length));
+describe('detectHeadings — a same-line Item heading that opens on one NBSP (#176)', () => {
+  const NBSP = ' ';
+  const TITLE_101 = 'Item 1.01. Entry into a Material Definitive Agreement.';
+  /**
+   * The shape of Horizon Space's 8-K 0001929980-26-000542: NBSP spacer lines,
+   * then an Item 1.01 line whose extracted text opens on a stray NBSP, while the
+   * later Items open on the marker.
+   */
+  const HSPO_8K = [
+    'CURRENT REPORT',
+    '',
+    'Check the appropriate box below. ☐',
+    '',
+    NBSP,
+    '',
+    `${NBSP}${TITLE_101}`,
+    '',
+    NBSP,
+    '',
+    'Business Combination Agreement',
+    '',
+    'On October 12, 2026, the company entered into a business combination agreement.',
+    '',
+    'Item 7.01 Regulation FD Disclosure.',
+    '',
+    'On October 12, 2026, the company issued a joint press release.',
+    '',
+    'Item 9.01 Financial Statements and Exhibits.',
+    '',
+    'SIGNATURES',
+    '',
+  ].join('\n');
 
+  it('lists the Item at its marker, not at the NBSP', () => {
+    expect(detectHeadings(HSPO_8K)).toEqual([
+      { heading: 'CURRENT REPORT', offset: 0 },
+      { heading: TITLE_101, offset: HSPO_8K.indexOf(TITLE_101) },
+      {
+        heading: 'Item 7.01 Regulation FD Disclosure.',
+        offset: HSPO_8K.indexOf('Item 7.01'),
+      },
+      {
+        heading: 'Item 9.01 Financial Statements and Exhibits.',
+        offset: HSPO_8K.indexOf('Item 9.01'),
+      },
+      { heading: 'SIGNATURES', offset: HSPO_8K.indexOf('SIGNATURES') },
+    ]);
+    expect(HSPO_8K.charAt(HSPO_8K.indexOf(TITLE_101) - 1)).toBe(NBSP);
+  });
+
+  it.each([
+    ['both Item arms match', 'ITEM 1.01. ENTRY INTO A MATERIAL DEFINITIVE AGREEMENT.'],
+    // A parenthesized code fails the mixed-case arm, so only the all-caps arm reads this line.
+    [
+      'only the all-caps arm matches',
+      'ITEM 7(A). QUANTITATIVE AND QUALITATIVE DISCLOSURES ABOUT MARKET RISK',
+    ],
+  ])('lists an all-caps NBSP-led Item line that %s once, at its marker', (_label, line) => {
+    const text = `Cover prose.\n\n${NBSP}${line}\n\nAgreement prose.\n`;
+    expect(detectHeadings(text)).toEqual([{ heading: line, offset: text.indexOf(line) }]);
+  });
+
+  // Characterization: what stays out — the pre-change patterns detect none of
+  // these lines, and the NBSP exception leaves them out too.
+  it.each([
+    [
+      'a bare mixed-case marker',
+      `${NBSP}Item 2.02.\n\nResults of Operations and Financial Condition`,
+    ],
+    ['a bare all-caps marker', `${NBSP}ITEM 2.02\n\nResults of Operations and Financial Condition`],
+    ['a bare all-caps marker over a page cell', `${NBSP}ITEM 1.    3`],
+    ['a Part line', `${NBSP}Part I`],
+    ['a titled all-caps Part line', `${NBSP}PART II — OTHER INFORMATION`],
+    ['an all-caps line', `${NBSP}RISK FACTORS`],
+    ['an Item indented by an ASCII space', ` ${TITLE_101}`],
+    ['an Item indented by two NBSPs', `${NBSP}${NBSP}${TITLE_101}`],
+    ['a tab-indented Item', `\t${TITLE_101}`],
+    [
+      'a wrapped cross-reference under a comma line',
+      `see the discussion in Part II,\n${NBSP}Item 8 Financial Statements and Supplementary Data`,
+    ],
+    [
+      'an unpunctuated marker before a lowercase word',
+      `${NBSP}Item 1 is the election of directors.`,
+    ],
+  ])('leaves out %s', (_label, lines) => {
+    const text = `Cover prose.\n\n${lines}\n\nSIGNATURES\n`;
+    expect(detectHeadings(text)).toEqual([
+      { heading: 'SIGNATURES', offset: text.indexOf('SIGNATURES') },
+    ]);
+  });
+
+  it('lands get_filing section "item 1.01" on the marker with no line notice, and lists it in the outline', async () => {
+    const accession = '0001929980-26-000542';
+    serveTextFiling(accession, '8-K', `${HSPO_8K}${'Closing prose. '.repeat(80)}\n`);
+
+    const landing = await runToolContract(getFilingTool, {
+      accession_number: accession,
+      cik: '1946021',
+      section: 'item 1.01',
+    });
+    expect(landing.isError).toBeFalsy();
+    const sc = landing.structuredContent as { content: string; notice?: string };
+    expect(sc.content.startsWith(`${TITLE_101}\n`)).toBe(true);
+    expect(sc.notice).toBeUndefined();
+    expect(contentText(landing)).toContain(`${TITLE_101}\n\n${NBSP}\n\nBusiness Combination`);
+
+    const firstPage = await runToolContract(getFilingTool, {
+      accession_number: accession,
+      cik: '1946021',
+      content_limit: 1000,
+    });
+    const outline = (
+      firstPage.structuredContent as { outline: Array<{ heading: string; offset: number }> }
+    ).outline;
+    expect(outline.map((h) => h.heading)).toEqual([
+      'CURRENT REPORT',
+      TITLE_101,
+      'Item 7.01 Regulation FD Disclosure.',
+      'Item 9.01 Financial Statements and Exhibits.',
+      'SIGNATURES',
+    ]);
+    const rendered = contentText(firstPage).split('--- BEGIN SEC FILING CONTENT')[0] ?? '';
+    const entry = at(outline, 1);
+    expect(rendered).toContain(`  [${entry.offset}] ${TITLE_101}\n`);
+
+    // The outline offset, passed as offset, starts the page on the marker.
+    const fromOutline = await runToolContract(getFilingTool, {
+      accession_number: accession,
+      cik: '1946021',
+      offset: entry.offset,
+    });
+    const page = (fromOutline.structuredContent as { content: string }).content;
+    expect(page.startsWith(`${TITLE_101}\n`)).toBe(true);
+  });
+});
+
+describe('detectHeadings — the NBSP-led Item scans stay linear (#176)', () => {
+  const NBSP = ' ';
+
+  // A long digit run never crosses Bun's slower regex mode, so it carries the full 64× span.
+  it('one NBSP-led all-caps ITEM line holding a long digit run (5k → 320k)', () => {
+    expectLinear(detectHeadings, (n) => `${NBSP}ITEM ${'1'.repeat(n)}\ny`, 320_000, 400);
+  });
+
+  it.each([
+    [
+      'one long NBSP-led Item line ending in a break',
+      (n: number) => `${NBSP}Item 1 ${fill('§1 x', n)}\ny`,
+    ],
+    ['one long NBSP-led all-caps ITEM line', (n: number) => `${NBSP}ITEM 1 ${fill('WORD ', n)}\ny`],
+    [
+      'an NBSP-led marker before a long whitespace run',
+      (n: number) => `${NBSP}Item 1${' '.repeat(n)}X\n`,
+    ],
+    ['NBSP lines throughout', (n: number) => fill(`${NBSP}\r\n`, n)],
+    ['NBSP-led Item lines throughout', (n: number) => fill(`${NBSP}Item 1.01 X\r\n`, n)],
+    ['NBSP-led Part lines throughout', (n: number) => fill(`${NBSP}Part II —  \r\n`, n)],
+  ])('%s (5k → 80k)', (_label, build) => {
+    expectLinear(detectHeadings, build, 80_000, 200);
+  });
+});
+
+describe('detectHeadings — the widened heading scans stay linear (#165, #170)', () => {
   it.each([
     ['a dotted marker before a long whitespace run', (n: number) => `Item 5.02${' '.repeat(n)}1\n`],
     [
@@ -1579,14 +1769,7 @@ describe('detectHeadings — the widened heading scans stay linear (#165, #170)'
       (n: number) => `RISK FACTORS  Page${' '.repeat(n)}x\n`,
     ],
   ])('%s', (_label, build) => {
-    detectHeadings(build(5_000)); // warm the JIT
-    const t5k = Math.max(bestOf3(build(5_000)), 0.25);
-    bestOf3(build(20_000));
-    bestOf3(build(80_000));
-    const t320k = bestOf3(build(320_000));
-
-    expect(t320k / t5k).toBeLessThan(256);
-    expect(t320k).toBeLessThan(800);
+    expectLinear(detectHeadings, build, 320_000, 800);
   });
 
   // The all-caps arm alternated its class with `[^\S\n]` under one quantifier,
@@ -1603,14 +1786,7 @@ describe('detectHeadings — the widened heading scans stay linear (#165, #170)'
       (n: number) => `ABCDEFGHIJ${' '.repeat(n)}x\n`,
     ],
   ])('%s stays flat past 100,000 characters', (_label, build) => {
-    detectHeadings(build(5_000)); // warm the JIT
-    const t5k = Math.max(bestOf3(build(5_000)), 0.25);
-    bestOf3(build(20_000));
-    bestOf3(build(80_000));
-    const t320k = bestOf3(build(320_000));
-
-    expect(t320k / t5k).toBeLessThan(256);
-    expect(t320k).toBeLessThan(20);
+    expectLinear(detectHeadings, build, 320_000, 20);
   });
 });
 
@@ -1642,6 +1818,63 @@ describe('foldForHeadingMatch (#106)', () => {
       true,
     );
     expect(foldForHeadingMatch(heading).includes(foldForHeadingMatch('item 8'))).toBe(false);
+  });
+});
+
+describe('headingKey — the separator between a marker and its title (#174)', () => {
+  const NBSP = ' ';
+
+  it.each([
+    ['a period', 'Item 1A. Risk Factors'],
+    ['a period and an en dash', 'Item 1A. – Risk Factors'],
+    ['an em dash', 'ITEM 1A — RISK FACTORS'],
+    ['a hyphen', 'Item 1A - Risk Factors'],
+    ['a colon', 'Item 1A: Risk Factors'],
+    ['a period and an NBSP run', `Item 1A.${NBSP}${NBSP}Risk Factors.`],
+  ])(
+    'keys an Item marker and its title past %s as the marker, one space, the title',
+    (_label, heading) => {
+      expect(headingKey(heading)).toBe('item 1a risk factors');
+    },
+  );
+
+  it.each([
+    ['PART II. OTHER INFORMATION', 'part ii other information'],
+    ['Part II — Other Information', 'part ii other information'],
+    [
+      'Item 9.01. Financial Statements and Exhibits.',
+      'item 9.01 financial statements and exhibits',
+    ],
+    ['Item 9.01(d).    Exhibits', 'item 9.01(d) exhibits'],
+  ])('keys %s as %s', (heading, key) => {
+    expect(headingKey(heading)).toBe(key);
+  });
+
+  // Characterization: a key with no separator to fold, a bare marker, and a
+  // heading with no marker keep the key they had.
+  it.each([
+    ['Item 1A Risk Factors', 'item 1a risk factors'],
+    ['ITEM 3.', 'item 3'],
+    ['Part II', 'part ii'],
+    ['Item 9.01(d).', 'item 9.01(d)'],
+    ['RISK FACTORS.', 'risk factors'],
+    ['3D. RISK FACTORS', '3d. risk factors'],
+    ['Items 1 and 2. Business and Properties', 'items 1 and 2. business and properties'],
+  ])('keeps the key of %s', (heading, key) => {
+    expect(headingKey(heading)).toBe(key);
+  });
+
+  it('dedups a TOC Item against its body Item when only the separator differs', () => {
+    // The shape of Worthington Steel's 10-Q 0001968487-26-000036.
+    const text =
+      `Item 1A.\n\nRisk Factors\n\n${NBSP}\n\n56\n\n${NBSP}\n\nItem 2.\n\nUse of Proceeds\n\n${NBSP}\n\n57\n\n` +
+      '----------------------------------------\n\n' +
+      'Item 1A. – Risk Factors\n\nThe following information supplements the risk factors.\n\n' +
+      'Item 2. – Use of Proceeds\n\nNone.\n';
+    expect(detectHeadings(text)).toEqual([
+      { heading: 'Item 1A. – Risk Factors', offset: text.indexOf('Item 1A. –') },
+      { heading: 'Item 2. – Use of Proceeds', offset: text.indexOf('Item 2. –') },
+    ]);
   });
 });
 
@@ -1680,6 +1913,20 @@ describe('findSectionLine — a section the outline omits, by the document’s o
       'The market for our products is competitive.',
     );
     expect(findSectionLine(text, 'Competition')).toBe(text.lastIndexOf('Competition'));
+  });
+
+  it('says whether the line it lands on equals the needle or only starts with it (#177)', () => {
+    const prefixOnly = body('Prose.', 'Human Capital Management', 'Our people.');
+    const both = body('Human Capital Management', 'Prose.', 'Human Capital', 'Our people.');
+    expect(matchSectionLine(prefixOnly, 'human capital')).toEqual({
+      offset: prefixOnly.indexOf('Human Capital Management'),
+      equal: false,
+    });
+    expect(matchSectionLine(both, 'human capital')).toEqual({
+      offset: both.indexOf('Human Capital\n'),
+      equal: true,
+    });
+    expect(matchSectionLine(prefixOnly, 'segment information')).toBe(undefined);
   });
 
   it('never takes a lowercase line in the prefix tier — the equal heading wins over the bullet', () => {
@@ -1793,7 +2040,7 @@ describe('findSectionLine — a section the outline omits, by the document’s o
 });
 
 describe('findSectionLine — no landing on a TOC row, a cross-reference, or a longer title (#166)', () => {
-  const NBSP = ' ';
+  const NBSP = ' ';
   const body = (...lines: string[]) => `${lines.join('\n')}\n`;
 
   it('skips a TOC Part row whose Item row below it ends in a page cell', () => {
@@ -1981,17 +2228,173 @@ describe('findSectionLine — no landing on a TOC row, a cross-reference, or a l
   });
 });
 
-describe('findSectionLine — the whole-document scan stays linear (#166)', () => {
-  const cpuMs = (text: string, section: string): number => {
-    const start = process.threadCpuUsage();
-    findSectionLine(text, section);
-    const used = process.threadCpuUsage(start);
-    return (used.user + used.system) / 1000;
+describe('isTocHeading — a detected heading on a table-of-contents row (#174)', () => {
+  const NBSP = ' ';
+  /** The detected heading whose text is `heading`, from the real detector. */
+  const detected = (text: string, heading: string) => {
+    const hit = detectHeadings(text).find((h) => h.heading === heading);
+    if (hit === undefined) throw new Error(`not detected: ${heading}`);
+    return hit;
   };
-  const bestOf3 = (text: string, section: string) =>
-    Math.min(cpuMs(text, section), cpuMs(text, section), cpuMs(text, section));
-  const fill = (unit: string, chars: number) => unit.repeat(Math.ceil(chars / unit.length));
 
+  it('flags a same-line Item heading whose row ends in a page cell', () => {
+    // The shape of First Bancorp's 8-K 0000765207-26-000110.
+    const text =
+      'Item 9.01 Financial Statements and Exhibits.        Page 1\n\n\nSignatures        Page 2\n\n' +
+      '----------------------------------------\n\n' +
+      'Item 9.01 Financial Statements, Pro Forma Financial Information and Exhibits.\n\n(d) Exhibits.\n';
+    expect(isTocHeading(text, detected(text, 'Item 9.01 Financial Statements and Exhibits.'))).toBe(
+      true,
+    );
+    const body = 'Item 9.01 Financial Statements, Pro Forma Financial Information and Exhibits.';
+    expect(isTocHeading(text, detected(text, body))).toBe(false);
+  });
+
+  it('flags a bare all-caps marker over a title cell and a page cell', () => {
+    // The shape of DRDGOLD's 20-F 0001628280-26-064355: one TOC cell per line.
+    const text =
+      'ITEM 3.\nKEY INFORMATION\n6\n3A.\n[Reserved]\n6\n\n' +
+      'ITEM 3. KEY INFORMATION\n\n3A. [Reserved]\n\nNot applicable.\n';
+    expect(isTocHeading(text, detected(text, 'ITEM 3.'))).toBe(true);
+    expect(isTocHeading(text, detected(text, 'ITEM 3. KEY INFORMATION'))).toBe(false);
+  });
+
+  it('flags a marker joined to a title whose page cell sits below spacer lines', () => {
+    // The shape of Worthington Steel's 10-Q 0001968487-26-000036.
+    const text = `Item 1A.\n\nRisk Factors\n\n${NBSP}\n\n56\n\n${NBSP}\n\nItem 2.\n\nUse of Proceeds\n\n57\n`;
+    const toc = { heading: 'Item 1A. Risk Factors', offset: 0 };
+    expect(detectHeadings(text)).toContainEqual(toc);
+    expect(isTocHeading(text, toc)).toBe(true);
+    const bodyText = 'Item 1A.\n\nRisk Factors\n\nThe following information supplements…\n';
+    expect(isTocHeading(bodyText, detected(bodyText, 'Item 1A. Risk Factors'))).toBe(false);
+  });
+
+  it('flags a TOC title that wraps onto a line ending in its page cell', () => {
+    // The shape of Aware's 2005 plain-text 10-K 0001188112-05-000453.
+    const title =
+      "Item 5.     Market for Registrant's Common Equity, Related Stockholder Matters and Issuer Purchases";
+    const text = `${title}\n            of Equity Securities.......................  12\nItem 6.     Selected Financial Data........  12\n`;
+    expect(isTocHeading(text, detected(text, title))).toBe(true);
+  });
+
+  // Characterization: a body heading set over a page number reads as a TOC row —
+  // `section` still lands on it when nothing else in its tier matches.
+  it('flags a body heading set directly over a page number', () => {
+    // The shape of CCC's 10-K 0000950170-25-026848 at its Item 6.
+    const text = `Index prose.\n\n${NBSP}\n\nItem 6. Reserved.\n\n36\n\n----------------------------------------\n`;
+    expect(isTocHeading(text, detected(text, 'Item 6. Reserved.'))).toBe(true);
+  });
+
+  it('judges an NBSP-led Item heading (#176) on its own row, from the marker offset', () => {
+    const toc = `Intro.\n${NBSP}Item 1.01. Entry into a Material Definitive Agreement.      3\n`;
+    const body = `Intro.\n${NBSP}Item 1.01. Entry into a Material Definitive Agreement.\n\nThe Company entered…\n`;
+    const heading = 'Item 1.01. Entry into a Material Definitive Agreement.';
+    expect(detected(toc, heading).offset).toBe(toc.indexOf('Item 1.01.'));
+    expect(isTocHeading(toc, detected(toc, heading))).toBe(true);
+    expect(isTocHeading(body, detected(body, heading))).toBe(false);
+  });
+
+  it.each([
+    ['a heading on the last line', 'Prose.\n\nRISK FACTORS', 'RISK FACTORS'],
+    ['a bare marker with nothing after it', 'Prose.\n\nPART II\n', 'PART II'],
+  ])('answers false for %s', (_label, text, heading) => {
+    expect(isTocHeading(text, detected(text, heading))).toBe(false);
+  });
+});
+
+describe('withoutSubItemLabel — a leading 20-F sub-item label on a folded key (#175)', () => {
+  it.each([
+    ['3d. risk factors', 'risk factors'],
+    ['12a. other matters', 'other matters'],
+    ['b. business overview', 'business overview'],
+    ['l. john doerr', 'john doerr'],
+    ['a. c. markkula, jr', 'c. markkula, jr'],
+  ])('strips the label from %s', (key, unlabelled) => {
+    expect(withoutSubItemLabel(key)).toBe(unlabelled);
+  });
+
+  it.each([
+    ['item 3. key information'],
+    ['123a. three digits'],
+    ['ab. two letters'],
+    ['3d.risk factors'],
+    ['3. a bare number'],
+    ['note 3d. a label mid-key'],
+    ['risk factors'],
+  ])('leaves %s alone', (key) => {
+    expect(withoutSubItemLabel(key)).toBe(undefined);
+  });
+});
+
+describe('findSectionLine — a line carrying a leading 20-F sub-item label (#175)', () => {
+  const NBSP = ' ';
+  const body = (...lines: string[]) => `${lines.join('\n')}\n`;
+
+  it.each([
+    ['a digit-led label', '3D. RISK FACTORS', 'risk factors'],
+    ['a letter label', 'B. Business Overview', 'business overview'],
+    ['a label set off by NBSPs', `3D.${NBSP}${NBSP}Risk Factors`, 'Risk Factors'],
+  ])('lands on a line equal to the value past %s, at the label', (_label, line, section) => {
+    const text = body(
+      'Not applicable.',
+      '',
+      line,
+      'In conducting our business, we face many risks.',
+    );
+    expect(matchSectionLine(text, section)).toEqual({ offset: text.indexOf(line), equal: true });
+  });
+
+  it('lands a several-word value on a labelled line it starts', () => {
+    const text = body('Prose.', 'D. Risk Factors Relating to Our Industry', 'Risks follow.');
+    expect(matchSectionLine(text, 'risk factors')).toEqual({
+      offset: text.indexOf('D. Risk'),
+      equal: false,
+    });
+  });
+
+  it('skips a labelled TOC row, landing on the labelled body line', () => {
+    const text = body(
+      '3D. Risk Factors      6',
+      '3E. Other Matters      9',
+      'Prose.',
+      '3D. RISK FACTORS',
+      'In conducting our business, we face many risks.',
+    );
+    expect(findSectionLine(text, 'risk factors')).toBe(text.indexOf('3D. RISK'));
+  });
+
+  it('judges the one-word rule on the line after its label', () => {
+    // Regencell's 20-F 0001213900-26-107581 prints "B. Business Overview": a
+    // longer Title Case title, so `business` misses there, while a lowercase
+    // continuation keeps a one-word value's prefix landing.
+    const regencell = body('Prose.', 'B. Business Overview', 'Our Business Plan', 'Our goal…');
+    expect(findSectionLine(regencell, 'business')).toBe(undefined);
+    const text = body('Prose.', 'C. Competition in our markets', 'We compete with large vendors.');
+    expect(matchSectionLine(text, 'competition')).toEqual({
+      offset: text.indexOf('C. Competition'),
+      equal: false,
+    });
+  });
+
+  it('matches a line opening on an initial only by the rest of the line', () => {
+    const text = body('Directors', 'L. John Doerr', 'Director since 2009.');
+    expect(findSectionLine(text, 'john doerr')).toBe(text.indexOf('L. John'));
+    expect(findSectionLine(text, 'john')).toBe(undefined);
+    expect(findSectionLine(text, 'doerr')).toBe(undefined);
+  });
+
+  // Characterization: the value is compared as given, so a labelled value still
+  // matches its own line, and a label never strips from the value's side.
+  it('matches a labelled value against its own line, and never strips the value', () => {
+    const text = body('Prose.', '3D. RISK FACTORS', 'Risks follow.');
+    expect(findSectionLine(text, '3D. RISK FACTORS')).toBe(text.indexOf('3D.'));
+    expect(findSectionLine(body('Prose.', 'Risk Factors', 'Risks.'), 'D. Risk Factors')).toBe(
+      undefined,
+    );
+  });
+});
+
+describe('findSectionLine — the whole-document scan stays linear (#166)', () => {
   it.each([
     ['one line with no newline', (n: number) => fill('Competitor ', n)],
     ['many short lines, each a near miss', (n: number) => fill('Competitor\n', n)],
@@ -2037,14 +2440,54 @@ describe('findSectionLine — the whole-document scan stays linear (#166)', () =
       (n: number) => `Competition  Page${' '.repeat(n)}1x\n`,
     ],
   ])('%s', (_label, build) => {
-    findSectionLine(build(5_000), 'Competition'); // warm the JIT
-    const t5k = Math.max(bestOf3(build(5_000), 'Competition'), 0.25);
-    bestOf3(build(20_000), 'Competition');
-    bestOf3(build(80_000), 'Competition');
-    const t320k = bestOf3(build(320_000), 'Competition');
+    expectLinear((text) => findSectionLine(text, 'Competition'), build, 320_000, 200);
+  });
+});
 
-    expect(t320k / t5k).toBeLessThan(256);
-    expect(t320k).toBeLessThan(200);
+describe('the heading key, the label strip, and the TOC-row test stay linear (#174, #175)', () => {
+  const NBSP = ' ';
+  const lineScan = (text: string) => findSectionLine(text, 'risk factors');
+
+  // A long digit run never crosses Bun's slower regex mode, so it carries the full 64× span.
+  it('a line scan over an Item line holding a long digit run (5k → 320k)', () => {
+    expectLinear(lineScan, (n) => `Item 1. ${'1'.repeat(n)}\ny`, 320_000, 200);
+  });
+
+  it.each([
+    ['one long line ending in a break', (n: number) => `${fill('§1 x', n)}\ny`],
+    ['breaks throughout', (n: number) => fill('  \r\n', n)],
+    ['a long run of periods, then a letter', (n: number) => `${'.'.repeat(n)}x\n`],
+    ['an Item marker before a long run of periods', (n: number) => `Item 1${'.'.repeat(n)}x\n`],
+    ['an Item marker before repeated separators', (n: number) => `Item 1A. ${fill('– ', n)}x\n`],
+    ['labelled prefix lines throughout', (n: number) => fill('3D. RISK FACTORS SUMMARY\n', n)],
+    ['labelled TOC rows throughout', (n: number) => fill('3D. Risk Factors\n6\n', n)],
+    ['one long labelled line', (n: number) => `3D. ${fill('RISK ', n)}\n`],
+    ['repeated label tokens on one line', (n: number) => `${fill('3D. ', n)}x\n`],
+  ])('a line scan over %s (5k → 80k)', (_label, build) => {
+    expectLinear(lineScan, build, 80_000, 200);
+  });
+
+  it.each([
+    ['repeated Item headings with separators', (n: number) => fill('Item 1A. – Risk Factors\n', n)],
+    ['repeated labelled all-caps headings', (n: number) => fill('D. RISK FACTORS\n', n)],
+  ])('heading detection over %s (5k → 80k)', (_label, build) => {
+    expectLinear(detectHeadings, build, 80_000, 200);
+  });
+
+  it.each([
+    [
+      'a bare marker over long spacer runs',
+      'Item 1.',
+      (n: number) =>
+        `Item 1.\n${fill(`${NBSP}\n`, n / 2)}Risk Factors\n${fill(`${NBSP}\n`, n / 2)}5\n`,
+    ],
+    [
+      'a titled heading over a long wrapped line',
+      'Item 1. Business',
+      (n: number) => `Item 1. Business\n${fill('of x ', n)}  5\n`,
+    ],
+  ])('the TOC-row test over %s (5k → 80k)', (_label, heading, build) => {
+    expectLinear((text) => isTocHeading(text, { heading, offset: 0 }), build, 80_000, 200);
   });
 });
 
@@ -2125,6 +2568,319 @@ describe('get_filing section — the line fallback after every heading tier (#16
     expect(text).toContain("Section 'Segment Information' not found in this document.");
     expect(text).toContain('] USE OF PROCEEDS');
     expect(text).toContain('exactly as the document prints it');
+  });
+
+  /**
+   * An S-1 shaped like Arxis' 0001193125-26-419718 and a 10-K like CCC's
+   * 0000950170-25-026848: a mixed-case `Business` heading the outline never
+   * lists, a note heading that merely contains the word, a `Compensation`
+   * table-row label, and the Item 11 heading.
+   */
+  const NOTE_AND_ITEM_DOC = [
+    'Business',
+    '',
+    'We are a leading designer of propulsion systems.',
+    '',
+    'Compensation',
+    '',
+    '$',
+    '',
+    '47,505',
+    '',
+    'NOTE 3. BUSINESS COMBINATIONS',
+    '',
+    'MagCanica prose.',
+    '',
+    'Item 11. Executive Compensation',
+    '',
+    'Compensation prose.',
+    '',
+  ].join('\n');
+
+  it('lands on an equal line ahead of a heading that only contains the value (#177)', async () => {
+    const accession = '0001193125-26-419718';
+    serveTextFiling(accession, 'S-1', NOTE_AND_ITEM_DOC);
+
+    const result = await runToolContract(getFilingTool, {
+      accession_number: accession,
+      cik: '2093536',
+      section: 'business',
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = result.structuredContent as { content: string; notice?: string };
+    expect(sc.content.startsWith('Business\n\nWe are a leading designer')).toBe(true);
+    const notice =
+      "No detected heading equals section 'business', so this page starts at the first document line that does, ahead of headings that only contain it.";
+    expect(sc.notice).toBe(notice);
+    expect(contentText(result)).toContain(notice);
+  });
+
+  // Characterization: an Item heading that only contains the value still beats
+  // the earlier equal line, a table-row label here.
+  it('keeps an Item heading that contains the value ahead of an equal line (#177)', async () => {
+    const accession = '0000950170-25-026848';
+    serveTextFiling(accession, '10-K', NOTE_AND_ITEM_DOC);
+
+    const result = await runToolContract(getFilingTool, {
+      accession_number: accession,
+      cik: '1818201',
+      section: 'compensation',
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = result.structuredContent as { content: string; notice?: string };
+    expect(sc.content.startsWith('Item 11. Executive Compensation\n\nCompensation prose.')).toBe(
+      true,
+    );
+    expect(sc.notice).toBeUndefined();
+  });
+
+  /**
+   * A proxy statement shaped like Goldman Sachs' DEF 14A 0001193125-26-117433:
+   * its ITEM headings are ballot proposals, and its lines equal to a value are
+   * table cells (the Pay versus Performance header "Summary" / "Compensation").
+   */
+  const PROXY_DOC = [
+    'EXECUTIVE SUMMARY',
+    '',
+    'This summary highlights information from our Proxy Statement.',
+    '',
+    'COMPENSATION DISCUSSION AND ANALYSIS',
+    '',
+    'This CD&A describes our executive compensation philosophy.',
+    '',
+    'Year',
+    '',
+    'Summary',
+    'Compensation',
+    '',
+    'Table Total for PEO ($)',
+    '',
+    'ITEM 2. AN ADVISORY VOTE TO APPROVE EXECUTIVE COMPENSATION (SAY ON PAY)',
+    '',
+    'Say on pay prose.',
+    '',
+  ].join('\n');
+
+  it.each([
+    ['summary', 'EXECUTIVE SUMMARY\n'],
+    ['compensation', 'COMPENSATION DISCUSSION AND ANALYSIS\n'],
+  ])(
+    'lands a proxy statement\'s "%s" on the first heading containing it, ahead of an equal line and a later ITEM proposal',
+    async (section, start) => {
+      const page = await sectionPage('0001193125-26-117433', 'DEF 14A', PROXY_DOC, section);
+      expect(page.content.startsWith(start)).toBe(true);
+      expect(page.notice).toBeUndefined();
+    },
+  );
+});
+
+/** A `get_filing` section page over `text`, served as a plain-text submission. */
+async function sectionPage(accession: string, form: string, text: string, section: string) {
+  serveTextFiling(accession, form, text);
+  const result = await runToolContract(getFilingTool, {
+    accession_number: accession,
+    cik: '1',
+    section,
+  });
+  expect(result.isError).toBeFalsy();
+  const sc = result.structuredContent as { content: string; notice?: string };
+  return { content: sc.content, notice: sc.notice, rendered: contentText(result) };
+}
+
+describe('get_filing section — a body heading ahead of a table-of-contents row (#174)', () => {
+  const NBSP = ' ';
+
+  /** A 20-F shaped like DRDGOLD's 0001628280-26-064355: one TOC cell per line, then the body. */
+  const TWENTY_F = [
+    'TABLE OF CONTENTS',
+    'ITEM 3.',
+    'KEY INFORMATION',
+    '6',
+    '3A.',
+    '[Reserved]',
+    '6',
+    '3D.',
+    'Risk Factors',
+    '6',
+    'ITEM 19.',
+    'EXHIBITS',
+    '120',
+    '',
+    '----------------------------------------',
+    '',
+    'ITEM 3. KEY INFORMATION',
+    '',
+    '3A. [Reserved]',
+    '',
+    '3D. RISK FACTORS',
+    'In conducting our business, we face many risks.',
+    '',
+    'ITEM 19. EXHIBITS',
+    '',
+    'The exhibits are listed below.',
+    '',
+  ].join('\n');
+
+  it.each([
+    ['item 3', 'ITEM 3. KEY INFORMATION\n\n3A. [Reserved]'],
+    ['key information', 'ITEM 3. KEY INFORMATION\n\n3A. [Reserved]'],
+    ['item 19', 'ITEM 19. EXHIBITS\n\nThe exhibits are listed below.'],
+  ])(
+    'lands "%s" on the body heading, past the bare TOC marker and title cell',
+    async (section, start) => {
+      const page = await sectionPage('0001628280-26-064355', '20-F', TWENTY_F, section);
+      expect(page.content.startsWith(start)).toBe(true);
+      expect(page.notice).toBeUndefined();
+      expect(page.rendered).toContain(page.content.slice(0, 80));
+    },
+  );
+
+  it('lands "risk factors" on a 10-Q body Item whose separator the TOC row lacks', async () => {
+    // The shape of Worthington Steel's 10-Q 0001968487-26-000036.
+    const text =
+      `Item 1A.\n\nRisk Factors\n\n${NBSP}\n\n56\n\n${NBSP}\n\nItem 2.\n\nUse of Proceeds\n\n${NBSP}\n\n57\n\n` +
+      '----------------------------------------\n\n' +
+      'Item 1A. – Risk Factors\n\nThe following information supplements the risk factors.\n\n' +
+      'Item 2. – Use of Proceeds\n\nNone.\n';
+    for (const [section, start] of [
+      ['risk factors', 'Item 1A. – Risk Factors\n\nThe following'],
+      ['item 2', 'Item 2. – Use of Proceeds\n\nNone.'],
+    ] as const) {
+      const page = await sectionPage('0001968487-26-000036', '10-Q', text, section);
+      expect(page.content.startsWith(start)).toBe(true);
+      expect(page.notice).toBeUndefined();
+    }
+  });
+
+  it('keeps a body Part whose running header prints another separator form', async () => {
+    const pageHeader = (n: number) =>
+      `----------------------------------------\n\nPart I. Financial Information\n\nPage ${n} prose.\n\n`;
+    const text =
+      'Part I – Financial Information      2\n\n' +
+      'Part II – Other Information      30\n\n' +
+      '----------------------------------------\n\n' +
+      'PART I – FINANCIAL INFORMATION\n\nItem 1. Financial Statements\n\nStatements prose.\n\n' +
+      [1, 2, 3, 4, 5].map(pageHeader).join('') +
+      'PART II – OTHER INFORMATION\n\nItem 1. Legal Proceedings\n\nLegal prose.\n';
+    expect(detectHeadings(text).filter((h) => /^part i\b/i.test(h.heading))).toEqual([
+      { heading: 'PART I – FINANCIAL INFORMATION', offset: text.indexOf('PART I –') },
+      { heading: 'Part I. Financial Information', offset: text.indexOf('Part I.') },
+    ]);
+    for (const section of ['part i', 'financial information']) {
+      const page = await sectionPage('0000000001-26-000001', '10-Q', text, section);
+      expect(page.content.startsWith('PART I – FINANCIAL INFORMATION\n\nItem 1.')).toBe(true);
+      expect(page.notice).toBeUndefined();
+    }
+  });
+
+  /** An 8-K shaped like First Bancorp's 0000765207-26-000110: TOC rows worded apart from the body. */
+  const EIGHT_K = [
+    'Item 8.01 Other Events            Page 1',
+    '',
+    'Item 9.01 Financial Statements and Exhibits.        Page 1',
+    '',
+    'Signatures                     Page 2',
+    '',
+    '----------------------------------------',
+    '',
+    'Item 8.01 Other Events.',
+    '',
+    'On September 24, 2026, the Registrant issued a press release.',
+    '',
+    'Item 9.01 Financial Statements, Pro Forma Financial Information and Exhibits.',
+    '',
+    '(d) Exhibits.',
+    '',
+  ].join('\n');
+
+  it('lands "item 9" on the body Item, past a TOC row worded differently', async () => {
+    const page = await sectionPage('0000765207-26-000110', '8-K', EIGHT_K, 'item 9');
+    expect(page.content.startsWith('Item 9.01 Financial Statements, Pro Forma')).toBe(true);
+    expect(page.notice).toBeUndefined();
+  });
+
+  // Characterization: the TOC row that dedups against its body Item (#172) stays off.
+  it('keeps "item 8" on the body Item', async () => {
+    const page = await sectionPage('0000765207-26-000110', '8-K', EIGHT_K, 'item 8');
+    expect(page.content.startsWith('Item 8.01 Other Events.\n\nOn September 24')).toBe(true);
+    expect(page.notice).toBeUndefined();
+  });
+
+  // Characterization: a body heading set over a page number reads as a TOC row,
+  // and still lands as its tier's only match (CCC's 10-K 0000950170-25-026848).
+  it('lands on a heading that reads as a TOC row when nothing else in its tier matches', async () => {
+    const text = [
+      'Item 5. Market for Registrant’s Common Equity',
+      '',
+      'Our common stock trades on the Nasdaq.',
+      '',
+      'Item 6. Reserved.',
+      '',
+      '36',
+      '',
+      '----------------------------------------',
+      '',
+      'Item 7. Management’s Discussion and Analysis',
+      '',
+      'MD&A prose.',
+      '',
+    ].join('\n');
+    const page = await sectionPage('0000950170-25-026848', '10-K', text, 'item 6');
+    expect(page.content.startsWith('Item 6. Reserved.\n\n36')).toBe(true);
+    expect(page.notice).toBeUndefined();
+  });
+});
+
+describe('get_filing section — a leading 20-F sub-item label (#175)', () => {
+  /** A 20-F shaped like DRDGOLD's 0001628280-26-064355 and Regencell's 0001213900-26-107581. */
+  const TWENTY_F = [
+    'ITEM 3. KEY INFORMATION',
+    '',
+    '3D. RISK FACTORS',
+    'In conducting our business, we face many risks.',
+    '',
+    'ITEM 4. INFORMATION ON THE COMPANY',
+    '',
+    'B. Business Overview',
+    '',
+    'Our Business Plan',
+    '',
+    'Our goal is to save lives.',
+    '',
+  ].join('\n');
+  const LINE_NOTICE = (section: string) =>
+    `No detected heading matches section '${section}', so this page starts at the first document line that does.`;
+
+  it.each([
+    ['risk factors', '3D. RISK FACTORS\nIn conducting'],
+    ['business overview', 'B. Business Overview\n\nOur Business Plan'],
+  ])(
+    'lands "%s" on the labelled line, in structuredContent and content[]',
+    async (section, start) => {
+      const page = await sectionPage('0001628280-26-064355', '20-F', TWENTY_F, section);
+      expect(page.content.startsWith(start)).toBe(true);
+      expect(page.notice).toBe(LINE_NOTICE(section));
+      expect(page.rendered).toContain(LINE_NOTICE(section));
+      expect(page.rendered).toContain(page.content.slice(0, 40));
+    },
+  );
+
+  // Characterization: a labelled value matches its own line as given.
+  it('lands the labelled value "3D. RISK FACTORS" on its own line', async () => {
+    const page = await sectionPage('0001628280-26-064355', '20-F', TWENTY_F, '3D. RISK FACTORS');
+    expect(page.content.startsWith('3D. RISK FACTORS\nIn conducting')).toBe(true);
+    expect(page.notice).toBe(LINE_NOTICE('3D. RISK FACTORS'));
+  });
+
+  it('still misses "business" on a longer Title Case title after a label', async () => {
+    serveTextFiling('0001213900-26-107581', '20-F', TWENTY_F);
+    const miss = await runToolContract(getFilingTool, {
+      accession_number: '0001213900-26-107581',
+      cik: '1',
+      section: 'business',
+    });
+    expect(miss.isError).toBe(true);
+    expect(contentText(miss)).toContain("Section 'business' not found in this document.");
   });
 });
 
@@ -2538,17 +3294,6 @@ describe('filingToExtract — the XBRL renderer files of a full submission stay 
 });
 
 describe('filingToExtract — <TEXT> body scan worst cases stay linear (#136, #159, #160)', () => {
-  /** Thread CPU milliseconds for one conversion — wall clock is noise under a parallel suite. */
-  const cpuMs = (input: string): number => {
-    const start = process.threadCpuUsage();
-    filingToExtract(input);
-    const used = process.threadCpuUsage(start);
-    return (used.user + used.system) / 1000;
-  };
-  /** Best of three, so one scheduler hiccup cannot fail the ratio. */
-  const bestOf3 = (input: string) => Math.min(cpuMs(input), cpuMs(input), cpuMs(input));
-  const fill = (unit: string, chars: number) => unit.repeat(Math.ceil(chars / unit.length));
-
   it.each([
     ['repeated opener, no closer', (n: number) => fill('<TEXT>', n)],
     ['nested openers', (n: number) => `${fill('<TEXT>', n / 2)}x${fill('</TEXT>', n / 2)}`],
@@ -2599,16 +3344,21 @@ describe('filingToExtract — <TEXT> body scan worst cases stay linear (#136, #1
       '<body prefixes in an HTML fragment after a <body>',
       (n: number) => `<body><TEXT><P>${fill('<bod', n)}</TEXT>`,
     ],
-  ])('%s', (_label, build) => {
-    filingToExtract(build(5_000)); // warm the JIT
-    // Floored so a sub-millisecond baseline cannot inflate the ratio on noise.
-    const t5k = Math.max(bestOf3(build(5_000)), 0.25);
-    bestOf3(build(20_000));
-    const t80k = bestOf3(build(80_000));
-
+  ])('%s (5k → 80k)', (_label, build) => {
     // Measured at 1–17 ms for 80k. A lazy `<TEXT>([\s\S]*?)</TEXT>` regex scan
     // takes ~470 ms on the no-closer shape alone, a 230× span ratio.
-    expect(t80k / t5k).toBeLessThan(64);
-    expect(t80k).toBeLessThan(200);
+    expectLinear(filingToExtract, build, 80_000, 200);
+  });
+
+  // A long digit run carries the full 64× span; so do the line-break shapes.
+  it.each([
+    ['a plain body holding a long digit run', (n: number) => `<TEXT>${'1'.repeat(n)}</TEXT>`],
+    [
+      'a plain body of one long line ending in a break',
+      (n: number) => `<TEXT>${fill('§1 x', n)}\ny</TEXT>`,
+    ],
+    ['a plain body with breaks throughout', (n: number) => `<TEXT>${fill('  \r\n', n)}</TEXT>`],
+  ])('%s (5k → 320k)', (_label, build) => {
+    expectLinear(filingToExtract, build, 320_000, 200);
   });
 });

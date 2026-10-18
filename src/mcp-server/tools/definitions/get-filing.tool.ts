@@ -12,12 +12,15 @@ import {
   detectHeadings,
   type FilingHeading,
   filingToExtract,
-  findSectionLine,
   foldForHeadingMatch,
   getExtractCache,
   headingKey,
+  isTocHeading,
+  MARKER_TITLE_RE,
+  matchSectionLine,
   setExtractCache,
   windowText,
+  withoutSubItemLabel,
 } from '@/services/edgar/filing-to-text.js';
 import type { FilingIndex, SubmissionsResponse } from '@/services/edgar/types.js';
 
@@ -147,7 +150,7 @@ const documentEntrySchema = z
 
 export const getFilingTool = tool('secedgar_get_filing', {
   description:
-    "Fetch a specific filing's metadata and document content by accession number. Returns the primary document as readable text. Use offset/next_offset for multi-page access to large filings (10-K, S-1 can exceed 1M chars): pass the next_offset from a truncated response to read the next page. Use section to jump directly to a heading (e.g. 'risk factors', 'item 7') without needing an offset.",
+    "Fetch a specific filing's metadata and document content by accession number. Returns the primary document as readable text. Use offset/next_offset for multi-page access to large filings (10-K, S-1 can exceed 1M chars): pass the next_offset from a truncated response as offset, without section, to read the next page. Use section to jump directly to a heading (e.g. 'risk factors', 'item 7') without needing an offset.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   // Agent-facing disclosure of the content window. `content_truncated` types the
@@ -215,6 +218,15 @@ export const getFilingTool = tool('secedgar_get_filing', {
       retryable: true,
       thrownBy: 'service',
     },
+    {
+      reason: 'sec_unreachable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The last of three attempts to reach SEC EDGAR got no HTTP response — the connection failed, or no response headers arrived within 15 seconds',
+      recovery:
+        'Retry the same call in a minute — SEC EDGAR could not be reached, and nothing in the request needs to change.',
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
 
   input: z.object({
@@ -261,14 +273,14 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .min(0)
       .default(0)
       .describe(
-        'Character offset into the extracted document text. Pass next_offset from a truncated response to continue reading the next page. Default 0 reads from the beginning.',
+        'Character offset into the extracted document text. Pass next_offset from a truncated response to continue reading the next page, and leave section out: section takes precedence over offset. Default 0 reads from the beginning.',
       ),
     section: z
       .string()
       .min(1)
       .optional()
       .describe(
-        "Jump to a named section, matched case-insensitively against every detected heading (e.g. 'risk factors', 'item 7', 'item 2.02', 'certain relationships'): a heading equal to the value, or whose title after its Item/Part marker equals it, wins first; otherwise the first heading containing it. A value ending in a number matches only that number: 'item 1' reaches Item 1 and Item 1A, never Items 10–16, and 'part i' never reaches Part II. With no heading match, a line of the document equal to the value, or else starting with it, is used — a subheading the outline omits ('Liquidity and Capital Resources') — and the notice says so; table-of-contents rows and wrapped cross-references are skipped. Matching also ignores whitespace and quote-style differences, so a heading copied from the outline resolves whether it carries the filing's non-breaking spaces and curly quotes or plain ones. Takes precedence over offset when both are provided. On a miss, the error message includes the detected outline so you can pick the correct heading.",
+        "Jump to a named section, matched against every detected heading and the document's own lines (e.g. 'risk factors', 'item 7', 'item 2.02', 'certain relationships'). The first match wins, in this order: a heading equal to the value, or whose title after its Item/Part marker equals it; the first Item or Part heading containing it; a document line equal to it — a subheading the outline omits ('Liquidity and Capital Resources'); the first other heading containing it; a document line starting with it. In a proxy statement (DEF 14A and its variants), whose ITEM headings are ballot proposals, the first heading of any kind containing the value comes before both document-line steps. Within each heading step a body heading wins over a table-of-contents row, which lands only when nothing else at that step matches. A line landing says so in the notice; table-of-contents rows and wrapped cross-references are never line landings. A leading 20-F sub-item label on a heading or line ('3D.', 'B.') is ignored, so 'risk factors' reaches '3D. RISK FACTORS'; the value itself is matched as given. A value ending in a number matches only that number: 'item 1' reaches Item 1 and Item 1A, never Items 10–16, and 'part i' never reaches Part II. Every step ignores case, whitespace, and quote style, so a heading copied from the outline resolves whether it carries the filing's non-breaking spaces and curly quotes or plain ones; the steps comparing a whole heading or line (equal to, starting with) also ignore the punctuation between an Item or Part marker and its title, so 'Item 1A Risk Factors' reaches 'Item 1A. – Risk Factors'. Takes precedence over offset when both are provided, so leave it out when paging on with next_offset. On a miss, the error message includes the detected outline so you can pick the correct heading.",
       ),
   }),
 
@@ -338,7 +350,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .number()
       .optional()
       .describe(
-        'Offset of the next page, to pass as offset; present while content_truncated is true.',
+        'Offset of the next page, to pass as offset without section; present while content_truncated is true.',
       ),
     outline: z
       .array(
@@ -503,6 +515,23 @@ export const getFilingTool = tool('secedgar_get_filing', {
       }
     }
 
+    // Form, filing date, and period come from the submissions feed's recent window when
+    // the accession sits in it. An older filing takes them from its own SEC header: the
+    // index-headers page already fetched above, or — only when that page is missing —
+    // the bare `.hdr.sgml` header, the one extra request this path can cost (#126).
+    // Read before `section` resolves, which ranks a proxy statement's headings apart.
+    const { submissions, headers } = records;
+    const recent = submissions.filings.recent;
+    const idx = recent.accessionNumber.indexOf(accn);
+    const header =
+      idx >= 0
+        ? undefined
+        : (headers?.submission ?? (await api.tryGetSubmissionHeader(resolvedCik, accn)));
+
+    const form = idx >= 0 ? recent.form[idx] : header?.form;
+    const filingDate = idx >= 0 ? recent.filingDate[idx] : header?.filingDate;
+    const periodEnding = idx >= 0 ? recent.reportDate[idx] : header?.periodOfReport;
+
     // Determine effective offset (section wins over raw offset)
     let effectiveOffset = input.offset ?? 0;
     let lineNotice: string | undefined;
@@ -511,11 +540,17 @@ export const getFilingTool = tool('secedgar_get_filing', {
       // Every detected heading is a candidate; the 50-entry cap is the
       // rendered outline's alone (#169).
       const headings = detectHeadings(fullText);
-      // A heading always wins; only then the document's own lines (#166).
-      const headingLanding = resolveSectionHeading(headings, input.section)?.offset;
-      const landing = headingLanding ?? findSectionLine(fullText, input.section);
-      if (headingLanding === undefined && landing !== undefined) {
+      // A value of whitespace alone folds to an empty needle, which every
+      // heading contains and every line starts with, so it fails before
+      // resolution rather than landing unasked on whatever comes first.
+      const blank = foldForHeadingMatch(input.section) === '';
+      const landing = blank
+        ? undefined
+        : resolveSection(fullText, headings, input.section, PROXY_FORM_RE.test(form ?? ''));
+      if (landing?.source === 'line') {
         lineNotice = `No detected heading matches section '${input.section}', so this page starts at the first document line that does.`;
+      } else if (landing?.source === 'line-over-heading') {
+        lineNotice = `No detected heading equals section '${input.section}', so this page starts at the first document line that does, ahead of headings that only contain it.`;
       }
       if (landing === undefined) {
         // Render the outline into the message itself — clients reliably see only
@@ -531,17 +566,16 @@ export const getFilingTool = tool('secedgar_get_filing', {
           headings.length > 0
             ? 'Pick a heading from the outline above and pass it as section; a subheading the outline omits matches when passed exactly as the document prints it.'
             : 'No headings were detected in this document — use offset paging instead.';
-        throw ctx.fail(
-          'section_not_found',
-          `Section '${input.section}' not found in this document.${outlineBlock}`,
-          {
-            section: input.section,
-            outline,
-            recovery: { hint },
-          },
-        );
+        const problem = blank
+          ? `Section is blank: ${describeBlankSection(input.section)}, leaving nothing to match.`
+          : `Section '${input.section}' not found in this document.`;
+        throw ctx.fail('section_not_found', `${problem}${outlineBlock}`, {
+          section: input.section,
+          outline,
+          recovery: { hint },
+        });
       }
-      effectiveOffset = landing;
+      effectiveOffset = landing.offset;
     }
 
     // Validate offset
@@ -575,7 +609,11 @@ export const getFilingTool = tool('secedgar_get_filing', {
       ? `The filing index names ${unservedPrimary} as the primary document, but the SEC archive does not serve it, so this text is the full submission file ${targetName}.`
       : undefined;
     if (truncated) {
-      const paging = `Showing ${text.length} of ${totalLength} characters. Pass next_offset (${nextOffset ?? '?'}) as offset to read the next page, or jump with section.`;
+      // section outranks offset, so a caller who keeps it reads this page again.
+      const nextPage = input.section
+        ? 'as offset without section to read the next page — section takes precedence over offset.'
+        : 'as offset to read the next page, or jump with section.';
+      const paging = `Showing ${text.length} of ${totalLength} characters. Pass next_offset (${nextOffset ?? '?'}) ${nextPage}`;
       const outlineCut = detected && outline && outlineCutNote(outline, detected);
       ctx.enrich.truncated({
         shown: text.length,
@@ -588,29 +626,12 @@ export const getFilingTool = tool('secedgar_get_filing', {
 
     // Headers give canonical document types; without them categorization falls
     // back to name-pattern inference.
-    const { submissions, headers } = records;
-
     const documents = categorizeDocuments(
       index.directory.item,
       filingPrimaryName,
       headers?.documents ?? null,
       input.include_xbrl,
     );
-
-    // Form, filing date, and period come from the submissions feed's recent window when
-    // the accession sits in it. An older filing takes them from its own SEC header: the
-    // index-headers page already fetched above, or — only when that page is missing —
-    // the bare `.hdr.sgml` header, the one extra request this path can cost (#126).
-    const recent = submissions.filings.recent;
-    const idx = recent.accessionNumber.indexOf(accn);
-    const header =
-      idx >= 0
-        ? undefined
-        : (headers?.submission ?? (await api.tryGetSubmissionHeader(resolvedCik, accn)));
-
-    const form = idx >= 0 ? recent.form[idx] : header?.form;
-    const filingDate = idx >= 0 ? recent.filingDate[idx] : header?.filingDate;
-    const periodEnding = idx >= 0 ? recent.reportDate[idx] : header?.periodOfReport;
 
     ctx.log.info('Filing retrieved', {
       accessionNumber: accn,
@@ -697,48 +718,170 @@ function sectionMatches(heading: string, needle: string): boolean {
     : /(?:^|\s)[ivx]{1,4}$/.test(needle)
       ? /[\p{L}\p{N}]/u
       : undefined;
-  for (let at = heading.indexOf(needle); at !== -1; at = heading.indexOf(needle, at + 1)) {
-    if (!continuation?.test(heading.charAt(at + needle.length))) return true;
+  const at = heading.indexOf(needle);
+  if (at === -1) return false;
+  if (continuation === undefined || !continuation.test(heading.charAt(at + needle.length))) {
+    return true;
+  }
+  return occursBeforeBoundary(heading, needle, at + 1, continuation);
+}
+
+/**
+ * Whether `needle` occurs in `heading` at or after `from` with no `continuation`
+ * character after it, over every occurrence in one Knuth–Morris–Pratt pass, so
+ * the check runs in time linear in the heading's length. Reached only after a
+ * first occurrence that runs on, so the heading is at least as long as the
+ * needle and the table costs no more than the scan.
+ */
+function occursBeforeBoundary(
+  heading: string,
+  needle: string,
+  from: number,
+  continuation: RegExp,
+): boolean {
+  const fallback = new Int32Array(needle.length);
+  for (let i = 1, k = 0; i < needle.length; i++) {
+    while (k > 0 && needle[i] !== needle[k]) k = fallback[k - 1] ?? 0;
+    if (needle[i] === needle[k]) k++;
+    fallback[i] = k;
+  }
+  for (let i = from, k = 0; i < heading.length; i++) {
+    while (k > 0 && heading[i] !== needle[k]) k = fallback[k - 1] ?? 0;
+    if (heading[i] === needle[k]) k++;
+    if (k === needle.length) {
+      if (!continuation.test(heading.charAt(i + 1))) return true;
+      k = fallback[k - 1] ?? 0;
+    }
   }
   return false;
 }
 
 /**
- * A folded heading key's Item or Part marker — an Item code with an optional
- * 8-K paragraph suffix, or a Part numeral — capturing the marker and the title
- * after it, past an optional period and a dash, colon, or period separator. A
- * bare marker captures an empty title.
+ * Where `section` lands. `line` is a document line no heading tier supplied;
+ * `line-over-heading` is an equal line that outranked a heading merely
+ * containing the value, which the notice words apart.
  */
-const MARKER_TITLE_RE =
-  /^(item \d{1,2}(?:\.\d{2}|[a-z])?(?:\([a-z]\))?|part [ivx]{1,4}\b)\.? ?(?:[-–—:.] ?)?(.*)$/;
+interface SectionLanding {
+  offset: number;
+  source: 'heading' | 'line' | 'line-over-heading';
+}
 
 /**
- * The heading `section` lands on, searching every detected heading (#169):
+ * Where `section` lands, over every detected heading (#169) and the document's
+ * own lines (#166), in five tiers — first hit wins (#177):
  * 1. Exact — the first heading whose {@link headingKey} equals the needle's, or
- *    whose title after its Item/Part marker does. A bare marker ("ITEM 1.",
- *    "Part II") has no title and is never a candidate here. This tier keeps
- *    "risk factors" on "Item 1A. Risk Factors." when an earlier all-caps heading
+ *    whose title after its Item/Part marker does; failing that, the first equal
+ *    once a leading 20-F sub-item label is removed ("D. RISK FACTORS", #175), so
+ *    an earlier "A. RISK FACTORS" never takes "risk factors" from "Item 1A. Risk
+ *    Factors". The needle is compared as given. A bare marker ("ITEM 1.", "Part
+ *    II") has no title and is never a candidate here. This tier keeps "risk
+ *    factors" on "Item 1A. Risk Factors." when an earlier all-caps heading
  *    merely contains the words.
- * 2. Substring — the first heading by offset that {@link sectionMatches}.
+ * 2. The first Item or Part heading that {@link sectionMatches}: a value inside
+ *    an Item title names that Item ("compensation" → "Item 11. Executive
+ *    Compensation"), where a line equal to it is often a table-row label.
+ * 3. A document line equal to the value ({@link matchSectionLine}).
+ * 4. The first other heading that {@link sectionMatches}. One that merely holds
+ *    the word ("NOTE 3. BUSINESS COMBINATIONS" for "business", "COST OF
+ *    REVENUES" for "revenue") ranks after a line printing the value alone.
+ * 5. A document line starting with the value.
+ *
+ * Inside each heading tier, a heading on a table-of-contents row
+ * ({@link isTocHeading}) ranks after every body heading of the tier, and lands
+ * only when it is the tier's one match (#174) — in tier 1, after the labelled
+ * body headings too, so a TOC row equal as printed never outranks a body "D.
+ * RISK FACTORS". TOC rows that survive dedup — a bare marker over its title and
+ * page cells, a row worded apart from its body heading — otherwise came first
+ * by offset and took every `item N` in a 20-F whose TOC prints one cell per
+ * line. They are not pushed behind the line tiers: a body heading over a page
+ * number reads as a TOC row too, and behind the line tiers CCC's `item 6` left
+ * its body "Item 6. Reserved." for a bare TOC marker line. The line tiers skip
+ * TOC rows already.
+ *
+ * The line tiers share one pass over the text, run only when tiers 1 and 2 miss.
+ *
+ * A proxy statement (`proxy`) keeps tier 1, then every heading containing the
+ * value, then the line tiers: its ITEM headings are ballot proposals, not the
+ * Regulation S-K item taxonomy, and its lines equal to a value are mostly table
+ * cells. Tiers 2–4 there took Goldman Sachs' DEF 14A `compensation` from the
+ * CD&A to "ITEM 2. … SAY ON PAY" 151,000 characters on, and `summary` from
+ * "EXECUTIVE SUMMARY" to a Pay versus Performance column header.
  */
-function resolveSectionHeading(
+function resolveSection(
+  text: string,
   headings: FilingHeading[],
   section: string,
-): FilingHeading | undefined {
+  proxy: boolean,
+): SectionLanding | undefined {
+  /**
+   * The earliest heading of the best rank `rank` gives (0, then 1; undefined is
+   * no match), every body heading ahead of every TOC row.
+   */
+  const best = (rank: (h: FilingHeading) => 0 | 1 | undefined): FilingHeading | undefined => {
+    const earliest: Array<FilingHeading | undefined> = [];
+    for (const h of headings) {
+      const r = rank(h);
+      if (r === undefined) continue;
+      const slot = r + (isTocHeading(text, h) ? 2 : 0);
+      if (slot === 0) return h;
+      earliest[slot] ??= h;
+    }
+    return earliest.find((h) => h !== undefined);
+  };
+  /** The first heading `matches` accepts, a body heading ahead of every TOC row. */
+  const first = (matches: (h: FilingHeading) => boolean) =>
+    best((h) => (matches(h) ? 0 : undefined));
   const exactNeedle = headingKey(section);
-  const exact = headings.find((h) => {
+  const exact = best((h) => {
     const key = headingKey(h.heading);
     const title = MARKER_TITLE_RE.exec(key)?.[2];
-    if (title === '') return false;
-    return key === exactNeedle || title === exactNeedle;
+    if (title === '') return;
+    if (key === exactNeedle || title === exactNeedle) return 0;
+    const labelled = [key, title].some(
+      (k) => k !== undefined && withoutSubItemLabel(k) === exactNeedle,
+    );
+    return labelled ? 1 : undefined;
   });
-  if (exact) return exact;
+  if (exact) return { offset: exact.offset, source: 'heading' };
   // Fold both operands (Unicode whitespace runs, typographic quotes) so a
   // heading re-sent from a rendered outline still matches the bytes it came
   // from (#106).
   const needle = foldForHeadingMatch(section);
-  return headings.find((h) => sectionMatches(foldForHeadingMatch(h.heading), needle));
+  const contains = (h: FilingHeading) => sectionMatches(foldForHeadingMatch(h.heading), needle);
+  if (proxy) {
+    const heading = first(contains);
+    if (heading) return { offset: heading.offset, source: 'heading' };
+    const line = matchSectionLine(text, section);
+    return line ? { offset: line.offset, source: 'line' } : undefined;
+  }
+  const itemOrPart = first((h) => STRUCTURAL_HEADING_RE.test(h.heading) && contains(h));
+  if (itemOrPart) return { offset: itemOrPart.offset, source: 'heading' };
+  const line = matchSectionLine(text, section);
+  // Tier 2 missed, so any heading containing the value is a non-Item one.
+  const other = first(contains);
+  if (line?.equal) return { offset: line.offset, source: other ? 'line-over-heading' : 'line' };
+  if (other) return { offset: other.offset, source: 'heading' };
+  if (line) return { offset: line.offset, source: 'line' };
+  return;
 }
+
+/**
+ * A blank `section` described by its length and the code points it holds, each
+ * named once in order of first appearance ("its 2 characters are all whitespace
+ * (U+0009, U+000A)"), since the value itself prints as nothing. Every character
+ * a fold strips is in the BMP, so a code unit is its code point.
+ */
+function describeBlankSection(section: string): string {
+  const codes = new Set(
+    Array.from(section, (c) => `U+${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`),
+  );
+  const count =
+    section.length === 1 ? 'its 1 character is' : `its ${section.length} characters are all`;
+  return `${count} whitespace (${[...codes].join(', ')})`;
+}
+
+/** A proxy or information statement form: DEF 14A, DEFA14A, DEFM14A, PRE 14A, PREM14C, … */
+const PROXY_FORM_RE = /^(?:DEF|PRE)[ACMNR]? ?14[AC]\b/;
 
 /** Most headings an outline renders, on the first page and in a section_not_found message. */
 const OUTLINE_MAX_ENTRIES = 50;

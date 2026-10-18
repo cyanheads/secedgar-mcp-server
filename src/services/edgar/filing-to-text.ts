@@ -326,6 +326,18 @@ const ITEM_CODE = String.raw`\d{1,2}(?:\.\d{2}|[a-z])?`;
  * `[a-c]`) and the marker's trailing period is optional — 20-F filers write
  * the lettered markers unpunctuated.
  *
+ * An indented line is no heading — admitting indentation fills the outline with
+ * centered cover legends and promotes indented TOC rows — with one exception: a
+ * same-line Item line, on either Item arm, may open on one NBSP (#176). An
+ * `&nbsp;` ahead of a styled marker leaves the extracted line starting on
+ * U+00A0 (Horizon Space's 8-K: "<NBSP>Item 1.01. Entry into a Material
+ * Definitive Agreement."), and the line anchor kept that Item out of the
+ * outline. A lookahead admits the NBSP only before an Item marker, and
+ * {@link itemEntryOffset} records the entry at the marker and drops a line that
+ * is a bare marker once its page cell is stripped. Part lines get no such
+ * allowance: Microsoft's 2004 10-K stamps an NBSP-led "Part I" on every page,
+ * and counting those would turn its body Parts into running-header furniture.
+ *
  * Both all-caps alternatives already absorb trailing whitespace, so that arm
  * ends at `$` with no `[^\S\n]*` of its own: the two quantifiers competing for one
  * whitespace run backtracked quadratically on a long run before a lowercase
@@ -339,12 +351,14 @@ const ITEM_CODE = String.raw`\d{1,2}(?:\.\d{2}|[a-z])?`;
  * Heuristics — best-effort, not guaranteed to match all or only headings.
  */
 const ALL_CAPS_HEADING_RE =
-  /^(ITEM[^\S\n]+\d+[A-Z]?\b[^\n]*|([A-Z][[A-Z0-9,\(\)\&.\/'’–—\-][\s--\n]]{8,}))$/gmv;
+  /^(?:\xA0(?=ITEM[^\S\n]+\d+[A-Z]?\b))?(ITEM[^\S\n]+\d+[A-Z]?\b[^\n]*|([A-Z][[A-Z0-9,\(\)\&.\/'’–—\-][\s--\n]]{8,}))$/gmv;
 const ITEM_PART_HEADING_RE = new RegExp(
-  String.raw`^(item[^\S\n]+(${ITEM_CODE})(?:\.?[^\S\n]+|(?<=\.\d{2})(?:\([a-z]\))?\.?[^\S\n]*(?=[a-z]))(\S[^\n]*)` +
+  String.raw`^(?:\xA0(?=item[^\S\n]))?(item[^\S\n]+(${ITEM_CODE})(?:\.?[^\S\n]+|(?<=\.\d{2})(?:\([a-z]\))?\.?[^\S\n]*(?=[a-z]))(\S[^\n]*)` +
     String.raw`|part[^\S\n]+[ivx]{1,4}\b\.?(?:[^\S\n]*(?:[-–—:.][^\S\n]*)?([a-z][^\n]{0,140}))?)[^\S\n]*$`,
   'gim',
 );
+/** The one leading character a same-line Item heading may open on (#176). */
+const NBSP = '\xA0';
 const BARE_ITEM_MARKER_RE = new RegExp(
   String.raw`^(item[^\S\n]+(${ITEM_CODE})\.?)[^\S\n]*$`,
   'gim',
@@ -600,16 +614,73 @@ function stripPageNumberTail(heading: string): string {
 }
 
 /**
+ * A folded key's Item or Part marker — an Item code with an optional 8-K
+ * paragraph suffix, or a Part numeral — capturing the marker and the title
+ * after it, past an optional period and one dash, colon, or period separator. A
+ * bare marker captures an empty title.
+ */
+export const MARKER_TITLE_RE =
+  /^(item \d{1,2}(?:\.\d{2}|[a-z])?(?:\([a-z]\))?|part [ivx]{1,4}\b)\.? ?(?:[-–—:.] ?)?(.*)$/;
+
+/**
+ * Terminal sentence punctuation on a folded key. The lookbehind starts a try only
+ * where a punctuation run begins, so the strip runs in time linear in the key's
+ * length.
+ */
+const TERMINAL_PUNCTUATION_RE = /(?<![.,;:])[.,;:]+$/;
+
+/**
  * Comparison key for a heading, a line, or a `section` needle — the dedup key
  * for detected headings and the operand of `section`'s exact tiers.
  * {@link foldForHeadingMatch} covers the whitespace and quote differences a
- * filing prints between its TOC and its body; terminal sentence punctuation is
- * the remaining one (C3is' 20-F writes "Item 16J Insider Trading Policies" in the
- * TOC and "…Policies." in the body). Key-only — the entry keeps the document's
- * own heading text.
+ * filing prints between its TOC and its body. Two remain:
+ * - Terminal sentence punctuation: C3is' 20-F writes "Item 16J Insider Trading
+ *   Policies" in the TOC and "…Policies." in the body.
+ * - The separator between an Item or Part marker and its title: Worthington
+ *   Steel's 10-Q prints "Item 1A. Risk Factors" in its TOC and "Item 1A. – Risk
+ *   Factors" in its body, so both kept an entry and `section` landed on the TOC
+ *   row (#174). A marker key is rebuilt as the marker, one space, and the title
+ *   ("item 1a risk factors"), whatever period, dash, or colon stood between them.
+ *
+ * Key-only — the entry keeps the document's own heading text.
  */
 export function headingKey(heading: string): string {
-  return foldForHeadingMatch(heading).replace(/[.,;:]+$/, '');
+  const key = printedKey(heading);
+  const [, marker, title] = MARKER_TITLE_RE.exec(key) ?? [];
+  if (marker === undefined) return key;
+  return title ? `${marker} ${title}` : marker;
+}
+
+/**
+ * A heading's printed form for the running-header count: {@link headingKey}
+ * short of the marker-separator fold. Page furniture repeats one printed form;
+ * counted on the dedup key, a 10-Q's per-page "Part I. Financial Information"
+ * pooled with its TOC row and body heading "PART I – FINANCIAL INFORMATION",
+ * and the TOC row, first of the pool, took the body heading's place.
+ */
+function printedKey(heading: string): string {
+  return foldForHeadingMatch(heading).replace(TERMINAL_PUNCTUATION_RE, '');
+}
+
+/**
+ * A 20-F sub-item label opening a folded key: a digit-led one ("3d. ") or a
+ * single letter ("b. "). Anchored, so it costs the same on any key.
+ */
+const SUB_ITEM_LABEL_RE = /^(?:\d{1,2}[a-z]|[a-z])\. /;
+
+/**
+ * A folded key with its leading 20-F sub-item label removed ("3d. risk factors"
+ * → "risk factors"), or undefined when it opens on none (#175). 20-F filers label
+ * sub-items ("3D. RISK FACTORS", "B. Business Overview"), so a plain-phrase
+ * `section` never equalled the line. Comparison-time only: `section`'s exact and
+ * line tiers compare a heading or line key both with and without its label,
+ * while the caller's value is compared as given, and no labelled line becomes a
+ * detected heading. A line opening on an initial ("L. John Doerr") strips the
+ * same way, so it matches a value equal to the rest of the line.
+ */
+export function withoutSubItemLabel(key: string): string | undefined {
+  const label = SUB_ITEM_LABEL_RE.exec(key);
+  return label === null ? undefined : key.slice(label[0].length);
 }
 
 /**
@@ -657,6 +728,18 @@ function usableTitle(raw: string, maxChars: number): string | undefined {
 }
 
 /**
+ * The offset of the entry a heading match at `lineStart` records: the line
+ * start, or past the one NBSP a same-line Item line may open on (#176). An
+ * NBSP-led line yields no entry when its page cell stripped leaves a bare marker
+ * ("ITEM 2.02", "Item 1.    3"), since the exception admits titled headings only.
+ */
+function itemEntryOffset(text: string, lineStart: number, heading: string): number | undefined {
+  if (!text.startsWith(NBSP, lineStart)) return lineStart;
+  if (BARE_MARKER_HEADING_RE.test(stripPageNumberTail(heading).trim())) return;
+  return lineStart + 1;
+}
+
+/**
  * Detect every heading in extracted text and return them with their offsets,
  * sorted by offset. Deduplicates by {@link headingKey}, keeping the later
  * occurrence (handles TOC vs body duplicate headings — the body occurrence is
@@ -671,6 +754,8 @@ export function detectHeadings(text: string): FilingHeading[] {
     if (trimmed.length > 0) matches.push({ heading: trimmed, index });
   };
 
+  // The guards read a line from its real start (`match.index`), the one NBSP an
+  // Item line may open on included (#176); `itemEntryOffset` places the entry.
   ALL_CAPS_HEADING_RE.lastIndex = 0;
   for (
     let match = ALL_CAPS_HEADING_RE.exec(text);
@@ -686,7 +771,8 @@ export function detectHeadings(text: string): FilingHeading[] {
       const partTitle = TITLED_PART_HEADING_RE.exec(capsLine)?.[2];
       if (partTitle !== undefined && isPartCrossReference(text, match.index, partTitle)) continue;
     }
-    add(heading, match.index);
+    const offset = itemEntryOffset(text, match.index, heading);
+    if (offset !== undefined) add(heading, offset);
   }
 
   ITEM_PART_HEADING_RE.lastIndex = 0;
@@ -709,7 +795,8 @@ export function detectHeadings(text: string): FilingHeading[] {
     ) {
       continue;
     }
-    add(heading, match.index);
+    const offset = itemEntryOffset(text, match.index, heading);
+    if (offset !== undefined) add(heading, offset);
   }
 
   // Bare marker, title on a later line — the shape every Item takes in a 20-F
@@ -759,7 +846,7 @@ export function detectHeadings(text: string): FilingHeading[] {
   // would read three occurrences of one heading as page furniture.
   const positions = new Map<string, Set<number>>();
   for (const { heading, index } of matches) {
-    const key = headingKey(heading);
+    const key = printedKey(heading);
     const seen = positions.get(key) ?? new Set<number>();
     seen.add(index);
     positions.set(key, seen);
@@ -769,21 +856,24 @@ export function detectHeadings(text: string): FilingHeading[] {
   // collapses "Part I" TOC vs "PART I" body). Page furniture inverts that: it
   // keeps the first occurrence, or none at all when it is a bare marker.
   // `matches` is offset-sorted, so the first write wins for furniture and the
-  // last for everything else.
+  // last for everything else. Furniture keeps its first occurrence in a map of
+  // its own, so a TOC row or body heading sharing its dedup key in another
+  // separator form neither joins the count nor gives way to it.
   const byHeading = new Map<string, FilingHeading>();
+  const furniture = new Map<string, FilingHeading>();
   for (const { heading, index } of matches) {
-    const key = headingKey(heading);
-    if ((positions.get(key)?.size ?? 0) >= RUNNING_HEADER_MIN_OCCURRENCES) {
+    const printed = printedKey(heading);
+    if ((positions.get(printed)?.size ?? 0) >= RUNNING_HEADER_MIN_OCCURRENCES) {
       if (BARE_MARKER_HEADING_RE.test(heading)) continue;
-      if (!byHeading.has(key)) byHeading.set(key, { heading, offset: index });
+      if (!furniture.has(printed)) furniture.set(printed, { heading, offset: index });
       continue;
     }
-    byHeading.set(key, { heading, offset: index });
+    byHeading.set(headingKey(heading), { heading, offset: index });
   }
   // An all-caps marker line ("ITEM 2.02") matches the all-caps arm on its own
   // and also joins the title below it; when both survive dedup at one offset,
   // the bare entry is the same heading listed twice.
-  const entries = [...byHeading.values()];
+  const entries = [...byHeading.values(), ...furniture.values()];
   const titledOffsets = new Set(
     entries.filter((h) => !BARE_MARKER_HEADING_RE.test(h.heading)).map((h) => h.offset),
   );
@@ -886,6 +976,43 @@ function isTocRow(text: string, line: string, after: number): boolean {
 }
 
 /**
+ * Whether a detected heading sits on a table-of-contents row, so `section` ranks
+ * it after every body heading of its tier (#174). The test runs on the heading's
+ * title line: its own line, or for a bare marker or a marker joined to a later
+ * title, the next line with content. That line is a TOC row by {@link isTocRow}
+ * (the line tiers' own test), or when the next line with content ends in a page
+ * cell — a TOC title wrapped onto a second line (Aware's "Item 5. Market for…
+ * Issuer Purchases / of Equity Securities.......  12").
+ *
+ * Three TOC shapes survive dedup: a body heading worded apart from its TOC row
+ * (First Bancorp's 8-K: "Item 9.01 Financial Statements and Exhibits.    Page 1"
+ * over the body's "…Pro Forma Financial Information and Exhibits."), a bare
+ * all-caps marker over a title cell and a page cell (DRDGOLD's 20-F: "ITEM 3." /
+ * "KEY INFORMATION" / "6"), and the title cell itself.
+ *
+ * The test reads a page number under a body heading the same way (CCC's 10-K sets
+ * "Item 6. Reserved." over its page number), which is why a TOC row is only
+ * ranked last in its tier rather than dropped: alone in the tier, it still lands.
+ * A heading's offset can sit one past its line start (an NBSP-led Item, #176), so
+ * the line is found from the newline before it.
+ */
+export function isTocHeading(text: string, heading: FilingHeading): boolean {
+  const lineStart = text.lastIndexOf('\n', heading.offset - 1) + 1;
+  const newline = text.indexOf('\n', heading.offset);
+  const lineEnd = newline === -1 ? text.length : newline;
+  const titledHere =
+    !BARE_MARKER_HEADING_RE.test(heading.heading) &&
+    text.startsWith(heading.heading, heading.offset);
+  const title = titledHere
+    ? { line: text.slice(lineStart, lineEnd), end: lineEnd + 1 }
+    : nextContentLine(text, lineEnd + 1);
+  if (title === undefined) return false;
+  if (isTocRow(text, title.line, title.end)) return true;
+  const below = nextContentLine(text, title.end);
+  return below !== undefined && TOC_PAGE_TAIL_RE.test(below.line);
+}
+
+/**
  * Whether a prefix line runs on past a one-word needle into a longer Title Case
  * title — the next word opens on a capital in a line that is not all caps. One
  * word heads many unrelated titles: `business` reached "Business Combinations.",
@@ -895,8 +1022,9 @@ function isTocRow(text: string, line: string, after: number): boolean {
  * ("Human Capital" → "Human Capital Management"), and a suffix opening
  * lowercase ("as of June 30, 2026") or on punctuation ("(continued)",
  * "—Parent Company Only") continues the needle's own heading. `key` is the
- * line's {@link headingKey}, which starts with `needle`; folding maps every
- * whitespace run to one space, so the needle is exactly the line's first word.
+ * line's {@link headingKey}, which starts with `needle` — for a labelled line,
+ * the key and the line both past the label (#175); folding maps every whitespace
+ * run to one space, so the needle is exactly the line's first word.
  */
 function continuesIntoLongerTitle(line: string, key: string, needle: string): boolean {
   if (needle.includes(' ') || key.charAt(needle.length) !== ' ') return false;
@@ -905,10 +1033,30 @@ function continuesIntoLongerTitle(line: string, key: string, needle: string): bo
 }
 
 /**
- * The offset of the document line `section` names when no detected heading
- * does — a mixed-case subheading ("Liquidity and Capital Resources") that
- * {@link detectHeadings} never lists (#166). Lines compare by
- * {@link headingKey} on both sides, in two tiers:
+ * Whether a line whose key is `key` is a prefix-tier landing for `needle`: the
+ * key starts with it at a word boundary, runs at most {@link MAX_TITLE_CHARS}
+ * characters, and does not run on into a longer title.
+ */
+function startsWithTitle(line: string, key: string, needle: string): boolean {
+  return (
+    key.length <= MAX_TITLE_CHARS &&
+    key.startsWith(needle) &&
+    !/[\p{L}\p{N}]/u.test(key.charAt(needle.length)) &&
+    !continuesIntoLongerTitle(line, key, needle)
+  );
+}
+
+/** A document line `section` names: where it starts, and whether it equals the needle. */
+export interface SectionLine {
+  /** True for a line equal to the needle, false for one that only starts with it. */
+  equal: boolean;
+  offset: number;
+}
+
+/**
+ * The document line `section` names — a mixed-case subheading ("Liquidity and
+ * Capital Resources") that {@link detectHeadings} never lists (#166). Lines
+ * compare by {@link headingKey} on both sides, in two tiers:
  * 1. A line equal to the needle.
  * 2. Only when no line is equal: a line that starts with the needle at a word
  *    boundary and runs at most {@link MAX_TITLE_CHARS} characters — a heading
@@ -917,6 +1065,18 @@ function continuesIntoLongerTitle(line: string, key: string, needle: string): bo
  *    ({@link continuesIntoLongerTitle}). Equality goes first because the prefix
  *    tier alone would take a bullet such as "Competition among vendors…" ahead
  *    of the "Competition" heading.
+ *
+ * The result says which tier hit, because `section` ranks the two apart (#177):
+ * an equal line ahead of a heading that only contains the value, a prefix line
+ * after every heading. One pass yields both, so a caller needing each pays for
+ * one scan.
+ *
+ * Both tiers also compare the line's key with a leading 20-F sub-item label
+ * removed ({@link withoutSubItemLabel}, #175), so `risk factors` reaches "3D.
+ * RISK FACTORS"; the longer-title test then judges the line after its label
+ * ("B. Business Overview" keeps `business` out). The needle is never stripped,
+ * so a labelled value still matches its own line. The landing is the line's
+ * first character, label included.
  *
  * In both tiers a line is skipped when it opens on a lowercase letter (a
  * wrapped sentence or bullet: "competition in our market…", a lone "business."
@@ -927,7 +1087,7 @@ function continuesIntoLongerTitle(line: string, key: string, needle: string): bo
  * line wins; its offset is the line's first non-blank character. One forward
  * pass over the text; a line shorter than the needle is never folded.
  */
-export function findSectionLine(text: string, section: string): number | undefined {
+export function matchSectionLine(text: string, section: string): SectionLine | undefined {
   const needle = headingKey(section);
   if (needle.length === 0) return;
   let prefixHit: number | undefined;
@@ -939,14 +1099,16 @@ export function findSectionLine(text: string, section: string): number | undefin
     start = end + 1;
     if (line.length < needle.length) continue;
     const key = headingKey(line);
-    const equal = key === needle;
+    const unlabelled = withoutSubItemLabel(key);
+    const equal = key === needle || unlabelled === needle;
     if (
       !equal &&
       (prefixHit !== undefined ||
-        key.length > MAX_TITLE_CHARS ||
-        !key.startsWith(needle) ||
-        /[\p{L}\p{N}]/u.test(key.charAt(needle.length)) ||
-        continuesIntoLongerTitle(line, key, needle))
+        !(
+          startsWithTitle(line, key, needle) ||
+          (unlabelled !== undefined &&
+            startsWithTitle(line.trimStart().replace(/^\S+\s+/, ''), unlabelled, needle))
+        ))
     ) {
       continue;
     }
@@ -955,10 +1117,15 @@ export function findSectionLine(text: string, section: string): number | undefin
     if (followsMidSentence(text, lineStart) || isWrappedProse(text, lineStart, content)) continue;
     if (isTocRow(text, line, start)) continue;
     const offset = lineStart + line.length - content.length;
-    if (equal) return offset;
+    if (equal) return { equal, offset };
     prefixHit = offset;
   }
-  return prefixHit;
+  return prefixHit === undefined ? undefined : { equal: false, offset: prefixHit };
+}
+
+/** The offset of the line {@link matchSectionLine} lands on: the equal line, else the prefix line. */
+export function findSectionLine(text: string, section: string): number | undefined {
+  return matchSectionLine(text, section)?.offset;
 }
 
 /** Convert filing HTML to plain text, optionally truncating to a character limit. */

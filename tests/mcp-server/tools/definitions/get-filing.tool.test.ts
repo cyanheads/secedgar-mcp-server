@@ -5,7 +5,7 @@
  */
 
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getFilingTool } from '@/mcp-server/tools/definitions/get-filing.tool.js';
 import type { CachedExtract } from '@/services/edgar/filing-to-text.js';
 import type { FilingIndex, SubmissionsResponse } from '@/services/edgar/types.js';
@@ -18,9 +18,10 @@ vi.mock('@/services/edgar/edgar-api-service.js', async (importOriginal) => ({
   initEdgarApiService: vi.fn(),
 }));
 
-// `foldForHeadingMatch`, `headingKey`, and `findSectionLine` are not mocked:
-// they are the comparisons the section matcher under test performs, so the real
-// ones have to run (#106, #166, #169).
+// `foldForHeadingMatch`, `headingKey`, `MARKER_TITLE_RE`, `withoutSubItemLabel`,
+// `isTocHeading`, and `matchSectionLine` are not mocked: they are the
+// comparisons the section matcher under test performs, so the real ones have to
+// run (#106, #166, #169, #174, #175).
 vi.mock('@/services/edgar/filing-to-text.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/edgar/filing-to-text.js')>();
   return {
@@ -35,7 +36,10 @@ vi.mock('@/services/edgar/filing-to-text.js', async (importOriginal) => {
     windowText: vi.fn(),
     foldForHeadingMatch: actual.foldForHeadingMatch,
     headingKey: actual.headingKey,
-    findSectionLine: actual.findSectionLine,
+    MARKER_TITLE_RE: actual.MARKER_TITLE_RE,
+    withoutSubItemLabel: actual.withoutSubItemLabel,
+    isTocHeading: actual.isTocHeading,
+    matchSectionLine: actual.matchSectionLine,
   };
 });
 
@@ -1232,6 +1236,76 @@ describe('section targeting', () => {
   });
 });
 
+describe('section targeting — paging on from a section landing', () => {
+  const TEXT =
+    `${'Cover prose. '.repeat(100)}\n\nRISK FACTORS\n\n${'Risk prose sentence. '.repeat(200)}` +
+    `\n\nSIGNATURES\n\n${'Signature prose. '.repeat(100)}`;
+  const LANDING = TEXT.indexOf('RISK FACTORS');
+  const FOOTER_RE = /Showing (\d+) of (\d+) characters\. Pass next_offset \((\d+)\) as offset/;
+
+  beforeEach(async () => {
+    const actual = await vi.importActual<typeof import('@/services/edgar/filing-to-text.js')>(
+      '@/services/edgar/filing-to-text.js',
+    );
+    vi.mocked(filingToExtract).mockReturnValue(TEXT);
+    vi.mocked(detectHeadings).mockImplementation(actual.detectHeadings);
+    vi.mocked(windowText).mockImplementation(actual.windowText);
+  });
+
+  /** One page, its offset read off the text, and the footer from both surfaces. */
+  async function page(args: Record<string, unknown>) {
+    const result = await runToolContract(getFilingTool, {
+      accession_number: ACCN,
+      cik: '320193',
+      content_limit: 1000,
+      ...args,
+    });
+    expect(result.isError).toBeFalsy();
+    const sc = bag(result.structuredContent);
+    const content = sc.content as string;
+    const notice = sc.notice as string;
+    const text = result.content.map((b) => ('text' in b ? b.text : '')).join('\n');
+    expect(text).toContain(notice);
+    return { content, notice, nextOffset: sc.next_offset as number };
+  }
+
+  /**
+   * The next call's arguments, built the way a caller reads the footer: next_offset
+   * as offset, and section dropped only when the footer says so — otherwise every
+   * other argument rides along unchanged.
+   */
+  function follow(args: Record<string, unknown>, notice: string): Record<string, unknown> {
+    const [, , , printed] = FOOTER_RE.exec(notice) ?? [];
+    expect(printed).toBeDefined();
+    const { section: _section, ...rest } = args;
+    const kept = notice.includes('as offset without section') ? rest : args;
+    return { ...kept, offset: Number(printed) };
+  }
+
+  it('tells a section page to page on without section, and that recipe reaches the next two pages', async () => {
+    const firstArgs = { section: 'risk factors' };
+    const first = await page(firstArgs);
+    expect(TEXT.startsWith(first.content, LANDING)).toBe(true);
+    expect(first.nextOffset).toBe(LANDING + first.content.length);
+
+    const secondArgs = follow(firstArgs, first.notice);
+    const second = await page(secondArgs);
+    expect(TEXT.startsWith(second.content, LANDING + first.content.length)).toBe(true);
+
+    const third = await page(follow(secondArgs, second.notice));
+    expect(
+      TEXT.startsWith(third.content, LANDING + first.content.length + second.content.length),
+    ).toBe(true);
+
+    expect(first.notice).toBe(
+      `Showing ${first.content.length} of ${TEXT.length} characters. Pass next_offset (${first.nextOffset}) as offset without section to read the next page — section takes precedence over offset.`,
+    );
+    expect(second.notice).toBe(
+      `Showing ${second.content.length} of ${TEXT.length} characters. Pass next_offset (${second.nextOffset}) as offset to read the next page, or jump with section.`,
+    );
+  });
+});
+
 // ── Section matching folds whitespace and quote style (#106) ──────────────────
 
 describe('section targeting — whitespace and quote folding (#106)', () => {
@@ -1324,6 +1398,32 @@ describe('section targeting — whitespace and quote folding (#106)', () => {
     );
   });
 
+  // Characterization: the marker punctuation folds where a whole heading or line
+  // is compared, not where a heading only contains the value — there a partial
+  // title reaches the heading's line through the starts-with step, with its notice.
+  it('ignores marker punctuation at the equal and starts-with steps only', async () => {
+    const text = 'Intro prose.\n\nItem 1A. – Risk Factors\n\nRisk prose.';
+    const offset = text.indexOf('Item 1A.');
+    vi.mocked(detectHeadings).mockReturnValue([{ heading: 'Item 1A. – Risk Factors', offset }]);
+    vi.mocked(filingToExtract).mockReturnValue(text);
+    vi.mocked(windowText).mockReturnValue({ text: 'page', truncated: false, totalLength: 9 });
+    const notices: Array<unknown> = [];
+    for (const section of ['Item 1A Risk Factors', 'item 1a risk']) {
+      const result = await runToolContract(getFilingTool, {
+        accession_number: ACCN,
+        cik: '320193',
+        section,
+      });
+      expect(result.isError).toBeFalsy();
+      expect(vi.mocked(windowText).mock.calls.at(-1)?.[1]).toBe(offset);
+      notices.push(bag(result.structuredContent).notice);
+    }
+    expect(notices).toEqual([
+      undefined,
+      "No detected heading matches section 'item 1a risk', so this page starts at the first document line that does.",
+    ]);
+  });
+
   it('does not widen matching — "item 8" resolves to Item 8, not Item 7 or 7A', async () => {
     await callWithSection('item 8');
     expect(vi.mocked(windowText)).toHaveBeenCalledWith(expect.any(String), 900, expect.any(Number));
@@ -1346,6 +1446,65 @@ describe('section targeting — whitespace and quote folding (#106)', () => {
     expect(err.data.outline).toEqual(STYLED_HEADINGS);
     expect(err.message).toContain(`  [400] ${MDA_HEADING}`);
     expect(recoveryHint(err)).toContain('Pick a heading from the outline');
+  });
+
+  // A value of whitespace alone folds to an empty needle, a substring of every
+  // heading, so it landed on the first Item heading (Item 5 at 100) unasked.
+  it.each([
+    ['a run of spaces', '   ', 'its 3 characters are all whitespace (U+0020)'],
+    ['a lone NBSP', NBSP, 'its 1 character is whitespace (U+00A0)'],
+    ['mixed tab and newline', '\t\n', 'its 2 characters are all whitespace (U+0009, U+000A)'],
+    [
+      'an 80,000-character run, each code point named once',
+      ' \t'.repeat(40_000),
+      'its 80000 characters are all whitespace (U+0020, U+0009)',
+    ],
+  ])(
+    'rejects a blank section — %s — with the outline instead of landing',
+    async (_label, section, described) => {
+      vi.mocked(detectHeadings).mockReturnValue(STYLED_HEADINGS);
+      vi.mocked(filingToExtract).mockReturnValue('x'.repeat(2000));
+
+      const result = await runToolContract(getFilingTool, {
+        accession_number: ACCN,
+        cik: '320193',
+        section,
+      });
+
+      const error = wireError(result);
+      const outlineBlock = STYLED_HEADINGS.map((h) => `  [${h.offset}] ${h.heading}`).join('\n');
+      const message = `Section is blank: ${described}, leaving nothing to match.\n\nOutline:\n${outlineBlock}`;
+      const hint =
+        'Pick a heading from the outline above and pass it as section; a subheading the outline omits matches when passed exactly as the document prints it.';
+      expect(error.message).toBe(message);
+      expect(error.data).toMatchObject({ reason: 'section_not_found', section });
+      expect(error.data.outline).toEqual(STYLED_HEADINGS);
+      expect(bag(error.data.recovery).hint).toBe(hint);
+      const textStart = `Error: ${message}\n\nRecovery: ${hint}\n\n(reason section_not_found`;
+      expect(blockText(result.content).slice(0, textStart.length)).toBe(textStart);
+      expect(vi.mocked(windowText)).not.toHaveBeenCalled();
+    },
+  );
+
+  it('resolves a value with one visible character inside whitespace as before', async () => {
+    vi.mocked(detectHeadings).mockReturnValue(STYLED_HEADINGS);
+    vi.mocked(filingToExtract).mockReturnValue('x'.repeat(2000));
+    vi.mocked(windowText).mockReturnValue({
+      text: 'Item 8 page',
+      truncated: false,
+      totalLength: 2000,
+    });
+
+    const result = await runToolContract(getFilingTool, {
+      accession_number: ACCN,
+      cik: '320193',
+      section: `${NBSP} 8\t\n`,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(vi.mocked(windowText).mock.calls.at(-1)?.[1]).toBe(900);
+    expect(bag(result.structuredContent).content).toBe('Item 8 page');
+    expect(blockText(result.content)).toContain('Item 8 page');
   });
 });
 
@@ -1571,10 +1730,10 @@ describe('section targeting — every detected heading, exact match first (#169)
   });
 
   // Characterization: a bare marker carries no title, so it never wins the exact
-  // tier; the needle falls through to the first substring hit, as before #169.
+  // tier; the needle falls through to the first Item heading containing it (#177).
   it('never lets a bare marker win the exact tier', async () => {
     const headings = [
-      { heading: 'Summary of Item 1A matters', offset: 10 },
+      { heading: 'Item 1A. Summary of Risk Factors', offset: 10 },
       { heading: 'ITEM 1A', offset: 20 },
     ];
     expect(await landingFor('item 1a', headings)).toBe(10);
@@ -1749,8 +1908,9 @@ describe('section targeting — the line fallback (#166)', () => {
     );
   });
 
-  // Characterization: a heading hit — even a substring one — wins over an
-  // earlier line that equals the needle, as it did before #166.
+  // Characterization: an Item or Part heading that only contains the needle
+  // wins over an earlier line that equals it, as it did before #166; any other
+  // heading that only contains it ranks after the line (#177).
   it('lets a substring heading hit win over an earlier equal line', async () => {
     expect(await landingFor('competition')).toBe(TEXT.indexOf('Item 7.'));
   });
@@ -1812,6 +1972,501 @@ describe('section targeting — the line fallback (#166)', () => {
     });
     expect(result.isError).toBeFalsy();
     expect(bag(result.structuredContent).notice).toBeUndefined();
+  });
+});
+
+describe('section targeting — an equal line ranks between Item/Part and other headings (#177)', () => {
+  const TEXT = [
+    'Cost of Revenues',
+    'Cover prose.',
+    'Compensation',
+    '$',
+    '47,505',
+    'Financial Information',
+    'Index prose.',
+    'Business',
+    'We design propulsion systems.',
+    'PART I — FINANCIAL INFORMATION (UNAUDITED)',
+    'Part prose.',
+    'NOTE 7 — INCOME TAXES',
+    'Tax prose.',
+    'COST OF REVENUES',
+    'Cost prose.',
+    'Income Taxes',
+    'The effective rate was 21%.',
+    'Acquisition of MagCanica',
+    'Deal prose.',
+    'NOTE 3. BUSINESS COMBINATIONS AND ACQUISITIONS',
+    'Acquisition prose.',
+    'Segment Results for the Quarter',
+    'Segment prose.',
+    'Item 11. Executive Compensation',
+    'Compensation prose.',
+  ].join('\n\n');
+  const HEADINGS = [
+    'PART I — FINANCIAL INFORMATION (UNAUDITED)',
+    'NOTE 7 — INCOME TAXES',
+    'COST OF REVENUES',
+    'NOTE 3. BUSINESS COMBINATIONS AND ACQUISITIONS',
+    'Item 11. Executive Compensation',
+  ].map((heading) => ({ heading, offset: TEXT.indexOf(heading) }));
+
+  function serveText() {
+    vi.mocked(detectHeadings).mockReturnValue(HEADINGS);
+    vi.mocked(filingToExtract).mockReturnValue(TEXT);
+  }
+
+  async function landingFor(section: string) {
+    serveText();
+    vi.mocked(windowText).mockReturnValue({ text: 'page', truncated: false, totalLength: 9 });
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({ accession_number: ACCN, cik: '320193', section });
+    await getFilingTool.handler(input, ctx);
+    return vi.mocked(windowText).mock.calls.at(-1)?.[1];
+  }
+
+  it.each([
+    ['that heading later in the text', 'business', 'Business\n'],
+    ['that heading earlier in the text', 'income taxes', 'Income Taxes\n'],
+  ])(
+    'lands on an equal line ahead of a heading that only contains the value, %s',
+    async (_label, section, line) => {
+      expect(await landingFor(section)).toBe(TEXT.indexOf(line));
+    },
+  );
+
+  // Characterization: every other tier keeps its place around the equal line.
+  it.each([
+    ['an exact heading over an earlier equal line', 'cost of revenues', 'COST OF REVENUES'],
+    [
+      'an Item heading that only contains the value over an earlier equal line',
+      'compensation',
+      'Item 11.',
+    ],
+    [
+      'a Part heading that only contains the value over an earlier equal line',
+      'financial information',
+      'PART I —',
+    ],
+    [
+      'a heading that only contains the value over an earlier prefix line',
+      'acquisition',
+      'NOTE 3.',
+    ],
+    ['a prefix line when no heading contains the value', 'segment results', 'Segment Results for'],
+  ])('keeps %s', async (_label, section, landing) => {
+    expect(await landingFor(section)).toBe(TEXT.indexOf(landing));
+  });
+
+  it('says the line outranked a heading that only contains the value, in structuredContent and content[]', async () => {
+    serveText();
+    vi.mocked(windowText).mockReturnValue({ text: 'Business', truncated: false, totalLength: 9 });
+
+    const result = await runToolContract(getFilingTool, {
+      accession_number: ACCN,
+      cik: '320193',
+      section: 'business',
+    });
+    expect(result.isError).toBeFalsy();
+    const notice =
+      "No detected heading equals section 'business', so this page starts at the first document line that does, ahead of headings that only contain it.";
+    expect(bag(result.structuredContent).notice).toBe(notice);
+    expect(result.content.map((b) => ('text' in b ? b.text : '')).join('\n')).toContain(notice);
+  });
+
+  // Characterization: a prefix-line landing — every heading tier missed — keeps
+  // the shipped notice.
+  it('keeps the shipped notice on a prefix-line landing', async () => {
+    serveText();
+    vi.mocked(windowText).mockReturnValue({ text: 'Segment', truncated: false, totalLength: 9 });
+
+    const result = await runToolContract(getFilingTool, {
+      accession_number: ACCN,
+      cik: '320193',
+      section: 'segment results',
+    });
+    expect(result.isError).toBeFalsy();
+    const notice =
+      "No detected heading matches section 'segment results', so this page starts at the first document line that does.";
+    expect(bag(result.structuredContent).notice).toBe(notice);
+    expect(result.content.map((b) => ('text' in b ? b.text : '')).join('\n')).toContain(notice);
+  });
+});
+
+/** Where `section` lands over `text` and its mocked headings: the offset `windowText` was given. */
+async function landingOver(
+  text: string,
+  headings: Array<{ heading: string; offset: number }>,
+  section: string,
+) {
+  vi.mocked(detectHeadings).mockReturnValue(headings);
+  vi.mocked(filingToExtract).mockReturnValue(text);
+  vi.mocked(windowText).mockReturnValue({ text: 'page', truncated: false, totalLength: 9 });
+  const ctx = createMockContext({ errors: getFilingTool.errors });
+  const input = getFilingTool.input.parse({ accession_number: ACCN, cik: '320193', section });
+  await getFilingTool.handler(input, ctx);
+  return vi.mocked(windowText).mock.calls.at(-1)?.[1];
+}
+
+describe('section targeting — body headings ahead of TOC rows in each heading tier (#174)', () => {
+  const TEXT = [
+    'Item 1A. Risk Factors      12',
+    'ITEM 3.',
+    'KEY INFORMATION',
+    '6',
+    'CONSOLIDATED BALANCE SHEETS      F-3',
+    'SELECTED FINANCIAL DATA      40',
+    'Item 6. Reserved.      36',
+    '',
+    'Body prose.',
+    '',
+    'Item 1A. Risk Factors',
+    'Risk prose.',
+    '',
+    'ITEM 3. KEY INFORMATION',
+    'Key prose.',
+    '',
+    'CONSOLIDATED BALANCE SHEETS (CONTINUED)',
+    'Balance prose.',
+    '',
+    /**
+     * Document lines no heading lists, which a line step would take if a TOC row
+     * ranked behind the line steps or the tier holding it skipped it: an equal
+     * line for `item 6` and for `selected financial data`, and a prefix line for
+     * `financial data`.
+     */
+    'Item 6.',
+    'Not applicable.',
+    '',
+    'Selected Financial Data',
+    'Financial data for the period follows.',
+  ].join('\n');
+  const pos = (line: string, from = 0) => TEXT.indexOf(line, from);
+  const BODY = pos('Body prose.');
+  const HEADINGS = [
+    { heading: 'Item 1A. Risk Factors', offset: 0 },
+    { heading: 'ITEM 3.', offset: pos('ITEM 3.\n') },
+    { heading: 'CONSOLIDATED BALANCE SHEETS', offset: pos('CONSOLIDATED BALANCE SHEETS ') },
+    { heading: 'SELECTED FINANCIAL DATA', offset: pos('SELECTED') },
+    { heading: 'Item 6. Reserved.', offset: pos('Item 6.') },
+    { heading: 'Item 1A. Risk Factors', offset: pos('Item 1A.', BODY) },
+    { heading: 'ITEM 3. KEY INFORMATION', offset: pos('ITEM 3. KEY') },
+    {
+      heading: 'CONSOLIDATED BALANCE SHEETS (CONTINUED)',
+      offset: pos('CONSOLIDATED BALANCE SHEETS ('),
+    },
+  ];
+
+  it.each([
+    ['the exact tier', 'risk factors', pos('Item 1A.', BODY)],
+    ['the Item/Part tier', 'item 3', pos('ITEM 3. KEY')],
+    ['the other-heading tier', 'balance sheets', pos('CONSOLIDATED BALANCE SHEETS (')],
+  ])(
+    'ranks the body heading ahead of an earlier TOC row in %s',
+    async (_label, section, offset) => {
+      expect(await landingOver(TEXT, HEADINGS, section)).toBe(offset);
+    },
+  );
+
+  /**
+   * Characterization: a TOC row is still a landing when it is its tier's only
+   * match, ahead of the line steps and of every later tier. Each value matches
+   * no heading in an earlier tier, and a later step holds a line for it.
+   */
+  it.each([
+    ['the exact tier', 'selected financial data', pos('SELECTED')],
+    ['the Item/Part tier', 'item 6', pos('Item 6.')],
+    ['the other-heading tier', 'financial data', pos('SELECTED')],
+  ])('lands on a TOC row that is the only match in %s', async (_label, section, offset) => {
+    expect(await landingOver(TEXT, HEADINGS, section)).toBe(offset);
+  });
+});
+
+describe('section targeting — the exact tier past a leading 20-F sub-item label (#175)', () => {
+  const TEXT = 'x'.repeat(1000);
+
+  it.each([
+    [
+      'an all-caps labelled heading over an earlier heading containing the value',
+      [
+        { heading: 'SUMMARY OF RISK FACTORS', offset: 100 },
+        { heading: 'D. RISK FACTORS', offset: 500 },
+      ],
+    ],
+    [
+      'a labelled Item title over an earlier Item heading containing the value',
+      [
+        { heading: 'Item 1A. Summary of Risk Factors', offset: 100 },
+        { heading: 'Item 3. D. Risk Factors', offset: 500 },
+      ],
+    ],
+  ])('matches %s', async (_label, headings) => {
+    expect(await landingOver(TEXT, headings, 'risk factors')).toBe(500);
+  });
+
+  it('takes a heading equal as printed over an earlier one equal only past its label', async () => {
+    const headings = [
+      { heading: 'A. RISK FACTORS', offset: 100 },
+      { heading: 'Item 1A. Risk Factors', offset: 500 },
+    ];
+    expect(await landingOver(TEXT, headings, 'risk factors')).toBe(500);
+  });
+
+  // Characterization: a labelled body heading still beats a TOC row equal as
+  // printed, and lands when no heading equals the value as printed.
+  it('ranks a labelled body heading over a TOC row equal as printed', async () => {
+    const text = [
+      'RISK FACTORS      12',
+      '',
+      'Body prose.',
+      '',
+      'D. RISK FACTORS',
+      'Risk prose.',
+    ].join('\n');
+    const headings = [
+      { heading: 'RISK FACTORS', offset: 0 },
+      { heading: 'D. RISK FACTORS', offset: text.indexOf('D. RISK') },
+    ];
+    expect(await landingOver(text, headings, 'risk factors')).toBe(text.indexOf('D. RISK'));
+    expect(await landingOver(text, headings.slice(1), 'risk factors')).toBe(
+      text.indexOf('D. RISK'),
+    );
+  });
+
+  // Characterization: the value is compared as given — a labelled value matches
+  // its own heading, and an unlabelled heading never matches a labelled value.
+  it('compares the value as given', async () => {
+    const headings = [
+      { heading: 'RISK FACTORS', offset: 100 },
+      { heading: 'D. RISK FACTORS', offset: 500 },
+    ];
+    expect(await landingOver(TEXT, headings, 'D. Risk Factors')).toBe(500);
+    const unlabelled = [{ heading: 'RISK FACTORS', offset: 100 }];
+    await expect(landingOver(TEXT, unlabelled, 'D. Risk Factors')).rejects.toMatchObject({
+      data: { reason: 'section_not_found' },
+    });
+  });
+});
+
+describe('section targeting — the substring tiers stay linear on a value that runs on', () => {
+  const cpuMs = async (run: () => Promise<unknown>): Promise<number> => {
+    const start = process.threadCpuUsage();
+    await run();
+    const used = process.threadCpuUsage(start);
+    return (used.user + used.system) / 1000;
+  };
+  const bestOf3 = async (run: () => Promise<unknown>) =>
+    Math.min(await cpuMs(run), await cpuMs(run), await cpuMs(run));
+  const fill = (unit: string, chars: number) => unit.repeat(Math.ceil(chars / unit.length));
+
+  /**
+   * Doubles the input from 5k to `maxChars`, checking the landing and the CPU
+   * bound at each size before building the next, so a quadratic shape fails fast
+   * instead of hanging.
+   */
+  async function expectLinear(
+    build: (n: number) => { heading: string; section: string },
+    maxChars: number,
+    boundMs: number,
+  ) {
+    const land = ({ heading, section }: { heading: string; section: string }) =>
+      landingOver('Body.', [{ heading, offset: 0 }], section);
+    await land(build(5_000)); // warm the JIT
+    const small = build(5_000);
+    const t5k = Math.max(await bestOf3(() => land(small)), 0.25);
+    let last = t5k;
+    for (let n = 10_000; n <= maxChars; n *= 2) {
+      const input = build(n);
+      expect(await land(input), `${n} characters`).toBe(0);
+      last = await bestOf3(() => land(input));
+      expect(last, `${n} characters`).toBeLessThan(boundMs);
+    }
+    expect(last / t5k).toBeLessThan(maxChars === 320_000 ? 256 : 64);
+  }
+
+  // Every occurrence of the value but the last runs on into another digit, and a
+  // long digit run never crosses Bun's slower regex mode, so it carries the full
+  // 64× span.
+  it('a digit value inside a long digit heading (5k → 320k)', async () => {
+    await expectLinear(
+      (n) => ({ heading: `ITEM 1 ${'1'.repeat(n)}`, section: '1'.repeat(n / 2) }),
+      320_000,
+      200,
+    );
+  });
+
+  it.each([
+    [
+      'one long line ending in a break',
+      (n: number) => ({
+        heading: `ITEM 1 ${fill('§1 x', n)} 12 ${fill('§1 x', n)} 1`,
+        section: `${fill('§1 x', n)}\n1`,
+      }),
+    ],
+    [
+      'breaks throughout',
+      (n: number) => ({ heading: `ITEM 1 ${'1'.repeat(n)}`, section: `${fill('  \r\n', n)}1` }),
+    ],
+  ])('a value over %s (5k → 80k)', async (_label, build) => {
+    await expectLinear(build, 80_000, 200);
+  });
+});
+
+describe('section targeting — every resolution step stays linear in a caller-sized value', () => {
+  const ITEMS = [
+    ['1', 'Business'],
+    ['1A', 'Risk Factors'],
+    ['1B', 'Unresolved Staff Comments'],
+    ['1C', 'Cybersecurity'],
+    ['2', 'Properties'],
+    ['3', 'Legal Proceedings'],
+    ['4', 'Mine Safety Disclosures'],
+    ['5', 'Market for Registrant’s Common Equity'],
+    ['6', 'Reserved'],
+    ['7', 'Management’s Discussion and Analysis'],
+    ['7A', 'Quantitative and Qualitative Disclosures About Market Risk'],
+    ['8', 'Financial Statements and Supplementary Data'],
+    ['9', 'Changes in and Disagreements with Accountants'],
+    ['9A', 'Controls and Procedures'],
+    ['9B', 'Other Information'],
+    ['10', 'Directors, Executive Officers and Corporate Governance'],
+    ['11', 'Executive Compensation'],
+    ['12', 'Security Ownership of Certain Beneficial Owners'],
+    ['13', 'Certain Relationships and Related Transactions'],
+    ['14', 'Principal Accountant Fees and Services'],
+    ['15', 'Exhibits and Financial Statement Schedules'],
+    ['16', 'Form 10-K Summary'],
+  ] as const;
+  /**
+   * A 10-K-shaped text: a page-numbered table of contents, then per Item its
+   * heading, fourteen all-caps note headings, mixed-case subheadings, prose,
+   * and statement rows — over 300 detected headings across over 3,000 lines.
+   */
+  const DOC = [
+    'TABLE OF CONTENTS',
+    '',
+    ...ITEMS.map(([code, title], i) => `Item ${code}.    ${title}      ${i * 4 + 3}`),
+    '',
+    ...ITEMS.flatMap(([code, title], i) => [
+      ...(i % 6 === 0 ? ['', `PART ${['I', 'II', 'III', 'IV'][i / 6]}`, ''] : []),
+      '',
+      `ITEM ${code}. ${title.toUpperCase()}`,
+      '',
+      ...Array.from({ length: 14 }, (_, j) => [
+        `NOTE ${j + 1} — ${['REVENUE', 'LEASES', 'DEBT ANALYSIS', 'INCOME TAXES'][j % 4]} OF ITEM ${code}`,
+        '',
+        `Segment Results for Quarter ${j + 1}`,
+        'The company recorded results in line with its outlook for the period.',
+        'Management reviewed the drivers and the year-over-year comparison.',
+        'Costs rose with volume, offset in part by pricing.',
+        'See the notes to the financial statements for the detail.',
+        `Revenue      $ ${1000 + j},${100 + i}      $ ${900 + j},${200 + i}`,
+        `Operating income      ${300 + j}      ${280 + j}`,
+        '',
+      ]).flat(),
+    ]),
+  ].join('\n');
+  const fill = (unit: string, chars: number) => unit.repeat(Math.ceil(chars / unit.length));
+  let headings: Array<{ heading: string; offset: number }> = [];
+
+  beforeAll(async () => {
+    const actual = await vi.importActual<typeof import('@/services/edgar/filing-to-text.js')>(
+      '@/services/edgar/filing-to-text.js',
+    );
+    headings = actual.detectHeadings(DOC);
+  });
+
+  /** Where `section` lands over DOC for a filing of `form`: the windowText offset, or 'miss'. */
+  async function outcome(section: string, form: string): Promise<number | 'miss'> {
+    vi.mocked(detectHeadings).mockReturnValue(headings);
+    vi.mocked(filingToExtract).mockReturnValue(DOC);
+    vi.mocked(windowText).mockReturnValue({ text: 'page', truncated: false, totalLength: 9 });
+    const recent = { ...mockSubmissions.filings.recent, form: [form] };
+    mockApi.getSubmissions.mockResolvedValue({
+      ...mockSubmissions,
+      filings: { ...mockSubmissions.filings, recent },
+    });
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({ accession_number: ACCN, cik: '320193', section });
+    try {
+      await getFilingTool.handler(input, ctx);
+    } catch (error) {
+      expect(error).toMatchObject({ data: { reason: 'section_not_found' } });
+      return 'miss';
+    }
+    const offset = vi.mocked(windowText).mock.calls.at(-1)?.[1];
+    if (offset === undefined) throw new Error('A landing with no windowText call.');
+    return offset;
+  }
+
+  const cpuMs = async (run: () => Promise<unknown>): Promise<number> => {
+    const start = process.threadCpuUsage();
+    await run();
+    const used = process.threadCpuUsage(start);
+    return (used.user + used.system) / 1000;
+  };
+  const bestOf3 = async (run: () => Promise<unknown>) =>
+    Math.min(await cpuMs(run), await cpuMs(run), await cpuMs(run));
+
+  /**
+   * Doubles the value from 5k to `maxChars`, checking the outcome and the CPU
+   * bound at each size before building the next, so a quadratic step fails in
+   * seconds instead of hanging.
+   */
+  async function expectLinear(
+    build: (n: number) => string,
+    form: string,
+    maxChars: number,
+    expected: number | 'miss',
+  ) {
+    expect(headings.length).toBeGreaterThan(250);
+    expect(DOC.split('\n').length).toBeGreaterThan(3000);
+    await outcome(build(5_000), form); // warm the JIT
+    const small = build(5_000);
+    expect(await outcome(small, form)).toBe(expected);
+    const t5k = Math.max(await bestOf3(() => outcome(small, form)), 0.25);
+    let last = t5k;
+    for (let n = 10_000; n <= maxChars; n *= 2) {
+      const section = build(n);
+      expect(await outcome(section, form), `${n} characters`).toBe(expected);
+      last = await bestOf3(() => outcome(section, form));
+      expect(last, `${n} characters`).toBeLessThan(200);
+    }
+    expect(last / t5k).toBeLessThan(maxChars === 320_000 ? 256 : 64);
+  }
+
+  /**
+   * Where "analysis" lands in each form's resolution order: a 10-K takes Item 7,
+   * whose title holds it, ahead of every other heading; a proxy statement takes
+   * the first heading of any kind holding it, a note heading under Item 1.
+   */
+  const ITEM_7 = DOC.indexOf('ITEM 7. MANAGEMENT');
+  const FIRST_ANALYSIS_NOTE = DOC.indexOf('NOTE 3 — DEBT ANALYSIS OF ITEM 1\n');
+  // The CPU bound at each size is the guard; the wall-clock timeout only absorbs a loaded machine.
+  const SLACK = { timeout: 30_000 };
+
+  describe.each([
+    ['a 10-K', '10-K', ITEM_7],
+    ['a proxy statement', 'DEF 14A', FIRST_ANALYSIS_NOTE],
+  ])('in %s', (_label, form, analysisLanding) => {
+    // A long digit run never crosses Bun's slower regex mode, so it carries the
+    // full 64× span; it misses every heading and line.
+    it('a digit run (5k → 320k)', SLACK, async () => {
+      await expectLinear((n) => '1'.repeat(n), form, 320_000, 'miss');
+    });
+
+    it('one long line ending in a break (5k → 80k)', SLACK, async () => {
+      await expectLinear((n) => `${fill('§1 x', n)}\ny`, form, 80_000, 'miss');
+    });
+
+    it('a run of periods (5k → 80k)', SLACK, async () => {
+      await expectLinear((n) => `item 1${'.'.repeat(n)}x`, form, 80_000, 'miss');
+    });
+
+    // Folds to "analysis", which lands apart in the two forms, so each run takes its own order.
+    it('breaks throughout (5k → 80k)', SLACK, async () => {
+      await expectLinear((n) => `${fill('  \r\n', n)}analysis`, form, 80_000, analysisLanding);
+    });
   });
 });
 
