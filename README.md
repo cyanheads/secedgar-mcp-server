@@ -89,7 +89,7 @@ SEC EDGAR filings, financials, and ownership data. Look up companies by ticker, 
 ### `secedgar_get_filing` <sub>tool</sub>
 
 - `accession_number` in dash or 18-digit form, optional `cik` to speed the lookup, `document` for an exhibit, `include_xbrl` for XBRL artifacts; `content_limit` 1,000–200,000 characters per page (default 50,000)
-- Page with `offset` / `next_offset` until `content_truncated` is false, or jump with `section` (a heading such as `item 1` or `part i`); the first page of a truncated document carries an `outline` of up to 50 headings with offsets
+- Page with `offset` / `next_offset` until `content_truncated` is false, or jump with `section` (a heading such as `item 1` or `part i`), then drop `section` to page on, since it outranks `offset`; the first page of a truncated document carries an `outline` of up to 50 headings with offsets
 - `documents` splits the filing into primary, exhibits, and auxiliary; `binary` entries (scans, PDFs, archives) fail as `binary_document`, and a `section` miss returns `section_not_found` with the outline
 - If the archive doesn't serve a filing's primary document (common in 2000–2001), the full submission `<accession>.txt` is read instead and the notice says so
 
@@ -358,7 +358,7 @@ cp .env.example .env
 
 | Variable | Description | Default |
 |:---|:---|:---|
-| `EDGAR_USER_AGENT` | **Required.** User-Agent sent to SEC, as `"AppName contact@email.com"`. SEC blocks IPs without one. | — |
+| `EDGAR_USER_AGENT` | **Required.** User-Agent sent to SEC, as `"AppName contact@email.com"`. SEC blocks IPs without one. A value that can't be sent as an HTTP header (an em dash or curly quote, an inner line break) stops the server at startup with an error naming this variable. | — |
 | `EDGAR_RATE_LIMIT_RPS` | Max requests per second to SEC (1–10). | `10` |
 | `EDGAR_RATE_LIMIT_COOLDOWN_SECONDS` | Seconds to refuse calls locally after a 429 before one probe goes out. | `600` |
 | `EDGAR_TICKER_CACHE_TTL` | Seconds to cache the company and fund ticker files. | `3600` |
