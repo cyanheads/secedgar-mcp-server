@@ -622,11 +622,7 @@ function stripPageNumberTail(heading: string): string {
 export const MARKER_TITLE_RE =
   /^(item \d{1,2}(?:\.\d{2}|[a-z])?(?:\([a-z]\))?|part [ivx]{1,4}\b)\.? ?(?:[-–—:.] ?)?(.*)$/;
 
-/**
- * Terminal sentence punctuation on a folded key. The lookbehind starts a try only
- * where a punctuation run begins, so the strip runs in time linear in the key's
- * length.
- */
+/** Terminal sentence punctuation on a folded key. */
 const TERMINAL_PUNCTUATION_RE = /(?<![.,;:])[.,;:]+$/;
 
 /**

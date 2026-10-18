@@ -728,10 +728,8 @@ function sectionMatches(heading: string, needle: string): boolean {
 
 /**
  * Whether `needle` occurs in `heading` at or after `from` with no `continuation`
- * character after it, over every occurrence in one Knuth–Morris–Pratt pass, so
- * the check runs in time linear in the heading's length. Reached only after a
- * first occurrence that runs on, so the heading is at least as long as the
- * needle and the table costs no more than the scan.
+ * character after it, over every occurrence in one Knuth–Morris–Pratt pass.
+ * Reached only after a first occurrence that runs on.
  */
 function occursBeforeBoundary(
   heading: string,

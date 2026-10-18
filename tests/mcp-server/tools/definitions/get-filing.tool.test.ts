@@ -2248,7 +2248,7 @@ describe('section targeting — the exact tier past a leading 20-F sub-item labe
   });
 });
 
-describe('section targeting — the substring tiers stay linear on a value that runs on', () => {
+describe('section targeting — one heading, linear in the value’s length', () => {
   const cpuMs = async (run: () => Promise<unknown>): Promise<number> => {
     const start = process.threadCpuUsage();
     await run();
@@ -2261,7 +2261,7 @@ describe('section targeting — the substring tiers stay linear on a value that 
 
   /**
    * Doubles the input from 5k to `maxChars`, checking the landing and the CPU
-   * bound at each size before building the next, so a quadratic shape fails fast
+   * bound at each size before building the next, so a regression fails fast
    * instead of hanging.
    */
   async function expectLinear(
@@ -2281,13 +2281,10 @@ describe('section targeting — the substring tiers stay linear on a value that 
       last = await bestOf3(() => land(input));
       expect(last, `${n} characters`).toBeLessThan(boundMs);
     }
-    expect(last / t5k).toBeLessThan(maxChars === 320_000 ? 256 : 64);
+    expect(last / t5k).toBeLessThan((4 * maxChars) / 5_000);
   }
 
-  // Every occurrence of the value but the last runs on into another digit, and a
-  // long digit run never crosses Bun's slower regex mode, so it carries the full
-  // 64× span.
-  it('a digit value inside a long digit heading (5k → 320k)', async () => {
+  it('case A', async () => {
     await expectLinear(
       (n) => ({ heading: `ITEM 1 ${'1'.repeat(n)}`, section: '1'.repeat(n / 2) }),
       320_000,
@@ -2297,17 +2294,17 @@ describe('section targeting — the substring tiers stay linear on a value that 
 
   it.each([
     [
-      'one long line ending in a break',
+      'case B',
       (n: number) => ({
         heading: `ITEM 1 ${fill('§1 x', n)} 12 ${fill('§1 x', n)} 1`,
         section: `${fill('§1 x', n)}\n1`,
       }),
     ],
     [
-      'breaks throughout',
+      'case C',
       (n: number) => ({ heading: `ITEM 1 ${'1'.repeat(n)}`, section: `${fill('  \r\n', n)}1` }),
     ],
-  ])('a value over %s (5k → 80k)', async (_label, build) => {
+  ])('%s', async (_label, build) => {
     await expectLinear(build, 80_000, 200);
   });
 });
@@ -2410,7 +2407,7 @@ describe('section targeting — every resolution step stays linear in a caller-s
 
   /**
    * Doubles the value from 5k to `maxChars`, checking the outcome and the CPU
-   * bound at each size before building the next, so a quadratic step fails in
+   * bound at each size before building the next, so a regression fails in
    * seconds instead of hanging.
    */
   async function expectLinear(
@@ -2432,7 +2429,7 @@ describe('section targeting — every resolution step stays linear in a caller-s
       last = await bestOf3(() => outcome(section, form));
       expect(last, `${n} characters`).toBeLessThan(200);
     }
-    expect(last / t5k).toBeLessThan(maxChars === 320_000 ? 256 : 64);
+    expect(last / t5k).toBeLessThan((4 * maxChars) / 5_000);
   }
 
   /**
@@ -2449,22 +2446,20 @@ describe('section targeting — every resolution step stays linear in a caller-s
     ['a 10-K', '10-K', ITEM_7],
     ['a proxy statement', 'DEF 14A', FIRST_ANALYSIS_NOTE],
   ])('in %s', (_label, form, analysisLanding) => {
-    // A long digit run never crosses Bun's slower regex mode, so it carries the
-    // full 64× span; it misses every heading and line.
-    it('a digit run (5k → 320k)', SLACK, async () => {
+    it('case A', SLACK, async () => {
       await expectLinear((n) => '1'.repeat(n), form, 320_000, 'miss');
     });
 
-    it('one long line ending in a break (5k → 80k)', SLACK, async () => {
+    it('case B', SLACK, async () => {
       await expectLinear((n) => `${fill('§1 x', n)}\ny`, form, 80_000, 'miss');
     });
 
-    it('a run of periods (5k → 80k)', SLACK, async () => {
+    it('case C', SLACK, async () => {
       await expectLinear((n) => `item 1${'.'.repeat(n)}x`, form, 80_000, 'miss');
     });
 
     // Folds to "analysis", which lands apart in the two forms, so each run takes its own order.
-    it('breaks throughout (5k → 80k)', SLACK, async () => {
+    it('case D', SLACK, async () => {
       await expectLinear((n) => `${fill('  \r\n', n)}analysis`, form, 80_000, analysisLanding);
     });
   });

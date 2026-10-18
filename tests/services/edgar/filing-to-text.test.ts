@@ -2448,16 +2448,15 @@ describe('the heading key, the label strip, and the TOC-row test stay linear (#1
   const NBSP = ' ';
   const lineScan = (text: string) => findSectionLine(text, 'risk factors');
 
-  // A long digit run never crosses Bun's slower regex mode, so it carries the full 64× span.
-  it('a line scan over an Item line holding a long digit run (5k → 320k)', () => {
+  it('a line scan over case A', () => {
     expectLinear(lineScan, (n) => `Item 1. ${'1'.repeat(n)}\ny`, 320_000, 200);
   });
 
   it.each([
-    ['one long line ending in a break', (n: number) => `${fill('§1 x', n)}\ny`],
-    ['breaks throughout', (n: number) => fill('  \r\n', n)],
-    ['a long run of periods, then a letter', (n: number) => `${'.'.repeat(n)}x\n`],
-    ['an Item marker before a long run of periods', (n: number) => `Item 1${'.'.repeat(n)}x\n`],
+    ['case B', (n: number) => `${fill('§1 x', n)}\ny`],
+    ['case C', (n: number) => fill('  \r\n', n)],
+    ['case D', (n: number) => `${'.'.repeat(n)}x\n`],
+    ['case E', (n: number) => `Item 1${'.'.repeat(n)}x\n`],
     ['an Item marker before repeated separators', (n: number) => `Item 1A. ${fill('– ', n)}x\n`],
     ['labelled prefix lines throughout', (n: number) => fill('3D. RISK FACTORS SUMMARY\n', n)],
     ['labelled TOC rows throughout', (n: number) => fill('3D. Risk Factors\n6\n', n)],
