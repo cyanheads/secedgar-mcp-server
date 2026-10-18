@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.15.13](changelog/0.15.x/0.15.13.md) — 2026-10-18 · 🛡️ Security
+
+get_filing's section lands on body headings ahead of table-of-contents rows and matches 20-F sub-items and NBSP-led 8-K Items; SEC calls that get no HTTP response retry, then fail as retryable sec_unreachable.
+
 ## [0.15.12](changelog/0.15.x/0.15.12.md) — 2026-10-14
 
 compare_companies and get_financials read annual balance-sheet values at fiscal-year ends, get_filing finds more headings and sections, company_search serves filing_limit above 50, and dataframe_query rejects more SQL via mcp-ts-core 0.13.15.
