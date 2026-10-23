@@ -4,8 +4,8 @@
  * SEC's rate-limit block arrives on both client surfaces — `structuredContent`
  * and `content[]` — with the same reason whether SEC answered the 429 or the
  * server refused the call without sending it. The same tools declare
- * `sec_unreachable`, the failure once the last of three attempts gets no HTTP
- * response (#173). Driven through `runToolContract` over the real `EdgarApiService` with
+ * `sec_unreachable`, the failure once the last attempt gets no complete, readable
+ * response (#173, #181). Driven through `runToolContract` over the real `EdgarApiService` with
  * `globalThis.fetch` stubbed.
  * @module tests/mcp-server/tools/rate-limit-contract
  */
@@ -83,7 +83,11 @@ describe('sec_unreachable on the tool contracts (#173)', () => {
     }
   });
 
-  // A 503, a 502, then a reset ends here too, so the text claims only the last attempt.
+  /**
+   * A 503, a 502, then a reset ends here too, so the text claims only the last attempt;
+   * the call's failure budget can end the ladder before the third, or keep a request
+   * from being sent at all (#179).
+   */
   it('says the same of every ladder that ends this way, in one string on every tool', () => {
     const whens = buildToolDefinitions({ dropEnabled: true }).flatMap(
       (def) => def.errors?.filter((e) => e.reason === 'sec_unreachable').map((e) => e.when) ?? [],
@@ -91,9 +95,117 @@ describe('sec_unreachable on the tool contracts (#173)', () => {
     expect(whens).toHaveLength(13);
     expect(new Set(whens)).toEqual(
       new Set([
-        'The last of three attempts to reach SEC EDGAR got no HTTP response — the connection failed, or no response headers arrived within 15 seconds',
+        "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
       ]),
     );
+  });
+});
+
+describe('a call whose SEC response body fails to read (#181)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('unmocked fetch')));
+    initEdgarApiService();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('fails as sec_unreachable on both surfaces after three attempts, with none of the runtime’s text', async () => {
+    // Bun 1.4.4's own rejection for invalid chunk framing after valid headers: the
+    // request URL in the message and on `path`.
+    const fetchMock = vi.fn(
+      async (url: string) =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('{"0":{"ci'));
+            },
+            pull(controller) {
+              controller.error(
+                Object.assign(
+                  new TypeError(
+                    `InvalidHTTPResponse fetching "${url}". For more information, pass \`verbose: true\` in the second argument to fetch()`,
+                  ),
+                  { code: 'InvalidHTTPResponse', errno: 0, path: url },
+                ),
+              );
+            },
+          }),
+          { status: 200 },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pending = runToolContract(companySearchTool, { query: 'AAPL' });
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await pending;
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.isError).toBe(true);
+    const message =
+      'The response body from SEC EDGAR (www.sec.gov) failed to read on the last of 3 attempts, which ended with InvalidHTTPResponse.';
+    const hint =
+      'SEC EDGAR (www.sec.gov) answered the last attempt, but its response body broke off or stalled before it finished — a network failure between this server and SEC, not a problem with the request. Retry the same call in a minute.';
+    expect(envelope(result)).toEqual({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message,
+      data: {
+        reason: 'sec_unreachable',
+        retryable: true,
+        url: 'https://www.sec.gov/files/company_tickers.json',
+        recovery: { hint },
+      },
+    });
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: `Error: ${message}\n\nRecovery: ${hint}\n\n(reason sec_unreachable · retryable)`,
+      },
+    ]);
+    const wire = JSON.stringify(result);
+    expect(wire).not.toContain('verbose');
+    expect(wire).not.toContain('fetching');
+  });
+
+  it('fails as sec_unreachable on both surfaces in one request when a 200 body is not JSON', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response('<html><body>Temporarily unavailable</body></html>', { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pending = runToolContract(companySearchTool, { query: 'AAPL' });
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await pending;
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const message =
+      'SEC EDGAR (www.sec.gov) answered, but its response body is not the JSON this request expects.';
+    const hint =
+      'SEC EDGAR (www.sec.gov) answered with something other than the JSON it serves for this request, such as a temporary error page — not a problem with the request. Retry the same call in a minute.';
+    expect(envelope(result)).toEqual({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message,
+      data: {
+        reason: 'sec_unreachable',
+        retryable: true,
+        url: 'https://www.sec.gov/files/company_tickers.json',
+        recovery: { hint },
+      },
+    });
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: `Error: ${message}\n\nRecovery: ${hint}\n\n(reason sec_unreachable · retryable)`,
+      },
+    ]);
+    const wire = JSON.stringify(result);
+    expect(wire).not.toContain('<html');
+    expect(wire).not.toContain('Unexpected token');
+    expect(wire).not.toContain('JSON Parse error');
   });
 });
 
@@ -150,6 +262,90 @@ describe('a call SEC never answers (#173)', () => {
     const wire = JSON.stringify(result);
     expect(wire).not.toContain('verbose');
     expect(wire).not.toContain('socket connection');
+  });
+});
+
+describe('a call SEC keeps failing past its failure budget (#179)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('unmocked fetch')));
+    initEdgarApiService();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('fails as sec_unreachable on both surfaces inside 45 s when every request answers only its third attempt', async () => {
+    /** SEC's answer for each route a cold company search reads; `undefined` for any other URL. */
+    const route = (url: URL): Response | undefined => {
+      if (url.hostname === 'www.sec.gov' && url.pathname === '/files/company_tickers.json') {
+        return Response.json({ 0: { cik_str: 320193, ticker: 'AAPL', title: 'Apple Inc.' } });
+      }
+      if (url.hostname === 'www.sec.gov' && url.pathname === '/files/company_tickers_mf.json') {
+        return Response.json({ fields: ['cik', 'seriesId', 'classId', 'symbol'], data: [] });
+      }
+      if (url.hostname === 'data.sec.gov' && url.pathname === '/submissions/CIK0000320193.json') {
+        return Response.json({ cik: '0000320193', name: 'Apple Inc.', tickers: ['AAPL'] });
+      }
+      return;
+    };
+    const attempts = new Map<string, number>();
+    const unrouted: string[] = [];
+    const fetchMock = vi.fn((input: string, init: RequestInit) => {
+      const response = route(new URL(input));
+      if (!response) {
+        unrouted.push(input);
+        return Promise.reject(new Error(`unrouted fetch: ${input}`));
+      }
+      const attempt = (attempts.get(input) ?? 0) + 1;
+      attempts.set(input, attempt);
+      if (attempt >= 3) return Promise.resolve(response);
+      // No response headers: the attempt ends only when its own timeout aborts it.
+      return new Promise<Response>((_, reject) => {
+        init.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    let settled = false;
+    const pending = runToolContract(companySearchTool, { query: 'AAPL' }).finally(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(settled).toBe(true);
+    const result = await pending;
+
+    expect(unrouted).toEqual([]);
+    expect(result.isError).toBe(true);
+    const message =
+      "No request sent to SEC EDGAR (data.sec.gov): retries stopped at this call's 40 s budget for SEC failures, which its earlier requests spent.";
+    const hint =
+      "SEC EDGAR (data.sec.gov) failed this call's earlier requests until its budget for SEC failures ran out — a network failure between this server and SEC, not a problem with the request. Retry the same call in a minute.";
+    expect(envelope(result)).toEqual({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message,
+      data: {
+        reason: 'sec_unreachable',
+        retryable: true,
+        url: 'https://data.sec.gov/submissions/CIK0000320193.json',
+        recovery: { hint },
+      },
+    });
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: `Error: ${message}\n\nRecovery: ${hint}\n\n(reason sec_unreachable · retryable)`,
+      },
+    ]);
+    // The ticker index spends 15 + 1 + 15 + 2 s before its third attempt answers, the
+    // fund slice the last 7 s, and this call — charged for both while it waited — has
+    // nothing left for the submissions request.
+    expect(Object.fromEntries(attempts)).toEqual({
+      'https://www.sec.gov/files/company_tickers.json': 3,
+      'https://www.sec.gov/files/company_tickers_mf.json': 1,
+    });
   });
 });
 

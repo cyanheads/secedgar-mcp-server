@@ -9,6 +9,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import { listConcepts, resolveConceptTarget } from '@/services/edgar/concept-map.js';
 import {
   type FramedUnit,
@@ -92,9 +93,9 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
     {
       reason: 'sec_unreachable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The last of three attempts to reach SEC EDGAR got no HTTP response — the connection failed, or no response headers arrived within 15 seconds',
+      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
       recovery:
-        'Retry the same call in a minute — SEC EDGAR could not be reached, and nothing in the request needs to change.',
+        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -178,8 +179,9 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
 
   async handler(input, ctx) {
     const api = getEdgarApiService();
+    const scope = new CallScope(ctx.signal);
 
-    const resolved = await api.resolveCik(input.company);
+    const resolved = await api.resolveCik(input.company, scope);
     if (Array.isArray(resolved) && resolved.length === 0) {
       throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
     }
@@ -199,7 +201,7 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
       throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
     }
 
-    const facts = await api.tryGetCompanyFacts(match.cik);
+    const facts = await api.tryGetCompanyFacts(match.cik, scope);
     if (!facts || Object.keys(facts.facts).length === 0) {
       throw ctx.fail('no_company_facts', `No XBRL facts on file for CIK ${match.cik}.`, {
         cik: match.cik,

@@ -25,8 +25,11 @@ const { config } = vi.hoisted(() => ({
 vi.mock('@/config/server-config.js', () => ({ getServerConfig: () => config }));
 vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => undefined }));
 
+import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, initEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import type { CikMatch } from '@/services/edgar/types.js';
+
+const scope = () => new CallScope(new AbortController().signal);
 
 /**
  * Rows copied verbatim from `https://www.sec.gov/files/company_tickers.json`.
@@ -100,14 +103,14 @@ function stubRegistryFetch() {
 
 /** Resolve and assert a single match, returning it. */
 async function resolveOne(query: string): Promise<CikMatch> {
-  const resolved = await getEdgarApiService().resolveCik(query);
+  const resolved = await getEdgarApiService().resolveCik(query, scope());
   expect(Array.isArray(resolved), `expected a single match for '${query}'`).toBe(false);
   return resolved as CikMatch;
 }
 
 /** Resolve and return the CIKs, whatever the arity. */
 async function resolveCiks(query: string): Promise<string[]> {
-  const resolved = await getEdgarApiService().resolveCik(query);
+  const resolved = await getEdgarApiService().resolveCik(query, scope());
   return (Array.isArray(resolved) ? resolved : [resolved]).map((m) => m.cik);
 }
 
@@ -135,7 +138,7 @@ describe('EdgarApiService.resolveCik', () => {
   });
 
   it('returns an empty array when nothing matches', async () => {
-    expect(await getEdgarApiService().resolveCik('zzzzzzzz not a company')).toEqual([]);
+    expect(await getEdgarApiService().resolveCik('zzzzzzzz not a company', scope())).toEqual([]);
   });
 
   it('resolves an exact hit alone, without the prefix hits behind it (#155)', async () => {
@@ -261,7 +264,7 @@ describe('EdgarApiService.resolveCik', () => {
   });
 
   it('keeps a dotted ticker that resolves in neither form a no-match (#110)', async () => {
-    expect(await getEdgarApiService().resolveCik('ZZZZ.Q')).toEqual([]);
+    expect(await getEdgarApiService().resolveCik('ZZZZ.Q', scope())).toEqual([]);
   });
 
   it('keeps the name passes ahead of the dotted ticker fallback (#110)', async () => {

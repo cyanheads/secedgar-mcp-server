@@ -7,6 +7,7 @@ import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getInstitutionalHoldingsTool } from '@/mcp-server/tools/definitions/get-institutional-holdings.tool.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import type { FilingIndex, FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', () => ({
@@ -811,7 +812,12 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
     const input = getInstitutionalHoldingsTool.input.parse({ company: 'vanguard group inc' });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
 
-    expect(mockApi.resolveEntityByName).toHaveBeenCalledWith('vanguard group inc');
+    expect(mockApi.resolveEntityByName).toHaveBeenCalledWith(
+      'vanguard group inc',
+      expect.any(CallScope),
+    );
+    // The scope carries the caller's own signal, so a cancel reaches SEC (#179).
+    expect(mockApi.resolveEntityByName.mock.calls[0]?.[1].signal).toBe(ctx.signal);
     expect(result.filer_cik).toBe('0000102909');
     expect(result.holdings).toHaveLength(2);
   });
@@ -1155,7 +1161,7 @@ describe('getInstitutionalHoldingsTool parameter names (#115)', () => {
     const result = await call({ [key]: value });
 
     expect(result.isError).toBeFalsy();
-    expect(mockApi.resolveCik).toHaveBeenCalledWith(value);
+    expect(mockApi.resolveCik).toHaveBeenCalledWith(value, expect.any(CallScope));
     expect(result.structuredContent).toMatchObject({
       filer_cik: '0000102909',
       accession_number: '0000102909-24-000001',
@@ -1273,13 +1279,20 @@ describe('getInstitutionalHoldingsTool — quarters older than the recent window
 
     expect(result.isError).toBeFalsy();
     expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(1);
-    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith('CIK0000102909-submissions-001.json');
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith(
+      'CIK0000102909-submissions-001.json',
+      expect.any(CallScope),
+    );
     expect(result.structuredContent).toMatchObject({
       accession_number: '0001752724-25-022205',
       filing_date: '2025-02-11',
     });
     expect(blockText(result.content)).toContain('Accession: 0001752724-25-022205');
-    expect(mockApi.tryGetFilingIndex).toHaveBeenCalledWith('0000102909', '0001752724-25-022205');
+    expect(mockApi.tryGetFilingIndex).toHaveBeenCalledWith(
+      '0000102909',
+      '0001752724-25-022205',
+      expect.any(CallScope),
+    );
   });
 
   it('reads no archive page for a quarter ending on or after the recent window’s oldest date', async () => {
@@ -1375,6 +1388,7 @@ describe('getInstitutionalHoldingsTool — quarters older than the recent window
     expect(mockApi.fetchArchivePage).toHaveBeenNthCalledWith(
       1,
       'CIK0000102909-submissions-014.json',
+      expect.any(CallScope),
     );
     expect(err.data.reason).toBe('no_filings_found');
     expect(err.message).toContain('10 archive pages');
@@ -1431,7 +1445,10 @@ describe('getInstitutionalHoldingsTool — quarters older than the recent window
     );
 
     expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(1);
-    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith('CIK0000789019-submissions-001.json');
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith(
+      'CIK0000789019-submissions-001.json',
+      expect.any(CallScope),
+    );
     expect(err.data.reason).toBe('no_filings_found');
     expect(err.message).toContain('operating company');
     expect(records(err.data.suggestions).map((s) => s.tool)).toContain('secedgar_find_holders');
@@ -1491,7 +1508,10 @@ describe('getInstitutionalHoldingsTool — 13F-NT notice for the quarter (#133)'
     );
 
     expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(1);
-    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith('CIK0000102909-submissions-002.json');
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith(
+      'CIK0000102909-submissions-002.json',
+      expect.any(CallScope),
+    );
     expect(err.data.notice_accession_number).toBe('0000102909-24-000111');
     expect(recoveryHint(err)).toContain('0000102909-24-000111');
   });

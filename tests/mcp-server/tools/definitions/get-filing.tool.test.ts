@@ -7,6 +7,7 @@
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getFilingTool } from '@/mcp-server/tools/definitions/get-filing.tool.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import type { CachedExtract } from '@/services/edgar/filing-to-text.js';
 import type { FilingIndex, SubmissionsResponse } from '@/services/edgar/types.js';
 
@@ -19,9 +20,9 @@ vi.mock('@/services/edgar/edgar-api-service.js', async (importOriginal) => ({
 }));
 
 // `foldForHeadingMatch`, `headingKey`, `MARKER_TITLE_RE`, `withoutSubItemLabel`,
-// `isTocHeading`, and `matchSectionLine` are not mocked: they are the
-// comparisons the section matcher under test performs, so the real ones have to
-// run (#106, #166, #169, #174, #175).
+// `isTocHeading`, `matchSectionLine`, and `spaceRunInMarker` are not mocked:
+// they are the comparisons the section matcher under test performs, so the real
+// ones have to run (#106, #166, #169, #174, #175, #180).
 vi.mock('@/services/edgar/filing-to-text.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/edgar/filing-to-text.js')>();
   return {
@@ -40,6 +41,7 @@ vi.mock('@/services/edgar/filing-to-text.js', async (importOriginal) => {
     withoutSubItemLabel: actual.withoutSubItemLabel,
     isTocHeading: actual.isTocHeading,
     matchSectionLine: actual.matchSectionLine,
+    spaceRunInMarker: actual.spaceRunInMarker,
   };
 });
 
@@ -200,8 +202,12 @@ describe('back-compat (no new params)', () => {
     const ctx = createMockContext({ errors: getFilingTool.errors });
     const input = getFilingTool.input.parse({ accession_number: ACCN });
     await getFilingTool.handler(input, ctx);
-    expect(mockApi.findFilingCiks).toHaveBeenCalledWith(ACCN);
-    expect(mockApi.tryGetFilingIndex).toHaveBeenCalledWith(CIK, ACCN);
+    expect(mockApi.findFilingCiks).toHaveBeenCalledWith(ACCN, expect.any(CallScope));
+    expect(mockApi.tryGetFilingIndex).toHaveBeenCalledWith(CIK, ACCN, expect.any(CallScope));
+    // One scope for the whole call, on the caller's own signal (#179).
+    const scope = mockApi.findFilingCiks.mock.calls[0]?.[1];
+    expect(scope.signal).toBe(ctx.signal);
+    expect(mockApi.tryGetFilingIndex.mock.calls[0]?.[2]).toBe(scope);
   });
 
   it('uses SEC search metadata to resolve accession-only lookups', async () => {
@@ -210,7 +216,11 @@ describe('back-compat (no new params)', () => {
     const input = getFilingTool.input.parse({ accession_number: '0001193125-14-383437' });
     const result = await getFilingTool.handler(input, ctx);
     expect(result.cik).toBe(CIK);
-    expect(mockApi.tryGetFilingIndex).toHaveBeenCalledWith(CIK, '0001193125-14-383437');
+    expect(mockApi.tryGetFilingIndex).toHaveBeenCalledWith(
+      CIK,
+      '0001193125-14-383437',
+      expect.any(CallScope),
+    );
   });
 
   it('fetches a specific document when specified', async () => {
@@ -224,7 +234,12 @@ describe('back-compat (no new params)', () => {
 
     expect(result.primary_document).toBe('aapl-20230930.htm');
     expect(result.requested_document).toBe('ex-21.htm');
-    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledWith(CIK, ACCN, 'ex-21.htm');
+    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledWith(
+      CIK,
+      ACCN,
+      'ex-21.htm',
+      expect.any(CallScope),
+    );
   });
 
   it('selects the largest HTML as primary document', async () => {
@@ -277,6 +292,7 @@ describe('back-compat (no new params)', () => {
       CIK,
       '0001140361-26-013192',
       'form4.xml',
+      expect.any(CallScope),
     );
   });
 
@@ -314,12 +330,14 @@ describe('back-compat (no new params)', () => {
       '0001140361',
       '0001140361-26-013192',
       'form4.xml',
+      expect.any(CallScope),
     );
     expect(mockApi.tryGetFilingDocument).toHaveBeenNthCalledWith(
       2,
       CIK,
       '0001140361-26-013192',
       'form4.xml',
+      expect.any(CallScope),
     );
   });
 
@@ -940,7 +958,7 @@ describe('input validation (#64)', () => {
     await expect(getFilingTool.handler(input, ctx)).rejects.toMatchObject({
       data: { reason: 'filing_not_found' },
     });
-    expect(mockApi.tryGetFilingIndex).toHaveBeenCalledWith(CIK, ACCN);
+    expect(mockApi.tryGetFilingIndex).toHaveBeenCalledWith(CIK, ACCN, expect.any(CallScope));
   });
 });
 
@@ -1620,6 +1638,47 @@ describe('section targeting — a needle ending in a roman numeral', () => {
     },
   );
 
+  // A numeral run straight into its title (#180) ends where detection ends it: at
+  // a capital followed by a lowercase letter.
+  it.each([
+    ['Part IFinancial Information', 'part i'],
+    ['Part IIOther Information', 'part ii'],
+    ['Part IVExhibits', 'part iv'],
+  ])(
+    'lands on the run-in Part heading "%s" from %s, ahead of an equal line',
+    async (heading, section) => {
+      const text = `${section.toUpperCase()}\n\nCover prose.\n\n${'x'.repeat(2000)}`;
+      vi.mocked(detectHeadings).mockReturnValue([{ heading, offset: 1000 }]);
+      vi.mocked(filingToExtract).mockReturnValue(text);
+      vi.mocked(windowText).mockReturnValue({ text: 'page', truncated: false, totalLength: 9 });
+
+      const result = await runToolContract(getFilingTool, {
+        accession_number: ACCN,
+        cik: '320193',
+        section,
+      });
+      expect(result.isError).toBeFalsy();
+      expect(vi.mocked(windowText).mock.calls.at(-1)?.[1]).toBe(1000);
+      expect(bag(result.structuredContent).notice).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ['Part IIOther Information', 'part i'],
+    ['Part IVExhibits', 'part i'],
+    ['Part IIIDirectors and Officers', 'part ii'],
+    ['Item 12Security Ownership', 'item 1'],
+  ])('never lands the run-in "%s" from %s', async (heading, section) => {
+    vi.mocked(detectHeadings).mockReturnValue([{ heading, offset: 80 }]);
+    vi.mocked(filingToExtract).mockReturnValue('x'.repeat(2000));
+    const ctx = createMockContext({ errors: getFilingTool.errors });
+    const input = getFilingTool.input.parse({ accession_number: ACCN, cik: '320193', section });
+
+    const err = await caught(getFilingTool.handler(input, ctx));
+    expect(err.data.reason).toBe('section_not_found');
+    expect(err.message).toContain(`  [80] ${heading}`);
+  });
+
   // Characterization: a needle ending in any other letter keeps plain substring matching.
   it('"risk factor" still reaches "Item 1A. Risk Factors"', async () => {
     expect(
@@ -1753,6 +1812,24 @@ describe('section targeting — every detected heading, exact match first (#169)
     expect(text).toContain(CUT_SENTENCE);
     expect(text).toContain('  [5500] Item 9B. Other Information.');
     expect(text).not.toContain('  [4500] ');
+  });
+
+  it('keeps a run-in Part heading past the 50th in the cut, and "part iii" reaches it (#180)', async () => {
+    const runIn = { heading: 'Part IIIOther Information', offset: 5700 };
+    const headings = CUT_HEADINGS.map((h) => (h.offset === runIn.offset ? runIn : h));
+    serveHeadings(headings);
+    serveFirstPage();
+
+    const result = await runToolContract(getFilingTool, { accession_number: ACCN, cik: '320193' });
+    const sc = bag(result.structuredContent);
+    expect(records(sc.outline)).toEqual(
+      CUT_OUTLINE.map((h) => (h.offset === runIn.offset ? runIn : h)),
+    );
+    expect(sc.notice).toContain(CUT_SENTENCE);
+    expect(result.content.map((b) => ('text' in b ? b.text : '')).join('\n')).toContain(
+      '  [5700] Part IIIOther Information',
+    );
+    expect(await landingFor('part iii', headings)).toBe(5700);
   });
 
   it('renders an outline of 50 or fewer headings whole, with no cut sentence', async () => {
@@ -2088,6 +2165,55 @@ describe('section targeting — an equal line ranks between Item/Part and other 
     expect(result.isError).toBeFalsy();
     const notice =
       "No detected heading matches section 'segment results', so this page starts at the first document line that does.";
+    expect(bag(result.structuredContent).notice).toBe(notice);
+    expect(result.content.map((b) => ('text' in b ? b.text : '')).join('\n')).toContain(notice);
+  });
+});
+
+describe('section targeting — a table-row label ranks after every heading containing the value (#184)', () => {
+  const TEXT = [
+    'Revenue',
+    '$',
+    '22,956',
+    'Net Revenue Trends',
+    'Trend prose.',
+    'Net Revenue',
+    'Client',
+    '$ 9,350    $ 9,732',
+    'SEGMENT PRODUCT REVENUE/OPERATING INCOME (LOSS)',
+    'Segment prose.',
+  ].join('\n\n');
+  const HEADINGS = [
+    {
+      heading: 'SEGMENT PRODUCT REVENUE/OPERATING INCOME (LOSS)',
+      offset: TEXT.indexOf('SEGMENT'),
+    },
+  ];
+
+  it('lands on a heading that only contains the value, past an earlier row label', async () => {
+    expect(await landingOver(TEXT, HEADINGS, 'revenue')).toBe(TEXT.indexOf('SEGMENT'));
+  });
+
+  // Characterization: with no heading containing the value, the row label lands,
+  // ahead of an earlier prefix line, under the plain line notice.
+  it('lands on a row label ahead of a prefix line, under the plain line notice, in structuredContent and content[]', async () => {
+    vi.mocked(detectHeadings).mockReturnValue(HEADINGS);
+    vi.mocked(filingToExtract).mockReturnValue(TEXT);
+    vi.mocked(windowText).mockReturnValue({
+      text: 'Net Revenue',
+      truncated: false,
+      totalLength: 9,
+    });
+
+    const result = await runToolContract(getFilingTool, {
+      accession_number: ACCN,
+      cik: '320193',
+      section: 'net revenue',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(vi.mocked(windowText).mock.calls.at(-1)?.[1]).toBe(TEXT.indexOf('Net Revenue\n'));
+    const notice =
+      "No detected heading matches section 'net revenue', so this page starts at the first document line that does.";
     expect(bag(result.structuredContent).notice).toBe(notice);
     expect(result.content.map((b) => ('text' in b ? b.text : '')).join('\n')).toContain(notice);
   });
@@ -2795,6 +2921,7 @@ describe('metadata for filings outside the recent window (#126)', () => {
     expect(mockApi.tryGetSubmissionHeader).toHaveBeenCalledExactlyOnceWith(
       '0000019617',
       '0001104659-05-058421',
+      expect.any(CallScope),
     );
     expect(result.structuredContent).toMatchObject({
       form: '10-K',
@@ -2932,8 +3059,8 @@ describe('primary document the archive does not serve (#158)', () => {
     expect(sc.notice).toContain(SUBMISSION);
     expect(allText(result)).toContain(String(sc.notice));
     expect(mockApi.tryGetFilingDocument.mock.calls).toEqual([
-      [LEGACY_CIK, LEGACY_ACCN, '0001.htm'],
-      [LEGACY_CIK, LEGACY_ACCN, SUBMISSION],
+      [LEGACY_CIK, LEGACY_ACCN, '0001.htm', expect.any(CallScope)],
+      [LEGACY_CIK, LEGACY_ACCN, SUBMISSION, expect.any(CallScope)],
     ]);
     expect(vi.mocked(setExtractCache)).toHaveBeenCalledWith(expect.stringContaining(LEGACY_ACCN), {
       text: 'Submission text',
@@ -2975,7 +3102,9 @@ describe('primary document the archive does not serve (#158)', () => {
     mockApi.tryGetFilingDocument.mockResolvedValue('<html><body>10-K</body></html>');
     const result = await runToolContract(getFilingTool, { accession_number: ACCN, cik: '320193' });
 
-    expect(mockApi.tryGetFilingDocument.mock.calls).toEqual([[CIK, ACCN, 'aapl-20230930.htm']]);
+    expect(mockApi.tryGetFilingDocument.mock.calls).toEqual([
+      [CIK, ACCN, 'aapl-20230930.htm', expect.any(CallScope)],
+    ]);
     const sc = bag(result.structuredContent);
     expect(sc.primary_document).toBe('aapl-20230930.htm');
     expect(sc.notice).toBeUndefined();
@@ -2993,8 +3122,8 @@ describe('primary document the archive does not serve (#158)', () => {
     expect(sc.primary_document).toBe('0001.htm');
     expect(sc.notice).toBeUndefined();
     expect(mockApi.tryGetFilingDocument.mock.calls).toEqual([
-      ['0000899681', LEGACY_ACCN, '0001.htm'],
-      [LEGACY_CIK, LEGACY_ACCN, '0001.htm'],
+      ['0000899681', LEGACY_ACCN, '0001.htm', expect.any(CallScope)],
+      [LEGACY_CIK, LEGACY_ACCN, '0001.htm', expect.any(CallScope)],
     ]);
   });
 
@@ -3035,7 +3164,7 @@ describe('primary document the archive does not serve (#158)', () => {
     expect(text).toContain('(reason document_not_found');
     // A named document is never swapped for the submission.
     expect(mockApi.tryGetFilingDocument.mock.calls).toEqual([
-      [LEGACY_CIK, LEGACY_ACCN, '0002.txt'],
+      [LEGACY_CIK, LEGACY_ACCN, '0002.txt', expect.any(CallScope)],
     ]);
 
     const err = await caught(
@@ -3091,7 +3220,7 @@ describe('primary document the archive does not serve (#158)', () => {
 
     expect(result.isError).toBe(true);
     expect(mockApi.tryGetFilingDocument.mock.calls).toEqual([
-      [LEGACY_CIK, LEGACY_ACCN, SUBMISSION],
+      [LEGACY_CIK, LEGACY_ACCN, SUBMISSION, expect.any(CallScope)],
     ]);
   });
 });
@@ -3176,7 +3305,9 @@ describe('primary document selection (#161)', () => {
     expect(records(bag(sc.documents).primary).map((d) => d.name)).toEqual([FORM_DOC]);
     expect(records(bag(sc.documents).exhibits).map((d) => d.name)).toContain(EXHIBIT_DOC);
     expect(allText(result)).toContain(`Primary: ${FORM_DOC} |`);
-    expect(mockApi.tryGetFilingDocument.mock.calls).toEqual([[MSFT_CIK, EIGHT_K_ACCN, FORM_DOC]]);
+    expect(mockApi.tryGetFilingDocument.mock.calls).toEqual([
+      [MSFT_CIK, EIGHT_K_ACCN, FORM_DOC, expect.any(CallScope)],
+    ]);
   });
 
   it('takes the primaryDocument the feed records when the header page is missing', async () => {
@@ -3187,7 +3318,9 @@ describe('primary document selection (#161)', () => {
 
     expect(bag(result.structuredContent).primary_document).toBe(FORM_DOC);
     expect(allText(result)).toContain(`Primary: ${FORM_DOC} |`);
-    expect(mockApi.tryGetFilingDocument.mock.calls).toEqual([[MSFT_CIK, EIGHT_K_ACCN, FORM_DOC]]);
+    expect(mockApi.tryGetFilingDocument.mock.calls).toEqual([
+      [MSFT_CIK, EIGHT_K_ACCN, FORM_DOC, expect.any(CallScope)],
+    ]);
   });
 
   it('falls through a feed row with no primaryDocument to the header type', async () => {
@@ -3221,7 +3354,9 @@ describe('primary document selection (#161)', () => {
     const result = await runToolContract(getFilingTool, { accession_number: accn, cik: '789019' });
 
     expect(bag(result.structuredContent).primary_document).toBe('primary_doc.xml');
-    expect(mockApi.tryGetFilingDocument.mock.calls).toEqual([[MSFT_CIK, accn, 'primary_doc.xml']]);
+    expect(mockApi.tryGetFilingDocument.mock.calls).toEqual([
+      [MSFT_CIK, accn, 'primary_doc.xml', expect.any(CallScope)],
+    ]);
   });
 
   it('keeps renderer pages out of the size fallback without dropping filer documents that start with R', async () => {
@@ -3244,7 +3379,7 @@ describe('primary document selection (#161)', () => {
 
     expect(bag(result.structuredContent).primary_document).toBe('Report10K.htm');
     expect(mockApi.tryGetFilingDocument.mock.calls).toEqual([
-      [MSFT_CIK, EIGHT_K_ACCN, 'Report10K.htm'],
+      [MSFT_CIK, EIGHT_K_ACCN, 'Report10K.htm', expect.any(CallScope)],
     ]);
   });
 
@@ -3349,7 +3484,7 @@ describe('primary document selection (#161)', () => {
     expect(sc.requested_document).toBe(EXHIBIT_DOC);
     expect(allText(result)).toContain(`Primary: ${FORM_DOC} | Requested: ${EXHIBIT_DOC}`);
     expect(mockApi.tryGetFilingDocument.mock.calls).toEqual([
-      [MSFT_CIK, EIGHT_K_ACCN, EXHIBIT_DOC],
+      [MSFT_CIK, EIGHT_K_ACCN, EXHIBIT_DOC, expect.any(CallScope)],
     ]);
   });
 
@@ -3401,8 +3536,8 @@ describe('primary document selection (#161)', () => {
     expect(records(bag(error.data.documents).primary).map((d) => d.name)).toEqual([FORM_DOC]);
     expect(allText(result)).toContain(`Primary (1 total): ${FORM_DOC} `);
     expect(mockApi.tryGetFilingDocument.mock.calls).toEqual([
-      [MSFT_CIK, EIGHT_K_ACCN, FORM_DOC],
-      [MSFT_CIK, EIGHT_K_ACCN, `${EIGHT_K_ACCN}.txt`],
+      [MSFT_CIK, EIGHT_K_ACCN, FORM_DOC, expect.any(CallScope)],
+      [MSFT_CIK, EIGHT_K_ACCN, `${EIGHT_K_ACCN}.txt`, expect.any(CallScope)],
     ]);
   });
 

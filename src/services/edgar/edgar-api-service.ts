@@ -17,6 +17,7 @@ import {
 import { parseDocument } from 'htmlparser2';
 import { getServerConfig } from '@/config/server-config.js';
 import { getEdgarMirror } from '@/services/edgar/mirror/index.js';
+import { CALL_FAILURE_BUDGET_MS, CallScope } from './call-scope.js';
 import formerNamesData from './data/former-names.json' with { type: 'json' };
 import {
   type FilingHeaders,
@@ -47,8 +48,8 @@ const BASE_BACKOFF_MS = 1000;
  * Statuses worth a retry. 429 is deliberately absent: SEC holds a rate-limit block
  * until the request rate has stayed under the threshold for ten minutes, so the
  * ~3s retry budget cannot outlast it and every retry restarts the clock the caller
- * is waiting on (#112). An attempt that gets no HTTP response at all retries on the
- * same ladder (#173).
+ * is waiting on (#112). An attempt that gets no HTTP response at all (#173), and
+ * one whose body fails to read after its headers (#181), retry on the same ladder.
  */
 const RETRYABLE_STATUSES = new Set([500, 502, 503, 504]);
 
@@ -57,31 +58,114 @@ const RETRYABLE_STATUSES = new Set([500, 502, 503, 504]);
  * it is aborted and retried as a no-response failure (#173). Bun applies no connect
  * timeout of its own — an unanswered connect waits out the OS TCP timeout, 75 s on
  * macOS — and neither runtime bounds a server that accepts and never answers, so one
- * attempt could outlast the MCP client's 60 s request timeout alone. Three capped
- * attempts plus the 1 s and 2 s backoffs come to 48 s. The clock starts once the
- * pacer dispatches the request, so queue time never counts, and stops at headers,
- * so a multi-megabyte body is never cut off. SEC's slowest reads sampled send
- * headers in under 2 s.
+ * attempt could outlast the MCP client's 60 s request timeout alone. Each wait is
+ * also clamped to what is left of the call's {@link CALL_FAILURE_BUDGET_MS}, which
+ * bounds a whole tool call's failure time (#179). The clock starts once the
+ * pacer dispatches the request, so queue time never counts, and stops at headers;
+ * the body is bounded only by {@link BODY_IDLE_TIMEOUT_MS}, so a multi-megabyte body
+ * that keeps arriving is never cut off. SEC's slowest reads sampled send headers in
+ * under 2 s.
  */
 const ATTEMPT_HEADERS_TIMEOUT_MS = 15_000;
 
 /**
- * `data.reason` once every attempt got no HTTP response (#173). Declared retryable
- * on every tool that reaches SEC; set on `data.retryable` here for the same reason
- * as `rate_limited` (#122).
+ * How long a response body may go without a byte before the read is abandoned and
+ * the attempt retried as a body-read failure (#181). Measured between reads, never
+ * across the whole body, so a body still arriving, however slowly, is never cut.
+ * Without it a stalled body holds the call until undici's 300 s body timeout on
+ * Node, and indefinitely on Bun.
+ */
+const BODY_IDLE_TIMEOUT_MS = 15_000;
+
+/**
+ * `data.reason` once SEC gave no complete, readable answer: the last attempt got no
+ * HTTP response (#173) or its body failed to read, or a 200 body was not JSON
+ * (#181). Declared retryable on every tool that reaches SEC; set on `data.retryable`
+ * here for the same reason as `rate_limited` (#122).
  */
 const SEC_UNREACHABLE_REASON = 'sec_unreachable';
 
 /**
  * One attempt's outcome: SEC's HTTP answer, whatever its status, or none at all — a
  * runtime `fetch` rejection (connection refused or reset, DNS failure, a connect
- * timeout) or no response headers within {@link ATTEMPT_HEADERS_TIMEOUT_MS}.
+ * timeout) or no response headers within `capMs`, the lesser of
+ * {@link ATTEMPT_HEADERS_TIMEOUT_MS} and the call's failure budget left (#179).
+ * `waitedMs` runs from dispatch to headers or to the rejection — for a call that
+ * counted a probe's attempt as its own, the time it waited on that probe.
  */
 type Attempt =
-  | { readonly kind: 'answered'; readonly response: Response }
-  | { readonly kind: 'unanswered'; readonly rejection: unknown; readonly timedOut: boolean };
+  | { readonly kind: 'answered'; readonly response: Response; readonly waitedMs: number }
+  | {
+      readonly kind: 'unanswered';
+      readonly capMs: number;
+      readonly rejection: unknown;
+      readonly timedOut: boolean;
+      readonly waitedMs: number;
+    };
 
 type UnansweredAttempt = Extract<Attempt, { kind: 'unanswered' }>;
+
+/** An attempt never sent because the call's failure budget was already spent (#179). */
+interface BudgetSpent {
+  readonly kind: 'budget_spent';
+}
+
+const BUDGET_SPENT: BudgetSpent = { kind: 'budget_spent' };
+
+/**
+ * An attempt SEC answered whose body then failed to read (#181): the read rejected —
+ * the connection broke off, the chunk framing or the compression was invalid — or no
+ * bytes arrived for `capMs` (`stalled`), the lesser of {@link BODY_IDLE_TIMEOUT_MS}
+ * and the budget left. `waitedMs` is the failing read's own wait, never the time
+ * earlier bytes took to arrive.
+ */
+interface BodyFailedAttempt {
+  readonly capMs: number;
+  readonly kind: 'body_failed';
+  readonly rejection: unknown;
+  readonly stalled: boolean;
+  readonly waitedMs: number;
+}
+
+/** One attempt's body read: its text, or why it failed. */
+type BodyRead = { readonly kind: 'read'; readonly text: string } | BodyFailedAttempt;
+
+/** Where a head read stops: once `stopAt` appears in the text so far, or `maxBytes` have arrived. */
+interface HeadCutoff {
+  readonly maxBytes: number;
+  readonly stopAt: string;
+}
+
+/**
+ * Every way SEC gives no complete, readable answer — each ends as `sec_unreachable`,
+ * including a request the call's spent failure budget kept from being sent (#179).
+ */
+type Unreadable =
+  | UnansweredAttempt
+  | BodyFailedAttempt
+  | BudgetSpent
+  | { readonly kind: 'not_json'; readonly rejection: unknown };
+
+/**
+ * How a request's retry ladder ended: on which attempt, and whether the call's
+ * failure budget ended it — retries it stopped, or a last wait it cut short (#179).
+ */
+interface LadderEnd {
+  readonly attempt: number;
+  readonly budgetStopped: boolean;
+}
+
+/** A load several calls await: its promise and the scope it runs under. */
+interface SharedLoad<T> {
+  readonly promise: Promise<T>;
+  readonly scope: CallScope;
+  /**
+   * Each waiting call's one wait on the load. A call that asks again while it waits —
+   * `fetch_frames` resolves thousands of tickers at once — joins its own wait, so it
+   * holds one abort listener and is charged the load's failure time once.
+   */
+  readonly waits: Map<CallScope, Promise<T>>;
+}
 
 /**
  * `data.reason` on every SEC rate-limit failure — the upstream 429 and a call
@@ -101,7 +185,8 @@ const RATE_LIMITED_REASON = 'rate_limited';
  *   that instant becomes the probe.
  * - `probing` — the probe is in flight; every other call waits on `settled`, then
  *   re-reads the gate. `settled` carries the probe's attempt when it got no HTTP
- *   response, which every waiter counts as one of its own (#173).
+ *   response, which every waiter counts as one of its own (#173). A probe whose own
+ *   call is cancelled settles with nothing, so a waiter probes in its place (#179).
  */
 type BlockGate =
   | { readonly state: 'open' }
@@ -113,8 +198,11 @@ const OPEN_GATE: BlockGate = { state: 'open' };
 /** A call cleared to send: the gate it was admitted under, and — for the probe — how to settle it. */
 interface Admission {
   gate: BlockGate;
-  /** Present on the probe only: the probe's attempt, or `undefined` when it threw before one. */
-  releaseProbe?: (outcome: Attempt | undefined) => void;
+  /**
+   * Present on the probe only: the probe's attempt, or `undefined` when none was
+   * made — it threw first, or its call was cancelled.
+   */
+  releaseProbe?: (outcome: Attempt | BudgetSpent | undefined) => void;
 }
 
 /**
@@ -359,7 +447,7 @@ class EdgarApiService {
   private readonly cooldownMs: number;
   private gate: BlockGate = OPEN_GATE;
   private tickerCache: TickerCache | undefined;
-  private tickerCacheLoad: Promise<TickerCache> | undefined;
+  private tickerCacheLoad: SharedLoad<TickerCache> | undefined;
   /** Per-CIK submissions doc cache, keyed by padded CIK (TTL = EDGAR_TICKER_CACHE_TTL). */
   private submissionsCache = new Map<string, { at: number; data: SubmissionsResponse }>();
   /** Per-page submissions archive cache, keyed by page name (TTL = EDGAR_TICKER_CACHE_TTL). */
@@ -391,34 +479,33 @@ class EdgarApiService {
     this.pacer.dispose();
   }
 
-  /** Fetch and parse JSON, throwing on non-OK responses. */
-  async fetchJson<T>(url: string): Promise<T> {
-    const response = await this.rawFetch(url, true);
-    if (response.status === 404) {
+  /** Fetch and parse JSON, throwing on non-OK responses and on a body that is not JSON. */
+  async fetchJson<T>(url: string, scope: CallScope): Promise<T> {
+    const text = await this.rawFetch(url, true, scope);
+    if (text === null) {
       throw notFound(`SEC EDGAR API returned 404 for ${url}`, { url, status: 404 });
     }
-    return response.json() as Promise<T>;
+    return parseJson<T>(url, text);
   }
 
   /** Fetch JSON, returning `null` on 404 and throwing on other non-OK responses. */
-  async tryFetchJson<T>(url: string): Promise<T | null> {
-    const response = await this.rawFetch(url, true);
-    return response.status === 404 ? null : (response.json() as Promise<T>);
+  async tryFetchJson<T>(url: string, scope: CallScope): Promise<T | null> {
+    const text = await this.rawFetch(url, true, scope);
+    return text === null ? null : parseJson<T>(url, text);
   }
 
   /** Fetch raw text content (HTML filing documents). */
-  async fetchText(url: string): Promise<string> {
-    const response = await this.rawFetch(url, false);
-    if (response.status === 404) {
+  async fetchText(url: string, scope: CallScope): Promise<string> {
+    const text = await this.rawFetch(url, false, scope);
+    if (text === null) {
       throw notFound(`SEC EDGAR returned 404 for ${url}`, { url, status: 404 });
     }
-    return response.text();
+    return text;
   }
 
   /** Fetch raw text content, returning `null` on 404 and throwing on other failures. */
-  async tryFetchText(url: string): Promise<string | null> {
-    const response = await this.rawFetch(url, false);
-    return response.status === 404 ? null : response.text();
+  tryFetchText(url: string, scope: CallScope): Promise<string | null> {
+    return this.rawFetch(url, false, scope);
   }
 
   // --- CIK Resolution ---
@@ -433,8 +520,8 @@ class EdgarApiService {
    * On no-result name search, the returned empty array carries `suggestions` on
    * the thrown error at the handler layer — call `suggestCompanies` there.
    */
-  async resolveCik(query: string): Promise<CikMatch | CikMatch[]> {
-    const cache = await this.getTickerCache();
+  async resolveCik(query: string, scope: CallScope): Promise<CikMatch | CikMatch[]> {
+    const cache = await this.getTickerCache(scope);
     const trimmed = query.trim();
 
     // Numeric → CIK
@@ -527,10 +614,10 @@ class EdgarApiService {
    * Distinct from `searchFilings`: same URL path, different query param (`keysTyped`)
    * and response shape (`_source.entity`, not the filing-document `_source`).
    */
-  async resolveEntityByName(name: string): Promise<EntityNameMatch[]> {
+  async resolveEntityByName(name: string, scope: CallScope): Promise<EntityNameMatch[]> {
     const url = new URL('https://efts.sec.gov/LATEST/search-index');
     url.searchParams.set('keysTyped', name);
-    const response = await this.fetchJson<EftsEntityAutocompleteResponse>(url.toString());
+    const response = await this.fetchJson<EftsEntityAutocompleteResponse>(url.toString(), scope);
 
     const hits = response?.hits?.hits;
     if (!Array.isArray(hits)) return [];
@@ -548,8 +635,8 @@ class EdgarApiService {
   }
 
   /** Reverse lookup: CIK → ticker symbol. */
-  async cikToTicker(cik: string): Promise<string | undefined> {
-    const cache = await this.getTickerCache();
+  async cikToTicker(cik: string, scope: CallScope): Promise<string | undefined> {
+    const cache = await this.getTickerCache(scope);
     return cache.byCik.get(cik.padStart(10, '0'))?.ticker;
   }
 
@@ -558,8 +645,8 @@ class EdgarApiService {
    * company_tickers_mf.json, which lists a series only once one of its share classes has a
    * ticker — a series with no listed class resolves to `undefined` rather than a wrong trust.
    */
-  async resolveFundSeries(seriesId: string): Promise<CikMatch | undefined> {
-    const cache = await this.getTickerCache();
+  async resolveFundSeries(seriesId: string, scope: CallScope): Promise<CikMatch | undefined> {
+    const cache = await this.getTickerCache(scope);
     return cache.bySeriesId.get(seriesId.toUpperCase());
   }
 
@@ -570,8 +657,8 @@ class EdgarApiService {
    * class only — a trust whose series carry no ticker returns an empty list, which is not
    * the same as having no series.
    */
-  async listFundSeries(cik: string): Promise<FundSeriesEntry[]> {
-    const cache = await this.getTickerCache();
+  async listFundSeries(cik: string, scope: CallScope): Promise<FundSeriesEntry[]> {
+    const cache = await this.getTickerCache(scope);
     const padded = cik.padStart(10, '0');
     const out: FundSeriesEntry[] = [];
     for (const [seriesId, match] of cache.bySeriesId) {
@@ -593,6 +680,7 @@ class EdgarApiService {
     seriesId: string,
     formType: string,
     count: number,
+    scope: CallScope,
   ): Promise<SeriesFilingFeed> {
     const url = new URL('https://www.sec.gov/cgi-bin/browse-edgar');
     url.searchParams.set('action', 'getcompany');
@@ -601,12 +689,12 @@ class EdgarApiService {
     url.searchParams.set('owner', 'include');
     url.searchParams.set('count', String(count));
     url.searchParams.set('output', 'atom');
-    return parseSeriesFilingFeed(await this.fetchText(url.toString()));
+    return parseSeriesFilingFeed(await this.fetchText(url.toString(), scope));
   }
 
   /** Return the current in-memory entry list (used by the handler for trigram suggestions). */
-  async getAllEntries(): Promise<CikMatch[]> {
-    const cache = await this.getTickerCache();
+  async getAllEntries(scope: CallScope): Promise<CikMatch[]> {
+    const cache = await this.getTickerCache(scope);
     return cache.allEntries;
   }
 
@@ -617,14 +705,16 @@ class EdgarApiService {
    * the last year or 1,000 filings, whichever holds more — + the `files[]`
    * archive-page manifest). Cached per CIK within
    * the ticker-cache TTL — the doc is large and re-read on every archive-paging
-   * scan (#78). A 404 throws (uncached) so a bad CIK still surfaces.
+   * scan (#78). A 404 throws (uncached) so a bad CIK still surfaces. Like every
+   * cache here, written only by a completed read — a cancelled one caches nothing.
    */
-  async getSubmissions(cik: string): Promise<SubmissionsResponse> {
+  async getSubmissions(cik: string, scope: CallScope): Promise<SubmissionsResponse> {
     const padded = cik.padStart(10, '0');
     const cached = this.submissionsCache.get(padded);
     if (cached && this.isFresh(cached.at)) return cached.data;
     const data = await this.fetchJson<SubmissionsResponse>(
       `https://data.sec.gov/submissions/CIK${padded}.json`,
+      scope,
     );
     this.submissionsCache.set(padded, { at: Date.now(), data });
     return data;
@@ -637,10 +727,13 @@ class EdgarApiService {
    * field-compatible with `FilingsRecent`. Cached per page within the ticker-cache
    * TTL (pages are large and effectively immutable once archived).
    */
-  async fetchArchivePage(name: string): Promise<FilingsRecent> {
+  async fetchArchivePage(name: string, scope: CallScope): Promise<FilingsRecent> {
     const cached = this.archivePageCache.get(name);
     if (cached && this.isFresh(cached.at)) return cached.data;
-    const data = await this.fetchJson<FilingsRecent>(`https://data.sec.gov/submissions/${name}`);
+    const data = await this.fetchJson<FilingsRecent>(
+      `https://data.sec.gov/submissions/${name}`,
+      scope,
+    );
     this.archivePageCache.set(name, { at: Date.now(), data });
     return data;
   }
@@ -654,12 +747,17 @@ class EdgarApiService {
    * bound how many quarters they scan and filter client-side (#77). Cached per
    * quarter within the ticker-cache TTL — an archived quarter is immutable.
    */
-  async fetchFullIndexQuarter(year: number, quarter: number): Promise<FullIndexEntry[]> {
+  async fetchFullIndexQuarter(
+    year: number,
+    quarter: number,
+    scope: CallScope,
+  ): Promise<FullIndexEntry[]> {
     const key = `${year}Q${quarter}`;
     const cached = this.fullIndexCache.get(key);
     if (cached && this.isFresh(cached.at)) return cached.data;
     const text = await this.fetchText(
       `https://www.sec.gov/Archives/edgar/full-index/${year}/QTR${quarter}/master.idx`,
+      scope,
     );
     const data = parseMasterIndex(text);
     this.fullIndexCache.set(key, { at: Date.now(), data });
@@ -671,15 +769,18 @@ class EdgarApiService {
     return Date.now() - at < getServerConfig().tickerCacheTtl * 1000;
   }
 
-  async searchFilings(params: {
-    query: string;
-    forms?: string[] | undefined;
-    ciks?: string[] | undefined;
-    startDate?: string | undefined;
-    endDate?: string | undefined;
-    from?: number | undefined;
-    size?: number | undefined;
-  }): Promise<EftsResponse> {
+  async searchFilings(
+    params: {
+      query: string;
+      forms?: string[] | undefined;
+      ciks?: string[] | undefined;
+      startDate?: string | undefined;
+      endDate?: string | undefined;
+      from?: number | undefined;
+      size?: number | undefined;
+    },
+    scope: CallScope,
+  ): Promise<EftsResponse> {
     const url = new URL('https://efts.sec.gov/LATEST/search-index');
     // `q` is optional — EFTS honors `ciks` for pure entity scope with no
     // full-text query, so a bare cik:/ticker: search sends no `q`.
@@ -696,7 +797,7 @@ class EdgarApiService {
     url.searchParams.set('from', String(params.from ?? 0));
     url.searchParams.set('size', String(params.size ?? 20));
 
-    const response = await this.fetchJson<EftsResponse>(url.toString());
+    const response = await this.fetchJson<EftsResponse>(url.toString(), scope);
 
     // Shape guard: EFTS can return a 2xx whose body omits `hits.total` (degraded
     // payload, or a rejected request echoed as `{ error: ... }` with 200). A genuine
@@ -724,8 +825,8 @@ class EdgarApiService {
    * Resolve likely company CIKs for a filing accession number using SEC search metadata.
    * Returns zero or more padded 10-digit CIKs in SEC-provided order.
    */
-  async findFilingCiks(accessionNumber: string): Promise<string[]> {
-    const response = await this.searchFilings({ query: accessionNumber, size: 10 });
+  async findFilingCiks(accessionNumber: string, scope: CallScope): Promise<string[]> {
+    const response = await this.searchFilings({ query: accessionNumber, size: 10 }, scope);
     const normalizedAccession = accessionNumber.replace(/[^0-9]/g, '');
     const ciks = new Set<string>();
 
@@ -745,8 +846,15 @@ class EdgarApiService {
   }
 
   /** Fetch a filing's document index. Returns `null` if the filing does not exist. */
-  tryGetFilingIndex(cik: string, accessionNumber: string): Promise<FilingIndex | null> {
-    return this.tryFetchJson<FilingIndex>(filingArchiveUrl(cik, accessionNumber, 'index.json'));
+  tryGetFilingIndex(
+    cik: string,
+    accessionNumber: string,
+    scope: CallScope,
+  ): Promise<FilingIndex | null> {
+    return this.tryFetchJson<FilingIndex>(
+      filingArchiveUrl(cik, accessionNumber, 'index.json'),
+      scope,
+    );
   }
 
   /**
@@ -755,9 +863,14 @@ class EdgarApiService {
    * and period. Returns `null` if the page is absent. The page exposes canonical SEC
    * document TYPE values (e.g. "EX-21.1") that the directory listing JSON does not.
    */
-  async tryGetFilingHeaders(cik: string, accessionNumber: string): Promise<FilingHeaders | null> {
+  async tryGetFilingHeaders(
+    cik: string,
+    accessionNumber: string,
+    scope: CallScope,
+  ): Promise<FilingHeaders | null> {
     const text = await this.tryFetchText(
       filingArchiveUrl(cik, accessionNumber, `${accessionNumber}-index-headers.html`),
+      scope,
     );
     return text ? parseFilingHeaders(text) : null;
   }
@@ -771,15 +884,22 @@ class EdgarApiService {
   async tryGetSubmissionHeader(
     cik: string,
     accessionNumber: string,
+    scope: CallScope,
   ): Promise<SubmissionHeader | null> {
     const text = await this.tryFetchText(
       filingArchiveUrl(cik, accessionNumber, `${accessionNumber}.hdr.sgml`),
+      scope,
     );
     return text ? parseSubmissionHeader(text) : null;
   }
 
-  getFilingDocument(cik: string, accessionNumber: string, document: string): Promise<string> {
-    return this.fetchText(filingArchiveUrl(cik, accessionNumber, document));
+  getFilingDocument(
+    cik: string,
+    accessionNumber: string,
+    document: string,
+    scope: CallScope,
+  ): Promise<string> {
+    return this.fetchText(filingArchiveUrl(cik, accessionNumber, document), scope);
   }
 
   /**
@@ -789,8 +909,9 @@ class EdgarApiService {
     cik: string,
     accessionNumber: string,
     document: string,
+    scope: CallScope,
   ): Promise<string | null> {
-    return this.tryFetchText(filingArchiveUrl(cik, accessionNumber, document));
+    return this.tryFetchText(filingArchiveUrl(cik, accessionNumber, document), scope);
   }
 
   /**
@@ -807,38 +928,18 @@ class EdgarApiService {
    * appears 1.5 KB in still costs 256 KB, and a `maxBytes` below that costs the same. Treat
    * both as "one chunk, not the file" rather than as a byte budget; `maxBytes` binds only on
    * a document long enough to arrive in several chunks, which is what stops a document
-   * missing `stopAt` entirely from being read to the end. A runtime that hands back no
-   * readable body (a stubbed fetch, for one) falls through to reading it whole, which costs
-   * bandwidth but returns the same text.
+   * missing `stopAt` entirely from being read to the end. The head is read inside the
+   * retry ladder like any other body, so a read that breaks off before the cutoff is
+   * retried; stopping at the cutoff is not a failure (#181).
    */
-  async tryGetFilingDocumentHead(
+  tryGetFilingDocumentHead(
     cik: string,
     accessionNumber: string,
     document: string,
-    options: { maxBytes: number; stopAt: string },
+    options: HeadCutoff,
+    scope: CallScope,
   ): Promise<string | null> {
-    const response = await this.rawFetch(filingArchiveUrl(cik, accessionNumber, document), false);
-    if (response.status === 404) return null;
-    if (!response.body) return response.text();
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let text = '';
-    let read = 0;
-    try {
-      while (read < options.maxBytes) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        read += value.byteLength;
-        text += decoder.decode(value, { stream: true });
-        if (text.includes(options.stopAt)) break;
-      }
-    } finally {
-      await reader.cancel().catch(() => {
-        /* the body is being discarded; a cancel race has nothing left to report */
-      });
-    }
-    return text;
+    return this.rawFetch(filingArchiveUrl(cik, accessionNumber, document), false, scope, options);
   }
 
   /**
@@ -850,6 +951,7 @@ class EdgarApiService {
     cik: string,
     formTypes: string[],
     limit: number,
+    scope: CallScope,
   ): Promise<
     Array<{
       accessionNumber: string;
@@ -858,7 +960,7 @@ class EdgarApiService {
       reportDate: string;
     }>
   > {
-    const submissions = await this.getSubmissions(cik);
+    const submissions = await this.getSubmissions(cik, scope);
     const recent = submissions.filings.recent;
     const results: Array<{
       accessionNumber: string;
@@ -890,7 +992,7 @@ class EdgarApiService {
    * lookup; the live API is the fallback. A concept unit that arrives as
    * anything but an array is dropped (#141).
    */
-  async tryGetCompanyFacts(cik: string): Promise<CompanyFactsResponse | null> {
+  async tryGetCompanyFacts(cik: string, scope: CallScope): Promise<CompanyFactsResponse | null> {
     const padded = cik.padStart(10, '0');
     const facts = await this.mirrorOrLive(
       (m) => m.companyFactsReady(),
@@ -898,6 +1000,7 @@ class EdgarApiService {
       () =>
         this.tryFetchJson<CompanyFactsResponse>(
           `https://data.sec.gov/api/xbrl/companyfacts/CIK${padded}.json`,
+          scope,
         ),
     );
     for (const namespace of Object.values(facts?.facts ?? {})) {
@@ -917,6 +1020,7 @@ class EdgarApiService {
     cik: string,
     taxonomy: string,
     tag: string,
+    scope: CallScope,
   ): Promise<CompanyConceptResponse | null> {
     const padded = cik.padStart(10, '0');
     const concept = await this.mirrorOrLive(
@@ -925,6 +1029,7 @@ class EdgarApiService {
       () =>
         this.tryFetchJson<CompanyConceptResponse>(
           `https://data.sec.gov/api/xbrl/companyconcept/CIK${padded}/${taxonomy}/${tag}.json`,
+          scope,
         ),
     );
     if (concept) concept.units = arrayUnits(concept.units);
@@ -944,6 +1049,7 @@ class EdgarApiService {
     tag: string,
     unit: string,
     period: string,
+    scope: CallScope,
   ): Promise<FramesResponse | null> {
     return this.mirrorOrLive(
       (m) => m.companyFactsComplete(),
@@ -951,6 +1057,7 @@ class EdgarApiService {
       () =>
         this.tryFetchJson<FramesResponse>(
           `https://data.sec.gov/api/xbrl/frames/${taxonomy}/${tag}/${unit}/${period}.json`,
+          scope,
         ),
     );
   }
@@ -992,74 +1099,144 @@ class EdgarApiService {
   // --- Internals ---
 
   /**
-   * Paced fetch with retry/backoff. Returns the response on 2xx or 404. A 5xx, and
-   * an attempt that got no HTTP response, retry up to `MAX_RETRIES` attempts; then
-   * the 5xx throws its status-classified `McpError` and the no-response case throws
-   * `sec_unreachable`. Other non-OK statuses throw at once, as does the local
-   * refusal while SEC's rate-limit block is active, and the pacer's
+   * Paced fetch with retry/backoff. Returns the body's text on 2xx — only its head
+   * when `cutoff` is given — and `null` on 404, whose body is left unread. The body
+   * is read inside the ladder (#181): a 5xx, an attempt that got no HTTP response,
+   * and a 2xx whose body failed to read all retry up to `MAX_RETRIES` attempts, and
+   * then the last attempt decides — a 5xx throws its status-classified `McpError`,
+   * the other two `sec_unreachable`. Other non-OK statuses throw at once, as does
+   * the local refusal while SEC's rate-limit block is active, and the pacer's
    * `RequestCancelled` — those are `McpError`s from `send()`, never retried.
+   *
+   * Every failed attempt and every backoff is charged to the call's failure budget,
+   * and the ladder ends early once the budget cannot cover another backoff and
+   * attempt (#179). Once the caller's signal has fired, whatever rejects is rethrown
+   * untouched — a queued request leaves the pacer unsent, and an attempt in flight,
+   * a body read, or a backoff sleep ends at once — never retried or classified.
    */
-  private async rawFetch(url: string, acceptJson: boolean): Promise<Response> {
+  private async rawFetch(
+    url: string,
+    acceptJson: boolean,
+    scope: CallScope,
+    cutoff?: HeadCutoff,
+  ): Promise<string | null> {
+    scope.signal.throwIfAborted();
     const headers: Record<string, string> = { 'User-Agent': getServerConfig().userAgent };
     if (acceptJson) headers.Accept = 'application/json';
 
-    for (let attempt = 0; ; attempt++) {
-      const outcome = await this.send(url, headers);
-      if (outcome.kind === 'answered' && (outcome.response.ok || outcome.response.status === 404)) {
-        return outcome.response;
+    /** The previous attempt's failure, which a request the budget stops before its next attempt ends with. */
+    let failed: Attempt | BodyFailedAttempt | undefined;
+    for (let attempt = 1; ; attempt++) {
+      const outcome = scope.remainingMs > 0 ? await this.send(url, headers, scope) : BUDGET_SPENT;
+      // An answer that lands as the caller cancels is not read.
+      scope.signal.throwIfAborted();
+      if (outcome.kind === 'budget_spent') {
+        // Spent before this attempt could go out — by an earlier request, or by a
+        // concurrent one while this retry waited for its slot.
+        if (failed === undefined) throw secUnreachable(url, outcome);
+        throw await this.ladderFailure(url, failed, { attempt: attempt - 1, budgetStopped: true });
       }
 
-      const transient =
-        outcome.kind === 'unanswered' || RETRYABLE_STATUSES.has(outcome.response.status);
-      if (transient && attempt < MAX_RETRIES - 1) {
-        await sleep(BASE_BACKOFF_MS * 2 ** attempt);
+      let last: Attempt | BodyFailedAttempt = outcome;
+      if (outcome.kind === 'answered') {
+        const { response } = outcome;
+        if (response.status === 404) return null;
+        if (response.ok) {
+          const body = await readBody(response, scope, cutoff);
+          if (body.kind === 'read') return body.text;
+          last = body;
+        }
+      }
+
+      const transient = last.kind !== 'answered' || RETRYABLE_STATUSES.has(last.response.status);
+      if (!transient) throw await this.ladderFailure(url, last, { attempt, budgetStopped: false });
+
+      scope.charge(outcome.waitedMs + (last.kind === 'body_failed' ? last.waitedMs : 0));
+      const backoffMs = BASE_BACKOFF_MS * 2 ** (attempt - 1);
+      if (attempt < MAX_RETRIES && scope.remainingMs > backoffMs) {
+        scope.charge(backoffMs);
+        await sleep(backoffMs, scope.signal);
+        failed = last;
         continue;
       }
-      if (outcome.kind === 'unanswered') throw secUnreachable(url, outcome);
-
-      const { response } = outcome;
-      const data: Record<string, unknown> = { url };
-      if (response.status === 403) {
-        const host = new URL(url).hostname;
-        data.recovery = {
-          hint: `${host} may be blocking requests. Check EDGAR_USER_AGENT format ("AppName contact@email.com") or retry later.`,
-        };
-      } else if (response.status === 429) {
-        // send() closed the gate on this response, so the wait is the full cool-down.
-        const retryAfter = this.cooldownSecondsRemaining();
-        data.reason = RATE_LIMITED_REASON;
-        data.retryable = true;
-        data.retryAfter = retryAfter;
-        data.recovery = { hint: rateLimitHint(retryAfter) };
-      }
-      throw await httpErrorFromResponse(response, {
-        service: 'SEC EDGAR',
-        data,
-        // SEC answers a rate-limit block with a full HTML page. The recovery hint
-        // above carries everything actionable, so the markup is not forwarded (#112).
-        captureBody: response.status !== 429,
+      throw await this.ladderFailure(url, last, {
+        attempt,
+        budgetStopped: attempt < MAX_RETRIES || cutByBudget(last),
       });
     }
   }
 
   /**
-   * One attempt through the block gate and the pacer. A 429 closes the gate
-   * before the response is handed back, so no call admitted after it sends. A
-   * `fetch` rejection comes back as an unanswered attempt, and so does a probe
-   * this call waited on that got no HTTP response; the gate's refusal and the
-   * pacer's `RequestCancelled` throw.
+   * The error a request's last attempt earned: `sec_unreachable` for no response or
+   * an unreadable body; for an HTTP answer, its status-classified `McpError`, with
+   * the 403 and 429 hints. A 5xx ladder the failure budget stopped keeps its status
+   * mapping and `data`, and its message says the budget stopped it (#179).
    */
-  private async send(url: string, headers: Record<string, string>): Promise<Attempt> {
-    const admission = await this.admit();
+  private async ladderFailure(
+    url: string,
+    last: Attempt | BodyFailedAttempt,
+    end: LadderEnd,
+  ): Promise<McpError> {
+    if (last.kind !== 'answered') return secUnreachable(url, last, end);
+
+    const { response } = last;
+    const data: Record<string, unknown> = { url };
+    if (response.status === 403) {
+      const host = new URL(url).hostname;
+      data.recovery = {
+        hint: `${host} may be blocking requests. Check EDGAR_USER_AGENT format ("AppName contact@email.com") or retry later.`,
+      };
+    } else if (response.status === 429) {
+      // send() closed the gate on this response, so the wait is the full cool-down.
+      const retryAfter = this.cooldownSecondsRemaining();
+      data.reason = RATE_LIMITED_REASON;
+      data.retryable = true;
+      data.retryAfter = retryAfter;
+      data.recovery = { hint: rateLimitHint(retryAfter) };
+    }
+    const error = await httpErrorFromResponse(response, {
+      service: 'SEC EDGAR',
+      data,
+      // SEC answers a rate-limit block with a full HTML page. The recovery hint
+      // above carries everything actionable, so the markup is not forwarded (#112).
+      captureBody: response.status !== 429,
+    });
+    if (!end.budgetStopped) return error;
+    return new McpError(
+      error.code,
+      `SEC EDGAR returned HTTP ${response.status} on attempt ${end.attempt} of ${MAX_RETRIES}; ${BUDGET_STOP_TEXT}.`,
+      error.data,
+      { cause: error },
+    );
+  }
+
+  /**
+   * One attempt through the block gate and the pacer, under the caller's signal. A
+   * 429 closes the gate before the response is handed back, so no call admitted
+   * after it sends. A `fetch` rejection comes back as an unanswered attempt, and so
+   * does a probe this call waited on that got no HTTP response; an attempt the spent
+   * failure budget kept from going out comes back as `budget_spent`. The gate's
+   * refusal and the pacer's `RequestCancelled` throw, and so does the caller's
+   * cancel, with its own reason — then a probe settles as having got no answer.
+   */
+  private async send(
+    url: string,
+    headers: Record<string, string>,
+    scope: CallScope,
+  ): Promise<Attempt | BudgetSpent> {
+    const admission = await this.admit(scope);
     if ('kind' in admission) return admission;
-    let outcome: Attempt | undefined;
+    let outcome: Attempt | BudgetSpent | undefined;
     try {
-      outcome = await this.pacer.run(() => {
-        // Re-read at dispatch: a 429 may have landed while this call waited for its
-        // slot, and a call queued before the block must not go out inside it.
-        if (this.gate !== admission.gate) throw this.cooldownRefusal();
-        return fetchUntilHeaders(url, headers);
-      });
+      outcome = await this.pacer.run(
+        () => {
+          // Re-read at dispatch: a 429 may have landed while this call waited for its
+          // slot, and a call queued before the block must not go out inside it.
+          if (this.gate !== admission.gate) throw this.cooldownRefusal();
+          return fetchUntilHeaders(url, headers, scope);
+        },
+        { signal: scope.signal },
+      );
       if (outcome.kind === 'answered' && outcome.response.status === 429) {
         this.gate = { state: 'closed', reopensAt: Date.now() + this.cooldownMs };
       }
@@ -1074,16 +1251,19 @@ class EdgarApiService {
    * cool-down runs. The first call after the cool-down becomes the probe; every
    * call behind it waits for the probe to resolve and then reads the gate again —
    * unless the probe got no HTTP response, which each waiter takes as its own
-   * unanswered attempt. Otherwise calls queued behind a silent SEC would probe one
-   * at a time, 15 s each, and the last of N would wait about 45·N s (#173).
+   * unanswered attempt, its wait on the probe charged to its own budget. Otherwise
+   * calls queued behind a silent SEC would probe one at a time, 15 s each, and the
+   * last of N would wait about 45·N s (#173). A waiter whose call is cancelled
+   * leaves with the caller's reason and leaves the gate as it found it (#179).
    */
-  private async admit(): Promise<Admission | UnansweredAttempt> {
+  private async admit(scope: CallScope): Promise<Admission | UnansweredAttempt> {
     for (;;) {
       const gate = this.gate;
       if (gate.state === 'open') return { gate };
       if (gate.state === 'probing') {
-        const unanswered = await gate.settled;
-        if (unanswered) return unanswered;
+        const waitedFrom = Date.now();
+        const unanswered = await untilAborted(gate.settled, scope.signal);
+        if (unanswered) return { ...unanswered, waitedMs: Date.now() - waitedFrom };
         continue;
       }
       if (gate.reopensAt > Date.now()) throw this.cooldownRefusal();
@@ -1098,9 +1278,13 @@ class EdgarApiService {
         releaseProbe: (outcome) => {
           /**
            * A probe 429 has already closed the gate for a full cool-down. Any other
-           * reply means SEC is serving again; no reply at all (a network error, or
-           * no headers within the per-attempt cap) proves nothing about the block,
-           * so the gate stays shut for the next call to probe in its place.
+           * reply means SEC is serving again, even when its body then fails to read —
+           * the probe settles at headers, and only its own call retries the body
+           * (#181). No reply at all (a network error, or no headers within the
+           * per-attempt cap) proves nothing about the block, so the gate stays shut
+           * for the next call to probe in its place. Nor does a probe whose own call
+           * was cancelled, or never sent for a spent budget: it settles with nothing,
+           * so no waiter counts it as one of its own attempts (#179).
            */
           if (this.gate === probe) {
             this.gate =
@@ -1133,7 +1317,7 @@ class EdgarApiService {
     return Math.max(1, Math.ceil(remainingMs / 1000));
   }
 
-  private getTickerCache(): Promise<TickerCache> {
+  private getTickerCache(scope: CallScope): Promise<TickerCache> {
     const cache = this.tickerCache;
     if (cache && this.isFresh(cache.loadedAt)) {
       if (cache.fundRetryAt === undefined || Date.now() < cache.fundRetryAt) {
@@ -1141,33 +1325,45 @@ class EdgarApiService {
       }
       // The live fund slice failed and its retry window has passed: refetch it
       // onto the cached base, which keeps its own load time and TTL (#119).
-      return this.loadTickerCacheOnce(() => this.reloadFundSlice(cache));
+      return this.loadTickerCacheOnce(scope, (load) => this.reloadFundSlice(cache, load));
     }
-    return this.loadTickerCacheOnce(() => this.loadTickerCache());
+    return this.loadTickerCacheOnce(scope, (load) => this.loadTickerCache(load));
   }
 
   /**
    * Singleflight: concurrent callers (e.g. fetch-frames enriching ~5k reporters
    * in parallel) share one in-flight load instead of each queuing its own SEC
-   * fetch through the pacer.
+   * fetch through the pacer. The load runs under a scope of its own — its own
+   * failure budget, and no caller's signal — so one waiter's cancel ends only its
+   * own wait while the load completes and caches for the rest; each waiter is
+   * charged the failure time the load spent while it waited (#179). A call already
+   * cancelled starts no load.
    */
-  private loadTickerCacheOnce(load: () => Promise<TickerCache>): Promise<TickerCache> {
-    this.tickerCacheLoad ??= load().finally(() => {
-      this.tickerCacheLoad = undefined;
-    });
-    return this.tickerCacheLoad;
+  private async loadTickerCacheOnce(
+    waiter: CallScope,
+    load: (scope: CallScope) => Promise<TickerCache>,
+  ): Promise<TickerCache> {
+    waiter.signal.throwIfAborted();
+    if (!this.tickerCacheLoad) {
+      const scope = CallScope.unowned();
+      const promise = load(scope).finally(() => {
+        this.tickerCacheLoad = undefined;
+      });
+      this.tickerCacheLoad = { promise, scope, waits: new Map() };
+    }
+    return await awaitShared(this.tickerCacheLoad, waiter);
   }
 
   /** Load the whole ticker index: its base, then the live fund slice when the base calls for one. */
-  private async loadTickerCache(): Promise<TickerCache> {
-    const base = await this.loadTickerBase();
-    const funds = base.liveFunds ? await this.loadMfTickers() : NO_LIVE_FUNDS;
+  private async loadTickerCache(scope: CallScope): Promise<TickerCache> {
+    const base = await this.loadTickerBase(scope);
+    const funds = base.liveFunds ? await this.loadMfTickers(scope) : NO_LIVE_FUNDS;
     return this.buildTickerCache(base.rows, funds, Date.now());
   }
 
   /** Refetch a failed live fund slice and rebuild the index on the cached base. */
-  private async reloadFundSlice(cache: TickerCache): Promise<TickerCache> {
-    return this.buildTickerCache(cache.baseRows, await this.loadMfTickers(), cache.loadedAt);
+  private async reloadFundSlice(cache: TickerCache, scope: CallScope): Promise<TickerCache> {
+    return this.buildTickerCache(cache.baseRows, await this.loadMfTickers(scope), cache.loadedAt);
   }
 
   /**
@@ -1180,7 +1376,9 @@ class EdgarApiService {
    * since the mirror stores a fund symbol as a bare ticker → CIK row. Strict mirror
    * mode reads nothing live, so the mirror's fund rows are its only fund tickers.
    */
-  private async loadTickerBase(): Promise<{ liveFunds: boolean; rows: TickerIndexRow[] }> {
+  private async loadTickerBase(
+    scope: CallScope,
+  ): Promise<{ liveFunds: boolean; rows: TickerIndexRow[] }> {
     const mirror = getEdgarMirror();
     if (mirror && (await mirror.tickersReady())) {
       const rows = await mirror.getTickerRows();
@@ -1199,6 +1397,7 @@ class EdgarApiService {
 
     const raw = await this.fetchJson<Record<string, TickerEntry>>(
       'https://www.sec.gov/files/company_tickers.json',
+      scope,
     );
     return {
       liveFunds: true,
@@ -1217,17 +1416,20 @@ class EdgarApiService {
    * Fetch company_tickers_mf.json (ETFs and mutual funds) as fund rows carrying
    * series and class IDs. Never throws: operating-company resolution must not
    * depend on the fund file. A failed load — any HTTP failure, no HTTP response
-   * at all (#173), a malformed body, or the block gate's local refusal — returns
-   * no rows and a `retryAt`, so the index without funds stands for the retry
+   * at all (#173), a body that fails to read or is not JSON (#181), a malformed
+   * body, or the block gate's local refusal — returns no rows and a `retryAt`, so
+   * the index without funds stands for the retry
    * window rather than the whole TTL (#119). The window is at least the error's
    * `retryAfter`, so a load refused by the rate-limit gate is not retried until
-   * the cool-down ends.
+   * the cool-down ends. It runs only inside the shared ticker load, whose scope no
+   * caller can cancel, so a failure here is always SEC's — a spent failure budget
+   * included (#179).
    */
-  private async loadMfTickers(): Promise<FundSlice> {
+  private async loadMfTickers(scope: CallScope): Promise<FundSlice> {
     let retryAfterMs = 0;
     let cause: Record<string, unknown> = { reason: 'malformed_body' };
     try {
-      const rows = parseMfTickerFile(await this.fetchJson<MfTickerFile>(MF_TICKERS_URL));
+      const rows = parseMfTickerFile(await this.fetchJson<MfTickerFile>(MF_TICKERS_URL, scope));
       if (rows) return { retryAt: undefined, rows };
     } catch (error) {
       const data = error instanceof McpError ? error.data : undefined;
@@ -1543,73 +1745,301 @@ export function pickPreferredTicker(a: CikMatch, b: CikMatch): CikMatch {
   return a;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** Sleep `ms`, or until `signal` fires — then reject with its reason. */
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) onAbort();
+  });
 }
 
 /**
- * One `fetch`, aborted when no response headers arrive within
- * {@link ATTEMPT_HEADERS_TIMEOUT_MS}. The timer is cleared once `fetch` settles, so
- * the body read is never bounded by it. `fetch` rejects with whatever reason the
- * signal carries, so the abort is recognized by the reason's identity. A
- * controller and `setTimeout` rather than `AbortSignal.timeout()`, as the
- * framework's `fetchWithTimeout` does: the latter can fail on a realm mismatch
- * under Bun.
+ * `promise`, or the rejection `signal` fires with, whichever comes first. A wait on
+ * work this call does not own — the block-gate probe, the shared ticker load —
+ * leaves that work running when the caller cancels.
  */
-async function fetchUntilHeaders(url: string, headers: Record<string, string>): Promise<Attempt> {
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+    if (signal.aborted) onAbort();
+  });
+}
+
+/**
+ * Wait on a shared load under the waiter's own signal, charging the waiter the
+ * failure time the load spent while it waited — no more, so a call that joins a
+ * load late is not billed for the failures before it asked (#179). One wait per
+ * call: a call already waiting joins that wait.
+ */
+function awaitShared<T>(shared: SharedLoad<T>, waiter: CallScope): Promise<T> {
+  let wait = shared.waits.get(waiter);
+  if (!wait) {
+    const spentBefore = shared.scope.spentMs;
+    wait = untilAborted(shared.promise, waiter.signal).finally(() => {
+      waiter.charge(shared.scope.spentMs - spentBefore);
+    });
+    shared.waits.set(waiter, wait);
+  }
+  return wait;
+}
+
+/**
+ * One `fetch` under the caller's signal, aborted when no response headers arrive
+ * within the lesser of {@link ATTEMPT_HEADERS_TIMEOUT_MS} and the call's failure
+ * budget left (#179) — or, with no budget left, not sent at all. The timer is
+ * cleared once `fetch` settles, so the body read is never bounded by it. `fetch`
+ * rejects with whatever reason the signal carries, so the timeout is recognized by
+ * the reason's identity; once the caller's signal has fired, the rejection is
+ * rethrown as it came. A controller and `setTimeout` rather than
+ * `AbortSignal.timeout()` or `AbortSignal.any()`, as the framework's
+ * `fetchWithTimeout` does: those can fail on a realm mismatch under Bun.
+ */
+async function fetchUntilHeaders(
+  url: string,
+  headers: Record<string, string>,
+  scope: CallScope,
+): Promise<Attempt | BudgetSpent> {
+  scope.signal.throwIfAborted();
+  const capMs = Math.min(ATTEMPT_HEADERS_TIMEOUT_MS, scope.remainingMs);
+  if (capMs <= 0) return BUDGET_SPENT;
   const controller = new AbortController();
-  const deadline = new DOMException(
-    `No response headers within ${ATTEMPT_HEADERS_TIMEOUT_MS}ms.`,
-    'TimeoutError',
-  );
-  const timer = setTimeout(() => controller.abort(deadline), ATTEMPT_HEADERS_TIMEOUT_MS);
+  const deadline = new DOMException(`No response headers within ${capMs}ms.`, 'TimeoutError');
+  const timer = setTimeout(() => controller.abort(deadline), capMs);
+  const cancel = () => controller.abort(scope.signal.reason);
+  scope.signal.addEventListener('abort', cancel, { once: true });
+  const dispatchedAt = Date.now();
   try {
     const response = await globalThis.fetch(url, { headers, signal: controller.signal });
-    return { kind: 'answered', response };
+    return { kind: 'answered', response, waitedMs: Date.now() - dispatchedAt };
   } catch (rejection) {
-    return { kind: 'unanswered', rejection, timedOut: controller.signal.reason === deadline };
+    if (scope.signal.aborted) throw rejection;
+    return {
+      kind: 'unanswered',
+      capMs,
+      rejection,
+      timedOut: controller.signal.reason === deadline,
+      waitedMs: Date.now() - dispatchedAt,
+    };
   } finally {
     clearTimeout(timer);
+    scope.signal.removeEventListener('abort', cancel);
   }
 }
 
 /**
- * The failure once the last attempt got no HTTP response (#173). The earlier
- * attempts may have drawn a 5xx: a 503, a 502, then a reset ends here too, so
- * the message claims only the last. Message and `data` are composed here from
- * the host, the attempt count, and the last attempt's transport code or
- * timeout: the runtime's own text is developer-facing (Bun's advice to pass
- * `verbose: true`, its "Is the computer able to access the url?"), and Bun's
- * rejection carries the full request URL on `path`. The rejection rides
- * `cause`, which the log records and the caller never sees.
+ * Read one attempt's body as text — whole, or up to `cutoff` — failing the read once
+ * no bytes arrive for the lesser of {@link BODY_IDLE_TIMEOUT_MS} and the call's
+ * failure budget left (#179). The one place an attempt's body is read (#181). The
+ * body is cancelled once the read stops, so an early stop at the cutoff, a stall,
+ * and the caller's cancel all release the connection without reading the rest; a
+ * cancel that fails is not a body failure, since the body is being discarded either
+ * way. Both cutoff checks run between reads, so neither can cut below one read
+ * chunk. Once the caller's signal has fired, the read's rejection is rethrown as
+ * it came, never a body failure.
  */
-function secUnreachable(url: string, last: UnansweredAttempt): McpError {
+async function readBody(
+  response: Response,
+  scope: CallScope,
+  cutoff?: HeadCutoff,
+): Promise<BodyRead> {
+  if (!response.body) return { kind: 'read', text: '' };
+  const stalled = new DOMException("No body bytes within the read's idle limit.", 'TimeoutError');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  let bytes = 0;
+  let capMs = 0;
+  let readFrom = 0;
+  try {
+    while (cutoff === undefined || bytes < cutoff.maxBytes) {
+      capMs = Math.min(BODY_IDLE_TIMEOUT_MS, scope.remainingMs);
+      readFrom = Date.now();
+      const { done, value } = await nextChunk(reader, stalled, capMs, scope.signal);
+      if (done) {
+        text += decoder.decode();
+        break;
+      }
+      bytes += value.byteLength;
+      text += decoder.decode(value, { stream: true });
+      if (cutoff !== undefined && text.includes(cutoff.stopAt)) break;
+    }
+    return { kind: 'read', text };
+  } catch (rejection) {
+    if (scope.signal.aborted) throw rejection;
+    // A stall is this read's own idle marker, recognized by identity.
+    return {
+      kind: 'body_failed',
+      capMs,
+      rejection,
+      stalled: rejection === stalled,
+      waitedMs: Date.now() - readFrom,
+    };
+  } finally {
+    await reader.cancel().catch(() => {
+      /* the body is being discarded; a cancel racing its end has nothing to report */
+    });
+  }
+}
+
+/**
+ * The body's next read, rejecting with `stalled` once `capMs` pass with no bytes,
+ * and with the signal's reason once it fires.
+ */
+async function nextChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  stalled: DOMException,
+  capMs: number,
+  signal: AbortSignal,
+) {
+  // Checked before the read: a chunk already buffered would otherwise win the race.
+  signal.throwIfAborted();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const idle = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(stalled), capMs);
+    onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([reader.read(), idle]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
+}
+
+/**
+ * True when the failure budget cut the attempt's last wait short of its own cap —
+ * headers or body bytes that might still have come (#179).
+ */
+function cutByBudget(last: Attempt | BodyFailedAttempt): boolean {
+  switch (last.kind) {
+    case 'answered':
+      return false;
+    case 'unanswered':
+      return last.timedOut && last.capMs < ATTEMPT_HEADERS_TIMEOUT_MS;
+    case 'body_failed':
+      return last.stalled && last.capMs < BODY_IDLE_TIMEOUT_MS;
+    default: {
+      const unhandled: never = last;
+      return unhandled;
+    }
+  }
+}
+
+/** How a failure the call's failure budget ended says so, in its message (#179). */
+const BUDGET_STOP_TEXT = `retries stopped at this call's ${CALL_FAILURE_BUDGET_MS / 1000} s budget for SEC failures`;
+
+/** A wait in seconds, to one decimal where it is not whole: `15`, `9.1`. */
+function seconds(ms: number): string {
+  return String(Math.round(ms / 100) / 10);
+}
+
+/**
+ * Parse a 200's body as JSON. Every SEC route read as JSON serves JSON, so a body
+ * that does not parse — an HTML error page served as a 200 — fails as
+ * `sec_unreachable`, unretried since the body arrived whole; the parser's text,
+ * which quotes the body, rides `cause` only (#181).
+ */
+function parseJson<T>(url: string, text: string): T {
+  try {
+    return JSON.parse(text) as T;
+  } catch (rejection) {
+    throw secUnreachable(url, { kind: 'not_json', rejection });
+  }
+}
+
+/**
+ * The failure once SEC gave no complete, readable answer. For the two ladder cases
+ * — no HTTP response (#173), a body that failed to read (#181) — the earlier
+ * attempts may have drawn a 5xx or failed the other way, so the message claims only
+ * the last. Message and `data` are composed here from the host, the attempt count,
+ * and the last attempt's transport code or timeout: the runtime's own text is
+ * developer-facing (Bun's advice to pass `verbose: true`, its "Is the computer able
+ * to access the url?"), and Bun carries the full request URL on `path` and, for
+ * some body failures, in its message. The rejection rides `cause`, which the log
+ * records and the caller never sees. A ladder the call's failure budget ended
+ * names the attempt it ended on and the budget (#179).
+ */
+function secUnreachable(url: string, last: Unreadable, end?: LadderEnd): McpError {
   const host = new URL(url).hostname;
-  const ending = last.timedOut
-    ? `got no response headers within ${ATTEMPT_HEADERS_TIMEOUT_MS / 1000} s`
-    : `ended with ${transportCode(last.rejection) ?? 'a network error that carried no code'}`;
+  const { message, hint } = unreadableText(host, last, end);
   return serviceUnavailable(
-    `No HTTP response from SEC EDGAR (${host}) on the last of ${MAX_RETRIES} attempts, which ${ending}.`,
-    {
-      reason: SEC_UNREACHABLE_REASON,
-      retryable: true,
-      url,
-      recovery: {
-        hint: `SEC EDGAR (${host}) sent no HTTP response to the last attempt — a network failure between this server and SEC, not a problem with the request. Retry the same call in a minute.`,
-      },
-    },
-    { cause: last.rejection },
+    message,
+    { reason: SEC_UNREACHABLE_REASON, retryable: true, url, recovery: { hint } },
+    last.kind === 'budget_spent' ? undefined : { cause: last.rejection },
   );
+}
+
+/** The message and recovery hint for each way SEC's answer was unreadable. */
+function unreadableText(
+  host: string,
+  last: Unreadable,
+  end: LadderEnd | undefined,
+): { hint: string; message: string } {
+  const transportEnding = (rejection: unknown) =>
+    `ended with ${transportCode(rejection) ?? 'a network error that carried no code'}`;
+  const onAttempt = end?.budgetStopped
+    ? `attempt ${end.attempt} of ${MAX_RETRIES}`
+    : `the last of ${MAX_RETRIES} attempts`;
+  const close = end?.budgetStopped ? `; ${BUDGET_STOP_TEXT}.` : '.';
+  switch (last.kind) {
+    case 'unanswered':
+      return {
+        message: `No HTTP response from SEC EDGAR (${host}) on ${onAttempt}, which ${last.timedOut ? `got no response headers within ${seconds(last.capMs)} s` : transportEnding(last.rejection)}${close}`,
+        hint: `SEC EDGAR (${host}) sent no HTTP response to the last attempt — a network failure between this server and SEC, not a problem with the request. Retry the same call in a minute.`,
+      };
+    case 'body_failed':
+      return {
+        message: `The response body from SEC EDGAR (${host}) failed to read on ${onAttempt}, which ${last.stalled ? `got no body bytes for ${seconds(last.capMs)} s` : transportEnding(last.rejection)}${close}`,
+        hint: `SEC EDGAR (${host}) answered the last attempt, but its response body broke off or stalled before it finished — a network failure between this server and SEC, not a problem with the request. Retry the same call in a minute.`,
+      };
+    case 'budget_spent':
+      return {
+        message: `No request sent to SEC EDGAR (${host}): ${BUDGET_STOP_TEXT}, which its earlier requests spent.`,
+        hint: `SEC EDGAR (${host}) failed this call's earlier requests until its budget for SEC failures ran out — a network failure between this server and SEC, not a problem with the request. Retry the same call in a minute.`,
+      };
+    case 'not_json':
+      return {
+        message: `SEC EDGAR (${host}) answered, but its response body is not the JSON this request expects.`,
+        hint: `SEC EDGAR (${host}) answered with something other than the JSON it serves for this request, such as a temporary error page — not a problem with the request. Retry the same call in a minute.`,
+      };
+    default: {
+      const unhandled: never = last;
+      return unhandled;
+    }
+  }
 }
 
 /** An identifier-shaped transport code: `ECONNRESET`, `EAI_AGAIN`, `UND_ERR_CONNECT_TIMEOUT`. */
 const TRANSPORT_CODE = /^[A-Za-z][A-Za-z0-9_]*$/;
 
 /**
- * The transport code on a `fetch` rejection. Bun sets it on the rejection itself
- * (`code: 'ECONNRESET'`, no `cause`); Node's undici rejects with
- * `TypeError('fetch failed')` and sets it on `cause`. Read from the field, never
- * the message, whose wording differs by runtime and version.
+ * The transport code on a `fetch` or body-read rejection. Bun sets it on the
+ * rejection itself (`code: 'ECONNRESET'`, `'InvalidHTTPResponse'`, `'ZlibError'`,
+ * no `cause`); Node's undici rejects with `TypeError('fetch failed')` or, mid-body,
+ * `TypeError('terminated')` and sets it on `cause` — when it has one: its
+ * chunk-framing `HTTPParserError` carries none. Read from the field, never the
+ * message, whose wording differs by runtime and version.
  */
 function transportCode(rejection: unknown): string | undefined {
   const codeOf = (value: unknown) => {

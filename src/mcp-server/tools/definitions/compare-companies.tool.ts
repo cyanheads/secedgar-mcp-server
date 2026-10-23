@@ -15,6 +15,7 @@ import {
   getCanvasBridge,
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import {
   describeUnknownConcepts,
   findUnknownConcept,
@@ -199,9 +200,9 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     {
       reason: 'sec_unreachable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The last of three attempts to reach SEC EDGAR got no HTTP response — the connection failed, or no response headers arrived within 15 seconds',
+      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
       recovery:
-        'Retry the same call in a minute — SEC EDGAR could not be reached, and nothing in the request needs to change.',
+        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -434,6 +435,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     }
 
     const api = getEdgarApiService();
+    const scope = new CallScope(ctx.signal);
 
     const resolvedCompanies: Array<CikMatch & { input: string }> = [];
     const failed: Array<{
@@ -443,7 +445,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     }> = [];
 
     for (const supplied of input.companies) {
-      const resolved = await api.resolveCik(supplied);
+      const resolved = await api.resolveCik(supplied, scope);
       if (Array.isArray(resolved) && resolved.length === 0) {
         failed.push({
           input: supplied,
@@ -498,7 +500,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     }
 
     for (const company of resolvedCompanies) {
-      const facts = await api.tryGetCompanyFacts(company.cik);
+      const facts = await api.tryGetCompanyFacts(company.cik, scope);
       const name = company.name || company.input;
       if (!facts || Object.keys(facts.facts).length === 0) {
         failed.push({

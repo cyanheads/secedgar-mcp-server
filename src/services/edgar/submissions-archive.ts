@@ -8,6 +8,7 @@
  * @module services/edgar/submissions-archive
  */
 
+import type { CallScope } from './call-scope.js';
 import type { FilingsRecent, SubmissionsResponse } from './types.js';
 
 /**
@@ -22,7 +23,7 @@ export type ArchivePageEntry = SubmissionsResponse['filings']['files'][number];
 
 /** Where pages are read from — `EdgarApiService`, whose page cache and pacer every read goes through. */
 export interface ArchivePageSource {
-  fetchArchivePage(name: string): Promise<FilingsRecent>;
+  fetchArchivePage(name: string, scope: CallScope): Promise<FilingsRecent>;
 }
 
 /** Which pages a walk selects and the order it reads them in. */
@@ -87,7 +88,8 @@ export function selectArchivePages(
  * filing dated on or after that day.
  *
  * Iterate it with `for await`; breaking out after any page ends the walk there.
- * Afterwards `scannedThrough` and `truncated` describe what was read.
+ * Afterwards `scannedThrough` and `truncated` describe what was read. Every page
+ * is read under the calling tool's `scope`, so a cancel ends the walk (#179).
  */
 export class SubmissionsArchiveWalk implements AsyncIterable<ArchivePageRead> {
   private readonly pages: ArchivePageEntry[];
@@ -98,6 +100,7 @@ export class SubmissionsArchiveWalk implements AsyncIterable<ArchivePageRead> {
     private readonly source: ArchivePageSource,
     submissions: SubmissionsResponse,
     options: ArchiveWalkOptions,
+    private readonly scope: CallScope,
   ) {
     const recentOldest = submissions.filings.recent.filingDate.at(-1);
     const coveredByRecent = Boolean(
@@ -125,7 +128,7 @@ export class SubmissionsArchiveWalk implements AsyncIterable<ArchivePageRead> {
     const limit = Math.min(this.pages.length, ARCHIVE_PAGE_SCAN_CAP);
     while (this.read < limit) {
       const page = this.pages[this.read] as ArchivePageEntry;
-      const block = await this.source.fetchArchivePage(page.name);
+      const block = await this.source.fetchArchivePage(page.name, this.scope);
       this.read++;
       if (!this.oldestRead || page.filingFrom < this.oldestRead) this.oldestRead = page.filingFrom;
       yield { block, page };

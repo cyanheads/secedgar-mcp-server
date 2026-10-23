@@ -12,6 +12,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getFundHoldingsTool } from '@/mcp-server/tools/definitions/get-fund-holdings.tool.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import type { FilingsRecent } from '@/services/edgar/types.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
@@ -175,7 +176,14 @@ describe('getFundHoldingsTool — routing', () => {
     const input = getFundHoldingsTool.input.parse({ fund: 'VOO' });
     const result = await getFundHoldingsTool.handler(input, ctx);
 
-    expect(mockApi.getFundSeriesFilings).toHaveBeenCalledWith('S000002839', 'NPORT-P', 40);
+    expect(mockApi.getFundSeriesFilings).toHaveBeenCalledWith(
+      'S000002839',
+      'NPORT-P',
+      40,
+      expect.any(CallScope),
+    );
+    // The scope carries the caller's own signal, so a cancel reaches SEC (#179).
+    expect(mockApi.getFundSeriesFilings.mock.calls[0]?.[3].signal).toBe(ctx.signal);
     expect(mockApi.tryGetFilingDocumentHead).not.toHaveBeenCalled();
     expect(result.series_id).toBe('S000002839');
     expect(result.accession_number).toBe('0000036405-26-000325');
@@ -187,7 +195,12 @@ describe('getFundHoldingsTool — routing', () => {
     const result = await getFundHoldingsTool.handler(input, ctx);
 
     expect(mockApi.resolveCik).not.toHaveBeenCalled();
-    expect(mockApi.getFundSeriesFilings).toHaveBeenCalledWith('S000002839', 'NPORT-P', 40);
+    expect(mockApi.getFundSeriesFilings).toHaveBeenCalledWith(
+      'S000002839',
+      'NPORT-P',
+      40,
+      expect.any(CallScope),
+    );
     expect(result.registrant_cik).toBe('0000036405');
   });
 
@@ -199,7 +212,12 @@ describe('getFundHoldingsTool — routing', () => {
     });
     await getFundHoldingsTool.handler(input, ctx);
 
-    expect(mockApi.getFundSeriesFilings).toHaveBeenCalledWith('S000002848', 'NPORT-P', 40);
+    expect(mockApi.getFundSeriesFilings).toHaveBeenCalledWith(
+      'S000002848',
+      'NPORT-P',
+      40,
+      expect.any(CallScope),
+    );
   });
 
   it('takes the registrant from the series feed when series_id names another trust (#80)', async () => {
@@ -237,11 +255,12 @@ describe('getFundHoldingsTool — routing', () => {
     const input = getFundHoldingsTool.input.parse({ fund: 'VOO', series_id: 'S000004310' });
     const result = await getFundHoldingsTool.handler(input, ctx);
 
-    expect(mockApi.getSubmissions).toHaveBeenCalledWith('0001100663');
+    expect(mockApi.getSubmissions).toHaveBeenCalledWith('0001100663', expect.any(CallScope));
     expect(mockApi.tryGetFilingDocument).toHaveBeenCalledWith(
       '0001100663',
       '0002071691-26-012459',
       'primary_doc.xml',
+      expect.any(CallScope),
     );
     expect(result.registrant_cik).toBe('0001100663');
     expect(result.series_id).toBe('S000004310');
@@ -256,6 +275,7 @@ describe('getFundHoldingsTool — routing', () => {
       '0000036405',
       '0000036405-26-000325',
       'primary_doc.xml',
+      expect.any(CallScope),
     );
   });
 
@@ -298,6 +318,7 @@ describe('getFundHoldingsTool — routing', () => {
       '0000036405-26-000325',
       'primary_doc.xml',
       { maxBytes: 65_536, stopAt: '</genInfo>' },
+      expect.any(CallScope),
     );
     expect(result.accession_number).toBe('0000036405-26-000325');
   });
@@ -372,7 +393,12 @@ describe('getFundHoldingsTool — routing', () => {
     const input = getFundHoldingsTool.input.parse({ fund: '0001067839' });
     await getFundHoldingsTool.handler(input, ctx);
 
-    expect(mockApi.getFundSeriesFilings).toHaveBeenCalledWith('S000101292', 'NPORT-P', 40);
+    expect(mockApi.getFundSeriesFilings).toHaveBeenCalledWith(
+      'S000101292',
+      'NPORT-P',
+      40,
+      expect.any(CallScope),
+    );
   });
 
   it('names the registrant series instead of picking one when several exist', async () => {
@@ -480,7 +506,12 @@ describe('getFundHoldingsTool — routing', () => {
     const input = getFundHoldingsTool.input.parse({ fund: '0000803013' });
     const result = await getFundHoldingsTool.handler(input, ctx);
 
-    expect(mockApi.getFundSeriesFilings).toHaveBeenCalledWith('S000071949', 'NPORT-P', 40);
+    expect(mockApi.getFundSeriesFilings).toHaveBeenCalledWith(
+      'S000071949',
+      'NPORT-P',
+      40,
+      expect.any(CallScope),
+    );
     expect(result.series_id).toBe('S000071949');
     // The other series' 2026-03-31 report is not offered as this fund's period.
     expect(result.available_report_periods).toEqual(['2026-05-31', '2026-02-28']);

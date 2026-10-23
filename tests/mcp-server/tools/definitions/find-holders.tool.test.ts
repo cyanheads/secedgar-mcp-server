@@ -10,6 +10,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { findHoldersTool } from '@/mcp-server/tools/definitions/find-holders.tool.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import type { EftsHit, EftsResponse } from '@/services/edgar/types.js';
 import { blockText, wireError } from '../../../support/assertions.js';
 
@@ -133,7 +134,10 @@ describe('findHoldersTool', () => {
     expect(result.filed_to).toBe('2026-06-30');
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ startDate: '2026-04-01', endDate: '2026-06-30' }),
+      expect.any(CallScope),
     );
+    // The scope carries the caller's own signal, so a cancel reaches SEC (#179).
+    expect(mockApi.searchFilings.mock.calls[0]?.[1].signal).toBe(ctx.signal);
   });
 
   it('rolls the window into the next year for a Q4 quarter', async () => {
@@ -160,6 +164,7 @@ describe('findHoldersTool', () => {
     expect(mockApi.resolveCik).not.toHaveBeenCalled();
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ query: '037833100', forms: ['13F-HR'] }),
+      expect.any(CallScope),
     );
   });
 
@@ -260,7 +265,10 @@ describe('findHoldersTool', () => {
     const result = await findHoldersTool.handler(input, ctx);
 
     expect(mockApi.searchFilings).toHaveBeenCalledTimes(5);
-    expect(mockApi.searchFilings).toHaveBeenLastCalledWith(expect.objectContaining({ from: 400 }));
+    expect(mockApi.searchFilings).toHaveBeenLastCalledWith(
+      expect.objectContaining({ from: 400 }),
+      expect.any(CallScope),
+    );
     expect(result.fetched).toBe(500);
     expect(result.total_filings).toBe(6652);
     expect(result.dataset?.truncated).toBe(true);
@@ -467,7 +475,7 @@ describe('findHoldersTool parameter names (#152)', () => {
       const result = await call({ [key]: 'AAPL' });
 
       expect(result.isError).toBeFalsy();
-      expect(mockApi.resolveCik).toHaveBeenCalledWith('AAPL');
+      expect(mockApi.resolveCik).toHaveBeenCalledWith('AAPL', expect.any(CallScope));
       expect(result.structuredContent).toMatchObject({
         issuer: 'AAPL',
         resolved_issuer_name: 'Apple Inc.',

@@ -13,6 +13,7 @@ import {
   getCanvasBridge,
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import { cleanDisplayName, getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import type { EftsHit } from '@/services/edgar/types.js';
 
@@ -127,9 +128,9 @@ export const findHoldersTool = tool('secedgar_find_holders', {
     {
       reason: 'sec_unreachable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The last of three attempts to reach SEC EDGAR got no HTTP response — the connection failed, or no response headers arrived within 15 seconds',
+      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
       recovery:
-        'Retry the same call in a minute — SEC EDGAR could not be reached, and nothing in the request needs to change.',
+        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -282,6 +283,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
 
   async handler(input, ctx) {
     const api = getEdgarApiService();
+    const scope = new CallScope(ctx.signal);
     const cusip = input.cusip?.toUpperCase() || undefined;
 
     // With a CUSIP in hand the information tables are matched directly, so no
@@ -289,7 +291,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
     let resolvedName: string | undefined;
     let resolvedCik: string | undefined;
     if (!cusip) {
-      const resolved = await api.resolveCik(input.issuer);
+      const resolved = await api.resolveCik(input.issuer, scope);
       const candidates = Array.isArray(resolved) ? resolved : [resolved];
       if (candidates.length > 1) {
         const shown = candidates.slice(0, 10);
@@ -340,14 +342,17 @@ export const findHoldersTool = tool('secedgar_find_holders', {
     let totalIsExact = true;
     let hitsFetched = 0;
     for (let page = 0; page < FETCH_PAGE_BUDGET; page++) {
-      const response = await api.searchFilings({
-        query: searchKey,
-        forms: ['13F-HR'],
-        startDate: filedFrom,
-        endDate: filedTo,
-        from: page * EFTS_PAGE_SIZE,
-        size: EFTS_PAGE_SIZE,
-      });
+      const response = await api.searchFilings(
+        {
+          query: searchKey,
+          forms: ['13F-HR'],
+          startDate: filedFrom,
+          endDate: filedTo,
+          from: page * EFTS_PAGE_SIZE,
+          size: EFTS_PAGE_SIZE,
+        },
+        scope,
+      );
       if (page === 0) {
         total = response.hits.total.value;
         totalIsExact = response.hits.total.relation === 'eq';

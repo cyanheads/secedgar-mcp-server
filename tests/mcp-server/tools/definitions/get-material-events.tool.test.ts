@@ -9,6 +9,7 @@ import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getMaterialEventsTool } from '@/mcp-server/tools/definitions/get-material-events.tool.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import type { FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
 import { blockText } from '../../../support/assertions.js';
 
@@ -247,7 +248,12 @@ describe('getMaterialEventsTool', () => {
     });
     const result = await getMaterialEventsTool.handler(input, ctx);
 
-    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith('CIK0000320193-submissions-001.json');
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith(
+      'CIK0000320193-submissions-001.json',
+      expect.any(CallScope),
+    );
+    // The scope carries the caller's own signal, so a cancel reaches SEC (#179).
+    expect(mockApi.fetchArchivePage.mock.calls[0]?.[1].signal).toBe(ctx.signal);
     expect(result.total_matched).toBe(1);
     expect(result.history_scanned_through).toBe('1994-01-26');
   });
@@ -474,7 +480,10 @@ describe('getMaterialEventsTool — under-filled archive walk (#134)', () => {
 
     expect(result.isError).toBeFalsy();
     expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(2);
-    expect(mockApi.fetchArchivePage).toHaveBeenLastCalledWith('CIK0000320193-submissions-002.json');
+    expect(mockApi.fetchArchivePage).toHaveBeenLastCalledWith(
+      'CIK0000320193-submissions-002.json',
+      expect.any(CallScope),
+    );
     expect(result.structuredContent).toMatchObject({
       total_matched: 25,
       history_scanned_through: '2013-01-01',
@@ -635,6 +644,7 @@ describe('getMaterialEventsTool — under-filled archive walk (#134)', () => {
       expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(2);
       expect(mockApi.fetchArchivePage).toHaveBeenLastCalledWith(
         'CIK0000320193-submissions-002.json',
+        expect.any(CallScope),
       );
       expect(result.structuredContent).toMatchObject({
         total_matched: 11,
@@ -781,7 +791,7 @@ describe('getMaterialEventsTool parameter names (#115)', () => {
     const result = await call({ [key]: value });
 
     expect(result.isError).toBeFalsy();
-    expect(mockApi.resolveCik).toHaveBeenCalledWith(value);
+    expect(mockApi.resolveCik).toHaveBeenCalledWith(value, expect.any(CallScope));
     expect(result.structuredContent).toMatchObject({ cik: '0000320193', total_8k_scanned: 5 });
     expect(blockText(result.content)).toContain('Apple Inc.');
   });

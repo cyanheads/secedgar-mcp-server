@@ -11,6 +11,7 @@ import {
   getCanvasBridge,
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import {
   describeUnknownConcepts,
   findUnknownConcept,
@@ -172,9 +173,9 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     {
       reason: 'sec_unreachable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The last of three attempts to reach SEC EDGAR got no HTTP response — the connection failed, or no response headers arrived within 15 seconds',
+      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
       recovery:
-        'Retry the same call in a minute — SEC EDGAR could not be reached, and nothing in the request needs to change.',
+        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -322,9 +323,10 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     }
 
     const api = getEdgarApiService();
+    const scope = new CallScope(ctx.signal);
 
     // Resolve company to CIK
-    const resolved = await api.resolveCik(input.company);
+    const resolved = await api.resolveCik(input.company, scope);
     if (Array.isArray(resolved) && resolved.length === 0) {
       throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
     }
@@ -398,7 +400,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
 
     for (const [tagIndex, tag] of tags.entries()) {
       tagsTried.push(tag);
-      const resp = await api.tryGetCompanyConcept(match.cik, taxonomy, tag);
+      const resp = await api.tryGetCompanyConcept(match.cik, taxonomy, tag, scope);
       if (!resp) continue;
       if (Object.keys(resp.units).length === 0) {
         servedEmpty.push({ tag, tagIndex });
@@ -421,7 +423,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     /** Set when the fiscal-year-end read below fails, leaving those frames untested (#148). */
     let yearEndsUnread = false;
     if (servedEmpty.length > 0) {
-      facts = await api.tryGetCompanyFacts(match.cik);
+      facts = await api.tryGetCompanyFacts(match.cik, scope);
       const namespace = facts?.facts[taxonomy];
       for (const { tag, tagIndex } of servedEmpty) {
         const concept = namespace?.[tag];
@@ -438,12 +440,13 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
      * Reads companyfacts for the filer's fiscal-year ends unless a payload is
      * already in hand. Best-effort: a failed read is logged and sets
      * `yearEndsUnread`, which also stops a second attempt, and each caller falls
-     * back to the answer it gives without the ends; a cancelled call still fails.
+     * back to the answer it gives without the ends — a read the call's spent failure
+     * budget refused included; a cancelled call still fails (#179).
      */
     const readFactsForYearEnds = async () => {
       if (facts !== undefined || yearEndsUnread) return;
       try {
-        facts = await api.tryGetCompanyFacts(match.cik);
+        facts = await api.tryGetCompanyFacts(match.cik, scope);
       } catch (err) {
         if (ctx.signal.aborted) throw err;
         yearEndsUnread = true;
@@ -497,7 +500,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       // Probe companyfacts to discover what namespaces and tags this filer actually reports,
       // and which other taxonomy carries the concept (#164). Only on the error path — one
       // extra request, never on the happy path.
-      if (facts === undefined) facts = await api.tryGetCompanyFacts(match.cik);
+      if (facts === undefined) facts = await api.tryGetCompanyFacts(match.cik, scope);
       const availableNamespaces = facts ? Object.keys(facts.facts) : [];
 
       let hint: string;

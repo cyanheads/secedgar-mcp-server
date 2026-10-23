@@ -23,7 +23,10 @@ const { config, mirrorRef } = vi.hoisted(() => ({
 vi.mock('@/config/server-config.js', () => ({ getServerConfig: () => config }));
 vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => mirrorRef.current }));
 
+import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, initEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+
+const scope = () => new CallScope(new AbortController().signal);
 
 function makeMirrorStub() {
   return {
@@ -66,7 +69,12 @@ describe('EdgarApiService — mirror routing', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 
-    const result = await getEdgarApiService().tryGetCompanyConcept('320193', 'us-gaap', 'Revenues');
+    const result = await getEdgarApiService().tryGetCompanyConcept(
+      '320193',
+      'us-gaap',
+      'Revenues',
+      scope(),
+    );
 
     expect(result?.entityName).toBe('Apple Inc.');
     expect(fetchMock).not.toHaveBeenCalled();
@@ -82,7 +90,12 @@ describe('EdgarApiService — mirror routing', () => {
     );
     vi.stubGlobal('fetch', fetchMock);
 
-    const result = await getEdgarApiService().tryGetCompanyConcept('320193', 'us-gaap', 'Revenues');
+    const result = await getEdgarApiService().tryGetCompanyConcept(
+      '320193',
+      'us-gaap',
+      'Revenues',
+      scope(),
+    );
 
     expect((result as { entityName?: string } | null)?.entityName).toBe('Live');
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -100,7 +113,7 @@ describe('EdgarApiService — mirror routing', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 
-    const result = await getEdgarApiService().tryGetCompanyFacts('320193');
+    const result = await getEdgarApiService().tryGetCompanyFacts('320193', scope());
 
     expect(result?.entityName).toBe('Apple Inc.');
     expect(mirror.getCompanyFacts).toHaveBeenCalledWith('320193');
@@ -115,7 +128,7 @@ describe('EdgarApiService — mirror routing', () => {
     const fetchMock = vi.fn(async () => jsonResponse({ entityName: 'Live', facts: {} }));
     vi.stubGlobal('fetch', fetchMock);
 
-    const result = await getEdgarApiService().tryGetCompanyFacts('320193');
+    const result = await getEdgarApiService().tryGetCompanyFacts('320193', scope());
 
     expect(result?.entityName).toBe('Live');
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -130,7 +143,13 @@ describe('EdgarApiService — mirror routing', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 
-    const result = await getEdgarApiService().tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023');
+    const result = await getEdgarApiService().tryGetFrames(
+      'us-gaap',
+      'Revenues',
+      'USD',
+      'CY2023',
+      scope(),
+    );
 
     expect(result).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
@@ -143,7 +162,7 @@ describe('EdgarApiService — mirror routing', () => {
     mirrorRef.current = mirror;
 
     await expect(
-      getEdgarApiService().tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023'),
+      getEdgarApiService().tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023', scope()),
     ).rejects.toThrow(/not synced/);
   });
 
@@ -158,7 +177,7 @@ describe('EdgarApiService — mirror routing', () => {
     const fetchMock = vi.fn(async () => jsonResponse({ taxonomy: 'us-gaap', data: [] }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await getEdgarApiService().tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023');
+    await getEdgarApiService().tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023', scope());
 
     expect(mirror.getFrames).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -182,7 +201,13 @@ describe('EdgarApiService — mirror routing', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 
-    const result = await getEdgarApiService().tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023');
+    const result = await getEdgarApiService().tryGetFrames(
+      'us-gaap',
+      'Revenues',
+      'USD',
+      'CY2023',
+      scope(),
+    );
 
     expect((result as { pts?: number } | null)?.pts).toBe(1);
     expect(fetchMock).not.toHaveBeenCalled();
@@ -193,7 +218,9 @@ describe('EdgarApiService — mirror routing', () => {
     const fetchMock = vi.fn(async () => new Response('blocked', { status: 429 }));
     vi.stubGlobal('fetch', fetchMock);
     const api = getEdgarApiService();
-    await expect(api.tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023')).rejects.toMatchObject({
+    await expect(
+      api.tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023', scope()),
+    ).rejects.toMatchObject({
       data: { reason: 'rate_limited' },
     });
 
@@ -218,17 +245,17 @@ describe('EdgarApiService — mirror routing', () => {
 
     // Ticker cache (its live fund-ticker merge is refused locally and degrades), company
     // facts, concept, and frames all answer from the mirror.
-    expect(await api.resolveCik('AAPL')).toMatchObject({ cik: '0000320193' });
-    expect((await api.tryGetCompanyFacts('320193'))?.entityName).toBe('Apple Inc.');
-    expect((await api.tryGetCompanyConcept('320193', 'us-gaap', 'Revenues'))?.entityName).toBe(
-      'Apple Inc.',
-    );
-    expect(await api.tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023')).toMatchObject({
+    expect(await api.resolveCik('AAPL', scope())).toMatchObject({ cik: '0000320193' });
+    expect((await api.tryGetCompanyFacts('320193', scope()))?.entityName).toBe('Apple Inc.');
+    expect(
+      (await api.tryGetCompanyConcept('320193', 'us-gaap', 'Revenues', scope()))?.entityName,
+    ).toBe('Apple Inc.');
+    expect(await api.tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023', scope())).toMatchObject({
       tag: 'Revenues',
     });
 
     // A live-only read in the same window is refused without a request.
-    await expect(api.getSubmissions('320193')).rejects.toMatchObject({
+    await expect(api.getSubmissions('320193', scope())).rejects.toMatchObject({
       data: { reason: 'rate_limited' },
     });
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -239,7 +266,7 @@ describe('EdgarApiService — mirror routing', () => {
     const fetchMock = vi.fn(async () => jsonResponse({ cik: 1, data: [] }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await getEdgarApiService().tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023');
+    await getEdgarApiService().tryGetFrames('us-gaap', 'Revenues', 'USD', 'CY2023', scope());
 
     expect(fetchMock).toHaveBeenCalledOnce();
   });
@@ -267,7 +294,7 @@ describe('EdgarApiService — mirror routing', () => {
       }),
     );
 
-    const vooMatch = await getEdgarApiService().resolveCik('VOO');
+    const vooMatch = await getEdgarApiService().resolveCik('VOO', scope());
     expect(Array.isArray(vooMatch)).toBe(false);
     expect((vooMatch as { cik: string }).cik).toBe('0000036405');
   });
@@ -292,7 +319,7 @@ describe('EdgarApiService — mirror routing', () => {
       }),
     );
 
-    const vooMatch = await getEdgarApiService().resolveCik('VOO');
+    const vooMatch = await getEdgarApiService().resolveCik('VOO', scope());
     const match = vooMatch as { cik: string; seriesId?: string; classId?: string };
     expect(match.seriesId).toBe('S000002839');
     expect(match.classId).toBe('C000092055');
@@ -319,7 +346,7 @@ describe('EdgarApiService — mirror routing', () => {
       }),
     );
 
-    const aaplMatch = await getEdgarApiService().resolveCik('AAPL');
+    const aaplMatch = await getEdgarApiService().resolveCik('AAPL', scope());
     expect(Array.isArray(aaplMatch)).toBe(false);
     const m = aaplMatch as { cik: string; name?: string };
     expect(m.cik).toBe('0000320193');
@@ -343,7 +370,7 @@ describe('EdgarApiService — mirror routing', () => {
     );
 
     // Equity ticker still resolves
-    const aaplMatch = await getEdgarApiService().resolveCik('AAPL');
+    const aaplMatch = await getEdgarApiService().resolveCik('AAPL', scope());
     expect(Array.isArray(aaplMatch)).toBe(false);
     expect((aaplMatch as { cik: string }).cik).toBe('0000320193');
   });
@@ -372,14 +399,14 @@ describe('EdgarApiService — mirror routing', () => {
       }),
     );
 
-    const spcx = (await getEdgarApiService().resolveCik('SPCX')) as {
+    const spcx = (await getEdgarApiService().resolveCik('SPCX', scope())) as {
       cik: string;
       seriesId?: string;
     };
     expect(spcx.cik).toBe('0001181412'); // the equity CIK, not the fund 0001719812
     expect(spcx.seriesId).toBeUndefined();
 
-    const voo = (await getEdgarApiService().resolveCik('VOO')) as { cik: string };
+    const voo = (await getEdgarApiService().resolveCik('VOO', scope())) as { cik: string };
     expect(voo.cik).toBe('0000036405');
   });
 
@@ -409,7 +436,7 @@ describe('EdgarApiService — mirror routing', () => {
       }),
     );
 
-    const vooMatch = await getEdgarApiService().resolveCik('VOO');
+    const vooMatch = await getEdgarApiService().resolveCik('VOO', scope());
     expect(Array.isArray(vooMatch)).toBe(false);
     expect((vooMatch as { cik: string }).cik).toBe('0000036405');
   });
@@ -427,7 +454,7 @@ describe('EdgarApiService — mirror routing', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     // VOO is not in the mirror and no live fetch is allowed
-    await getEdgarApiService().resolveCik('VOO');
+    await getEdgarApiService().resolveCik('VOO', scope());
     // No fetch should occur — fund ticker stays unresolved but no live call
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -449,7 +476,7 @@ describe('EdgarApiService — mirror routing', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     // "Facebook" matches a former-name tuple in the committed former-names.json asset.
-    const match = (await getEdgarApiService().resolveCik('Facebook')) as { cik: string };
+    const match = (await getEdgarApiService().resolveCik('Facebook', scope())) as { cik: string };
     expect(match.cik).toBe('0001326801');
     expect(fetchMock).not.toHaveBeenCalled();
   });

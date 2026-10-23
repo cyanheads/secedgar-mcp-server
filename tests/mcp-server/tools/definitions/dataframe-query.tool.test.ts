@@ -14,7 +14,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
 }));
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
-import { blockText } from '../../../support/assertions.js';
+import { bag, blockText, wireError } from '../../../support/assertions.js';
 
 const mockBridge = {
   query: vi.fn(),
@@ -33,6 +33,19 @@ describe('dataframeQueryTool', () => {
     await expect(dataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
       code: JsonRpcErrorCode.ServiceUnavailable,
     });
+  });
+
+  it('names the npm/Docker switch and the MCPB bundle in the canvas_unavailable recovery, on both surfaces', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+    const result = await runToolContract(dataframeQueryTool, { sql: 'SELECT 1' });
+
+    const error = wireError(result);
+    expect(error.data.reason).toBe('canvas_unavailable');
+    const hint = String(bag(error.data.recovery).hint);
+    expect(hint).toBe(
+      'Dataframes need the DuckDB canvas. On an npm or Docker install, set CANVAS_PROVIDER_TYPE=duckdb (the default when unset) and restart the server; the MCPB bundle ships without DuckDB, so there the data tools return their results inline and stage no dataframe.',
+    );
+    expect(blockText(result.content)).toContain(hint);
   });
 
   it('declares system_catalog_access in errors contract (#22)', () => {

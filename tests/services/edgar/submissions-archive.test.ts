@@ -6,6 +6,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import {
   ARCHIVE_PAGE_SCAN_CAP,
   type ArchivePageEntry,
@@ -13,6 +14,8 @@ import {
   selectArchivePages,
 } from '@/services/edgar/submissions-archive.js';
 import type { FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
+
+const scope = () => new CallScope(new AbortController().signal);
 
 /** Fourteen yearly pages, newest first: 001 = 2014 … 014 = 2001. */
 const FILES: ArchivePageEntry[] = Array.from({ length: 14 }, (_, i) => ({
@@ -48,12 +51,14 @@ function submissions(recentDates: string[], files = FILES): SubmissionsResponse 
   };
 }
 
-/** A page source that records the order of reads and how many ran at once. */
+/** A page source that records the order of reads, how many ran at once, and the scope each ran under. */
 function recordingSource() {
   let inFlight = 0;
   const source = {
     maxInFlight: 0,
-    fetchArchivePage: vi.fn(async (_name: string) => {
+    scopes: [] as CallScope[],
+    fetchArchivePage: vi.fn(async (_name: string, readScope: CallScope) => {
+      source.scopes.push(readScope);
       inFlight++;
       source.maxInFlight = Math.max(source.maxInFlight, inFlight);
       await new Promise((resolve) => setTimeout(resolve, 1));
@@ -155,15 +160,20 @@ describe('selectArchivePages', () => {
 });
 
 describe('SubmissionsArchiveWalk', () => {
-  it('reads pages one at a time, never in parallel', async () => {
+  it('reads pages one at a time, never in parallel, each under the calling tool’s scope (#179)', async () => {
     const source = recordingSource();
-    const walk = new SubmissionsArchiveWalk(source, submissions(RECENT), {
-      filedAfter: '2011-01-01',
-      order: 'newest-first',
-    });
+    const callScope = scope();
+    const walk = new SubmissionsArchiveWalk(
+      source,
+      submissions(RECENT),
+      { filedAfter: '2011-01-01', order: 'newest-first' },
+      callScope,
+    );
 
     // page-005 ends 2010-12-31, a day before the bound, and is kept for manifest drift (#137).
     expect(await drain(walk)).toEqual(['page-001', 'page-002', 'page-003', 'page-004', 'page-005']);
+    expect(source.scopes).toHaveLength(5);
+    for (const readScope of source.scopes) expect(readScope).toBe(callScope);
     expect(source.maxInFlight).toBe(1);
     expect(walk.pagesRead).toBe(5);
     expect(walk.scannedThrough).toBe('2010-01-01');
@@ -172,10 +182,12 @@ describe('SubmissionsArchiveWalk', () => {
 
   it('selects no page when the lower bound falls on recent’s oldest date', async () => {
     const source = recordingSource();
-    const walk = new SubmissionsArchiveWalk(source, submissions(RECENT), {
-      filedAfter: '2015-06-01',
-      order: 'oldest-first',
-    });
+    const walk = new SubmissionsArchiveWalk(
+      source,
+      submissions(RECENT),
+      { filedAfter: '2015-06-01', order: 'oldest-first' },
+      scope(),
+    );
 
     expect(await drain(walk)).toEqual([]);
     expect(source.fetchArchivePage).not.toHaveBeenCalled();
@@ -186,33 +198,44 @@ describe('SubmissionsArchiveWalk', () => {
   it('selects no page when the lower bound is newer than recent’s oldest date', async () => {
     const source = recordingSource();
     // Page 001 claims to reach 2015-12-31, past recent's oldest row — still skipped.
-    const walk = new SubmissionsArchiveWalk(source, submissions(RECENT), {
-      filedAfter: '2015-07-01',
-      order: 'newest-first',
-    });
+    const walk = new SubmissionsArchiveWalk(
+      source,
+      submissions(RECENT),
+      { filedAfter: '2015-07-01', order: 'newest-first' },
+      scope(),
+    );
 
     expect(await drain(walk)).toEqual([]);
     expect(source.fetchArchivePage).not.toHaveBeenCalled();
   });
 
   it('walks the archive when the lower bound predates recent, and when recent is empty', async () => {
-    const before = new SubmissionsArchiveWalk(recordingSource(), submissions(RECENT), {
-      filedAfter: '2014-06-30',
-      order: 'newest-first',
-    });
+    const before = new SubmissionsArchiveWalk(
+      recordingSource(),
+      submissions(RECENT),
+      { filedAfter: '2014-06-30', order: 'newest-first' },
+      scope(),
+    );
     expect(await drain(before)).toEqual(['page-001']);
 
-    const empty = new SubmissionsArchiveWalk(recordingSource(), submissions([]), {
-      filedAfter: '2014-01-01',
-      order: 'newest-first',
-    });
+    const empty = new SubmissionsArchiveWalk(
+      recordingSource(),
+      submissions([]),
+      { filedAfter: '2014-01-01', order: 'newest-first' },
+      scope(),
+    );
     // page-002 ends 2013-12-31, within the one-day drift allowance (#137).
     expect(await drain(empty)).toEqual(['page-001', 'page-002']);
   });
 
   it(`stops at the ${ARCHIVE_PAGE_SCAN_CAP}-page cap and reports the rest unread`, async () => {
     const source = recordingSource();
-    const walk = new SubmissionsArchiveWalk(source, submissions(RECENT), { order: 'newest-first' });
+    const walk = new SubmissionsArchiveWalk(
+      source,
+      submissions(RECENT),
+      { order: 'newest-first' },
+      scope(),
+    );
 
     const names = await drain(walk);
     expect(names).toHaveLength(ARCHIVE_PAGE_SCAN_CAP);
@@ -227,9 +250,8 @@ describe('SubmissionsArchiveWalk', () => {
     const walk = new SubmissionsArchiveWalk(
       recordingSource(),
       submissions(RECENT, FILES.slice(0, 10)),
-      {
-        order: 'newest-first',
-      },
+      { order: 'newest-first' },
+      scope(),
     );
 
     expect(await drain(walk)).toHaveLength(10);
@@ -238,7 +260,12 @@ describe('SubmissionsArchiveWalk', () => {
 
   it('ends where the caller stops, reporting the unread pages as truncated', async () => {
     const source = recordingSource();
-    const walk = new SubmissionsArchiveWalk(source, submissions(RECENT), { order: 'newest-first' });
+    const walk = new SubmissionsArchiveWalk(
+      source,
+      submissions(RECENT),
+      { order: 'newest-first' },
+      scope(),
+    );
 
     expect(await drain(walk, 2)).toEqual(['page-001', 'page-002']);
     expect(source.fetchArchivePage).toHaveBeenCalledTimes(2);
@@ -248,10 +275,12 @@ describe('SubmissionsArchiveWalk', () => {
 
   it('walks forward from the page covering the lower bound, stopping on the first page it needs', async () => {
     const source = recordingSource();
-    const walk = new SubmissionsArchiveWalk(source, submissions(RECENT), {
-      filedAfter: '2004-12-31',
-      order: 'oldest-first',
-    });
+    const walk = new SubmissionsArchiveWalk(
+      source,
+      submissions(RECENT),
+      { filedAfter: '2004-12-31', order: 'oldest-first' },
+      scope(),
+    );
 
     expect(await drain(walk, 1)).toEqual(['page-011']);
     // The page covering the bound is where the scan reaches back to.
@@ -260,9 +289,12 @@ describe('SubmissionsArchiveWalk', () => {
   });
 
   it('selects nothing for a filer with no archive pages', async () => {
-    const walk = new SubmissionsArchiveWalk(recordingSource(), submissions(RECENT, []), {
-      order: 'newest-first',
-    });
+    const walk = new SubmissionsArchiveWalk(
+      recordingSource(),
+      submissions(RECENT, []),
+      { order: 'newest-first' },
+      scope(),
+    );
 
     expect(await drain(walk)).toEqual([]);
     expect(walk.truncated).toBe(false);
@@ -280,10 +312,8 @@ describe('SubmissionsArchiveWalk — one-day manifest drift (#137)', () => {
     const walk = new SubmissionsArchiveWalk(
       source,
       submissions(['2026-09-22', '2015-07-27'], APPLE_FILES),
-      {
-        filedAfter: '2015-07-26',
-        order: 'newest-first',
-      },
+      { filedAfter: '2015-07-26', order: 'newest-first' },
+      scope(),
     );
 
     // One extra page at the boundary; the caller's own row filter drops its rows.
@@ -295,10 +325,8 @@ describe('SubmissionsArchiveWalk — one-day manifest drift (#137)', () => {
     const walk = new SubmissionsArchiveWalk(
       source,
       submissions(['2026-09-22', '2015-07-26'], APPLE_FILES),
-      {
-        filedAfter: '2015-07-26',
-        order: 'newest-first',
-      },
+      { filedAfter: '2015-07-26', order: 'newest-first' },
+      scope(),
     );
 
     expect(await drain(walk)).toEqual([]);

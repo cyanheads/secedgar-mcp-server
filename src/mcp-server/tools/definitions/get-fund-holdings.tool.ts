@@ -16,6 +16,7 @@ import {
   getCanvasBridge,
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, rawDocumentName } from '@/services/edgar/edgar-api-service.js';
 import {
   type NportHeader,
@@ -109,6 +110,7 @@ function byReportPeriod(a: NportCandidate, b: NportCandidate): number {
  */
 async function scanHeaders(
   api: ReturnType<typeof getEdgarApiService>,
+  scope: CallScope,
   cik: string,
   candidates: NportCandidate[],
   limit: number,
@@ -125,6 +127,7 @@ async function scanHeaders(
       candidate.accessionNumber,
       candidate.document,
       { maxBytes: HEADER_MAX_BYTES, stopAt: HEADER_STOP_AT },
+      scope,
     );
     if (!head) continue;
     const header = parseNportHeader(head);
@@ -145,6 +148,7 @@ async function scanHeaders(
  */
 async function datePeriods(
   api: ReturnType<typeof getEdgarApiService>,
+  scope: CallScope,
   cik: string,
   candidates: NportCandidate[],
   wanted: string,
@@ -153,6 +157,7 @@ async function datePeriods(
   if (undated.length === 0) return;
   const { scanned } = await scanHeaders(
     api,
+    scope,
     cik,
     undated,
     SERIES_SCAN_LIMIT,
@@ -170,11 +175,12 @@ async function datePeriods(
  */
 async function datedCandidates(
   api: ReturnType<typeof getEdgarApiService>,
+  scope: CallScope,
   filings: Array<{ accessionNumber: string; filingDate: string; form: string }>,
   registrantCik: string,
 ): Promise<NportCandidate[]> {
   const byAccession = new Map(
-    nportRows((await api.getSubmissions(registrantCik)).filings.recent).map((row) => [
+    nportRows((await api.getSubmissions(registrantCik, scope)).filings.recent).map((row) => [
       row.accessionNumber,
       row,
     ]),
@@ -262,9 +268,9 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
     {
       reason: 'sec_unreachable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The last of three attempts to reach SEC EDGAR got no HTTP response — the connection failed, or no response headers arrived within 15 seconds',
+      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
       recovery:
-        'Retry the same call in a minute — SEC EDGAR could not be reached, and nothing in the request needs to change.',
+        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -495,6 +501,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
 
   async handler(input, ctx) {
     const api = getEdgarApiService();
+    const scope = new CallScope(ctx.signal);
 
     // Phase 1 — registrant and series identity, from local indexes only.
     const fundIsSeries = SERIES_ID_PATTERN.test(input.fund);
@@ -502,9 +509,9 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
     let registrantCik: string | undefined;
 
     if (fundIsSeries) {
-      registrantCik = (await api.resolveFundSeries(input.fund))?.cik;
+      registrantCik = (await api.resolveFundSeries(input.fund, scope))?.cik;
     } else {
-      const resolved = await api.resolveCik(input.fund);
+      const resolved = await api.resolveCik(input.fund, scope);
       const candidates = Array.isArray(resolved) ? resolved : [resolved];
       if (candidates.length > 1) {
         const shown = candidates.slice(0, 10);
@@ -527,7 +534,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
     // fund ticker file settles that without a request; a trust whose series carry no listed
     // ticker returns nothing here and falls through to the header scan below.
     if (!targetSeries && registrantCik) {
-      const listed = await api.listFundSeries(registrantCik);
+      const listed = await api.listFundSeries(registrantCik, scope);
       if (listed.length === 1 && listed[0]) targetSeries = listed[0].seriesId;
       else if (listed.length > 1) {
         const shown = listed.slice(0, SERIES_HINT_LIMIT);
@@ -551,13 +558,18 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
     // reading candidate headers is the fallback for a series it does not index.
     let candidates: NportCandidate[] = [];
     if (targetSeries) {
-      const feed = await api.getFundSeriesFilings(targetSeries, 'NPORT-P', SERIES_FEED_COUNT);
+      const feed = await api.getFundSeriesFilings(
+        targetSeries,
+        'NPORT-P',
+        SERIES_FEED_COUNT,
+        scope,
+      );
       // The browse feed is keyed on the series, so the registrant it names is the trust that
       // files for this series. It outranks the one the fund input implied, which is a
       // different trust whenever series_id overrides that input.
       registrantCik = feed.registrantCik ?? registrantCik;
       if (feed.filings.length > 0 && registrantCik) {
-        candidates = await datedCandidates(api, feed.filings, registrantCik);
+        candidates = await datedCandidates(api, scope, feed.filings, registrantCik);
       }
     }
 
@@ -568,7 +580,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       );
     }
 
-    const submissions = await api.getSubmissions(registrantCik);
+    const submissions = await api.getSubmissions(registrantCik, scope);
 
     if (candidates.length === 0) {
       const rows = nportRows(submissions.filings.recent);
@@ -584,6 +596,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
         // for — read headers until the series turns up.
         const { scanned, complete } = await scanHeaders(
           api,
+          scope,
           registrantCik,
           ordered,
           SERIES_SCAN_LIMIT,
@@ -612,6 +625,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
         const newestBatch = ordered.filter((row) => row.reportDate === newestPeriod);
         const { scanned, complete } = await scanHeaders(
           api,
+          scope,
           registrantCik,
           newestBatch,
           SERIES_SCAN_LIMIT,
@@ -638,9 +652,14 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
         const only = series[0];
         if (only) {
           targetSeries = only.id.toUpperCase();
-          const feed = await api.getFundSeriesFilings(targetSeries, 'NPORT-P', SERIES_FEED_COUNT);
+          const feed = await api.getFundSeriesFilings(
+            targetSeries,
+            'NPORT-P',
+            SERIES_FEED_COUNT,
+            scope,
+          );
           if (feed.filings.length > 0) {
-            candidates = await datedCandidates(api, feed.filings, registrantCik);
+            candidates = await datedCandidates(api, scope, feed.filings, registrantCik);
           }
         }
         // A registrant that files as a single fund carries no series in the document at all,
@@ -652,7 +671,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
     // Phase 3 — pick the report. Ordering is by period reported, so an amendment restating
     // an older period never displaces the current portfolio.
     if (input.report_date && !candidates.some((c) => c.reportDate === input.report_date)) {
-      await datePeriods(api, registrantCik, candidates, input.report_date);
+      await datePeriods(api, scope, registrantCik, candidates, input.report_date);
     }
     const ordered = [...candidates].sort(byReportPeriod);
     const availablePeriods = [
@@ -678,6 +697,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       registrantCik,
       target.accessionNumber,
       target.document,
+      scope,
     );
     if (!xml) {
       throw ctx.fail(

@@ -18,6 +18,7 @@ import {
   getCanvasBridge,
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import {
   cleanDisplayName,
   getEdgarApiService,
@@ -38,11 +39,42 @@ const EFTS_FULLTEXT_FLOOR = '2001-01-01';
 /** Last day the archive arms serve when a range is split at {@link EFTS_FULLTEXT_FLOOR}. */
 const ARCHIVE_ERA_END = '2000-12-31';
 
+/** First day of EDGAR's archives — where a lone pre-2001 `filed_before` starts. */
+const EDGAR_ARCHIVE_START = '1993-01-01';
+
+/**
+ * The inclusive filing-date window a call searches, or `undefined` when no bound
+ * was given (`""` counts as absent). EFTS honors a custom range only with both
+ * ends — `startdt` or `enddt` alone returns the same hits as no dates — so a lone
+ * bound is paired here, before routing: `filed_after` runs through today (UTC,
+ * read per call), and `filed_before` starts where its route's coverage does —
+ * the full-text floor from 2001 on, the archive start before it (#185). `filled`
+ * marks a window the caller did not spell out, which the full-text path then
+ * discloses in `effectiveQuery`.
+ */
+function dateWindow(
+  filedAfter: string | undefined,
+  filedBefore: string | undefined,
+): { startDate: string; endDate: string; filled: boolean } | undefined {
+  if (filedAfter && filedBefore) {
+    return { startDate: filedAfter, endDate: filedBefore, filled: false };
+  }
+  if (filedAfter) {
+    return { startDate: filedAfter, endDate: new Date().toISOString().slice(0, 10), filled: true };
+  }
+  if (filedBefore) {
+    const startDate = filedBefore < EFTS_FULLTEXT_FLOOR ? EDGAR_ARCHIVE_START : EFTS_FULLTEXT_FLOOR;
+    return { startDate, endDate: filedBefore, filled: true };
+  }
+  return;
+}
+
 /**
  * Cap on quarterly full-index files fetched in one unscoped pre-2001 browse.
  * Each `master.idx` is a multi-MB whole-quarter download and is not
  * form-filterable server-side, so this arm is the heaviest — the cap bounds it
- * hard, and `dataset.truncated` discloses when older quarters went unscanned.
+ * hard. When older quarters go unscanned, `effectiveQuery` and the notice name the
+ * quarters read and `total_is_exact` / `dataset.truncated` turn false / true.
  */
 const FULL_INDEX_QUARTER_SCAN_CAP = 8;
 
@@ -89,8 +121,21 @@ type SearchRow = {
 /**
  * Rows from one archive-backed collector, plus whether its page/quarter cap bound
  * before the requested range was exhausted (which makes the row count a lower bound).
+ * `quarterCap` is the full-index arm's account of a bound cap: the quarters it read
+ * and the range end that reaches the next older ones.
  */
-type ArchiveRows = { rows: SearchRow[]; scanTruncated: boolean };
+type ArchiveRows = {
+  rows: SearchRow[];
+  scanTruncated: boolean;
+  quarterCap?: QuarterCap | undefined;
+};
+
+/**
+ * The quarters a capped full-index browse read, out of the `count` its range spans —
+ * `read` and `range` as `1998Q1–1999Q4` — and `olderEnd`, the last day of the
+ * newest quarter left unread, where a follow-up range ends to read on.
+ */
+type QuarterCap = { read: string; range: string; count: number; olderEnd: string };
 
 /**
  * Disclosure for the pre-2001 local text scan: how many filings the form+date
@@ -276,10 +321,11 @@ function stripToken(query: string, token: string): string {
 async function resolveEntityTargeting(
   query: string,
   ctx: Context,
+  scope: CallScope,
 ): Promise<{ query: string; entityCik?: string }> {
   const tickerMatch = query.match(/\bticker:(\S+)/i);
   if (tickerMatch?.[1]) {
-    const resolved = await getEdgarApiService().resolveCik(tickerMatch[1]);
+    const resolved = await getEdgarApiService().resolveCik(tickerMatch[1], scope);
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
     if (!match?.cik) {
       throw validationError(
@@ -484,6 +530,7 @@ async function finishAssembledResult(
  */
 async function collectSubmissionsRows(
   ctx: Context,
+  scope: CallScope,
   args: {
     entityCik: string;
     forms: string[] | undefined;
@@ -500,13 +547,13 @@ async function collectSubmissionsRows(
   // error — no raw SEC URL (#93). A registrant that 404s is an EDGAR-side problem
   // and propagates unchanged, same reasoning as #55 and #76. The lookup is confined
   // to this pre-2001 arm (already multi-fetch) so the EFTS path stays untouched.
-  const resolved = await api.resolveCik(args.entityCik);
+  const resolved = await api.resolveCik(args.entityCik, scope);
   const cacheMatch = Array.isArray(resolved) ? resolved[0] : resolved;
   const isBareCikFallback = !cacheMatch?.name && !cacheMatch?.ticker;
 
   let submissions: Awaited<ReturnType<typeof api.getSubmissions>>;
   try {
-    submissions = await api.getSubmissions(args.entityCik);
+    submissions = await api.getSubmissions(args.entityCik, scope);
   } catch (err) {
     if (isBareCikFallback && err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
       ctx.log.debug('CIK has no submissions feed', { cik: args.entityCik });
@@ -548,11 +595,12 @@ async function collectSubmissionsRows(
   pushBlock(submissions.filings.recent);
 
   // Older filings live in the archive pages covering the requested pre-2001 range.
-  const walk = new SubmissionsArchiveWalk(api, submissions, {
-    filedAfter: args.startDate,
-    filedBefore: args.endDate,
-    order: 'newest-first',
-  });
+  const walk = new SubmissionsArchiveWalk(
+    api,
+    submissions,
+    { filedAfter: args.startDate, filedBefore: args.endDate, order: 'newest-first' },
+    scope,
+  );
   for await (const { block } of walk) pushBlock(block);
 
   return { rows, scanTruncated: walk.truncated };
@@ -568,12 +616,18 @@ async function collectSubmissionsRows(
  * filer and the subject company — so lines collapse to one row per accession,
  * keeping the first line's `cik` and `company_name`; the index carries no
  * filer/subject role to choose by (#124).
+ *
+ * Quarters are read newest first, so a capped browse covers the end of its range;
+ * `quarterCap` names that slice, which `effectiveQuery` and the notice disclose.
  */
-async function collectFullIndexRows(args: {
-  forms: string[];
-  startDate: string;
-  endDate: string;
-}): Promise<ArchiveRows> {
+async function collectFullIndexRows(
+  scope: CallScope,
+  args: {
+    forms: string[];
+    startDate: string;
+    endDate: string;
+  },
+): Promise<ArchiveRows> {
   const api = getEdgarApiService();
   const quarters = quartersInRange(args.startDate, args.endDate);
   const quarterLimit = Math.min(quarters.length, FULL_INDEX_QUARTER_SCAN_CAP);
@@ -584,7 +638,7 @@ async function collectFullIndexRows(args: {
   for (let i = 0; i < quarterLimit; i++) {
     const quarter = quarters[i];
     if (!quarter) break;
-    const entries = await api.fetchFullIndexQuarter(quarter.year, quarter.quarter);
+    const entries = await api.fetchFullIndexQuarter(quarter.year, quarter.quarter, scope);
     for (const entry of entries) {
       if (entry.filingDate < args.startDate || entry.filingDate > args.endDate) continue;
       if (!formMatches(entry.form, args.forms)) continue;
@@ -607,7 +661,24 @@ async function collectFullIndexRows(args: {
     }
   }
 
-  return { rows, scanTruncated };
+  // A quarter past the limit exists only when the cap bound.
+  const newestUnread = quarters[quarterLimit];
+  const newest = quarters[0];
+  const oldestRead = quarters[quarterLimit - 1];
+  const oldest = quarters.at(-1);
+  if (!newestUnread || !newest || !oldestRead || !oldest) return { rows, scanTruncated };
+  const label = (q: { year: number; quarter: number }) => `${q.year}Q${q.quarter}`;
+  const quarterEnd = ['03-31', '06-30', '09-30', '12-31'][newestUnread.quarter - 1];
+  return {
+    rows,
+    scanTruncated,
+    quarterCap: {
+      read: `${label(oldestRead)}–${label(newest)}`,
+      range: `${label(oldest)}–${label(newest)}`,
+      count: quarters.length,
+      olderEnd: `${newestUnread.year}-${quarterEnd}`,
+    },
+  };
 }
 
 /**
@@ -630,6 +701,7 @@ async function collectFullIndexRows(args: {
  */
 async function scanFilingText(
   ctx: Context,
+  scope: CallScope,
   candidates: SearchRow[],
   parsed: LocalQuery,
 ): Promise<{ rows: SearchRow[]; scan: ScanSummary }> {
@@ -642,6 +714,7 @@ async function scanFilingText(
         row.cik ?? '',
         row.accession_number,
         `${row.accession_number}.txt`,
+        scope,
       );
       if (text === null) return null;
       return matchesLocalQuery(filingToExtract(text), parsed) ? row : null;
@@ -666,22 +739,28 @@ async function scanFilingText(
  * is always fetched from offset 0 regardless of the caller's `offset`, which
  * addresses the merged list instead.
  */
-async function fetchEftsRows(args: {
-  query: string;
-  forms: string[] | undefined;
-  entityCik: string | undefined;
-  startDate: string;
-  endDate: string;
-}): Promise<{ rows: SearchRow[]; totalIsExact: boolean; totalDocuments: number }> {
-  const response = await getEdgarApiService().searchFilings({
-    query: args.query,
-    forms: args.forms,
-    ciks: args.entityCik ? [args.entityCik] : undefined,
-    startDate: args.startDate,
-    endDate: args.endDate,
-    from: 0,
-    size: 100,
-  });
+async function fetchEftsRows(
+  scope: CallScope,
+  args: {
+    query: string;
+    forms: string[] | undefined;
+    entityCik: string | undefined;
+    startDate: string;
+    endDate: string;
+  },
+): Promise<{ rows: SearchRow[]; totalIsExact: boolean; totalDocuments: number }> {
+  const response = await getEdgarApiService().searchFilings(
+    {
+      query: args.query,
+      forms: args.forms,
+      ciks: args.entityCik ? [args.entityCik] : undefined,
+      startDate: args.startDate,
+      endDate: args.endDate,
+      from: 0,
+      size: 100,
+    },
+    scope,
+  );
   return {
     rows: collapseEftsHits(response.hits.hits),
     totalIsExact: windowHoldsEveryMatch(response, 0),
@@ -702,7 +781,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     effectiveQuery: z
       .string()
       .describe(
-        'The query as executed: a ticker:/cik: token shows as "(entity scope: CIK …)", a forms-only browse as "(browse: forms …)", and a pre-2001 range names its archive route and dates.',
+        'The query as executed: "(entity scope: CIK …)" for a ticker:/cik: token, "(browse: forms …)" for a forms-only browse, a pre-2001 range\'s archive route and dates (and quarters read, if the full-index cap bound), and "(filed <after> to <before>)" for a full-text search given one bound.',
       ),
     notice: z
       .string()
@@ -721,12 +800,6 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
   },
 
   errors: [
-    {
-      reason: 'invalid_date_range',
-      code: JsonRpcErrorCode.ValidationError,
-      when: 'Only one of filed_after or filed_before was provided',
-      recovery: 'Provide both filed_after and filed_before, or omit both to search all dates.',
-    },
     {
       reason: 'unresolved_ticker',
       code: JsonRpcErrorCode.ValidationError,
@@ -763,7 +836,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'A date range reaching before 2001-01-01 carries free-text terms with no entity scope — no pre-2001 full-text index exists, and nothing bounds a local scan',
       recovery:
-        'Add ticker: or cik: entity scope to the query, drop the text terms to browse by form and date, or start the range at 2001-01-01.',
+        'Add ticker: or cik: entity scope to the query, drop the text terms and browse by form type (forms: ["10-K"]) and date, or, for a range that reaches 2001, start the range at 2001-01-01.',
     },
     {
       reason: 'rate_limited',
@@ -777,9 +850,9 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     {
       reason: 'sec_unreachable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The last of three attempts to reach SEC EDGAR got no HTTP response — the connection failed, or no response headers arrived within 15 seconds',
+      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
       recovery:
-        'Retry the same call in a minute — SEC EDGAR could not be reached, and nothing in the request needs to change.',
+        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -799,7 +872,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       ])
       .optional()
       .describe(
-        'Full-text search query. Optional — omit (or pass "") to browse by form type and/or entity instead, e.g. every S-1 in a date window, or a company\'s filings via ticker:/cik:. A date range alone is not a valid search; pair it with forms or entity targeting. The EFTS index that serves free text starts at 2001-01-01; a date range reaching earlier needs ticker:/cik: entity scope, which lets the tool read that entity\'s filings and match the terms locally (bounded to 50 documents, a few seconds at SEC\'s request rate), or drop the text terms to browse by form and date. When present, supports exact phrases ("material weakness"), boolean operators (revenue OR income), exclusion (-preliminary), wildcard suffix (account*), and entity targeting (ticker:AAPL or cik:320193 in the query); terms are AND\'d by default. A multi-class share ticker resolves in either form — ticker:BRK-B and ticker:BRK.B scope to the same issuer. The pre-2001 local scan honors the same phrase / OR / exclusion / wildcard syntax.',
+        'Full-text search query. Optional — omit (or pass "") to browse by form type and/or entity instead, e.g. every S-1 in a date window, or a company\'s filings via ticker:/cik:. A date range alone is not a valid search; pair it with forms or entity targeting. The EFTS index that serves free text starts at 2001-01-01; a date range reaching earlier needs ticker:/cik: entity scope, which lets the tool read that entity\'s filings and match the terms locally (bounded to 50 documents, a few seconds at SEC\'s request rate), or drop the text terms and browse by form type (forms) and date. When present, supports exact phrases ("material weakness"), boolean operators (revenue OR income), exclusion (-preliminary), wildcard suffix (account*), and entity targeting (ticker:AAPL or cik:320193 in the query); terms are AND\'d by default. A multi-class share ticker resolves in either form — ticker:BRK-B and ticker:BRK.B scope to the same issuer. The pre-2001 local scan honors the same phrase / OR / exclusion / wildcard syntax.',
       ),
     forms: z
       .array(z.string())
@@ -817,7 +890,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       ])
       .optional()
       .describe(
-        'Only include filings filed on or after this date (YYYY-MM-DD). This tool filters by date only with both bounds — pair it with filed_before.',
+        'Only include filings filed on or after this date (YYYY-MM-DD). Use alone or with filed_before; alone, the search runs through today (UTC).',
       ),
     filed_before: z
       .union([
@@ -829,7 +902,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       ])
       .optional()
       .describe(
-        'Only include filings filed on or before this date (YYYY-MM-DD). This tool filters by date only with both bounds — pair it with filed_after.',
+        'Only include filings filed on or before this date (YYYY-MM-DD). Use alone or with filed_after; alone, the search starts at 2001-01-01, or at 1993-01-01 (the archive start) for a date before 2001.',
       ),
     limit: z.number().int().min(1).max(100).default(20).describe('Results per page. Max 100.'),
     offset: z
@@ -993,14 +1066,6 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
   }),
 
   async handler(input, ctx): Promise<SearchFilingsResult> {
-    // Validate date range: both or neither
-    if ((input.filed_after && !input.filed_before) || (!input.filed_after && input.filed_before)) {
-      throw ctx.fail(
-        'invalid_date_range',
-        'Both filed_after and filed_before are required when filtering by date.',
-      );
-    }
-
     // Browse mode (#79): EFTS accepts a forms-only or entity-scoped request with no
     // full-text term, but rejects one with neither ("Blank search not valid"). Guard
     // the both-absent shape here — checked against the RAW query/forms (before the
@@ -1016,35 +1081,48 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     // Resolve ticker:/cik: entity targeting → stripped query + CIK for the
     // server-side ciks param. Throws typed validation errors on bad tokens (#61).
     // Default to '' so a browse request (undefined query) resolves cleanly.
-    const { query, entityCik } = await resolveEntityTargeting(input.query ?? '', ctx);
+    const scope = new CallScope(ctx.signal);
+    const { query, entityCik } = await resolveEntityTargeting(input.query ?? '', ctx, scope);
 
     const api = getEdgarApiService();
 
     // Date-based routing at the EFTS full-text floor (2001-01-01). EFTS only
     // indexes filings from 2001, so a range reaching earlier is served from the
     // archives — entirely, or (when it also reaches 2001 onward) as the older half
-    // of a two-source merge split at the floor (#77, #87).
-    const startDate = input.filed_after || undefined;
-    const endDate = input.filed_before || undefined;
+    // of a two-source merge split at the floor (#77, #87). A lone bound is paired
+    // first, so it routes exactly as the equivalent explicit pair would (#185).
+    const dates = dateWindow(input.filed_after, input.filed_before);
     const hasFreeText = query.trim().length > 0;
-    if (startDate && endDate && startDate < EFTS_FULLTEXT_FLOOR) {
+    if (dates && dates.startDate < EFTS_FULLTEXT_FLOOR) {
+      const { startDate, endDate } = dates;
       const straddles = endDate >= EFTS_FULLTEXT_FLOOR;
       const archiveEnd = straddles ? ARCHIVE_ERA_END : endDate;
 
       // Free text before 2001 is matched by reading documents, which only an entity
       // scope bounds. Unscoped, the pre-2001 half of the range cannot be served at
-      // all — reject rather than answer half a range and call it the answer.
+      // all — reject rather than answer half a range and call it the answer. Starting
+      // at the floor is a way out only for a range that reaches it.
       if (hasFreeText && !entityCik) {
+        const ways = straddles
+          ? `Add ticker:/cik: entity scope to match those filings by reading them, drop the text terms and browse by form type (forms: ["10-K"]) and date, or start the range at ${EFTS_FULLTEXT_FLOOR}.`
+          : 'Add ticker:/cik: entity scope to match those filings by reading them, or drop the text terms and browse by form type (forms: ["10-K"]) and date.';
         throw ctx.fail(
           'pre2001_full_text_unscoped',
-          `Full-text search is unavailable before ${EFTS_FULLTEXT_FLOOR} (where the EFTS index starts), so the ${startDate}..${archiveEnd} part of this range has no index to search. Add ticker:/cik: entity scope to match those filings by reading them, drop the text terms to browse by form and date, or start the range at ${EFTS_FULLTEXT_FLOOR}.`,
+          `Full-text search is unavailable before ${EFTS_FULLTEXT_FLOOR} (where the EFTS index starts), so the ${startDate}..${archiveEnd} part of this range has no index to search. ${ways}`,
+          straddles
+            ? undefined
+            : {
+                recovery: {
+                  hint: 'Add ticker: or cik: entity scope to the query, or drop the text terms and browse by form type (forms: ["10-K"]) and date.',
+                },
+              },
         );
       }
 
       let archive: ArchiveRows;
       let scan: ScanSummary | undefined;
       if (entityCik) {
-        archive = await collectSubmissionsRows(ctx, {
+        archive = await collectSubmissionsRows(ctx, scope, {
           entityCik,
           forms: input.forms,
           startDate,
@@ -1053,6 +1131,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         if (hasFreeText) {
           const scanned = await scanFilingText(
             ctx,
+            scope,
             sortRows(archive.rows, input.sort),
             parseLocalQuery(query),
           );
@@ -1061,7 +1140,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         }
       } else {
         // Unscoped + no free text → forms are guaranteed present by the missing_criteria guard.
-        archive = await collectFullIndexRows({
+        archive = await collectFullIndexRows(scope, {
           forms: input.forms ?? [],
           startDate,
           endDate: archiveEnd,
@@ -1069,7 +1148,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       }
 
       const efts = straddles
-        ? await fetchEftsRows({
+        ? await fetchEftsRows(scope, {
             query,
             forms: input.forms,
             entityCik,
@@ -1101,6 +1180,15 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         efts && eftsWindowIncomplete
           ? ` The ${EFTS_FULLTEXT_FLOOR}-onward side contributed the ${efts.rows.length} filings of one 100-document window of its ${efts.totalDocuments} matching documents, so the merged rows jump from the end of that window straight to ${ARCHIVE_ERA_END} — search ${EFTS_FULLTEXT_FLOOR} to ${endDate} on its own to page through the rest.`
           : '';
+      // A capped full-index browse covers only the newest quarters of its range, which
+      // the stated dates alone would hide.
+      const { quarterCap } = archive;
+      const quarterRead = quarterCap
+        ? `; quarters read ${quarterCap.read} of ${quarterCap.range}`
+        : '';
+      const quarterNote = quarterCap
+        ? ` The full-index browse read the newest ${FULL_INDEX_QUARTER_SCAN_CAP} of the ${quarterCap.count} quarters in range, ${quarterCap.read}; end the range at ${quarterCap.olderEnd} to read the older ones.`
+        : '';
 
       return await finishAssembledResult(ctx, {
         matched: [...archive.rows, ...(efts?.rows ?? [])],
@@ -1118,11 +1206,11 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
           source: straddles ? 'efts+archive' : entityCik ? 'submissions' : 'full-index',
         },
         effectiveQuery: straddles
-          ? `${hasFreeText ? `${query} ` : ''}(split at ${EFTS_FULLTEXT_FLOOR}: ${scopeNote}${formsNote}, ${startDate} to ${endDate})`
-          : `${hasFreeText ? `${query} ` : ''}(pre-2001 archive: ${scopeNote}${formsNote}, ${startDate} to ${endDate})`,
+          ? `${hasFreeText ? `${query} ` : ''}(split at ${EFTS_FULLTEXT_FLOOR}: ${scopeNote}${formsNote}, ${startDate} to ${endDate}${quarterRead})`
+          : `${hasFreeText ? `${query} ` : ''}(pre-2001 archive: ${scopeNote}${formsNote}, ${startDate} to ${endDate}${quarterRead})`,
         coverageNote: straddles
-          ? `Merged across the ${EFTS_FULLTEXT_FLOOR} boundary — filings from ${EFTS_FULLTEXT_FLOOR} on come from the full-text index, earlier ones from ${archiveSource}. Read each row's source; the EFTS-only fields (period_ending, ticker, file_description, matched_documents, sic, location) are null on archive rows.${windowNote}${scanNote}`
-          : `Served from ${archiveSource} — full-text search covers 2001-present only.${scanNote}`,
+          ? `Merged across the ${EFTS_FULLTEXT_FLOOR} boundary — filings from ${EFTS_FULLTEXT_FLOOR} on come from the full-text index, earlier ones from ${archiveSource}. Read each row's source; the EFTS-only fields (period_ending, ticker, file_description, matched_documents, sic, location) are null on archive rows.${windowNote}${quarterNote}${scanNote}`
+          : `Served from ${archiveSource} — full-text search covers 2001-present only.${quarterNote}${scanNote}`,
         zeroHitCriteria: [
           ...(hasFreeText ? [`"${query}"`] : []),
           ...(entityCik ? [`CIK ${entityCik}`] : []),
@@ -1141,15 +1229,18 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     const fetchFrom = wideFetch ? 0 : input.offset;
     const fetchSize = wideFetch ? 100 : input.limit;
 
-    const response = await api.searchFilings({
-      query,
-      forms: input.forms,
-      ciks: entityCik ? [entityCik] : undefined,
-      startDate: input.filed_after,
-      endDate: input.filed_before,
-      from: fetchFrom,
-      size: fetchSize,
-    });
+    const response = await api.searchFilings(
+      {
+        query,
+        forms: input.forms,
+        ciks: entityCik ? [entityCik] : undefined,
+        startDate: dates?.startDate,
+        endDate: dates?.endDate,
+        from: fetchFrom,
+        size: fetchSize,
+      },
+      scope,
+    );
 
     // EFTS scopes by the server-side `ciks` param (set above when entity targeting
     // was used), so no client-side CIK post-filter is involved. A search with terms
@@ -1199,8 +1290,8 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         queryParams: {
           query,
           forms: input.forms,
-          filed_after: input.filed_after,
-          filed_before: input.filed_before,
+          filed_after: dates?.startDate,
+          filed_before: dates?.endDate,
           entity_cik: entityCik,
           source: 'efts',
         },
@@ -1217,9 +1308,13 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       datasetName: dataset?.name,
     });
 
-    const effectiveQuery = entityCik
+    const searched = entityCik
       ? `${query ? `${query} ` : ''}(entity scope: CIK ${entityCik})`
       : query || (input.forms?.length ? `(browse: forms ${input.forms.join(', ')})` : '');
+    // A window the caller spelled out is already in their arguments; a filled one is not.
+    const effectiveQuery = dates?.filled
+      ? `${searched} (filed ${dates.startDate} to ${dates.endDate})`
+      : searched;
     ctx.enrich.echo(effectiveQuery);
     if (totalDocuments === 0) {
       // Genuine no-match — EFTS returned zero hits. Echo all active criteria; on the
@@ -1229,9 +1324,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       if (query) criteria.push(`"${query}"`);
       if (entityCik) criteria.push(`entity CIK ${entityCik}`);
       if (input.forms?.length) criteria.push(`forms [${input.forms.join(', ')}]`);
-      if (input.filed_after && input.filed_before) {
-        criteria.push(`dates ${input.filed_after} to ${input.filed_before}`);
-      }
+      if (dates) criteria.push(`dates ${dates.startDate} to ${dates.endDate}`);
       const criteriaText = criteria.length > 0 ? criteria.join(', ') : 'the given criteria';
       ctx.enrich.notice(
         `No filings matched ${criteriaText}. Broaden the query, remove the form filter, or widen the date range.`,

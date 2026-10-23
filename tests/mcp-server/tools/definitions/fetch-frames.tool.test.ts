@@ -7,6 +7,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetchFramesTool } from '@/mcp-server/tools/definitions/fetch-frames.tool.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import { resolveConceptTarget } from '@/services/edgar/concept-map.js';
 import type { FramesResponse } from '@/services/edgar/types.js';
 
@@ -103,7 +104,10 @@ describe('fetchFramesTool', () => {
       'RevenueFromContractWithCustomerExcludingAssessedTax',
       'USD',
       'CY2023',
+      expect.any(CallScope),
     );
+    // The scope carries the caller's own signal, so a cancel reaches SEC (#179).
+    expect(mockApi.tryGetFrames.mock.calls[0]?.[4].signal).toBe(ctx.signal);
   });
 
   it('passes raw XBRL tags directly', async () => {
@@ -120,6 +124,7 @@ describe('fetchFramesTool', () => {
       'AccountsPayableCurrent',
       'USD',
       'CY2023Q4I',
+      expect.any(CallScope),
     );
   });
 
@@ -137,6 +142,7 @@ describe('fetchFramesTool', () => {
       'EntityCommonStockSharesOutstanding',
       'shares',
       'CY2024Q4I',
+      expect.any(CallScope),
     );
   });
 
@@ -861,6 +867,7 @@ describe('fetchFramesTool', () => {
       'WeightedAverageNumberOfDilutedSharesOutstanding',
       'shares',
       'CY2025',
+      expect.any(CallScope),
     );
   });
 
@@ -1125,6 +1132,7 @@ describe('taxonomy selects the frames namespace (#143)', () => {
       'EntityCommonStockSharesOutstanding',
       'shares',
       'CY2024Q4I',
+      expect.any(CallScope),
     );
     const output = fetchFramesTool.output.parse(result.structuredContent);
     expect(output).toMatchObject({
@@ -1181,6 +1189,7 @@ describe('taxonomy selects the frames namespace (#143)', () => {
       'EntityCommonStockSharesOutstanding',
       'shares',
       'CY2024Q4I',
+      expect.any(CallScope),
     );
     const text = blockText(result.content);
     expect(text).toContain('us-gaap');
@@ -1212,7 +1221,13 @@ describe('taxonomy selects the frames namespace (#143)', () => {
       await runToolContract(fetchFramesTool, { concept, period: 'CY2024Q4I', taxonomy });
 
       expect(resolveConceptTarget(concept, taxonomy).taxonomy).toBe(expectedTaxonomy);
-      expect(mockApi.tryGetFrames).toHaveBeenCalledWith(expectedTaxonomy, tag, unit, 'CY2024Q4I');
+      expect(mockApi.tryGetFrames).toHaveBeenCalledWith(
+        expectedTaxonomy,
+        tag,
+        unit,
+        'CY2024Q4I',
+        expect.any(CallScope),
+      );
     },
   );
 
@@ -1292,6 +1307,7 @@ describe('concept names that are neither a friendly name nor an XBRL tag (#128)'
       'RevenueFromContractWithCustomerExcludingAssessedTax',
       'USD',
       'CY2023',
+      expect.any(CallScope),
     );
   });
 
@@ -1310,6 +1326,7 @@ describe('concept names that are neither a friendly name nor an XBRL tag (#128)'
       tag,
       expect.any(String),
       'CY2023',
+      expect.any(CallScope),
     );
   });
 

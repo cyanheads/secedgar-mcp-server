@@ -8,7 +8,10 @@
  * after it reopens is a single probe, a probe 429 closes it again, and a probe
  * answer resumes ordinary pacing (#116). A probe that gets no HTTP response at all
  * proves nothing, so the next call probes in its place, and a no-response retry
- * goes through the gate like a 5xx one (#173).
+ * goes through the gate like a 5xx one (#173). Calls queued behind a silent SEC
+ * settle within their 40 s failure budget; a call cancelled in the pacer queue sends
+ * nothing, a cancelled probe hands the next waiter the probe at once, charging it
+ * nothing, and a waiter cancelled on the probe leaves the gate untouched (#179).
  * @module tests/services/edgar/edgar-api-service.rate-limit-block
  */
 
@@ -28,6 +31,7 @@ const { config } = vi.hoisted(() => ({
 vi.mock('@/config/server-config.js', () => ({ getServerConfig: () => config }));
 vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => undefined }));
 
+import { CallScope } from '@/services/edgar/call-scope.js';
 import {
   disposeEdgarApiService,
   getEdgarApiService,
@@ -36,6 +40,12 @@ import {
 
 const DOC = (n: number) =>
   `https://www.sec.gov/Archives/edgar/data/320193/000032019323000106/doc-${n}.htm`;
+
+/** A fresh call scope that is never cancelled: one tool call's signal and failure budget (#179). */
+const scope = () => new CallScope(new AbortController().signal);
+
+/** The reason the MCP SDK aborts a cancelled request with: the `notifications/cancelled` reason string. */
+const CANCELLED = 'client cancelled';
 
 const COOLDOWN_MS = 600_000;
 
@@ -112,7 +122,7 @@ function hint(error: McpError | undefined): string | undefined {
 
 /** Close the gate: one call answered 429 at the current fake time. */
 async function closeGateWith429(): Promise<McpError | undefined> {
-  return settle(getEdgarApiService().fetchText(DOC(0)));
+  return settle(getEdgarApiService().fetchText(DOC(0), scope()));
 }
 
 const T0 = new Date('2026-01-05T15:00:00.000Z').getTime();
@@ -138,7 +148,11 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       const { starts } = stubFetch();
       const api = getEdgarApiService();
 
-      const calls = [api.fetchText(DOC(1)), api.fetchText(DOC(2)), api.fetchText(DOC(3))];
+      const calls = [
+        api.fetchText(DOC(1), scope()),
+        api.fetchText(DOC(2), scope()),
+        api.fetchText(DOC(3), scope()),
+      ];
       await vi.advanceTimersByTimeAsync(1_000);
       await Promise.all(calls);
 
@@ -150,8 +164,8 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       const { starts } = stubFetch(slow.promise);
       const api = getEdgarApiService();
 
-      const first = api.fetchText(DOC(1));
-      const second = api.fetchText(DOC(2));
+      const first = api.fetchText(DOC(1), scope());
+      const second = api.fetchText(DOC(2), scope());
       await vi.advanceTimersByTimeAsync(150);
 
       // The second request went out at +100ms, before the first response arrived.
@@ -166,7 +180,7 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       const { fetchMock, starts } = stubFetch();
       const api = getEdgarApiService();
 
-      const burst = Array.from({ length: 30 }, (_, i) => settle(api.fetchText(DOC(i))));
+      const burst = Array.from({ length: 30 }, (_, i) => settle(api.fetchText(DOC(i), scope())));
       await vi.advanceTimersByTimeAsync(5_000);
 
       expect(await Promise.all(burst)).toEqual(Array(30).fill(undefined));
@@ -197,7 +211,7 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       const { fetchMock } = stubFetch(429);
       await closeGateWith429();
 
-      const refused = await settle(getEdgarApiService().fetchText(DOC(1)));
+      const refused = await settle(getEdgarApiService().fetchText(DOC(1), scope()));
 
       expect(fetchMock).toHaveBeenCalledOnce();
       expect(refused).toBeInstanceOf(McpError);
@@ -217,9 +231,9 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       const api = getEdgarApiService();
 
       await vi.advanceTimersByTimeAsync(4 * 60_000);
-      const atFourMinutes = await settle(api.fetchText(DOC(1)));
+      const atFourMinutes = await settle(api.fetchText(DOC(1), scope()));
       await vi.advanceTimersByTimeAsync(5 * 60_000 + 59_500);
-      const halfSecondLeft = await settle(api.fetchText(DOC(2)));
+      const halfSecondLeft = await settle(api.fetchText(DOC(2), scope()));
 
       expect(data(atFourMinutes).retryAfter).toBe(360);
       expect(hint(atFourMinutes)).toContain('360 seconds');
@@ -232,7 +246,7 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       const { fetchMock } = stubFetch(429);
       const api = getEdgarApiService();
 
-      const calls = [DOC(0), DOC(1), DOC(2)].map((url) => settle(api.fetchText(url)));
+      const calls = [DOC(0), DOC(1), DOC(2)].map((url) => settle(api.fetchText(url, scope())));
       await vi.advanceTimersByTimeAsync(1_000);
       const [upstream, queued1, queued2] = await Promise.all(calls);
 
@@ -250,8 +264,8 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       const { fetchMock } = stubFetch(503, 429);
       const api = getEdgarApiService();
 
-      const a = settle(api.fetchText(DOC(1)));
-      const b = settle(api.fetchText(DOC(2)));
+      const a = settle(api.fetchText(DOC(1), scope()));
+      const b = settle(api.fetchText(DOC(2), scope()));
       await vi.advanceTimersByTimeAsync(5_000);
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -266,8 +280,33 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       const { fetchMock } = stubFetch(bunConnectionReset(), 429);
       const api = getEdgarApiService();
 
-      const a = settle(api.fetchText(DOC(1)));
-      const b = settle(api.fetchText(DOC(2)));
+      const a = settle(api.fetchText(DOC(1), scope()));
+      const b = settle(api.fetchText(DOC(2), scope()));
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(data(await b)).toMatchObject({ reason: 'rate_limited', status: 429 });
+      const retryRefused = await a;
+      expect(retryRefused?.code).toBe(JsonRpcErrorCode.RateLimited);
+      expect(data(retryRefused)).toMatchObject({ reason: 'rate_limited', retryable: true });
+      expect(data(retryRefused).status).toBeUndefined();
+    });
+
+    it('does not send a body-failure retry once another call has closed the gate (#181)', async () => {
+      // Call A's body breaks after its headers and it sleeps its 1s backoff; call B draws the 429 meanwhile.
+      const broken = new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            controller.error(bunConnectionReset());
+          },
+        }),
+        { status: 200 },
+      );
+      const { fetchMock } = stubFetch(Promise.resolve(broken), 429);
+      const api = getEdgarApiService();
+
+      const a = settle(api.fetchText(DOC(1), scope()));
+      const b = settle(api.fetchText(DOC(2), scope()));
       await vi.advanceTimersByTimeAsync(5_000);
 
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -287,7 +326,11 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       await vi.advanceTimersByTimeAsync(COOLDOWN_MS);
       const api = getEdgarApiService();
 
-      const calls = [api.fetchText(DOC(1)), api.fetchText(DOC(2)), api.fetchText(DOC(3))];
+      const calls = [
+        api.fetchText(DOC(1), scope()),
+        api.fetchText(DOC(2), scope()),
+        api.fetchText(DOC(3), scope()),
+      ];
       await vi.advanceTimersByTimeAsync(10_000);
 
       // Only the probe went out; the other two are waiting on it, not refused.
@@ -310,8 +353,8 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       await vi.advanceTimersByTimeAsync(COOLDOWN_MS);
       const api = getEdgarApiService();
 
-      const probing = settle(api.fetchText(DOC(1)));
-      const waiting = settle(api.fetchText(DOC(2)));
+      const probing = settle(api.fetchText(DOC(1), scope()));
+      const waiting = settle(api.fetchText(DOC(2), scope()));
       await vi.advanceTimersByTimeAsync(2_000);
       probe.resolve(new Response('blocked', { status: 429 }));
 
@@ -322,7 +365,7 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       expect(fetchMock).toHaveBeenCalledTimes(2);
 
       await vi.advanceTimersByTimeAsync(COOLDOWN_MS - 1_000);
-      expect(data(await settle(api.fetchText(DOC(3)))).retryAfter).toBe(1);
+      expect(data(await settle(api.fetchText(DOC(3), scope()))).retryAfter).toBe(1);
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
@@ -334,7 +377,11 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       await vi.advanceTimersByTimeAsync(COOLDOWN_MS);
       const api = getEdgarApiService();
 
-      const calls = [api.fetchText(DOC(1)), api.fetchText(DOC(2)), api.fetchText(DOC(3))];
+      const calls = [
+        api.fetchText(DOC(1), scope()),
+        api.fetchText(DOC(2), scope()),
+        api.fetchText(DOC(3), scope()),
+      ];
       probe.reject(new TypeError('fetch failed'));
       await vi.advanceTimersByTimeAsync(500);
 
@@ -360,7 +407,11 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       await vi.advanceTimersByTimeAsync(COOLDOWN_MS);
       const api = getEdgarApiService();
 
-      const calls = [api.fetchText(DOC(1)), api.fetchText(DOC(2)), api.fetchText(DOC(3))];
+      const calls = [
+        api.fetchText(DOC(1), scope()),
+        api.fetchText(DOC(2), scope()),
+        api.fetchText(DOC(3), scope()),
+      ];
       await vi.advanceTimersByTimeAsync(14_900);
       // Only the silent probe has gone out; the other calls wait on it.
       expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -384,7 +435,43 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       expect(fetchMock).toHaveBeenCalledTimes(5);
     });
 
-    it('settles every call queued behind a silent SEC within its own three attempts (#173)', async () => {
+    it('reopens the gate on a probe whose headers arrive even when its body then breaks, retrying the body on the probe’s own call only (#181)', async () => {
+      const brokenProbe = new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('partial '));
+          },
+          pull(controller) {
+            controller.error(bunConnectionReset());
+          },
+        }),
+        { status: 200 },
+      );
+      const { fetchMock, starts } = stubFetch(429, Promise.resolve(brokenProbe));
+      await closeGateWith429();
+      await vi.advanceTimersByTimeAsync(COOLDOWN_MS);
+      const api = getEdgarApiService();
+
+      const calls = [
+        api.fetchText(DOC(1), scope()),
+        api.fetchText(DOC(2), scope()),
+        api.fetchText(DOC(3), scope()),
+      ];
+      await vi.advanceTimersByTimeAsync(500);
+
+      // SEC answered the probe, so the gate reopened: both waiters went out at the
+      // pacing rate instead of waiting out the probe's retry or counting its failure.
+      expect(fetchMock).toHaveBeenCalledTimes(4);
+      const [, probeStart, ...waiterStarts] = starts;
+      expect(waiterStarts.map((at) => at - (probeStart ?? 0))).toEqual([100, 200]);
+
+      // The probe's own call retries the broken body after its 1 s backoff, alone.
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fetchMock).toHaveBeenCalledTimes(5);
+      await expect(Promise.all(calls)).resolves.toEqual(['status 200', 'status 200', 'status 200']);
+    });
+
+    it('settles every call queued behind a silent SEC within its own three attempts and its 40 s budget (#173, #179)', async () => {
       const { fetchMock } = stubFetch(429, ...Array<Answer>(9).fill('silent'));
       await closeGateWith429();
       await vi.advanceTimersByTimeAsync(COOLDOWN_MS);
@@ -393,17 +480,19 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
 
       const outcomes: Array<{ error: McpError | undefined; settledAfterMs: number }> = [];
       const calls = [DOC(1), DOC(2), DOC(3)].map((url) =>
-        settle(api.fetchText(url)).then((error) => {
+        settle(api.fetchText(url, scope())).then((error) => {
           outcomes.push({ error, settledAfterMs: Date.now() - t0 });
         }),
       );
-      // Three probes of 15 s with the 1 s and 2 s backoffs between them: 48 s for every call,
-      // where probing in turn would leave the last of three waiting about 135 s.
-      await vi.advanceTimersByTimeAsync(48_500);
+      // Probes of 15 s and 15 s with the 1 s and 2 s backoffs between them, then a third cut
+      // to the 7 s of the failure budget left: 40 s for every call, where probing in turn
+      // would leave the last of three waiting about 135 s.
+      await vi.advanceTimersByTimeAsync(40_500);
 
-      // The two waiters count each probe as one of their own attempts, so they settle with
-      // the probing call — neither sooner, as if one silent probe were their last, nor later.
-      expect(outcomes.map((outcome) => outcome.settledAfterMs)).toEqual([48_000, 48_000, 48_000]);
+      // The two waiters count each probe as one of their own attempts, and are charged the
+      // time they waited on it, so they settle with the probing call — neither sooner, as if
+      // one silent probe were their last, nor later.
+      expect(outcomes.map((outcome) => outcome.settledAfterMs)).toEqual([40_000, 40_000, 40_000]);
       await Promise.all(calls);
       for (const { error } of outcomes) {
         expect(error?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
@@ -432,24 +521,24 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       // 429 → the gate closes and refuses locally, retryAfter counting down.
       await closeGateWith429();
       await vi.advanceTimersByTimeAsync(COOLDOWN_MS / 2);
-      expect(data(await settle(api.fetchText(DOC(1)))).retryAfter).toBe(300);
+      expect(data(await settle(api.fetchText(DOC(1), scope()))).retryAfter).toBe(300);
 
       // Reopens → a single probe → it draws a 429 → closed for the full cool-down again.
       await vi.advanceTimersByTimeAsync(COOLDOWN_MS / 2);
-      const probe1 = settle(api.fetchText(DOC(2)));
-      const waiter1 = settle(api.fetchText(DOC(3)));
+      const probe1 = settle(api.fetchText(DOC(2), scope()));
+      const waiter1 = settle(api.fetchText(DOC(3), scope()));
       await vi.advanceTimersByTimeAsync(500);
       expect(fetchMock).toHaveBeenCalledTimes(2);
       firstProbe.resolve(new Response('blocked', { status: 429 }));
       expect(data(await probe1)).toMatchObject({ status: 429, retryAfter: 600 });
       expect(data(await waiter1).retryAfter).toBe(600);
       await vi.advanceTimersByTimeAsync(COOLDOWN_MS / 3);
-      expect(data(await settle(api.fetchText(DOC(4)))).retryAfter).toBe(400);
+      expect(data(await settle(api.fetchText(DOC(4), scope()))).retryAfter).toBe(400);
 
       // Reopens → a single probe → it succeeds.
       await vi.advanceTimersByTimeAsync((2 * COOLDOWN_MS) / 3);
-      const probe2 = api.fetchText(DOC(5));
-      const waiter2 = api.fetchText(DOC(6));
+      const probe2 = api.fetchText(DOC(5), scope());
+      const waiter2 = api.fetchText(DOC(6), scope());
       await vi.advanceTimersByTimeAsync(500);
       expect(fetchMock).toHaveBeenCalledTimes(3);
       secondProbe.resolve(new Response('open', { status: 200 }));
@@ -458,7 +547,7 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
 
       // Ordinary pacing: three slow requests start 100ms apart without waiting on each other.
       const before = starts.length;
-      const paced = [7, 8, 9].map((n) => api.fetchText(DOC(n)));
+      const paced = [7, 8, 9].map((n) => api.fetchText(DOC(n), scope()));
       await vi.advanceTimersByTimeAsync(250);
       const pacedStarts = starts.slice(before);
       expect(pacedStarts).toHaveLength(3);
@@ -468,14 +557,132 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
     });
   });
 
+  // --- The caller's signal at the pacer and the gate (#179) ---
+
+  describe('a cancelled call (#179)', () => {
+    it('sends nothing for a call cancelled while it waits in the pacer queue, or cancelled before it asks', async () => {
+      const caller = new AbortController();
+      const starts: number[] = [];
+      const fetchMock = vi.fn(async (url: string) => {
+        starts.push(Date.now());
+        // DOC(3)'s call is queued for its slot 100 ms behind this one, which is in flight.
+        if (url === DOC(2)) caller.abort(CANCELLED);
+        return new Response(`sent ${url.slice(-9)}`, { status: 200 });
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const api = getEdgarApiService();
+
+      const first = api.fetchText(DOC(1), scope());
+      const second = api.fetchText(DOC(2), scope());
+      let cancelledAt: number | undefined;
+      const cancelled = settle(api.fetchText(DOC(3), new CallScope(caller.signal))).then(
+        (error) => {
+          cancelledAt = Date.now();
+          return error;
+        },
+      );
+      const behind = api.fetchText(DOC(5), scope());
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect((await cancelled) as unknown).toBe(CANCELLED);
+      // It left the queue as the cancel landed, not at the slot it was waiting for, and
+      // the call behind it took that slot.
+      expect((cancelledAt ?? 0) - T0).toBe(100);
+      await expect(Promise.all([first, second, behind])).resolves.toEqual([
+        'sent doc-1.htm',
+        'sent doc-2.htm',
+        'sent doc-5.htm',
+      ]);
+      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([DOC(1), DOC(2), DOC(5)]);
+      expect(starts.map((at) => at - T0)).toEqual([0, 100, 200]);
+
+      expect((await settle(api.fetchText(DOC(4), new CallScope(caller.signal)))) as unknown).toBe(
+        CANCELLED,
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('releases a probe whose own call is cancelled as no answer: a waiter probes next at once, charged nothing', async () => {
+      const caller = new AbortController();
+      const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === DOC(0)) return new Response('blocked', { status: 429 });
+        if (url === DOC(1)) {
+          // The probe: in flight, then its own call is cancelled.
+          const pending = neverAnswer(init?.signal);
+          caller.abort(CANCELLED);
+          return pending;
+        }
+        return new Response(`sent ${url.slice(-9)}`, { status: 200 });
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      await closeGateWith429();
+      await vi.advanceTimersByTimeAsync(COOLDOWN_MS);
+      const api = getEdgarApiService();
+      const waiterScope = scope();
+
+      const probe = settle(api.fetchText(DOC(1), new CallScope(caller.signal)));
+      const waiter = api.fetchText(DOC(2), waiterScope);
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect((await probe) as unknown).toBe(CANCELLED);
+      // Not handed to the waiter as one of its no-response attempts: it probes in the
+      // probe's place within the pacing gap, with no backoff, and is charged nothing.
+      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([DOC(0), DOC(1), DOC(2)]);
+      await expect(waiter).resolves.toBe('sent doc-2.htm');
+      expect(waiterScope.spentMs).toBe(0);
+
+      // The waiter's answer reopened the gate: ordinary pacing resumes.
+      await expect(api.fetchText(DOC(3), scope())).resolves.toBe('sent doc-3.htm');
+    });
+
+    it('lets a waiter cancelled on the probe leave without touching the gate', async () => {
+      const caller = new AbortController();
+      const probeAnswer = deferred<Response>();
+      const fetchMock = vi.fn(async (url: string) => {
+        if (url === DOC(0)) return new Response('blocked', { status: 429 });
+        if (url === DOC(1)) {
+          // The probe is in flight; the call waiting on it is cancelled.
+          caller.abort(CANCELLED);
+          return probeAnswer.promise;
+        }
+        return new Response(`sent ${url.slice(-9)}`, { status: 200 });
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      await closeGateWith429();
+      await vi.advanceTimersByTimeAsync(COOLDOWN_MS);
+      const api = getEdgarApiService();
+
+      const probing = api.fetchText(DOC(1), scope());
+      const cancelled = settle(api.fetchText(DOC(2), new CallScope(caller.signal)));
+      await vi.advanceTimersByTimeAsync(0);
+      expect((await cancelled) as unknown).toBe(CANCELLED);
+
+      // The gate is still the probe's: a later call waits on it rather than probing.
+      const later = api.fetchText(DOC(3), scope());
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+
+      probeAnswer.resolve(new Response('probe ok', { status: 200 }));
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(probing).resolves.toBe('probe ok');
+      await expect(later).resolves.toBe('sent doc-3.htm');
+      // The cancelled waiter never sent.
+      expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([DOC(0), DOC(1), DOC(3)]);
+    });
+  });
+
   describe('disposal', () => {
     it('rejects queued requests without sending them and refuses new ones', async () => {
       const slow = deferred<Response>();
       const { fetchMock } = stubFetch(slow.promise);
       const api = getEdgarApiService();
 
-      const inFlight = api.fetchText(DOC(1));
-      const queued = [settle(api.fetchText(DOC(2))), settle(api.fetchText(DOC(3)))];
+      const inFlight = api.fetchText(DOC(1), scope());
+      const queued = [
+        settle(api.fetchText(DOC(2), scope())),
+        settle(api.fetchText(DOC(3), scope())),
+      ];
       // The first request goes out at once; the other two wait for their slots.
       await vi.advanceTimersByTimeAsync(50);
       disposeEdgarApiService();
@@ -483,7 +690,9 @@ describe('EdgarApiService — outbound pacing and the rate-limit block (#116)', 
       for (const error of await Promise.all(queued)) {
         expect(error?.code).toBe(JsonRpcErrorCode.RequestCancelled);
       }
-      expect((await settle(api.fetchText(DOC(4))))?.code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect((await settle(api.fetchText(DOC(4), scope())))?.code).toBe(
+        JsonRpcErrorCode.RequestCancelled,
+      );
       await vi.advanceTimersByTimeAsync(1_000);
       expect(fetchMock).toHaveBeenCalledOnce();
 

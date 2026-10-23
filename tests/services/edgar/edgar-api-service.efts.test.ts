@@ -25,7 +25,10 @@ const { config } = vi.hoisted(() => ({
 vi.mock('@/config/server-config.js', () => ({ getServerConfig: () => config }));
 vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => undefined }));
 
+import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, initEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+
+const scope = () => new CallScope(new AbortController().signal);
 
 const jsonResponse = (body: unknown) =>
   new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
@@ -54,7 +57,7 @@ describe('EdgarApiService.searchFilings — EFTS shape guard (#61)', () => {
     );
 
     const err = await getEdgarApiService()
-      .searchFilings({ query: 'revenue' })
+      .searchFilings({ query: 'revenue' }, scope())
       .catch((e) => e);
 
     expect(err).toBeInstanceOf(McpError);
@@ -71,7 +74,7 @@ describe('EdgarApiService.searchFilings — EFTS shape guard (#61)', () => {
     );
 
     const err = await getEdgarApiService()
-      .searchFilings({ query: 'revenue' })
+      .searchFilings({ query: 'revenue' }, scope())
       .catch((e) => e);
 
     expect(err).toBeInstanceOf(McpError);
@@ -93,7 +96,7 @@ describe('EdgarApiService.searchFilings — EFTS shape guard (#61)', () => {
       ),
     );
 
-    const response = await getEdgarApiService().searchFilings({ query: 'zzqqxyzzy' });
+    const response = await getEdgarApiService().searchFilings({ query: 'zzqqxyzzy' }, scope());
 
     expect(response.hits.total.value).toBe(0);
     expect(response.hits.hits).toEqual([]);
@@ -106,7 +109,7 @@ describe('EdgarApiService.searchFilings — EFTS shape guard (#61)', () => {
     );
 
     const err = await getEdgarApiService()
-      .findFilingCiks('0000320193-23-000106')
+      .findFilingCiks('0000320193-23-000106', scope())
       .catch((e) => e);
 
     expect(err).toBeInstanceOf(McpError);
@@ -136,7 +139,7 @@ describe('EdgarApiService.resolveEntityByName — EFTS entity-autocomplete (#73)
       ),
     );
 
-    const matches = await getEdgarApiService().resolveEntityByName('berkshire hathaway');
+    const matches = await getEdgarApiService().resolveEntityByName('berkshire hathaway', scope());
 
     // Bare _id is zero-padded to the 10-digit CIK the submissions API expects.
     expect(matches).toEqual([{ cik: '0001067983', name: 'BERKSHIRE HATHAWAY INC' }]);
@@ -160,7 +163,7 @@ describe('EdgarApiService.resolveEntityByName — EFTS entity-autocomplete (#73)
       ),
     );
 
-    const matches = await getEdgarApiService().resolveEntityByName('vanguard group');
+    const matches = await getEdgarApiService().resolveEntityByName('vanguard group', scope());
 
     expect(matches).toEqual([
       { cik: '0000735286', name: 'VANGUARD GROUP INC' },
@@ -172,7 +175,7 @@ describe('EdgarApiService.resolveEntityByName — EFTS entity-autocomplete (#73)
     const fetchMock = vi.fn(async (_input: unknown) => jsonResponse({ hits: { hits: [] } }));
     vi.stubGlobal('fetch', fetchMock);
 
-    await getEdgarApiService().resolveEntityByName('vanguard group');
+    await getEdgarApiService().resolveEntityByName('vanguard group', scope());
 
     const calledUrl = String(fetchMock.mock.calls[0]?.[0]);
     expect(calledUrl).toContain('efts.sec.gov/LATEST/search-index');
@@ -185,7 +188,10 @@ describe('EdgarApiService.resolveEntityByName — EFTS entity-autocomplete (#73)
       vi.fn(async () => jsonResponse({ hits: { total: { value: 0, relation: 'eq' }, hits: [] } })),
     );
 
-    const matches = await getEdgarApiService().resolveEntityByName('zzqqxyzzy nonexistent');
+    const matches = await getEdgarApiService().resolveEntityByName(
+      'zzqqxyzzy nonexistent',
+      scope(),
+    );
 
     expect(matches).toEqual([]);
   });
@@ -205,7 +211,7 @@ describe('EdgarApiService.resolveEntityByName — EFTS entity-autocomplete (#73)
       ),
     );
 
-    const matches = await getEdgarApiService().resolveEntityByName('vanguard');
+    const matches = await getEdgarApiService().resolveEntityByName('vanguard', scope());
 
     expect(matches).toEqual([{ cik: '0000102909', name: 'VANGUARD GROUP INC' }]);
   });

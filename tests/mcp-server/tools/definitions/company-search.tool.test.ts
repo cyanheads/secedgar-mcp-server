@@ -9,6 +9,7 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { companySearchTool } from '@/mcp-server/tools/definitions/company-search.tool.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import type { CikMatch, FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
 
 // Keep the real module and override only the service accessor + suggestions. The
@@ -611,7 +612,12 @@ describe('companySearchTool', () => {
 
     // Recent filings (2023–2024) all post-date the filter → excluded; the archive
     // page (2005–2010) is fetched and its rows fill the result.
-    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith('CIK0000320193-submissions-001.json');
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith(
+      'CIK0000320193-submissions-001.json',
+      expect.any(CallScope),
+    );
+    // The scope carries the caller's own signal, so a cancel reaches SEC (#179).
+    expect(mockApi.fetchArchivePage.mock.calls[0]?.[1].signal).toBe(ctx.signal);
     expect(result.total_filings).toBe(4);
     expect(result.filings!.every((f) => f.filing_date <= '2010-12-31')).toBe(true);
     // Newest-first ordering across the archive page.
@@ -863,7 +869,7 @@ describe('companySearchTool parameter names (#115)', () => {
       const result = await call({ [key]: 'AAPL', include_filings: false });
 
       expect(result.isError).toBeFalsy();
-      expect(mockApi.resolveCik).toHaveBeenCalledWith('AAPL');
+      expect(mockApi.resolveCik).toHaveBeenCalledWith('AAPL', expect.any(CallScope));
       expect(result.structuredContent).toMatchObject({ cik: '0000320193', name: 'Apple Inc.' });
       expect(blockText(result.content)).toContain('**Apple Inc.** (AAPL)');
     },
@@ -873,7 +879,7 @@ describe('companySearchTool parameter names (#115)', () => {
     const result = await call({ cik: 320193, include_filings: false });
 
     expect(result.isError).toBeFalsy();
-    expect(mockApi.resolveCik).toHaveBeenCalledWith('320193');
+    expect(mockApi.resolveCik).toHaveBeenCalledWith('320193', expect.any(CallScope));
     expect(result.structuredContent).toMatchObject({ cik: '0000320193' });
   });
 
@@ -948,7 +954,7 @@ describe('companySearchTool — one-day manifest drift (#137)', () => {
     });
 
     expect(result.isError).toBeFalsy();
-    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith('p041');
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith('p041', expect.any(CallScope));
     expect(result.structuredContent).toMatchObject({ total_filings: 2 });
     const text = blockText(result.content);
     expect(text).toContain('[feb18-a]');

@@ -5,13 +5,27 @@
 
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getInsiderTransactionsTool } from '@/mcp-server/tools/definitions/get-insider-transactions.tool.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', () => ({
   getEdgarApiService: vi.fn(),
   initEdgarApiService: vi.fn(),
 }));
+
+// The caller-cancellation suite runs the real service over a stubbed `fetch`; these
+// are the only config fields and the mirror accessor it reads.
+vi.mock('@/config/server-config.js', () => ({
+  getServerConfig: () => ({
+    userAgent: 'test test@example.com',
+    rateLimitRps: 10,
+    rateLimitCooldownSeconds: 600,
+    tickerCacheTtl: 3600,
+    mirrorFallbackLive: true,
+  }),
+}));
+vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => undefined }));
 
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import type { FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
@@ -295,6 +309,7 @@ describe('getInsiderTransactionsTool', () => {
       '0000320193',
       '0001214128-24-000010',
       'form4.xml',
+      expect.any(CallScope),
     );
   });
 
@@ -688,7 +703,12 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
     const result = await getInsiderTransactionsTool.handler(input, ctx);
 
     // Fetch requested the 40-filing scan floor plus the +1 sentinel, not limit*5=5.
-    expect(mockApi.getRecentFilingsByForm).toHaveBeenCalledWith('0000320193', ['4', '4/A'], 41);
+    expect(mockApi.getRecentFilingsByForm).toHaveBeenCalledWith(
+      '0000320193',
+      ['4', '4/A'],
+      41,
+      expect.any(CallScope),
+    );
     // The whole 40-filing window was scanned despite limit=1; inline stays capped.
     expect(result.filings_scanned).toBe(40);
     expect(result.transactions).toHaveLength(1);
@@ -812,7 +832,7 @@ describe('getInsiderTransactionsTool parameter names (#115)', () => {
     const result = await call({ [key]: value });
 
     expect(result.isError).toBeFalsy();
-    expect(mockApi.resolveCik).toHaveBeenCalledWith(value);
+    expect(mockApi.resolveCik).toHaveBeenCalledWith(value, expect.any(CallScope));
     expect(result.structuredContent).toMatchObject({
       issuer_name: 'Apple Inc.',
       issuer_cik: '0000320193',
@@ -934,6 +954,7 @@ describe('getInsiderTransactionsTool — filed_after / filed_before window (#127
       '0000320193',
       'q1-amend',
       'form4.xml',
+      expect.any(CallScope),
     );
     expect(result.structuredContent).toMatchObject({
       filings_scanned: 30,
@@ -1172,7 +1193,12 @@ describe('getInsiderTransactionsTool — filed_after / filed_before window (#127
   it('leaves a window-less call on the recent Form 4 list, with no scan-depth field', async () => {
     const result = await call({ company: 'AAPL' });
 
-    expect(mockApi.getRecentFilingsByForm).toHaveBeenCalledWith('0000320193', ['4', '4/A'], 101);
+    expect(mockApi.getRecentFilingsByForm).toHaveBeenCalledWith(
+      '0000320193',
+      ['4', '4/A'],
+      101,
+      expect.any(CallScope),
+    );
     expect(mockApi.getSubmissions).not.toHaveBeenCalled();
     expect(result.structuredContent).not.toHaveProperty('history_scanned_through');
   });
@@ -1421,5 +1447,103 @@ describe('getInsiderTransactionsTool — Form 4s naming another issuer (#157)', 
 
     expect(result.structuredContent).toMatchObject({ filings_scanned: 1, filings_other_issuer: 0 });
     expect(blockText(result.content)).not.toContain('names another issuer');
+  });
+});
+
+describe('getInsiderTransactionsTool — caller cancellation (#179)', () => {
+  const ISSUER_CIK = '0000320193';
+  const FORM4_COUNT = 30;
+
+  /** Thirty Form 4s, so a `limit: 4` walk is far from done when the caller cancels. */
+  function submissions() {
+    const column = <T>(at: (i: number) => T) =>
+      Array.from({ length: FORM4_COUNT }, (_, i) => at(i));
+    return {
+      cik: ISSUER_CIK,
+      name: 'Apple Inc.',
+      tickers: ['AAPL'],
+      filings: {
+        recent: {
+          accessionNumber: column((i) => `0000320193-26-${String(100 + i).padStart(6, '0')}`),
+          filingDate: column((i) => `2026-09-${String(28 - (i % 27)).padStart(2, '0')}`),
+          reportDate: column(() => ''),
+          form: column(() => '4'),
+          primaryDocument: column((i) => `form4-${i}.xml`),
+          primaryDocDescription: column(() => ''),
+        },
+        files: [],
+      },
+    };
+  }
+
+  /** SEC's answer for each route the walk reads; `undefined` for any other URL. */
+  function route(url: URL): Response | undefined {
+    if (url.hostname === 'www.sec.gov' && url.pathname === '/files/company_tickers.json') {
+      return Response.json({ 0: { cik_str: 320193, ticker: 'AAPL', title: 'Apple Inc.' } });
+    }
+    if (url.hostname === 'www.sec.gov' && url.pathname === '/files/company_tickers_mf.json') {
+      return Response.json({ fields: ['cik', 'seriesId', 'classId', 'symbol'], data: [] });
+    }
+    if (url.hostname === 'data.sec.gov' && url.pathname === `/submissions/CIK${ISSUER_CIK}.json`) {
+      return Response.json(submissions());
+    }
+    if (url.hostname === 'www.sec.gov' && url.pathname.startsWith('/Archives/edgar/data/')) {
+      return new Response('not found', { status: 404 });
+    }
+    return;
+  }
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    const actual = await vi.importActual<typeof import('@/services/edgar/edgar-api-service.js')>(
+      '@/services/edgar/edgar-api-service.js',
+    );
+    actual.initEdgarApiService();
+    vi.mocked(getEdgarApiService).mockReturnValue(actual.getEdgarApiService());
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('sends no SEC request once the caller cancels mid-walk, settling as RequestCancelled on both surfaces', async () => {
+    const caller = new AbortController();
+    const sent: string[] = [];
+    const unrouted: string[] = [];
+    vi.stubGlobal('fetch', (input: string, init: RequestInit) => {
+      sent.push(input);
+      const response = route(new URL(input));
+      if (!response) {
+        unrouted.push(input);
+        return Promise.reject(new Error(`unrouted fetch: ${input}`));
+      }
+      if (sent.length < 5) return Promise.resolve(response);
+      // The fifth request is in flight when the caller cancels; it answers only if
+      // nothing aborts it first.
+      return new Promise<Response>((resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+        caller.abort('client cancelled');
+        setTimeout(() => resolve(response), 20);
+      });
+    });
+
+    const pending = runToolContract(
+      getInsiderTransactionsTool,
+      { company: 'AAPL', limit: 4 },
+      { context: { signal: caller.signal } },
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    const result = await pending;
+
+    expect(unrouted).toEqual([]);
+    expect(sent).toHaveLength(5);
+    expect(result.isError).toBe(true);
+    // The cancel's own reason, as the MCP SDK aborts with it — never an SEC failure.
+    expect((result.structuredContent as { error: unknown }).error).toEqual({
+      code: JsonRpcErrorCode.RequestCancelled,
+      message: 'client cancelled',
+    });
+    expect(result.content).toEqual([{ type: 'text', text: 'Error: client cancelled' }]);
   });
 });

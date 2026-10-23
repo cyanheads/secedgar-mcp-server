@@ -9,6 +9,7 @@
 import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => ({
   ...(await importActual<typeof import('@/services/edgar/edgar-api-service.js')>()),
@@ -84,7 +85,10 @@ describe('searchFilingsTool — sort=relevance pages (#124)', () => {
   it('lists the filings of the first limit documents only', async () => {
     const { result, out } = await page(0);
 
-    expect(searchFilings).toHaveBeenCalledWith(expect.objectContaining({ from: 0, size: 2 }));
+    expect(searchFilings).toHaveBeenCalledWith(
+      expect.objectContaining({ from: 0, size: 2 }),
+      expect.any(CallScope),
+    );
     expect(out.results.map((r) => r.accession_number)).toEqual(['0000000001-25-000001']);
     expect(out.results[0]?.matched_documents).toEqual([
       { name: 'a8k.htm', type: '8-K' },

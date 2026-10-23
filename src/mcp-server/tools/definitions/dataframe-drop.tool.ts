@@ -19,7 +19,8 @@ export const dataframeDropTool = tool('secedgar_dataframe_drop', {
       reason: 'canvas_unavailable',
       code: JsonRpcErrorCode.ServiceUnavailable,
       when: 'The DataCanvas service is not configured for this deployment',
-      recovery: 'Set CANVAS_PROVIDER_TYPE=duckdb in the server environment to enable dataframes.',
+      recovery:
+        'Dataframes need the DuckDB canvas. On an npm or Docker install, set CANVAS_PROVIDER_TYPE=duckdb (the default when unset) and restart the server; the MCPB bundle ships without DuckDB, so there the data tools return their results inline and stage no dataframe.',
     },
   ],
 

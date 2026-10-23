@@ -12,6 +12,7 @@ import {
 } from '@cyanheads/mcp-ts-core/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials.tool.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import { resolveConcept } from '@/services/edgar/concept-map.js';
 import type {
   CompanyConceptResponse,
@@ -150,7 +151,10 @@ describe('getFinancialsTool', () => {
       '0000320193',
       'us-gaap',
       'RevenueFromContractWithCustomerExcludingAssessedTax',
+      expect.any(CallScope),
     );
+    // The scope carries the caller's own signal, so a cancel reaches SEC (#179).
+    expect(mockApi.tryGetCompanyConcept.mock.calls[0]?.[3].signal).toBe(ctx.signal);
   });
 
   it('passes raw XBRL tags directly when not a friendly name', async () => {
@@ -165,6 +169,7 @@ describe('getFinancialsTool', () => {
       '0000320193',
       'us-gaap',
       'AccountsPayableCurrent',
+      expect.any(CallScope),
     );
   });
 
@@ -652,18 +657,25 @@ describe('getFinancialsTool', () => {
     await getFinancialsTool.handler(input, ctx);
 
     // Should use the IFRS tags in order (Revenue first per #44 reorder)
-    expect(mockApi.tryGetCompanyConcept).toHaveBeenCalledWith('0000320193', 'ifrs-full', 'Revenue');
+    expect(mockApi.tryGetCompanyConcept).toHaveBeenCalledWith(
+      '0000320193',
+      'ifrs-full',
+      'Revenue',
+      expect.any(CallScope),
+    );
     // Should also try the sub-line tag
     expect(mockApi.tryGetCompanyConcept).toHaveBeenCalledWith(
       '0000320193',
       'ifrs-full',
       'RevenueFromContractsWithCustomers',
+      expect.any(CallScope),
     );
     // Should NOT have been called with a us-gaap tag under ifrs-full
     expect(mockApi.tryGetCompanyConcept).not.toHaveBeenCalledWith(
       '0000320193',
       'ifrs-full',
       'RevenueFromContractWithCustomerExcludingAssessedTax',
+      expect.any(CallScope),
     );
   });
 
@@ -682,6 +694,7 @@ describe('getFinancialsTool', () => {
       '0000320193',
       'ifrs-full',
       'LongTermNotesPayable',
+      expect.any(CallScope),
     );
   });
 
@@ -2358,7 +2371,7 @@ describe('a 10-Q-held year its own series cannot test (#148)', () => {
     expect(text).not.toContain('CY2021: ');
     expect(text).not.toContain('CY2020: ');
     expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledTimes(1);
-    expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledWith('0001018724');
+    expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledWith('0001018724', expect.any(CallScope));
   });
 
   it('leaves the annual view empty, failing as no_period_data', async () => {
@@ -2694,7 +2707,7 @@ describe('getFinancialsTool parameter names (#115)', () => {
     const result = await call({ [key]: value, concept: 'revenue' });
 
     expect(result.isError).toBeFalsy();
-    expect(mockApi.resolveCik).toHaveBeenCalledWith(value);
+    expect(mockApi.resolveCik).toHaveBeenCalledWith(value, expect.any(CallScope));
     expect(result.structuredContent).toMatchObject({ company: 'Apple Inc.', cik: '0000320193' });
     expect(blockText(result.content)).toContain('Apple Inc.');
   });
@@ -2807,6 +2820,7 @@ describe('concept names that are neither a friendly name nor an XBRL tag (#128)'
       '0000320193',
       'us-gaap',
       'RevenueFromContractWithCustomerExcludingAssessedTax',
+      expect.any(CallScope),
     );
   });
 
@@ -2817,6 +2831,7 @@ describe('concept names that are neither a friendly name nor an XBRL tag (#128)'
       '0000320193',
       'us-gaap',
       'NetIncomeLoss',
+      expect.any(CallScope),
     );
   });
 
@@ -2837,11 +2852,12 @@ describe('concept names that are neither a friendly name nor an XBRL tag (#128)'
     async (concept, taxonomy, expectedTaxonomy, tag) => {
       await runToolContract(getFinancialsTool, { company: 'AAPL', concept, taxonomy });
 
-      expect(mockApi.resolveCik).toHaveBeenCalledWith('AAPL');
+      expect(mockApi.resolveCik).toHaveBeenCalledWith('AAPL', expect.any(CallScope));
       expect(mockApi.tryGetCompanyConcept).toHaveBeenCalledWith(
         '0000320193',
         expectedTaxonomy,
         tag,
+        expect.any(CallScope),
       );
     },
   );

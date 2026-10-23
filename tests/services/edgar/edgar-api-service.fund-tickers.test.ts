@@ -10,6 +10,7 @@
  * @module tests/services/edgar/edgar-api-service.fund-tickers
  */
 
+import type { McpError } from '@cyanheads/mcp-ts-core/errors';
 import { logger } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -27,8 +28,15 @@ const { config, mirrorRef } = vi.hoisted(() => ({
 vi.mock('@/config/server-config.js', () => ({ getServerConfig: () => config }));
 vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => mirrorRef.current }));
 
+import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, initEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import type { CikMatch } from '@/services/edgar/types.js';
+
+/** A fresh call scope that is never cancelled: one tool call's signal and failure budget (#179). */
+const scope = () => new CallScope(new AbortController().signal);
+
+/** The reason the MCP SDK aborts a cancelled request with: the `notifications/cancelled` reason string. */
+const CANCELLED = 'client cancelled';
 
 const TICKERS_URL = 'https://www.sec.gov/files/company_tickers.json';
 const MF_URL = 'https://www.sec.gov/files/company_tickers_mf.json';
@@ -52,12 +60,19 @@ const VOO_LIVE: CikMatch = {
 
 /**
  * A status becomes an empty response with that status, an `Error` is thrown as the
- * runtime's rejection (no HTTP response, #173); anything else is a 200 JSON body.
+ * runtime's rejection (no HTTP response, #173), `'silent'` never sends headers and
+ * rejects with the request signal's reason once it aborts (#179); anything else is
+ * a 200 JSON body.
  */
-type Answer = number | Error | object;
+type Answer = number | Error | 'silent' | object;
 
-const toResponse = (answer: Answer) => {
+const toResponse = (answer: Answer, signal?: AbortSignal | null): Response | Promise<Response> => {
   if (answer instanceof Error) throw answer;
+  if (answer === 'silent') {
+    return new Promise((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+  }
   return typeof answer === 'number'
     ? new Response(`status ${answer}`, { status: answer })
     : new Response(JSON.stringify(answer), { headers: { 'content-type': 'application/json' } });
@@ -84,14 +99,14 @@ function stubTickerFiles(answers: { tickers?: Answer[]; mf?: Answer[] }) {
   };
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (url: string) => {
+    vi.fn(async (url: string, init?: RequestInit) => {
       if (url === MF_URL) {
         calls.mf++;
-        return toResponse(next('mf'));
+        return toResponse(next('mf'), init?.signal);
       }
       if (url === TICKERS_URL) {
         calls.tickers++;
-        return toResponse(next('tickers'));
+        return toResponse(next('tickers'), init?.signal);
       }
       throw new Error(`unmocked fetch: ${url}`);
     }),
@@ -105,7 +120,8 @@ async function run<T>(call: Promise<T>, ms = 50): Promise<T> {
   return call;
 }
 
-const resolve = (query: string, ms?: number) => run(getEdgarApiService().resolveCik(query), ms);
+const resolve = (query: string, ms?: number) =>
+  run(getEdgarApiService().resolveCik(query, scope()), ms);
 
 /** A mirror whose ticker layer holds these rows; fund symbols carry an empty name, as tickers-sync writes them. */
 function useMirror(rows: Array<{ cik: string; name: string; ticker: string }>) {
@@ -230,7 +246,9 @@ describe('EdgarApiService — fund-ticker slice', () => {
         expect(await resolve('VOO')).toEqual(VOO_LIVE);
         expect(calls.mf).toBe(mfAfterLoad + 1);
         expect(calls.tickers).toBe(1);
-        expect(await getEdgarApiService().resolveFundSeries('S000002839')).toEqual(VOO_LIVE);
+        expect(await getEdgarApiService().resolveFundSeries('S000002839', scope())).toEqual(
+          VOO_LIVE,
+        );
       },
     );
 
@@ -242,10 +260,10 @@ describe('EdgarApiService — fund-ticker slice', () => {
       const api = getEdgarApiService();
       const results = await run(
         Promise.all([
-          api.resolveCik('VOO'),
-          api.resolveCik('VTI'),
-          api.resolveCik('AAPL'),
-          api.listFundSeries('36405'),
+          api.resolveCik('VOO', scope()),
+          api.resolveCik('VTI', scope()),
+          api.resolveCik('AAPL', scope()),
+          api.listFundSeries('36405', scope()),
         ]),
       );
 
@@ -335,7 +353,144 @@ describe('EdgarApiService — fund-ticker slice', () => {
       expect(await resolve('AAPL')).toEqual(AAPL);
       expect(await resolve('320193')).toEqual(AAPL);
       expect(await resolve('apple inc.')).toEqual(AAPL);
-      expect(await getEdgarApiService().cikToTicker('320193')).toBe('AAPL');
+      expect(await getEdgarApiService().cikToTicker('320193', scope())).toBe('AAPL');
+    });
+  });
+
+  describe('the shared ticker-index load under cancellation and the failure budget (#179)', () => {
+    const BUDGET_STOP = "retries stopped at this call's 40 s budget for SEC failures";
+    /** A call's rejection; a call that resolves fails the test. */
+    const failure = (call: Promise<unknown>): Promise<McpError> =>
+      call.then(
+        () => {
+          throw new Error('expected the call to reject');
+        },
+        (error: unknown) => error as McpError,
+      );
+
+    it('keeps loading for every other waiter when one cancels, and caches the index for later calls', async () => {
+      const caller = new AbortController();
+      const calls = stubTickerFiles({});
+      const served = globalThis.fetch;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((url: string, init?: RequestInit) => {
+          // The call that started the load is cancelled while the load is in flight.
+          if (url === TICKERS_URL) caller.abort(CANCELLED);
+          return served(url, init);
+        }),
+      );
+      const api = getEdgarApiService();
+
+      const cancelled = failure(api.resolveCik('AAPL', new CallScope(caller.signal)));
+      const other = api.resolveCik('VOO', scope());
+      await vi.advanceTimersByTimeAsync(50);
+
+      expect((await cancelled) as unknown).toBe(CANCELLED);
+      expect(await other).toEqual(VOO_LIVE);
+      expect(calls).toEqual({ tickers: 1, mf: 1 });
+      expect(await resolve('AAPL')).toEqual(AAPL);
+      expect(calls).toEqual({ tickers: 1, mf: 1 });
+    });
+
+    it('starts no load for a call cancelled before it asks', async () => {
+      const calls = stubTickerFiles({});
+      const caller = new AbortController();
+      caller.abort(CANCELLED);
+
+      const error = await failure(
+        getEdgarApiService().resolveCik('AAPL', new CallScope(caller.signal)),
+      );
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(error as unknown).toBe(CANCELLED);
+      expect(calls).toEqual({ tickers: 0, mf: 0 });
+    });
+
+    it('charges each waiting call the failure time the load spent while it waited, once however often it asks', async () => {
+      stubTickerFiles({ tickers: ['silent', 'silent', OPERATING] });
+      const api = getEdgarApiService();
+      const starter = scope();
+      const joiner = scope();
+
+      // One call resolving several symbols at once, as fetch_frames does, waits once.
+      const first = Promise.all([
+        api.resolveCik('AAPL', starter),
+        api.resolveCik('VOO', starter),
+        api.cikToTicker('320193', starter),
+      ]);
+      // The load's first attempt has gone unanswered (15 s) and its 1 s backoff begun.
+      await vi.advanceTimersByTimeAsync(20_000);
+      const second = api.resolveCik('VOO', joiner);
+      await vi.advanceTimersByTimeAsync(20_000);
+
+      expect(await first).toEqual([AAPL, VOO_LIVE, 'AAPL']);
+      expect(await second).toEqual(VOO_LIVE);
+      // 15 + 1 + 15 + 2 s of failure in the load; the joiner waited through the last 17.
+      expect(starter.spentMs).toBe(33_000);
+      expect(joiner.spentMs).toBe(17_000);
+    });
+
+    it('settles a cold resolution whose every request goes unanswered twice inside 45 s, its next request refused as sec_unreachable naming the budget', async () => {
+      const warning = vi.spyOn(logger, 'warning').mockImplementation(() => undefined);
+      stubTickerFiles({ tickers: ['silent', 'silent', OPERATING], mf: ['silent'] });
+      const api = getEdgarApiService();
+      const callScope = scope();
+      const t0 = Date.now();
+
+      let resolvedAfterMs: number | undefined;
+      const company = api.resolveCik('AAPL', callScope).then((match) => {
+        resolvedAfterMs = Date.now() - t0;
+        return match;
+      });
+      await vi.advanceTimersByTimeAsync(60_000);
+      // 33 s for company_tickers.json, then the fund file's first attempt — sent at the
+      // next 1 ms pacing slot — gets the 7 s left and fails, so the fund slice degrades
+      // as any failed fund load does.
+      expect(await company).toEqual(AAPL);
+      expect(resolvedAfterMs).toBe(40_001);
+      expect(callScope.spentMs).toBe(40_000);
+      expect(warning).toHaveBeenCalledOnce();
+      expect(warning.mock.calls[0]?.[1]).toMatchObject({
+        extra: {
+          endpoint: 'company_tickers_mf',
+          reason: 'sec_unreachable',
+          error: `No HTTP response from SEC EDGAR (www.sec.gov) on attempt 1 of 3, which got no response headers within 7 s; ${BUDGET_STOP}.`,
+        },
+      });
+
+      // Refused before any request goes out: it settles without the clock moving.
+      let refused: McpError | undefined;
+      const submissions = failure(api.getSubmissions('320193', callScope)).then((error) => {
+        refused = error;
+        return error;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(refused).toBeDefined();
+      const error = await submissions;
+      expect(error.message).toBe(
+        `No request sent to SEC EDGAR (data.sec.gov): ${BUDGET_STOP}, which its earlier requests spent.`,
+      );
+      expect(error.data).toMatchObject({ reason: 'sec_unreachable', retryable: true });
+      expect(vi.mocked(globalThis.fetch).mock.calls.map(([url]) => url)).toEqual([
+        TICKERS_URL,
+        TICKERS_URL,
+        TICKERS_URL,
+        MF_URL,
+      ]);
+    });
+
+    it('fails a load SEC never answers at the 40 s budget, as sec_unreachable naming it', async () => {
+      stubTickerFiles({ tickers: ['silent'] });
+      const api = getEdgarApiService();
+
+      const error = failure(api.resolveCik('AAPL', scope()));
+      await vi.advanceTimersByTimeAsync(40_000);
+
+      expect((await error).message).toBe(
+        `No HTTP response from SEC EDGAR (www.sec.gov) on attempt 3 of 3, which got no response headers within 7 s; ${BUDGET_STOP}.`,
+      );
+      expect((await error).data).toMatchObject({ reason: 'sec_unreachable', retryable: true });
     });
   });
 
@@ -356,7 +511,7 @@ describe('EdgarApiService — fund-ticker slice', () => {
       const api = getEdgarApiService();
 
       expect(await resolve('36405')).toEqual({ cik: '0000036405' });
-      expect(await run(api.cikToTicker('36405'))).toBeUndefined();
+      expect(await run(api.cikToTicker('36405', scope()))).toBeUndefined();
       expect(await resolve('320193')).toEqual(AAPL);
     });
 
@@ -367,14 +522,14 @@ describe('EdgarApiService — fund-ticker slice', () => {
 
       // The mirror row still resolves the symbol, but carries no series.
       expect(await resolve('VOO')).toEqual({ cik: '0000036405', ticker: 'VOO' });
-      expect(await run(api.resolveFundSeries('S000002839'))).toBeUndefined();
+      expect(await run(api.resolveFundSeries('S000002839', scope()))).toBeUndefined();
 
       await vi.advanceTimersByTimeAsync(30_000);
-      expect(await run(api.resolveFundSeries('S000002839'))).toBeUndefined();
+      expect(await run(api.resolveFundSeries('S000002839', scope()))).toBeUndefined();
       expect(calls).toEqual({ tickers: 0, mf: 1 });
 
       await vi.advanceTimersByTimeAsync(31_000);
-      expect(await run(api.resolveFundSeries('S000002839'))).toEqual(VOO_LIVE);
+      expect(await run(api.resolveFundSeries('S000002839', scope()))).toEqual(VOO_LIVE);
       expect(await resolve('VOO')).toEqual(VOO_LIVE);
       expect(calls).toEqual({ tickers: 0, mf: 2 });
     });

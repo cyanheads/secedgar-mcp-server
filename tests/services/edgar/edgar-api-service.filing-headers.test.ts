@@ -22,7 +22,10 @@ const { config } = vi.hoisted(() => ({
 vi.mock('@/config/server-config.js', () => ({ getServerConfig: () => config }));
 vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => undefined }));
 
+import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, initEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+
+const scope = () => new CallScope(new AbortController().signal);
 
 // Archive paths carry the unpadded CIK; SEC 301s the zero-padded form (#156).
 const BASE = 'https://www.sec.gov/Archives/edgar/data/320193/000110465905058421';
@@ -70,6 +73,7 @@ describe('EdgarApiService — SEC header reads (#126)', () => {
     const headers = await getEdgarApiService().tryGetFilingHeaders(
       '320193',
       '0001104659-05-058421',
+      scope(),
     );
 
     expect(fetchMock).toHaveBeenCalledOnce();
@@ -84,7 +88,7 @@ describe('EdgarApiService — SEC header reads (#126)', () => {
   it('answers null when the index-headers page 404s', async () => {
     serve({});
     await expect(
-      getEdgarApiService().tryGetFilingHeaders('320193', '0001104659-05-058421'),
+      getEdgarApiService().tryGetFilingHeaders('320193', '0001104659-05-058421', scope()),
     ).resolves.toBeNull();
   });
 
@@ -94,6 +98,7 @@ describe('EdgarApiService — SEC header reads (#126)', () => {
     const header = await getEdgarApiService().tryGetSubmissionHeader(
       '320193',
       '0001104659-05-058421',
+      scope(),
     );
 
     expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
@@ -110,7 +115,7 @@ describe('EdgarApiService — SEC header reads (#126)', () => {
   it('answers null when the .hdr.sgml header 404s', async () => {
     serve({});
     await expect(
-      getEdgarApiService().tryGetSubmissionHeader('320193', '0001104659-05-058421'),
+      getEdgarApiService().tryGetSubmissionHeader('320193', '0001104659-05-058421', scope()),
     ).resolves.toBeNull();
   });
 });

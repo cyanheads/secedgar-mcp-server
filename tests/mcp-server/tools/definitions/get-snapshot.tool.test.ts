@@ -7,6 +7,7 @@
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getSnapshotTool } from '@/mcp-server/tools/definitions/get-snapshot.tool.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import type { CompanyConceptUnit, CompanyFactsResponse } from '@/services/edgar/types.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', () => ({
@@ -92,7 +93,9 @@ describe('getSnapshotTool', () => {
     await getSnapshotTool.handler(input, ctx);
 
     expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledTimes(1);
-    expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledWith('0000320193');
+    expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledWith('0000320193', expect.any(CallScope));
+    // The scope carries the caller's own signal, so a cancel reaches SEC (#179).
+    expect(mockApi.tryGetCompanyFacts.mock.calls[0]?.[1].signal).toBe(ctx.signal);
   });
 
   it('reports the latest full year and latest quarter for a duration concept', async () => {
@@ -801,7 +804,7 @@ describe('getSnapshotTool parameter names (#115)', () => {
     const result = await call({ [key]: value });
 
     expect(result.isError).toBeFalsy();
-    expect(mockApi.resolveCik).toHaveBeenCalledWith(value);
+    expect(mockApi.resolveCik).toHaveBeenCalledWith(value, expect.any(CallScope));
     expect(result.structuredContent).toMatchObject({ company: 'Apple Inc.', cik: '0000320193' });
     expect(blockText(result.content)).toContain('annual CY2024 = 391035000000');
   });

@@ -11,6 +11,7 @@ import {
   getCanvasBridge,
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import {
   type InsiderTransaction,
@@ -127,9 +128,9 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     {
       reason: 'sec_unreachable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The last of three attempts to reach SEC EDGAR got no HTTP response — the connection failed, or no response headers arrived within 15 seconds',
+      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
       recovery:
-        'Retry the same call in a minute — SEC EDGAR could not be reached, and nothing in the request needs to change.',
+        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -326,9 +327,10 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
 
   async handler(input, ctx) {
     const api = getEdgarApiService();
+    const scope = new CallScope(ctx.signal);
 
     // Resolve company to CIK
-    const resolved = await api.resolveCik(input.company);
+    const resolved = await api.resolveCik(input.company, scope);
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
     if (!match || (Array.isArray(resolved) && resolved.length === 0)) {
       throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
@@ -392,15 +394,16 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       // In-window Form 4 rows, newest first: the recent window, then the archive pages
       // overlapping the window, read until the scan budget plus one sentinel row is in
       // hand or the shared page cap ends the walk.
-      const submissions = await readSubmissionsFeed(api.getSubmissions(match.cik));
+      const submissions = await readSubmissionsFeed(api.getSubmissions(match.cik, scope));
       const inWindow = (date: string) =>
         (!filedAfter || date >= filedAfter) && (!filedBefore || date <= filedBefore);
       filingBatch = windowForm4Rows(submissions.filings.recent, inWindow);
-      walk = new SubmissionsArchiveWalk(api, submissions, {
-        filedAfter,
-        filedBefore,
-        order: 'newest-first',
-      });
+      walk = new SubmissionsArchiveWalk(
+        api,
+        submissions,
+        { filedAfter, filedBefore, order: 'newest-first' },
+        scope,
+      );
       if (filingBatch.length <= scanCap) {
         for await (const { block } of walk) {
           filingBatch.push(...windowForm4Rows(block, inWindow));
@@ -409,7 +412,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       }
     } else {
       filingBatch = await readSubmissionsFeed(
-        api.getRecentFilingsByForm(match.cik, ['4', '4/A'], scanCap + 1),
+        api.getRecentFilingsByForm(match.cik, ['4', '4/A'], scanCap + 1, scope),
       );
     }
     // Form 4 filings exist past the scan: the sentinel row turned up, or — in a date
@@ -455,7 +458,12 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
 
       // primaryDocument may be prefixed with xslF345X06/ — strip to get the bare filename
       const docName = filing.primaryDocument.replace(/^xsl[^/]+\//, '');
-      const xmlText = await api.tryGetFilingDocument(match.cik, filing.accessionNumber, docName);
+      const xmlText = await api.tryGetFilingDocument(
+        match.cik,
+        filing.accessionNumber,
+        docName,
+        scope,
+      );
       if (!xmlText) continue;
 
       filingsScanned++;

@@ -4,7 +4,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { dataframeDropTool } from '@/mcp-server/tools/definitions/dataframe-drop.tool.js';
 
@@ -13,7 +13,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
 }));
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
-import { blockText } from '../../../support/assertions.js';
+import { bag, blockText, wireError } from '../../../support/assertions.js';
 
 const mockBridge = {
   drop: vi.fn(),
@@ -33,6 +33,17 @@ describe('dataframeDropTool', () => {
       code: JsonRpcErrorCode.ServiceUnavailable,
       data: { reason: 'canvas_unavailable' },
     });
+  });
+
+  it('names the npm/Docker switch and the MCPB bundle in the canvas_unavailable recovery, on both surfaces', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+    const result = await runToolContract(dataframeDropTool, { name: 'df_ABCDE_FGHIJ' });
+
+    const hint = String(bag(wireError(result).data.recovery).hint);
+    expect(hint).toBe(
+      'Dataframes need the DuckDB canvas. On an npm or Docker install, set CANVAS_PROVIDER_TYPE=duckdb (the default when unset) and restart the server; the MCPB bundle ships without DuckDB, so there the data tools return their results inline and stage no dataframe.',
+    );
+    expect(blockText(result.content)).toContain(hint);
   });
 
   it('returns dropped=true when the dataframe exists and is removed', async () => {

@@ -5,8 +5,9 @@
 
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import type { EftsResponse } from '@/services/edgar/types.js';
 
 // Preserve the real pure helpers the tool imports (quartersInRange); only the
@@ -35,7 +36,16 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import { at, bag, blockAt, blockText, caught, recoveryHint } from '../../../support/assertions.js';
+import {
+  at,
+  bag,
+  blockAt,
+  blockText,
+  caught,
+  records,
+  recoveryHint,
+  wireError,
+} from '../../../support/assertions.js';
 
 // EFTS also sends form_filter aggregation buckets, which EftsResponse omits and the tool ignores.
 const mockEftsResponse: EftsResponse & { aggregations: unknown } = {
@@ -160,14 +170,19 @@ describe('searchFilingsTool', () => {
     });
     await searchFilingsTool.handler(input, ctx);
 
-    expect(mockApi.searchFilings).toHaveBeenCalledWith({
-      query: 'revenue growth',
-      forms: ['10-K', '10-Q'],
-      startDate: '2023-01-01',
-      endDate: '2023-12-31',
-      from: 20,
-      size: 10,
-    });
+    expect(mockApi.searchFilings).toHaveBeenCalledWith(
+      {
+        query: 'revenue growth',
+        forms: ['10-K', '10-Q'],
+        startDate: '2023-01-01',
+        endDate: '2023-12-31',
+        from: 20,
+        size: 10,
+      },
+      expect.any(CallScope),
+    );
+    // The scope carries the caller's own signal, so a cancel reaches SEC (#179).
+    expect(mockApi.searchFilings.mock.calls[0]?.[1].signal).toBe(ctx.signal);
   });
 
   it('over-fetches and applies offset client-side under date sort', async () => {
@@ -182,14 +197,17 @@ describe('searchFilingsTool', () => {
 
     // Default sort is filing_date_desc → fetch the EFTS window (size=100, from=0)
     // so we have enough hits to sort and paginate over.
-    expect(mockApi.searchFilings).toHaveBeenCalledWith({
-      query: 'revenue growth',
-      forms: ['10-K'],
-      startDate: undefined,
-      endDate: undefined,
-      from: 0,
-      size: 100,
-    });
+    expect(mockApi.searchFilings).toHaveBeenCalledWith(
+      {
+        query: 'revenue growth',
+        forms: ['10-K'],
+        startDate: undefined,
+        endDate: undefined,
+        from: 0,
+        size: 100,
+      },
+      expect.any(CallScope),
+    );
   });
 
   it('applies client-side limit slicing', async () => {
@@ -404,6 +422,7 @@ describe('searchFilingsTool', () => {
     // injected into the free-text query.
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ query: 'foo', ciks: ['0000320193'] }),
+      expect.any(CallScope),
     );
     expect(result.total).toBe(2);
     expect(result.form_distribution).toEqual({ '10-K': 1, '10-Q': 1 });
@@ -587,6 +606,7 @@ describe('searchFilingsTool', () => {
     expect(mockApi.searchFilings).toHaveBeenCalledOnce();
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ query: 'revenue', ciks: ['0000320193'] }),
+      expect.any(CallScope),
     );
     expect(registerDataframe).toHaveBeenCalledOnce();
     const call = registerDataframe.mock.calls[0]![1];
@@ -636,6 +656,7 @@ describe('searchFilingsTool', () => {
     // Bare ticker: → no free-text query; entity scope is entirely the CIK.
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ query: '', ciks: ['0000320193'] }),
+      expect.any(CallScope),
     );
   });
 
@@ -678,9 +699,10 @@ describe('searchFilingsTool', () => {
     await searchFilingsTool.handler(input, ctx);
 
     // The dot survives tokenization — resolveCik sees the caller's literal symbol.
-    expect(resolveCik).toHaveBeenCalledWith('BRK.B');
+    expect(resolveCik).toHaveBeenCalledWith('BRK.B', expect.any(CallScope));
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ query: 'insurance', ciks: ['0001067983'] }),
+      expect.any(CallScope),
     );
   });
 
@@ -745,6 +767,7 @@ describe('searchFilingsTool', () => {
         ciks: ['0001326801'],
         forms: ['10-K'],
       }),
+      expect.any(CallScope),
     );
     // The free-text query carries no injected entity name.
     const sentQuery = mockApi.searchFilings.mock.calls[0]![0].query;
@@ -816,6 +839,7 @@ describe('searchFilingsTool', () => {
     // Empty query string reaches the service, which omits `q` from the EFTS request.
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ query: '', forms: ['S-1'] }),
+      expect.any(CallScope),
     );
     // A browse matches one document per filing, so EDGAR's count of 80 is the filing
     // count even though the window holds one of them (#124).
@@ -849,6 +873,7 @@ describe('searchFilingsTool', () => {
 
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ query: '', ciks: ['0000320193'] }),
+      expect.any(CallScope),
     );
     expect(result.total).toBe(2);
   });
@@ -1064,7 +1089,7 @@ describe('searchFilingsTool', () => {
     const result = await searchFilingsTool.handler(input, ctx);
 
     expect(mockApi.searchFilings).not.toHaveBeenCalled();
-    expect(mockApi.getSubmissions).toHaveBeenCalledWith('0000320193');
+    expect(mockApi.getSubmissions).toHaveBeenCalledWith('0000320193', expect.any(CallScope));
     expect(result.total).toBe(2);
     expect(result.results.every((r) => r.source === 'submissions')).toBe(true);
     // Newest-first by default; both recent 10-Ks fall inside the window.
@@ -1112,7 +1137,10 @@ describe('searchFilingsTool', () => {
     });
     const result = await searchFilingsTool.handler(input, ctx);
 
-    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith('CIK0000320193-submissions-001.json');
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledWith(
+      'CIK0000320193-submissions-001.json',
+      expect.any(CallScope),
+    );
     expect(result.total).toBe(1);
     expect(at(result.results, 0).accession_number).toBe('0000320193-94-000005');
     expect(at(result.results, 0).source).toBe('submissions');
@@ -1152,7 +1180,7 @@ describe('searchFilingsTool', () => {
     const result = await searchFilingsTool.handler(input, ctx);
 
     expect(mockApi.searchFilings).not.toHaveBeenCalled();
-    expect(mockApi.fetchFullIndexQuarter).toHaveBeenCalledWith(1998, 1);
+    expect(mockApi.fetchFullIndexQuarter).toHaveBeenCalledWith(1998, 1, expect.any(CallScope));
     // 10-K + 10-K/A match forms:['10-K'] (amendment-aware); 10-Q excluded.
     expect(result.total).toBe(2);
     expect(result.results.every((r) => r.source === 'full-index')).toBe(true);
@@ -1381,6 +1409,7 @@ describe('searchFilingsTool', () => {
       '0000320193',
       '0000320193-97-000010',
       '0000320193-97-000010.txt',
+      expect.any(CallScope),
     );
     expect(result.results.map((r) => r.accession_number)).toEqual(['0000320193-97-000010']);
     expect(at(result.results, 0).source).toBe('submissions');
@@ -1668,8 +1697,9 @@ describe('searchFilingsTool', () => {
         from: 0,
         size: 100,
       }),
+      expect.any(CallScope),
     );
-    expect(mockApi.getSubmissions).toHaveBeenCalledWith('0000320193');
+    expect(mockApi.getSubmissions).toHaveBeenCalledWith('0000320193', expect.any(CallScope));
 
     expect(result.results.map((r) => r.source)).toEqual(['efts', 'submissions', 'submissions']);
     expect(result.results.map((r) => r.filing_date)).toEqual([
@@ -1776,9 +1806,10 @@ describe('searchFilingsTool', () => {
 
     // The full-index side stops at 2000-12-31, so only Q4 2000 is scanned.
     expect(mockApi.fetchFullIndexQuarter).toHaveBeenCalledTimes(1);
-    expect(mockApi.fetchFullIndexQuarter).toHaveBeenCalledWith(2000, 4);
+    expect(mockApi.fetchFullIndexQuarter).toHaveBeenCalledWith(2000, 4, expect.any(CallScope));
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ startDate: '2001-01-01', endDate: '2001-03-31' }),
+      expect.any(CallScope),
     );
     expect(result.results.map((r) => r.source)).toEqual(['efts', 'full-index']);
     // The full-text side's one-filing window of 4,067 documents makes the sum a lower bound.
@@ -1826,6 +1857,7 @@ describe('searchFilingsTool', () => {
     // EFTS gets the text terms server-side; the archive half is matched locally.
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ query: 'Macintosh', startDate: '2001-01-01' }),
+      expect.any(CallScope),
     );
     expect(result.scan).toEqual({ candidates: 2, scanned: 2, matched: 1, capped: false });
     expect(result.results.map((r) => r.accession_number)).toEqual(['EFTS1', 'HIT']);
@@ -2078,7 +2110,7 @@ describe('searchFilingsTool', () => {
     });
 
     expect(bag(result.structuredContent).notice).toBe(
-      'Offset (3) exceeds the 1 filings this search assembled — lower the offset. Served from the quarterly EDGAR full-index — full-text search covers 2001-present only. More matches exist beyond the rows fetched — narrow the range.',
+      'Offset (3) exceeds the 1 filings this search assembled — lower the offset. Served from the quarterly EDGAR full-index — full-text search covers 2001-present only. The full-index browse read the newest 8 of the 32 quarters in range, 1999Q1–2000Q4; end the range at 1998-12-31 to read the older ones. More matches exist beyond the rows fetched — narrow the range.',
     );
   });
 
@@ -2688,6 +2720,7 @@ describe('searchFilingsTool parameter names (#115)', () => {
     expect(result.isError).toBeFalsy();
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ startDate: '2023-01-01', endDate: '2023-12-31' }),
+      expect.any(CallScope),
     );
     expect(result.structuredContent).toMatchObject({ total: 2 });
     expect(blockText(result.content)).toContain('0000320193-23-000106');
@@ -2699,20 +2732,42 @@ describe('searchFilingsTool parameter names (#115)', () => {
     expect(result.isError).toBeFalsy();
     expect(mockApi.searchFilings).toHaveBeenCalledWith(
       expect.objectContaining({ forms: ['10-K'] }),
+      expect.any(CallScope),
     );
     expect(blockText(result.content)).toContain('Found 2 filings');
   });
 
-  it('names the canonical bounds when a retired spelling arrives with only one of them', async () => {
-    const result = await call({ query: 'material weakness', start_date: '2023-01-01' });
+  describe('a lone bound under an alias (#185)', () => {
+    // A zone west of Greenwich, where this instant is still the 23rd: the fill reads the UTC day.
+    beforeEach(() => {
+      vi.stubEnv('TZ', 'America/Los_Angeles');
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-10-24T02:00:00Z'));
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    });
 
-    expect(result.isError).toBe(true);
-    const error = (result.structuredContent as { error: { data?: { reason?: string } } }).error;
-    expect(error.data?.reason).toBe('invalid_date_range');
-    const text = blockText(result.content);
-    expect(text).toContain('filed_after');
-    expect(text).toContain('filed_before');
-    expect(mockApi.searchFilings).not.toHaveBeenCalled();
+    it.each([
+      ['filed_after', { startDate: '2023-01-01', endDate: '2026-10-24' }],
+      ['start_date', { startDate: '2023-01-01', endDate: '2026-10-24' }],
+      ['date_from', { startDate: '2023-01-01', endDate: '2026-10-24' }],
+      ['filed_before', { startDate: '2001-01-01', endDate: '2023-01-01' }],
+      ['end_date', { startDate: '2001-01-01', endDate: '2023-01-01' }],
+      ['date_to', { startDate: '2001-01-01', endDate: '2023-01-01' }],
+    ])('fills the other bound when %s arrives alone', async (key, window) => {
+      const result = await call({ query: 'material weakness', [key]: '2023-01-01' });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining(window),
+        expect.any(CallScope),
+      );
+      expect(bag(result.structuredContent).effectiveQuery).toBe(
+        `material weakness (filed ${window.startDate} to ${window.endDate})`,
+      );
+    });
   });
 
   it('leaves a singular form_type out — one string cannot fill the forms array', async () => {
@@ -2729,5 +2784,555 @@ describe('searchFilingsTool parameter names (#115)', () => {
     expect(result.isError).toBe(true);
     expect(blockText(result.content)).toContain('bogus');
     expect(mockApi.searchFilings).not.toHaveBeenCalled();
+  });
+});
+
+// The window a call searches: either bound alone is paired by the server (#185).
+describe('searchFilingsTool date window (#185)', () => {
+  const call = (args: Record<string, unknown>) => runToolContract(searchFilingsTool, args as never);
+  const allText = (result: Awaited<ReturnType<typeof call>>) =>
+    result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+  const noEftsHits = () =>
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: { total: { value: 0, relation: 'eq' }, hits: [] },
+    });
+
+  describe('with both bounds or neither', () => {
+    it('sends an explicit pair as given and echoes the query without a window', async () => {
+      noEftsHits();
+      const result = await call({
+        query: '"credit facility"',
+        forms: ['8-K'],
+        filed_after: '2023-01-01',
+        filed_before: '2023-12-31',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining({ startDate: '2023-01-01', endDate: '2023-12-31' }),
+        expect.any(CallScope),
+      );
+      const structured = bag(result.structuredContent);
+      expect(structured.effectiveQuery).toBe('"credit facility"');
+      expect(structured.notice).toBe(
+        'No filings matched ""credit facility"", forms [8-K], dates 2023-01-01 to 2023-12-31. Broaden the query, remove the form filter, or widen the date range.',
+      );
+      expect(allText(result)).toContain(String(structured.notice));
+    });
+
+    it('searches every date when both bounds are absent or blank', async () => {
+      noEftsHits();
+      const result = await call({ query: 'zzznomatch', filed_after: '', filed_before: '' });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockApi.searchFilings).toHaveBeenCalledTimes(1);
+      const structured = bag(result.structuredContent);
+      expect(structured.effectiveQuery).toBe('zzznomatch');
+      expect(structured.notice).toBe(
+        'No filings matched "zzznomatch". Broaden the query, remove the form filter, or widen the date range.',
+      );
+    });
+
+    it('records an explicit pair on the staged dataframe', async () => {
+      const registerDataframe = vi.fn().mockResolvedValue({
+        tableName: 'df_PAIR1_DATES',
+        rowCount: 2,
+        expiresAt: '2026-11-01T00:00:00.000Z',
+        columnSchema: [],
+      });
+      vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+
+      await call({
+        query: 'revenue',
+        filed_after: '2023-01-01',
+        filed_before: '2023-12-31',
+        limit: 1,
+      });
+
+      expect(registerDataframe.mock.calls[0]![1].queryParams).toMatchObject({
+        filed_after: '2023-01-01',
+        filed_before: '2023-12-31',
+        source: 'efts',
+      });
+    });
+
+    it('offers starting at 2001-01-01 when an unscoped free-text range reaches past it', async () => {
+      const result = await call({
+        query: 'material weakness',
+        filed_after: '1998-01-01',
+        filed_before: '2004-12-31',
+      });
+
+      const error = wireError(result);
+      expect(error.data.reason).toBe('pre2001_full_text_unscoped');
+      expect(String(bag(error.data.recovery).hint)).toContain('start the range at 2001-01-01');
+      expect(error.message).toContain('or start the range at 2001-01-01');
+    });
+
+    it('offers no 2001-01-01 start when an unscoped free-text range ends before it', async () => {
+      const result = await call({
+        query: 'revenue',
+        filed_after: '1998-01-01',
+        filed_before: '1998-12-31',
+      });
+
+      const error = wireError(result);
+      expect(error.data.reason).toBe('pre2001_full_text_unscoped');
+      const hint = String(bag(error.data.recovery).hint);
+      expect(hint).toContain('ticker: or cik:');
+      expect(hint).not.toContain('2001-01-01');
+      expect(error.message).not.toContain('start the range at');
+      expect(allText(result)).not.toContain('start the range at');
+    });
+
+    it('names the forms filter when it says to drop the text terms, on both surfaces', async () => {
+      const dates = { filed_after: '1998-01-01', filed_before: '1998-12-31' };
+      const straddling = await call({
+        query: 'material weakness',
+        ...dates,
+        filed_before: '2004-12-31',
+      });
+      const archiveOnly = await call({ query: 'revenue', ...dates });
+
+      for (const result of [straddling, archiveOnly]) {
+        const error = wireError(result);
+        const hint = String(bag(error.data.recovery).hint);
+        expect(hint).toContain(
+          'drop the text terms and browse by form type (forms: ["10-K"]) and date',
+        );
+        expect(error.message).toContain(
+          'drop the text terms and browse by form type (forms: ["10-K"]) and date',
+        );
+        expect(allText(result)).toContain(hint);
+      }
+
+      // The advice taken literally: text dropped with no forms is still no search; with forms it is one.
+      mockApi.fetchFullIndexQuarter.mockResolvedValue([]);
+      expect(wireError(await call(dates)).data.reason).toBe('missing_criteria');
+      expect((await call({ ...dates, forms: ['10-K'] })).isError).toBeFalsy();
+    });
+
+    it('scopes the contract recovery’s 2001-01-01 start to a range that reaches 2001', () => {
+      const entry = searchFilingsTool.errors?.find(
+        (e) => e.reason === 'pre2001_full_text_unscoped',
+      );
+      expect(entry?.recovery).toBe(
+        'Add ticker: or cik: entity scope to the query, drop the text terms and browse by form type (forms: ["10-K"]) and date, or, for a range that reaches 2001, start the range at 2001-01-01.',
+      );
+    });
+
+    it('no longer declares invalid_date_range', () => {
+      expect(searchFilingsTool.errors?.map((e) => e.reason)).not.toContain('invalid_date_range');
+    });
+  });
+
+  describe('with one bound', () => {
+    // 02:00 UTC on the 24th is still the 23rd west of Greenwich, so the zone is pinned
+    // there whatever the host's: the fill reads the UTC day.
+    beforeEach(() => {
+      vi.stubEnv('TZ', 'America/Los_Angeles');
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-10-24T02:00:00Z'));
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.unstubAllEnvs();
+    });
+
+    it('runs a lone filed_after through today (UTC) and discloses the window', async () => {
+      const result = await call({
+        query: '"credit facility"',
+        forms: ['8-K'],
+        filed_after: '2026-10-01',
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining({ startDate: '2026-10-01', endDate: '2026-10-24' }),
+        expect.any(CallScope),
+      );
+      const effectiveQuery = String(bag(result.structuredContent).effectiveQuery);
+      expect(effectiveQuery).toBe('"credit facility" (filed 2026-10-01 to 2026-10-24)');
+      expect(allText(result)).toContain(effectiveQuery);
+      expect(bag(result.structuredContent).results).toHaveLength(2);
+    });
+
+    it('reads today per call, not once', async () => {
+      await call({ query: 'revenue', filed_after: '2026-10-01' });
+      vi.setSystemTime(new Date('2026-11-02T12:00:00Z'));
+      await call({ query: 'revenue', filed_after: '2026-10-01' });
+
+      expect(mockApi.searchFilings.mock.calls.map(([args]) => args.endDate)).toEqual([
+        '2026-10-24',
+        '2026-11-02',
+      ]);
+    });
+
+    it('treats a blank filed_before beside filed_after as absent', async () => {
+      await call({ query: 'revenue', filed_after: '2026-10-01', filed_before: '' });
+
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining({ startDate: '2026-10-01', endDate: '2026-10-24' }),
+        expect.any(CallScope),
+      );
+    });
+
+    it('labels an entity-scoped and a forms-only browse with the window too', async () => {
+      const scoped = await call({ query: 'cik:320193', filed_after: '2026-01-01' });
+      const browse = await call({ forms: ['8-K'], filed_before: '2026-06-30' });
+
+      expect(bag(scoped.structuredContent).effectiveQuery).toBe(
+        '(entity scope: CIK 0000320193) (filed 2026-01-01 to 2026-10-24)',
+      );
+      expect(bag(browse.structuredContent).effectiveQuery).toBe(
+        '(browse: forms 8-K) (filed 2001-01-01 to 2026-06-30)',
+      );
+    });
+
+    it('starts a lone filed_before from 2001 on at the full-text floor', async () => {
+      const result = await call({ query: 'revenue', filed_before: '2010-12-31' });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining({ startDate: '2001-01-01', endDate: '2010-12-31' }),
+        expect.any(CallScope),
+      );
+      expect(bag(result.structuredContent).effectiveQuery).toBe(
+        'revenue (filed 2001-01-01 to 2010-12-31)',
+      );
+    });
+
+    it('searches a lone filed_before of 2001-01-01 as one full-text day, not an archive route', async () => {
+      const result = await call({ query: 'revenue', filed_before: '2001-01-01' });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining({ startDate: '2001-01-01', endDate: '2001-01-01' }),
+        expect.any(CallScope),
+      );
+      expect(mockApi.fetchFullIndexQuarter).not.toHaveBeenCalled();
+      expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+    });
+
+    it('browses the full-index from 1993-01-01 for a lone pre-2001 filed_before, newest 8 quarters', async () => {
+      mockApi.fetchFullIndexQuarter.mockImplementation(async (year: number, quarter: number) => [
+        {
+          cik: '0000320193',
+          companyName: 'APPLE COMPUTER INC',
+          form: '10-K',
+          filingDate: `${year}-${String(quarter * 3).padStart(2, '0')}-15`,
+          accessionNumber: `IDX-${year}Q${quarter}`,
+        },
+      ]);
+
+      const result = await call({ forms: ['10-K'], filed_before: '1999-12-31' });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockApi.searchFilings).not.toHaveBeenCalled();
+      // 1993 QTR1..1999 QTR4 is 28 quarters; the newest 8 are read, 1999 QTR4 first.
+      expect(mockApi.fetchFullIndexQuarter.mock.calls.map(([y, q]) => `${y}Q${q}`)).toEqual([
+        '1999Q4',
+        '1999Q3',
+        '1999Q2',
+        '1999Q1',
+        '1998Q4',
+        '1998Q3',
+        '1998Q2',
+        '1998Q1',
+      ]);
+      const structured = bag(result.structuredContent);
+      expect(structured.total).toBe(8);
+      expect(structured.total_is_exact).toBe(false);
+      expect(structured.effectiveQuery).toBe(
+        '(pre-2001 archive: full-index browse, forms 10-K, 1993-01-01 to 1999-12-31; quarters read 1998Q1–1999Q4 of 1993Q1–1999Q4)',
+      );
+      expect(allText(result)).toContain('1993-01-01 to 1999-12-31');
+    });
+
+    it('reads the submissions history from 1993-01-01 for a lone pre-2001 filed_before with entity scope', async () => {
+      mockApi.getSubmissions.mockResolvedValue(
+        submissionsWith([
+          { accession: 'SUB-2000', date: '2000-03-01' },
+          { accession: 'SUB-1999', date: '1999-06-01' },
+          { accession: 'SUB-1993', date: '1993-02-01' },
+        ]),
+      );
+
+      const result = await call({
+        query: 'cik:320193',
+        forms: ['10-K'],
+        filed_before: '1999-12-31',
+      });
+
+      expect(mockApi.searchFilings).not.toHaveBeenCalled();
+      expect(mockApi.getSubmissions).toHaveBeenCalledWith('0000320193', expect.any(CallScope));
+      const structured = bag(result.structuredContent);
+      expect(records(structured.results).map((r) => r.accession_number)).toEqual([
+        'SUB-1999',
+        'SUB-1993',
+      ]);
+      expect(records(structured.results).every((r) => r.source === 'submissions')).toBe(true);
+      expect(structured.effectiveQuery).toBe(
+        '(pre-2001 archive: CIK 0000320193, forms 10-K, 1993-01-01 to 1999-12-31)',
+      );
+    });
+
+    it('rejects a lone pre-2001 filed_before with unscoped free text, offering no 2001 start', async () => {
+      const result = await call({ query: 'revenue', filed_before: '1999-12-31' });
+
+      const error = wireError(result);
+      expect(error.data.reason).toBe('pre2001_full_text_unscoped');
+      expect(error.message).toContain('1993-01-01..1999-12-31');
+      expect(String(bag(error.data.recovery).hint)).not.toContain('2001-01-01');
+      expect(mockApi.searchFilings).not.toHaveBeenCalled();
+    });
+
+    it('splits a lone pre-2001 filed_after at 2001-01-01, matching the pair through today', async () => {
+      const arrange = () => {
+        mockApi.getSubmissions.mockResolvedValue(
+          submissionsWith([
+            { accession: 'SUB-2000', date: '2000-05-01' },
+            { accession: 'SUB-1998', date: '1998-05-01' },
+          ]),
+        );
+        mockApi.searchFilings.mockResolvedValue(mockEftsResponse);
+      };
+      arrange();
+      const lone = await call({ query: 'cik:320193', forms: ['10-K'], filed_after: '1999-01-01' });
+      const loneEfts = mockApi.searchFilings.mock.calls[0]?.[0];
+      vi.clearAllMocks();
+      arrange();
+      const pair = await call({
+        query: 'cik:320193',
+        forms: ['10-K'],
+        filed_after: '1999-01-01',
+        filed_before: '2026-10-24',
+      });
+
+      expect(loneEfts).toMatchObject({ startDate: '2001-01-01', endDate: '2026-10-24' });
+      const loneRows = records(bag(lone.structuredContent).results);
+      expect(loneRows.map((r) => r.accession_number)).toEqual([
+        '0000320193-23-000106',
+        '0000320193-23-000077',
+        'SUB-2000',
+      ]);
+      expect(loneRows).toEqual(records(bag(pair.structuredContent).results));
+      expect(bag(lone.structuredContent).total).toBe(bag(pair.structuredContent).total);
+      expect(bag(lone.structuredContent).effectiveQuery).toBe(
+        '(split at 2001-01-01: CIK 0000320193, forms 10-K, 1999-01-01 to 2026-10-24)',
+      );
+    });
+
+    it('answers a future lone filed_after with no filings and the no-match notice', async () => {
+      noEftsHits();
+      const result = await call({ query: 'revenue', filed_after: '2026-11-01' });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining({ startDate: '2026-11-01', endDate: '2026-10-24' }),
+        expect.any(CallScope),
+      );
+      const structured = bag(result.structuredContent);
+      expect(structured.results).toEqual([]);
+      expect(structured.notice).toBe(
+        'No filings matched "revenue", dates 2026-11-01 to 2026-10-24. Broaden the query, remove the form filter, or widen the date range.',
+      );
+      expect(allText(result)).toContain(String(structured.notice));
+    });
+
+    it('answers a lone filed_before ahead of the archive with no filings, reading no quarter', async () => {
+      const result = await call({ forms: ['10-K'], filed_before: '1992-06-30' });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockApi.fetchFullIndexQuarter).not.toHaveBeenCalled();
+      const structured = bag(result.structuredContent);
+      expect(structured.total).toBe(0);
+      expect(String(structured.notice)).toContain('dates 1993-01-01 to 1992-06-30');
+    });
+
+    // Each case has the caller's own bound and a filled one, so both recorded fields are tested.
+    it.each([
+      ['filed_after', '2026-10-01', { filed_after: '2026-10-01', filed_before: '2026-10-24' }],
+      ['filed_before', '2010-12-31', { filed_after: '2001-01-01', filed_before: '2010-12-31' }],
+    ])(
+      'records the filled bounds of a lone %s on the staged dataframe',
+      async (key, date, bounds) => {
+        const registerDataframe = vi.fn().mockResolvedValue({
+          tableName: 'df_LONE1_DATES',
+          rowCount: 2,
+          expiresAt: '2026-11-01T00:00:00.000Z',
+          columnSchema: [],
+        });
+        vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+
+        await call({ query: 'revenue', [key]: date, limit: 1 });
+
+        expect(registerDataframe.mock.calls[0]![1].queryParams).toMatchObject({
+          ...bounds,
+          source: 'efts',
+        });
+      },
+    );
+
+    it('describes both bounds as usable alone', () => {
+      const shape = searchFilingsTool.input.shape;
+      expect(shape.filed_after.description).toContain('Use alone or with filed_before');
+      expect(shape.filed_before.description).toContain('Use alone or with filed_after');
+    });
+  });
+
+  describe('a full-index browse past its quarter cap names the quarters it read', () => {
+    /** One 10-K per quarter, filed mid-quarter, so every quarter read adds a row. */
+    const oneFilingPerQuarter = () =>
+      mockApi.fetchFullIndexQuarter.mockImplementation(async (year: number, quarter: number) => [
+        {
+          cik: '0000320193',
+          companyName: 'APPLE COMPUTER INC',
+          form: '10-K',
+          filingDate: `${year}-${String(quarter * 3 - 1).padStart(2, '0')}-15`,
+          accessionNumber: `IDX-${year}Q${quarter}`,
+        },
+      ]);
+    const quartersFetched = () =>
+      mockApi.fetchFullIndexQuarter.mock.calls.map(([y, q]) => `${y}Q${q}`);
+
+    it('reads every quarter of an 8-quarter range and discloses no cap', async () => {
+      oneFilingPerQuarter();
+      const result = await call({
+        forms: ['10-K'],
+        filed_after: '1998-01-01',
+        filed_before: '1999-12-31',
+      });
+
+      expect(quartersFetched()).toHaveLength(8);
+      const structured = bag(result.structuredContent);
+      expect(structured.total).toBe(8);
+      expect(structured.total_is_exact).toBe(true);
+      expect(structured.effectiveQuery).toBe(
+        '(pre-2001 archive: full-index browse, forms 10-K, 1998-01-01 to 1999-12-31)',
+      );
+      expect(structured.notice).toBeUndefined();
+      expect(allText(result)).not.toContain('quarters');
+    });
+
+    it('states the quarters read and the range end that reaches the older ones, on both surfaces', async () => {
+      oneFilingPerQuarter();
+      const result = await call({ forms: ['10-K'], filed_before: '1999-12-31' });
+
+      const structured = bag(result.structuredContent);
+      expect(structured.total_is_exact).toBe(false);
+      expect(structured.effectiveQuery).toBe(
+        '(pre-2001 archive: full-index browse, forms 10-K, 1993-01-01 to 1999-12-31; quarters read 1998Q1–1999Q4 of 1993Q1–1999Q4)',
+      );
+      const quarterNote =
+        'The full-index browse read the newest 8 of the 28 quarters in range, 1998Q1–1999Q4; end the range at 1997-12-31 to read the older ones.';
+      expect(String(structured.notice)).toContain(quarterNote);
+      const text = allText(result);
+      expect(text).toContain(String(structured.effectiveQuery));
+      expect(text).toContain(quarterNote);
+    });
+
+    it('walks older quarters by ending each range where the last one says, to the archive start', async () => {
+      oneFilingPerQuarter();
+      const walk: Array<{ fetched: string[]; effectiveQuery: unknown; notice: unknown }> = [];
+      let filedBefore: string | undefined = '1997-12-31';
+      while (filedBefore && walk.length < 5) {
+        mockApi.fetchFullIndexQuarter.mockClear();
+        const structured = bag(
+          (await call({ forms: ['10-K'], filed_before: filedBefore })).structuredContent,
+        );
+        walk.push({
+          fetched: quartersFetched(),
+          effectiveQuery: structured.effectiveQuery,
+          notice: structured.notice,
+        });
+        filedBefore = /end the range at (\d{4}-\d{2}-\d{2})/.exec(String(structured.notice))?.[1];
+      }
+
+      expect(walk.map((step) => [step.fetched[0], step.fetched.at(-1)])).toEqual([
+        ['1997Q4', '1996Q1'],
+        ['1995Q4', '1994Q1'],
+        ['1993Q4', '1993Q1'],
+      ]);
+      expect(walk.map((step) => step.effectiveQuery)).toEqual([
+        '(pre-2001 archive: full-index browse, forms 10-K, 1993-01-01 to 1997-12-31; quarters read 1996Q1–1997Q4 of 1993Q1–1997Q4)',
+        '(pre-2001 archive: full-index browse, forms 10-K, 1993-01-01 to 1995-12-31; quarters read 1994Q1–1995Q4 of 1993Q1–1995Q4)',
+        '(pre-2001 archive: full-index browse, forms 10-K, 1993-01-01 to 1993-12-31)',
+      ]);
+      expect(String(walk[1]?.notice)).toContain(
+        'read the newest 8 of the 12 quarters in range, 1994Q1–1995Q4; end the range at 1993-12-31',
+      );
+      expect(walk[2]?.notice).toBeUndefined();
+    });
+
+    it('counts quarters from a mid-quarter filed_after', async () => {
+      oneFilingPerQuarter();
+      const result = await call({
+        forms: ['10-K'],
+        filed_after: '1995-05-10',
+        filed_before: '1999-12-31',
+      });
+
+      const structured = bag(result.structuredContent);
+      expect(structured.effectiveQuery).toBe(
+        '(pre-2001 archive: full-index browse, forms 10-K, 1995-05-10 to 1999-12-31; quarters read 1998Q1–1999Q4 of 1995Q2–1999Q4)',
+      );
+      expect(String(structured.notice)).toContain(
+        'the newest 8 of the 19 quarters in range, 1998Q1–1999Q4; end the range at 1997-12-31',
+      );
+    });
+
+    it('names the archive quarters read on a range split at 2001-01-01', async () => {
+      oneFilingPerQuarter();
+      const result = await call({
+        forms: ['10-K'],
+        filed_after: '1993-01-01',
+        filed_before: '2003-12-31',
+      });
+
+      expect(quartersFetched()).toEqual([
+        '2000Q4',
+        '2000Q3',
+        '2000Q2',
+        '2000Q1',
+        '1999Q4',
+        '1999Q3',
+        '1999Q2',
+        '1999Q1',
+      ]);
+      const structured = bag(result.structuredContent);
+      expect(structured.effectiveQuery).toBe(
+        '(split at 2001-01-01: full-index browse, forms 10-K, 1993-01-01 to 2003-12-31; quarters read 1999Q1–2000Q4 of 1993Q1–2000Q4)',
+      );
+      const quarterNote =
+        'The full-index browse read the newest 8 of the 32 quarters in range, 1999Q1–2000Q4; end the range at 1998-12-31 to read the older ones.';
+      expect(String(structured.notice)).toContain(quarterNote);
+      expect(allText(result)).toContain(quarterNote);
+    });
+
+    it('says which quarters were read when they held no match', async () => {
+      mockApi.fetchFullIndexQuarter.mockResolvedValue([]);
+      const result = await call({ forms: ['10-K'], filed_before: '1999-12-31' });
+
+      const structured = bag(result.structuredContent);
+      expect(structured.total).toBe(0);
+      expect(structured.notice).toBe(
+        'No filings matched forms [10-K], dates 1993-01-01 to 1999-12-31. Served from the quarterly EDGAR full-index — full-text search covers 2001-present only. The full-index browse read the newest 8 of the 28 quarters in range, 1998Q1–1999Q4; end the range at 1997-12-31 to read the older ones.',
+      );
+      expect(allText(result)).toContain(String(structured.notice));
+    });
+
+    it('keeps the quarters read in the notice for an offset past the rows', async () => {
+      oneFilingPerQuarter();
+      const result = await call({ forms: ['10-K'], filed_before: '1999-12-31', offset: 50 });
+
+      const structured = bag(result.structuredContent);
+      expect(structured.results).toEqual([]);
+      expect(String(structured.notice)).toContain('Offset (50) exceeds the 8 filings');
+      expect(String(structured.notice)).toContain(
+        '1998Q1–1999Q4; end the range at 1997-12-31 to read the older ones.',
+      );
+    });
   });
 });

@@ -22,12 +22,15 @@ const { config } = vi.hoisted(() => ({
 vi.mock('@/config/server-config.js', () => ({ getServerConfig: () => config }));
 vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => undefined }));
 
+import { CallScope } from '@/services/edgar/call-scope.js';
 import {
   getEdgarApiService,
   initEdgarApiService,
   parseMasterIndex,
   quartersInRange,
 } from '@/services/edgar/edgar-api-service.js';
+
+const scope = () => new CallScope(new AbortController().signal);
 
 /**
  * A small master.idx fixture in the real EDGAR shape: metadata preamble, column
@@ -129,7 +132,7 @@ describe('EdgarApiService.fetchFullIndexQuarter', () => {
     const fetchMock = vi.fn(async (_input: unknown) => textResponse(MASTER_IDX_FIXTURE));
     vi.stubGlobal('fetch', fetchMock);
 
-    const entries = await getEdgarApiService().fetchFullIndexQuarter(1998, 1);
+    const entries = await getEdgarApiService().fetchFullIndexQuarter(1998, 1, scope());
 
     const calledUrl = String(fetchMock.mock.calls[0]?.[0]);
     expect(calledUrl).toBe('https://www.sec.gov/Archives/edgar/full-index/1998/QTR1/master.idx');
@@ -142,8 +145,8 @@ describe('EdgarApiService.fetchFullIndexQuarter', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const api = getEdgarApiService();
-    await api.fetchFullIndexQuarter(1998, 1);
-    await api.fetchFullIndexQuarter(1998, 1);
+    await api.fetchFullIndexQuarter(1998, 1, scope());
+    await api.fetchFullIndexQuarter(1998, 1, scope());
 
     expect(fetchMock).toHaveBeenCalledOnce();
   });

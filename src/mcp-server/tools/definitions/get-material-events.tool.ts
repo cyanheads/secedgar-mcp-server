@@ -12,6 +12,7 @@ import {
   getCanvasBridge,
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, suggestCompanies } from '@/services/edgar/edgar-api-service.js';
 import {
   type DecodedEightKItem,
@@ -94,9 +95,9 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
     {
       reason: 'sec_unreachable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The last of three attempts to reach SEC EDGAR got no HTTP response — the connection failed, or no response headers arrived within 15 seconds',
+      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
       recovery:
-        'Retry the same call in a minute — SEC EDGAR could not be reached, and nothing in the request needs to change.',
+        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -273,11 +274,12 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
 
   async handler(input, ctx) {
     const api = getEdgarApiService();
-    const resolved = await api.resolveCik(input.company);
+    const scope = new CallScope(ctx.signal);
+    const resolved = await api.resolveCik(input.company, scope);
 
     if (Array.isArray(resolved)) {
       if (resolved.length === 0) {
-        const suggestions = suggestCompanies(input.company, await api.getAllEntries());
+        const suggestions = suggestCompanies(input.company, await api.getAllEntries(scope));
         const suggestionNote =
           suggestions.length > 0
             ? ` Near matches: ${suggestions.map((s) => `${s.name ?? s.cik}${s.ticker ? ` (${s.ticker})` : ''}`).join(', ')}.`
@@ -309,7 +311,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
     const isBareCikFallback = !match.name && !match.ticker;
     let submissions: Awaited<ReturnType<typeof api.getSubmissions>>;
     try {
-      submissions = await api.getSubmissions(match.cik);
+      submissions = await api.getSubmissions(match.cik, scope);
     } catch (err) {
       if (isBareCikFallback && err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
         ctx.log.debug('CIK not found in EDGAR submissions', { cik: match.cik });
@@ -338,11 +340,12 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
     // since an undated call asks for the newest `limit` and nothing older (#134).
     // Entry counts the same filtered rows as the stop test, so recent 8-Ks the
     // filter rejects never stand in for matches (#139).
-    const walk = new SubmissionsArchiveWalk(api, submissions, {
-      filedAfter,
-      filedBefore,
-      order: 'newest-first',
-    });
+    const walk = new SubmissionsArchiveWalk(
+      api,
+      submissions,
+      { filedAfter, filedBefore, order: 'newest-first' },
+      scope,
+    );
     let matchedSoFar = scanned.filter(passesItems).length;
     if (hasDateFilter || matchedSoFar < input.limit) {
       for await (const { block } of walk) {

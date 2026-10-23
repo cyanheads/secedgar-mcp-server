@@ -11,6 +11,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getBeneficialOwnersTool } from '@/mcp-server/tools/definitions/get-beneficial-owners.tool.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import type { FilingsRecent } from '@/services/edgar/types.js';
 import { blockText, wireError } from '../../../support/assertions.js';
 
@@ -183,7 +184,10 @@ describe('getBeneficialOwnersTool', () => {
       '0000320193',
       '0000000001-26-000001',
       'primary_doc.xml',
+      expect.any(CallScope),
     );
+    // The scope carries the caller's own signal, so a cancel reaches SEC (#179).
+    expect(mockApi.tryGetFilingDocument.mock.calls[0]?.[3].signal).toBe(ctx.signal);
   });
 
   it('excludes amendments when asked, and marks the ones it keeps', async () => {
@@ -486,7 +490,7 @@ describe('getBeneficialOwnersTool parameter names (#152)', () => {
       const result = await call({ [key]: 'AAPL' });
 
       expect(result.isError).toBeFalsy();
-      expect(mockApi.resolveCik).toHaveBeenCalledWith('AAPL');
+      expect(mockApi.resolveCik).toHaveBeenCalledWith('AAPL', expect.any(CallScope));
       expect(result.structuredContent).toMatchObject({
         issuer: 'AAPL',
         issuer_cik: '0000320193',

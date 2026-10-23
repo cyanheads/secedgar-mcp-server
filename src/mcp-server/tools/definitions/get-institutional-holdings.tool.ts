@@ -14,6 +14,7 @@ import {
   getCanvasBridge,
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { parseInfoTableXml, parseThirteenFCoverPage } from '@/services/edgar/ownership-parser.js';
 import {
@@ -201,9 +202,9 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     {
       reason: 'sec_unreachable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The last of three attempts to reach SEC EDGAR got no HTTP response — the connection failed, or no response headers arrived within 15 seconds',
+      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
       recovery:
-        'Retry the same call in a minute — SEC EDGAR could not be reached, and nothing in the request needs to change.',
+        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -352,17 +353,18 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
 
   async handler(input, ctx) {
     const api = getEdgarApiService();
+    const callScope = new CallScope(ctx.signal);
 
     // Resolve entity to CIK. Ticker/CIK/name go through the ticker cache first; on a
     // name miss, fall back to EFTS entity-autocomplete, which resolves any EDGAR filer —
     // institutional managers, trusts, individuals — that company_tickers.json can never
     // contain (#73). Both paths normalize to a candidate list so ambiguity is handled
     // uniformly and index 0 is never taken silently.
-    const resolved = await api.resolveCik(input.company);
+    const resolved = await api.resolveCik(input.company, callScope);
     const candidates: Array<{ cik: string; name: string | undefined; ticker: string | undefined }> =
       Array.isArray(resolved)
         ? resolved.length === 0
-          ? (await api.resolveEntityByName(input.company)).map((m) => ({
+          ? (await api.resolveEntityByName(input.company, callScope)).map((m) => ({
               cik: m.cik,
               name: m.name,
               ticker: undefined,
@@ -407,7 +409,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     // both the bare-CIK 404 recovery (#76) and operating-company classification (#86).
     let submissions: Awaited<ReturnType<typeof api.getSubmissions>>;
     try {
-      submissions = await api.getSubmissions(match.cik);
+      submissions = await api.getSubmissions(match.cik, callScope);
     } catch (err) {
       if (isBareCikFallback && err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
         ctx.log.debug('CIK has no submissions feed', { cik: match.cik });
@@ -444,10 +446,12 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       // end and stop on the first page holding a report or notice for it (#117, #133).
       // A quarter ending on or after the window's oldest filing selects no page.
       if (!filingMeta && !notice) {
-        walk = new SubmissionsArchiveWalk(api, submissions, {
-          filedAfter: periodEnd,
-          order: 'oldest-first',
-        });
+        walk = new SubmissionsArchiveWalk(
+          api,
+          submissions,
+          { filedAfter: periodEnd, order: 'oldest-first' },
+          callScope,
+        );
         for await (const { block } of walk) {
           const rows = thirteenFRows(block);
           filesThirteenF ||= rows.length > 0;
@@ -532,7 +536,11 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     }
 
     // Get the filing index to find the information table document
-    const filingIndex = await api.tryGetFilingIndex(match.cik, filingMeta.accessionNumber);
+    const filingIndex = await api.tryGetFilingIndex(
+      match.cik,
+      filingMeta.accessionNumber,
+      callScope,
+    );
     if (!filingIndex) {
       throw ctx.fail(
         'no_info_table',
@@ -556,6 +564,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       match.cik,
       filingMeta.accessionNumber,
       infoTableDoc,
+      callScope,
     );
     if (!xmlText) {
       throw ctx.fail(
@@ -571,6 +580,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       match.cik,
       filingMeta.accessionNumber,
       'primary_doc.xml',
+      callScope,
     );
     const { filerName, reportingPeriod } = primaryXml
       ? parseThirteenFCoverPage(primaryXml)

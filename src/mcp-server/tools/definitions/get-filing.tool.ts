@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import { filingArchiveUrl, getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import type { FilingDocumentHeader, FilingHeaders } from '@/services/edgar/filing-headers.js';
 import {
@@ -19,6 +20,7 @@ import {
   MARKER_TITLE_RE,
   matchSectionLine,
   setExtractCache,
+  spaceRunInMarker,
   windowText,
   withoutSubItemLabel,
 } from '@/services/edgar/filing-to-text.js';
@@ -221,9 +223,9 @@ export const getFilingTool = tool('secedgar_get_filing', {
     {
       reason: 'sec_unreachable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The last of three attempts to reach SEC EDGAR got no HTTP response — the connection failed, or no response headers arrived within 15 seconds',
+      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
       recovery:
-        'Retry the same call in a minute — SEC EDGAR could not be reached, and nothing in the request needs to change.',
+        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -280,7 +282,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .min(1)
       .optional()
       .describe(
-        "Jump to a named section, matched against every detected heading and the document's own lines (e.g. 'risk factors', 'item 7', 'item 2.02', 'certain relationships'). The first match wins, in this order: a heading equal to the value, or whose title after its Item/Part marker equals it; the first Item or Part heading containing it; a document line equal to it — a subheading the outline omits ('Liquidity and Capital Resources'); the first other heading containing it; a document line starting with it. In a proxy statement (DEF 14A and its variants), whose ITEM headings are ballot proposals, the first heading of any kind containing the value comes before both document-line steps. Within each heading step a body heading wins over a table-of-contents row, which lands only when nothing else at that step matches. A line landing says so in the notice; table-of-contents rows and wrapped cross-references are never line landings. A leading 20-F sub-item label on a heading or line ('3D.', 'B.') is ignored, so 'risk factors' reaches '3D. RISK FACTORS'; the value itself is matched as given. A value ending in a number matches only that number: 'item 1' reaches Item 1 and Item 1A, never Items 10–16, and 'part i' never reaches Part II. Every step ignores case, whitespace, and quote style, so a heading copied from the outline resolves whether it carries the filing's non-breaking spaces and curly quotes or plain ones; the steps comparing a whole heading or line (equal to, starting with) also ignore the punctuation between an Item or Part marker and its title, so 'Item 1A Risk Factors' reaches 'Item 1A. – Risk Factors'. Takes precedence over offset when both are provided, so leave it out when paging on with next_offset. On a miss, the error message includes the detected outline so you can pick the correct heading.",
+        "Jump to a named section, matched against every detected heading and the document's own lines (e.g. 'risk factors', 'item 7', 'item 2.02', 'certain relationships'). The first match wins, in this order: a heading equal to the value, or whose title after its Item/Part marker equals it; the first Item or Part heading containing it; a document line equal to it — a subheading the outline omits ('Liquidity and Capital Resources') — unless the line labels a table row; the first other heading containing it; a table-row label equal to it, else a document line starting with it. In a proxy statement (DEF 14A and its variants), whose ITEM headings are ballot proposals, the first heading of any kind containing the value comes before both document-line steps. Within each heading step a body heading wins over a table-of-contents row, which lands only when nothing else at that step matches. A line landing says so in the notice; table-of-contents rows and wrapped cross-references are never line landings. A leading 20-F sub-item label on a heading or line ('3D.', 'B.') is ignored, so 'risk factors' reaches '3D. RISK FACTORS'; the value itself is matched as given. A value ending in a number matches only that number: 'item 1' reaches Item 1 and Item 1A, never Items 10–16, and 'part i' never reaches Part II. Every step ignores case, whitespace, and quote style, so a heading copied from the outline resolves whether it carries the filing's non-breaking spaces and curly quotes or plain ones; the steps comparing a whole heading or line (equal to, starting with) also ignore the punctuation between an Item or Part marker and its title, so 'Item 1A Risk Factors' reaches 'Item 1A. – Risk Factors'. Takes precedence over offset when both are provided, so leave it out when paging on with next_offset. On a miss, the error message includes the detected outline so you can pick the correct heading.",
       ),
   }),
 
@@ -372,6 +374,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
 
   async handler(input, ctx) {
     const api = getEdgarApiService();
+    const scope = new CallScope(ctx.signal);
 
     const accn = normalizeAccessionNumber(input.accession_number);
     const documentKey = input.document ?? PRIMARY_SENTINEL;
@@ -390,7 +393,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
 
     if (cached === undefined) {
       // Cache miss — fetch, convert, and cache.
-      const resolved = await resolveFilingArchive(api, accn, input.cik, input.document);
+      const resolved = await resolveFilingArchive(api, scope, accn, input.cik, input.document);
       if (!resolved.ok) {
         if (resolved.kind === 'document_not_found') {
           // Render candidates into the message itself — clients reliably see only
@@ -491,7 +494,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       // archive served the cached text (no candidate search, no document body fetch).
       // A resolution failure here is a real failure (EDGAR index unavailable or the
       // filing gone): fail honestly rather than fabricating placeholder metadata.
-      const metaResolved = await resolveFilingMeta(api, accn, cached.cik, input.document);
+      const metaResolved = await resolveFilingMeta(api, scope, accn, cached.cik, input.document);
       if (!metaResolved.ok) {
         throw ctx.fail('filing_not_found', `Filing '${accn}' could not be resolved.`, {
           accession_number: accn,
@@ -526,7 +529,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
     const header =
       idx >= 0
         ? undefined
-        : (headers?.submission ?? (await api.tryGetSubmissionHeader(resolvedCik, accn)));
+        : (headers?.submission ?? (await api.tryGetSubmissionHeader(resolvedCik, accn, scope)));
 
     const form = idx >= 0 ? recent.form[idx] : header?.form;
     const filingDate = idx >= 0 ? recent.filingDate[idx] : header?.filingDate;
@@ -700,6 +703,18 @@ export const getFilingTool = tool('secedgar_get_filing', {
 });
 
 /**
+ * A heading or `section` value folded for {@link sectionMatches}: Unicode
+ * whitespace runs and typographic quotes folded on both operands, so a heading
+ * re-sent from a rendered outline still matches the bytes it came from (#106),
+ * with a space read in where a marker runs straight into its title
+ * ({@link spaceRunInMarker}, #180) before the fold lowercases the capital that
+ * marks it.
+ */
+function foldForSectionMatch(value: string): string {
+  return foldForHeadingMatch(spaceRunInMarker(value));
+}
+
+/**
  * Whether a folded `section` needle matches a folded heading: a substring match,
  * except that a needle ending in a number never continues into a longer one.
  * A trailing digit never runs on into another digit — `item 1` matches `Item 1.`
@@ -711,6 +726,9 @@ export const getFilingTool = tool('secedgar_get_filing', {
  * `part i` never matches `PART II`, `PART III`, or `PART IV` — a 10-Q printing
  * Part I only in its table of contents otherwise landed `part i` on its body
  * `PART II - OTHER INFORMATION`. Every occurrence is checked, not just the first.
+ * Both operands arrive folded with a run-in marker spaced
+ * ({@link foldForSectionMatch}), so the numeral of "Part IFinancial Information"
+ * ends where heading detection ends it (#180).
  */
 function sectionMatches(heading: string, needle: string): boolean {
   const continuation = /\d$/.test(needle)
@@ -778,11 +796,15 @@ interface SectionLanding {
  * 2. The first Item or Part heading that {@link sectionMatches}: a value inside
  *    an Item title names that Item ("compensation" → "Item 11. Executive
  *    Compensation"), where a line equal to it is often a table-row label.
- * 3. A document line equal to the value ({@link matchSectionLine}).
+ * 3. A document line equal to the value ({@link matchSectionLine}) that labels
+ *    no table row.
  * 4. The first other heading that {@link sectionMatches}. One that merely holds
  *    the word ("NOTE 3. BUSINESS COMBINATIONS" for "business", "COST OF
  *    REVENUES" for "revenue") ranks after a line printing the value alone.
- * 5. A document line starting with the value.
+ * 5. A document line equal to the value that labels a table row, else one
+ *    starting with the value. A row label ranks after every heading containing
+ *    the value (#184): every line equal to `revenue` in Microsoft's 2004 10-K
+ *    labels a row, and in tier 3 one took the value from its MD&A heading.
  *
  * Inside each heading tier, a heading on a table-of-contents row
  * ({@link isTocHeading}) ranks after every body heading of the tier, and lands
@@ -841,18 +863,15 @@ function resolveSection(
     return labelled ? 1 : undefined;
   });
   if (exact) return { offset: exact.offset, source: 'heading' };
-  // Fold both operands (Unicode whitespace runs, typographic quotes) so a
-  // heading re-sent from a rendered outline still matches the bytes it came
-  // from (#106).
-  const needle = foldForHeadingMatch(section);
-  const contains = (h: FilingHeading) => sectionMatches(foldForHeadingMatch(h.heading), needle);
+  const needle = foldForSectionMatch(section);
+  const contains = (h: FilingHeading) => sectionMatches(foldForSectionMatch(h.heading), needle);
   if (proxy) {
     const heading = first(contains);
     if (heading) return { offset: heading.offset, source: 'heading' };
     const line = matchSectionLine(text, section);
     return line ? { offset: line.offset, source: 'line' } : undefined;
   }
-  const itemOrPart = first((h) => STRUCTURAL_HEADING_RE.test(h.heading) && contains(h));
+  const itemOrPart = first((h) => isStructuralHeading(h) && contains(h));
   if (itemOrPart) return { offset: itemOrPart.offset, source: 'heading' };
   const line = matchSectionLine(text, section);
   // Tier 2 missed, so any heading containing the value is a non-Item one.
@@ -883,8 +902,18 @@ const PROXY_FORM_RE = /^(?:DEF|PRE)[ACMNR]? ?14[AC]\b/;
 
 /** Most headings an outline renders, on the first page and in a section_not_found message. */
 const OUTLINE_MAX_ENTRIES = 50;
-/** An Item or Part heading, bare marker included — the document's structure. */
+/** An Item or Part heading's opening, bare marker included. Non-global: a predicate. */
 const STRUCTURAL_HEADING_RE = /^(?:items?\s+\d|part\s+[ivx]{1,4}\b)/i;
+
+/**
+ * Whether a heading is an Item or Part heading — the document's structure. Read
+ * with its run-in marker spaced ({@link spaceRunInMarker}), so "Part
+ * IFinancial Information" is Part I's heading (#180), while a numeral running on
+ * into a lowercase letter ("Part Ivory") stays out.
+ */
+function isStructuralHeading(h: FilingHeading): boolean {
+  return STRUCTURAL_HEADING_RE.test(spaceRunInMarker(h.heading));
+}
 
 /**
  * The Item and Part headings an outline keeps. Past {@link OUTLINE_MAX_ENTRIES}
@@ -895,7 +924,7 @@ const STRUCTURAL_HEADING_RE = /^(?:items?\s+\d|part\s+[ivx]{1,4}\b)/i;
  * Items 16A–19 out. A bare marker no titled heading repeats stays.
  */
 function outlineStructuralHeadings(headings: FilingHeading[]): FilingHeading[] {
-  const structural = headings.filter((h) => STRUCTURAL_HEADING_RE.test(h.heading));
+  const structural = headings.filter(isStructuralHeading);
   if (structural.length <= OUTLINE_MAX_ENTRIES) return structural;
   const titledLater = new Set<string>();
   const kept: FilingHeading[] = [];
@@ -922,7 +951,7 @@ function selectOutline(headings: FilingHeading[]): FilingHeading[] {
   const outline: FilingHeading[] = [];
   for (const h of headings) {
     if (structural.has(h)) outline.push(h);
-    else if (otherSlots > 0 && !STRUCTURAL_HEADING_RE.test(h.heading)) {
+    else if (otherSlots > 0 && !isStructuralHeading(h)) {
       outline.push(h);
       otherSlots--;
     }
@@ -938,7 +967,7 @@ function selectOutline(headings: FilingHeading[]): FilingHeading[] {
 function outlineCutNote(outline: FilingHeading[], detected: FilingHeading[]): string | undefined {
   if (outline.length === detected.length) return;
   const kept = outlineStructuralHeadings(detected).length;
-  const structural = detected.filter((h) => STRUCTURAL_HEADING_RE.test(h.heading)).length;
+  const structural = detected.filter(isStructuralHeading).length;
   const scope =
     kept > OUTLINE_MAX_ENTRIES
       ? ''
@@ -1011,11 +1040,12 @@ function normalizeAccessionNumber(input: string): string {
  */
 async function resolveFilingArchive(
   api: ReturnType<typeof getEdgarApiService>,
+  scope: CallScope,
   accessionNumber: string,
   providedCik: string | undefined,
   requestedDocument: string | undefined,
 ): Promise<ResolveOutcome> {
-  const candidateCiks = await resolveCandidateCiks(api, accessionNumber, providedCik);
+  const candidateCiks = await resolveCandidateCiks(api, scope, accessionNumber, providedCik);
   /** The last archive path whose index exists, with its records, for the error catalog. */
   let lastIndexed: { items: FilingIndexItem[]; records: FilingRecords } | undefined;
   /** First archive path whose index named a primary the archive answered 404 for. */
@@ -1025,12 +1055,12 @@ async function resolveFilingArchive(
   let requestedNotServed = false;
 
   for (const cik of candidateCiks) {
-    const index = await api.tryGetFilingIndex(cik, accessionNumber);
+    const index = await api.tryGetFilingIndex(cik, accessionNumber, scope);
     if (!index) continue;
 
     // Records name the primary every outcome below reports, error catalogs included.
     const items = index.directory.item;
-    const records = await readFilingRecords(api, cik, accessionNumber);
+    const records = await readFilingRecords(api, scope, cik, accessionNumber);
     lastIndexed = { items, records };
     if (requestedDocument && !items.some((item) => item.name === requestedDocument)) continue;
 
@@ -1059,7 +1089,7 @@ async function resolveFilingArchive(
       };
     }
 
-    const html = await api.tryGetFilingDocument(cik, accessionNumber, targetName);
+    const html = await api.tryGetFilingDocument(cik, accessionNumber, targetName, scope);
     if (html) return { ok: true, cik, html, index, targetName, filingPrimaryName, records };
     if (requestedDocument) requestedNotServed = true;
     else unserved ??= { cik, index, primary: targetName, records };
@@ -1075,7 +1105,7 @@ async function resolveFilingArchive(
    */
   const submission = `${accessionNumber}.txt`;
   if (unserved && unserved.primary !== submission) {
-    const html = await api.tryGetFilingDocument(unserved.cik, accessionNumber, submission);
+    const html = await api.tryGetFilingDocument(unserved.cik, accessionNumber, submission, scope);
     if (html) {
       return {
         ok: true,
@@ -1132,11 +1162,12 @@ type MetaOutcome =
  */
 async function resolveFilingMeta(
   api: ReturnType<typeof getEdgarApiService>,
+  scope: CallScope,
   accessionNumber: string,
   cik: string,
   requestedDocument: string | undefined,
 ): Promise<MetaOutcome> {
-  const index = await api.tryGetFilingIndex(cik, accessionNumber);
+  const index = await api.tryGetFilingIndex(cik, accessionNumber, scope);
   if (!index) return { ok: false };
 
   const items = index.directory.item;
@@ -1144,7 +1175,7 @@ async function resolveFilingMeta(
     return { ok: false };
   }
 
-  const records = await readFilingRecords(api, cik, accessionNumber);
+  const records = await readFilingRecords(api, scope, cik, accessionNumber);
   const filingPrimaryName = findPrimaryDocument(items, accessionNumber, records);
   if (!filingPrimaryName) return { ok: false };
 
@@ -1158,24 +1189,26 @@ async function resolveFilingMeta(
  */
 async function readFilingRecords(
   api: ReturnType<typeof getEdgarApiService>,
+  scope: CallScope,
   cik: string,
   accessionNumber: string,
 ): Promise<FilingRecords> {
   const [submissions, headers] = await Promise.all([
-    api.getSubmissions(cik),
-    api.tryGetFilingHeaders(cik, accessionNumber),
+    api.getSubmissions(cik, scope),
+    api.tryGetFilingHeaders(cik, accessionNumber, scope),
   ]);
   return { headers, submissions };
 }
 
 async function resolveCandidateCiks(
   api: ReturnType<typeof getEdgarApiService>,
+  scope: CallScope,
   accessionNumber: string,
   providedCik: string | undefined,
 ): Promise<string[]> {
   if (providedCik) return [providedCik.padStart(10, '0')];
 
-  const ciks = await api.findFilingCiks(accessionNumber);
+  const ciks = await api.findFilingCiks(accessionNumber, scope);
   const prefixCik = (accessionNumber.split('-')[0] ?? accessionNumber.slice(0, 10)).padStart(
     10,
     '0',

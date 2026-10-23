@@ -28,8 +28,11 @@ vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => mirro
 
 import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials.tool.js';
 import { getSnapshotTool } from '@/mcp-server/tools/definitions/get-snapshot.tool.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, initEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { blockText, caught } from '../../support/assertions.js';
+
+const scope = () => new CallScope(new AbortController().signal);
 
 const VISA_CIK = '0001403161';
 
@@ -107,6 +110,7 @@ describe('XBRL unit validation at the service edge (#141)', () => {
       VISA_CIK,
       'us-gaap',
       'NetIncomeLoss',
+      scope(),
     );
     expect(concept?.tag).toBe('NetIncomeLoss');
     expect(concept?.units).toEqual({});
@@ -114,7 +118,7 @@ describe('XBRL unit validation at the service edge (#141)', () => {
 
   it('drops the same shape from a companyfacts payload, leaving well-formed tags intact', async () => {
     stubSec();
-    const facts = await getEdgarApiService().tryGetCompanyFacts(VISA_CIK);
+    const facts = await getEdgarApiService().tryGetCompanyFacts(VISA_CIK, scope());
     expect(facts?.facts['us-gaap']?.Assets?.units).toEqual({});
     expect(facts?.facts['us-gaap']?.NetIncomeLoss?.units.USD).toEqual([tenK]);
   });
@@ -132,6 +136,7 @@ describe('XBRL unit validation at the service edge (#141)', () => {
       VISA_CIK,
       'us-gaap',
       'NetIncomeLoss',
+      scope(),
     );
     expect(concept?.units).toEqual({ EUR: [tenK] });
   });

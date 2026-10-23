@@ -11,6 +11,7 @@ import {
   getCanvasBridge,
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
+import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, suggestCompanies } from '@/services/edgar/edgar-api-service.js';
 import { SubmissionsArchiveWalk } from '@/services/edgar/submissions-archive.js';
 import type { FilingsRecent } from '@/services/edgar/types.js';
@@ -126,9 +127,9 @@ export const companySearchTool = tool('secedgar_company_search', {
     {
       reason: 'sec_unreachable',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'The last of three attempts to reach SEC EDGAR got no HTTP response — the connection failed, or no response headers arrived within 15 seconds',
+      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
       recovery:
-        'Retry the same call in a minute — SEC EDGAR could not be reached, and nothing in the request needs to change.',
+        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -296,12 +297,13 @@ export const companySearchTool = tool('secedgar_company_search', {
 
   async handler(input, ctx) {
     const api = getEdgarApiService();
-    const resolved = await api.resolveCik(input.query);
+    const scope = new CallScope(ctx.signal);
+    const resolved = await api.resolveCik(input.query, scope);
 
     if (Array.isArray(resolved)) {
       if (resolved.length === 0) {
         // Run trigram suggestions on the zero-hit name-search path.
-        const allEntries = await api.getAllEntries();
+        const allEntries = await api.getAllEntries(scope);
         const suggestions = suggestCompanies(input.query, allEntries);
         const suggestionNote =
           suggestions.length > 0
@@ -344,7 +346,7 @@ export const companySearchTool = tool('secedgar_company_search', {
     const isBareCikFallback = !match.name && !match.ticker;
     let submissions: Awaited<ReturnType<typeof api.getSubmissions>>;
     try {
-      submissions = await api.getSubmissions(match.cik);
+      submissions = await api.getSubmissions(match.cik, scope);
     } catch (err) {
       if (isBareCikFallback && err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
         ctx.log.debug('CIK not found in EDGAR submissions', {
@@ -397,11 +399,12 @@ export const companySearchTool = tool('secedgar_company_search', {
       const bridge = getCanvasBridge();
 
       const archiveMatched: FilingEntry[] = [];
-      const walk = new SubmissionsArchiveWalk(api, submissions, {
-        filedAfter,
-        filedBefore,
-        order: 'newest-first',
-      });
+      const walk = new SubmissionsArchiveWalk(
+        api,
+        submissions,
+        { filedAfter, filedBefore, order: 'newest-first' },
+        scope,
+      );
 
       if (hasDateFilter || underFill) {
         for await (const { block } of walk) {

@@ -22,11 +22,14 @@ const { config } = vi.hoisted(() => ({
 vi.mock('@/config/server-config.js', () => ({ getServerConfig: () => config }));
 vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => undefined }));
 
+import { CallScope } from '@/services/edgar/call-scope.js';
 import {
   filingArchiveUrl,
   getEdgarApiService,
   initEdgarApiService,
 } from '@/services/edgar/edgar-api-service.js';
+
+const scope = () => new CallScope(new AbortController().signal);
 
 const ACCESSION = '0000320193-25-000079';
 const FILING_DIR = 'https://www.sec.gov/Archives/edgar/data/320193/000032019325000079';
@@ -68,7 +71,9 @@ describe('EdgarApiService — request URL shape (#156)', () => {
 
     it('tryGetFilingIndex', async () => {
       const fetchMock = serveOnly(`${FILING_DIR}/index.json`, '{"directory":{"item":[]}}');
-      await expect(getEdgarApiService().tryGetFilingIndex(cik, ACCESSION)).resolves.toEqual({
+      await expect(
+        getEdgarApiService().tryGetFilingIndex(cik, ACCESSION, scope()),
+      ).resolves.toEqual({
         directory: { item: [] },
       });
       expect(fetchMock).toHaveBeenCalledOnce();
@@ -76,20 +81,20 @@ describe('EdgarApiService — request URL shape (#156)', () => {
 
     it('tryGetFilingHeaders', async () => {
       const fetchMock = serveOnly(`${FILING_DIR}/${ACCESSION}-index-headers.html`, '<HTML></HTML>');
-      await getEdgarApiService().tryGetFilingHeaders(cik, ACCESSION);
+      await getEdgarApiService().tryGetFilingHeaders(cik, ACCESSION, scope());
       expect(fetchMock).toHaveBeenCalledOnce();
     });
 
     it('tryGetSubmissionHeader', async () => {
       const fetchMock = serveOnly(`${FILING_DIR}/${ACCESSION}.hdr.sgml`, '<SEC-HEADER>');
-      await getEdgarApiService().tryGetSubmissionHeader(cik, ACCESSION);
+      await getEdgarApiService().tryGetSubmissionHeader(cik, ACCESSION, scope());
       expect(fetchMock).toHaveBeenCalledOnce();
     });
 
     it('getFilingDocument', async () => {
       const fetchMock = serveOnly(`${FILING_DIR}/aapl-20250927.htm`, '<html>10-K</html>');
       await expect(
-        getEdgarApiService().getFilingDocument(cik, ACCESSION, 'aapl-20250927.htm'),
+        getEdgarApiService().getFilingDocument(cik, ACCESSION, 'aapl-20250927.htm', scope()),
       ).resolves.toBe('<html>10-K</html>');
       expect(fetchMock).toHaveBeenCalledOnce();
     });
@@ -97,7 +102,7 @@ describe('EdgarApiService — request URL shape (#156)', () => {
     it('tryGetFilingDocument', async () => {
       const fetchMock = serveOnly(`${FILING_DIR}/primary_doc.xml`, '<ownershipDocument/>');
       await expect(
-        getEdgarApiService().tryGetFilingDocument(cik, ACCESSION, 'primary_doc.xml'),
+        getEdgarApiService().tryGetFilingDocument(cik, ACCESSION, 'primary_doc.xml', scope()),
       ).resolves.toBe('<ownershipDocument/>');
       expect(fetchMock).toHaveBeenCalledOnce();
     });
@@ -105,10 +110,13 @@ describe('EdgarApiService — request URL shape (#156)', () => {
     it('tryGetFilingDocumentHead', async () => {
       const fetchMock = serveOnly(`${FILING_DIR}/primary_doc.xml`, '<edgarSubmission><seriesId>');
       await expect(
-        getEdgarApiService().tryGetFilingDocumentHead(cik, ACCESSION, 'primary_doc.xml', {
-          maxBytes: 1_000_000,
-          stopAt: '</seriesId>',
-        }),
+        getEdgarApiService().tryGetFilingDocumentHead(
+          cik,
+          ACCESSION,
+          'primary_doc.xml',
+          { maxBytes: 1_000_000, stopAt: '</seriesId>' },
+          scope(),
+        ),
       ).resolves.toBe('<edgarSubmission><seriesId>');
       expect(fetchMock).toHaveBeenCalledOnce();
     });
@@ -125,7 +133,7 @@ describe('EdgarApiService — request URL shape (#156)', () => {
         'https://data.sec.gov/submissions/CIK0000320193.json',
         '{"cik":"320193","name":"Apple Inc."}',
       );
-      await expect(getEdgarApiService().getSubmissions(cik)).resolves.toMatchObject({
+      await expect(getEdgarApiService().getSubmissions(cik, scope())).resolves.toMatchObject({
         name: 'Apple Inc.',
       });
       expect(fetchMock).toHaveBeenCalledOnce();
@@ -136,7 +144,7 @@ describe('EdgarApiService — request URL shape (#156)', () => {
         'https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json',
         '{"cik":320193,"entityName":"Apple Inc.","facts":{}}',
       );
-      await expect(getEdgarApiService().tryGetCompanyFacts(cik)).resolves.toMatchObject({
+      await expect(getEdgarApiService().tryGetCompanyFacts(cik, scope())).resolves.toMatchObject({
         entityName: 'Apple Inc.',
       });
       expect(fetchMock).toHaveBeenCalledOnce();
@@ -148,7 +156,7 @@ describe('EdgarApiService — request URL shape (#156)', () => {
         '{"cik":320193,"tag":"Revenues","units":{}}',
       );
       await expect(
-        getEdgarApiService().tryGetCompanyConcept(cik, 'us-gaap', 'Revenues'),
+        getEdgarApiService().tryGetCompanyConcept(cik, 'us-gaap', 'Revenues', scope()),
       ).resolves.toMatchObject({ tag: 'Revenues' });
       expect(fetchMock).toHaveBeenCalledOnce();
     });
