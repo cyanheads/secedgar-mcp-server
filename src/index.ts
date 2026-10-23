@@ -5,6 +5,7 @@
  */
 
 import { createApp } from '@cyanheads/mcp-ts-core';
+import { parseConfig, resetConfig } from '@cyanheads/mcp-ts-core/config';
 import {
   requestContextService,
   runtimeCaps,
@@ -20,11 +21,12 @@ import { initCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { disposeEdgarApiService, initEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { closeEdgarMirror, initEdgarMirror } from '@/services/edgar/mirror/index.js';
 
-// DuckDB is the only canvas engine we support and ships as a direct dep, so
-// enable the canvas by default. Set CANVAS_PROVIDER_TYPE=none explicitly to
-// turn it off (e.g. on Cloudflare Workers, where DuckDB has no V8-isolate
-// build and the framework would fail to construct a canvas anyway).
-process.env.CANVAS_PROVIDER_TYPE ??= 'duckdb';
+// DuckDB ships as a direct dependency, so the canvas defaults on once .env has
+// loaded. Set CANVAS_PROVIDER_TYPE=none to turn it off (e.g. on Cloudflare
+// Workers, where DuckDB has no V8-isolate build).
+parseConfig();
+process.env.CANVAS_PROVIDER_TYPE ||= 'duckdb';
+resetConfig();
 
 // secedgar_dataframe_drop is the only destructive tool on this server and is
 // off by default — TTL handles cleanup. Set EDGAR_DATAFRAME_DROP_ENABLED=true

@@ -21,6 +21,7 @@
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
         "MCP_AUTH_MODE": "none",
+        "CANVAS_PROVIDER_TYPE": "none",
         "NODE_ENV": "production",
         "EDGAR_USER_AGENT": "${user_config.EDGAR_USER_AGENT}",
         "EDGAR_RATE_LIMIT_COOLDOWN_SECONDS": "${user_config.EDGAR_RATE_LIMIT_COOLDOWN_SECONDS}",
