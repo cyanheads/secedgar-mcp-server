@@ -91,7 +91,7 @@
     "bun": ">=1.4.0",
     "node": ">=24.0.0"
   },
-  "packageManager": "bun@1.4.3",
+  "packageManager": "bun@1.4.4",
   "publishConfig": {
     "access": "public"
   },
@@ -114,8 +114,8 @@
     "@types/html-to-text": "^9.0.4",
     "@types/node": "^26.6.5",
     "depcheck": "^1.4.7",
-    "ignore": "^7.0.12",
-    "tsc-alias": "^1.9.7",
+    "ignore": "^7.0.13",
+    "tsc-alias": "^1.9.8",
     "typescript": "^7.0.2",
     "vitest": "^5.0.5"
   },
