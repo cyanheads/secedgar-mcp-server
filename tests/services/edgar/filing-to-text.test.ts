@@ -994,6 +994,192 @@ describe('detectHeadings — dotted 8-K Item headings (#165)', () => {
     expect(miss.isError).toBe(true);
     expect(contentText(miss)).toContain(`] Item${NBSP}5.02. ${TITLE_502}`);
   });
+
+  // #180: a non-dotted code abuts its title past its period, or with no period
+  // when the title opens on a capital followed by a lowercase letter.
+  it.each([
+    [
+      'past its period',
+      'Item 2.Management’s Discussion and Analysis of Financial Condition and Results of Operations',
+    ],
+    ['past a lettered code’s period', 'Item 1A.Risk Factors'],
+    ['past a 20-F code’s period', 'Item 16A.Audit Committee Financial Expert'],
+    ['with no period', 'Item 1Financial Statements'],
+    ['with no period after a lettered code', 'Item 16KCybersecurity'],
+    ['a Part numeral with no period', 'Part IFinancial Information'],
+    ['a longer Part numeral with no period', 'Part IVExhibits and Financial Statement Schedules'],
+  ])('detects a non-dotted marker abutting its title %s (#180)', (_label, line) => {
+    const text = `Preceding paragraph.\n\n${line}\n\nFollowing paragraph.\n`;
+    expect(detectHeadings(text)).toEqual([{ heading: line, offset: text.indexOf(line) }]);
+  });
+
+  // Characterization (#180): a digit after the period stays part of the code, an
+  // unpunctuated code runs into a title only at a capital and a lowercase letter,
+  // and the spaced and all-caps forms read as they did.
+  it.each([
+    ['a period before a lone digit', 'Item 2.0 something', []],
+    ['an all-caps title run into a lettered code', 'Item 1ARISK FACTORS', []],
+    ['a lowercase title run into the code', 'Item 1financial statements', []],
+    ['a lowercase title run into a Part numeral', 'Part Ifinancial information', []],
+    ['a lettered code and a spaced title', 'Item 1A Risk Factors', ['Item 1A Risk Factors']],
+    ['a bare longer Part numeral', 'PART IV', ['PART IV']],
+    [
+      'an all-caps title past its period',
+      'ITEM 2.MANAGEMENT’S DISCUSSION AND ANALYSIS',
+      ['ITEM 2.MANAGEMENT’S DISCUSSION AND ANALYSIS'],
+    ],
+  ])('reads %s as before (#180)', (_label, line, headings) => {
+    const text = `Preceding paragraph.\n\n${line}\n\nFollowing paragraph.\n`;
+    expect(detectHeadings(text).map((h) => h.heading)).toEqual(headings);
+  });
+
+  it.each([
+    ['abutting markers', 'Item 2.Item 3.Item 4.'],
+    ['abutting all-caps markers', 'ITEM 2.ITEM 3.ITEM 4.'],
+    ['a dotted code abutting the next marker', 'Item 9.01Item 9.02'],
+    ['a page cell abutting the next marker', 'Item 2. Properties 3Item 3. Legal Proceedings 4'],
+  ])('reads a TOC run together at %s as no heading (#180)', (_label, line) => {
+    const text = `Preceding paragraph.\n\n${line}\n\nFollowing paragraph.\n`;
+    expect(detectHeadings(text)).toEqual([]);
+  });
+
+  // Characterization: a title citing another Item in quotes or parentheses is no TOC.
+  it.each([
+    ['in quotes', 'Item 7. Liquidity, discussed with “Item 8 Financial Statements”'],
+    ['in parentheses', 'Item 9B. Other Information (Item 408 of Regulation S-K)'],
+  ])('keeps an Item heading whose title cites another Item %s (#180)', (_label, line) => {
+    const text = `Preceding paragraph.\n\n${line}\n\nFollowing paragraph.\n`;
+    expect(detectHeadings(text).map((h) => h.heading)).toEqual([line]);
+  });
+
+  it('lands get_filing section "item 3" past a TOC run together at abutting markers (#180)', async () => {
+    const text = 'Item 2.Item 3.Item 4.\n\nProse.\n\nItem 3. Legal Proceedings\n\nLegal prose.\n';
+    const page = await sectionPage('0000000001-26-000001', '10-Q', text, 'item 3');
+    expect(page.content.startsWith('Item 3. Legal Proceedings\n\nLegal prose.')).toBe(true);
+    expect(page.rendered).toContain('Item 3. Legal Proceedings');
+  });
+
+  it('reads a run-in Item line under a line ending mid-sentence as prose (#180)', () => {
+    const text =
+      'Prose.\n\nas described in Part II,\nItem 8Financial Statements of this report\n\nItem 8. Financial Statements\n\nBody.\n';
+    expect(detectHeadings(text).map((h) => h.heading)).toEqual(['Item 8. Financial Statements']);
+  });
+
+  // Characterization: the same run-in line under a sentence end stays a heading.
+  it('keeps a run-in Item line under a finished sentence (#180)', () => {
+    const text = 'Prose.\n\nThe report follows.\nItem 8Financial Statements\n\nBody.\n';
+    expect(detectHeadings(text).map((h) => h.heading)).toEqual(['Item 8Financial Statements']);
+  });
+
+  it('dedups a TOC row against a body marker that abuts its title (#180)', () => {
+    const text =
+      'Part I. Financial Information      3\n\nItem 1. Financial Statements      3\n\n' +
+      '----------------------------------------\n\n' +
+      'Part IFinancial Information\n\nItem 1Financial Statements\n\nStatements prose.\n';
+    expect(detectHeadings(text)).toEqual([
+      { heading: 'Part IFinancial Information', offset: text.indexOf('Part IFinancial') },
+      { heading: 'Item 1Financial Statements', offset: text.indexOf('Item 1Financial') },
+    ]);
+  });
+
+  it('drops a bare TOC Part that a body Part abutting its title repeats (#180)', () => {
+    const text = 'Part I\n\n3\n\nPart II\n\n30\n\n----\n\nPart IFinancial Information\n\nProse.\n';
+    expect(detectHeadings(text)).toEqual([
+      { heading: 'Part II', offset: text.indexOf('Part II') },
+      { heading: 'Part IFinancial Information', offset: text.indexOf('Part IFinancial') },
+    ]);
+  });
+
+  /**
+   * A 10-Q shaped like New Peoples Bankshares' 0001903596-26-000307: a TOC run
+   * together on one line, then body markers that abut their titles.
+   */
+  const ABUTTING_10Q = [
+    'PART I FINANCIAL INFORMATION   3         Item 2. Management’s Discussion and Analysis of Financial Condition and Results of Operations   25         PART II OTHER INFORMATION             Item 1A. Risk Factors   35         SIGNATURES   37',
+    '',
+    ' ',
+    '',
+    'Part IFinancial Information',
+    '',
+    '',
+    '',
+    'Item 1Financial Statements',
+    '',
+    ' ',
+    '',
+    'Statements prose.',
+    '',
+    'Item 2.Management’s Discussion and Analysis of Financial Condition and Results of Operations',
+    '',
+    ' ',
+    '',
+    'Caution About Forward-Looking Statements',
+    '',
+    'Item 4.Controls and Procedures',
+    '',
+    'Controls prose.',
+    '',
+    'Part II Other Information',
+    '',
+    ' ',
+    '',
+    'Item 1.Legal Proceedings',
+    '',
+    'In the course of operations, we may become a party to legal proceedings.',
+    '',
+    'Item 1A.Risk Factors',
+    '',
+    'Not Applicable.',
+    '',
+    'Item 6.Exhibits',
+    '',
+    'Exhibit list.',
+    '',
+  ].join('\n');
+
+  it('lists every abutting Item and Part of a 10-Q (#180)', () => {
+    expect(
+      detectHeadings(ABUTTING_10Q)
+        .map((h) => h.heading)
+        .filter((h) => /^(?:item|part)\b/i.test(h)),
+    ).toEqual([
+      'Part IFinancial Information',
+      'Item 1Financial Statements',
+      'Item 2.Management’s Discussion and Analysis of Financial Condition and Results of Operations',
+      'Item 4.Controls and Procedures',
+      'Part II Other Information',
+      'Item 1.Legal Proceedings',
+      'Item 1A.Risk Factors',
+      'Item 6.Exhibits',
+    ]);
+  });
+
+  it.each([
+    ['item 1', 'Item 1Financial Statements\n\n \n\nStatements prose.'],
+    ['item 2', 'Item 2.Management’s Discussion'],
+    ["management's discussion", 'Item 2.Management’s Discussion'],
+    ['risk factors', 'Item 1A.Risk Factors\n\nNot Applicable.'],
+    ['legal proceedings', 'Item 1.Legal Proceedings\n\nIn the course'],
+    ['exhibits', 'Item 6.Exhibits\n\nExhibit list.'],
+  ])(
+    'lands get_filing section "%s" on the abutting body heading (#180)',
+    async (section, start) => {
+      const page = await sectionPage('0001903596-26-000307', '10-Q', ABUTTING_10Q, section);
+      expect(page.content.startsWith(start)).toBe(true);
+      expect(page.notice).toBeUndefined();
+      expect(page.rendered).toContain(start);
+    },
+  );
+
+  it('lands get_filing section "part i" on the abutting Part heading (#180)', async () => {
+    // The numeral ends where detection ends it, so the Part tier takes `part i`.
+    const page = await sectionPage('0001903596-26-000307', '10-Q', ABUTTING_10Q, 'part i');
+    expect(page.content.startsWith('Part IFinancial Information\n\n\n\nItem 1Financial')).toBe(
+      true,
+    );
+    expect(page.notice).toBeUndefined();
+    expect(page.rendered).toContain('Part IFinancial Information');
+  });
 });
 
 describe('detectHeadings — dashed, numbered, and titled Part headings (#170)', () => {
@@ -1752,6 +1938,14 @@ describe('detectHeadings — the widened heading scans stay linear (#165, #170)'
       'one long ITEM line of near-miss later markers',
       (n: number) => `ITEM 1 ${fill(' ITEM X', n)}\n`,
     ],
+    [
+      'one long ITEM line of abutting near-miss later markers',
+      (n: number) => `ITEM 1 ${fill('.ITEM X', n)}\n`,
+    ],
+    [
+      'an ITEM line abutting a later marker before a long whitespace run',
+      (n: number) => `ITEM 1.ITEM${' '.repeat(n)}x\n`,
+    ],
     ['one long ITEM line of single-spaced numbers', (n: number) => `ITEM 1 ${fill('A 1 ', n)}\n`],
     [
       'an ITEM line, a number, then a long whitespace run',
@@ -1768,6 +1962,21 @@ describe('detectHeadings — the widened heading scans stay linear (#165, #170)'
       'a Page word before a long whitespace run',
       (n: number) => `RISK FACTORS  Page${' '.repeat(n)}x\n`,
     ],
+    // A marker abutting its title (#180).
+    ['one long Item line abutting its period', (n: number) => `Item 2.${fill('Ab ', n)}\n`],
+    ['one long Item line abutting its code', (n: number) => `Item 1${fill('Ab ', n)}\n`],
+    ['one long Part line abutting its numeral', (n: number) => `Part I${fill('Ab ', n)}\n`],
+    ['repeated abutting Item lines', (n: number) => fill('Item 1Financial Statements\n', n)],
+    ['repeated abutting Part lines', (n: number) => fill('Part IVExhibits\n', n)],
+    [
+      'repeated abutting Item lines under comma lines',
+      (n: number) => fill('as described,\nItem 8Financial Statements\n', n),
+    ],
+    [
+      'repeated near-miss run-in markers',
+      (n: number) => fill('Item 1ARISK\nItem 2.0 x\nPart Ifoo\n', n),
+    ],
+    ['a long run of lettered codes', (n: number) => `Item 1${fill('A', n)}b\n`],
   ])('%s', (_label, build) => {
     expectLinear(detectHeadings, build, 320_000, 800);
   });
@@ -1864,6 +2073,30 @@ describe('headingKey — the separator between a marker and its title (#174)', (
     expect(headingKey(heading)).toBe(key);
   });
 
+  // #180: with no period, the marker ends where a capital and a lowercase letter
+  // open the title, the same read heading detection makes.
+  it.each([
+    ['Item 1Financial Statements', 'item 1 financial statements'],
+    [`Item${NBSP}1Financial Statements`, 'item 1 financial statements'],
+    ['Part IFinancial Information', 'part i financial information'],
+    ['Part IVExhibits and Schedules', 'part iv exhibits and schedules'],
+    ['Part IIncome Taxes', 'part i income taxes'],
+  ])('keys the abutting marker of %s as %s (#180)', (heading, key) => {
+    expect(headingKey(heading)).toBe(key);
+  });
+
+  // Characterization (#180): a lettered code or an all-caps or lowercase run-in
+  // title keys as it did.
+  it.each([
+    ['Item 16KCybersecurity', 'item 16k cybersecurity'],
+    ['Item 1ARISK FACTORS', 'item 1a risk factors'],
+    ['Item 1A.Risk Factors', 'item 1a risk factors'],
+    ['Item 1financial statements', 'item 1f inancial statements'],
+    ['PART IFINANCIAL INFORMATION', 'part ifinancial information'],
+  ])('keeps the key of the run-in %s (#180)', (heading, key) => {
+    expect(headingKey(heading)).toBe(key);
+  });
+
   it('dedups a TOC Item against its body Item when only the separator differs', () => {
     // The shape of Worthington Steel's 10-Q 0001968487-26-000036.
     const text =
@@ -1927,6 +2160,76 @@ describe('findSectionLine — a section the outline omits, by the document’s o
       equal: true,
     });
     expect(matchSectionLine(prefixOnly, 'segment information')).toBe(undefined);
+  });
+
+  // An equal line labelling a table row gives way to a later equal line (#184).
+  it.each([
+    ['figures', ['Revenue', '$ 22,956    $ 25,296    $ 28,365']],
+    ['a lone currency cell past spacer lines', ['Revenue', '', NBSP, '', '$', '', '47,505']],
+    ['a dotted-leader row', ['Revenue:', 'Product sales.......  $4,759  $4,309  $4,530']],
+    ['a row set off by two or more spaces', ['Revenue', 'Product sales     4,759     4,309']],
+    ['a tab-led row', ['Revenue', 'Product sales\t4,759']],
+    ['a label, then figures', ['Revenue', 'Client', '$ 9,350    $ 9,732    $ 10,394']],
+    ['a label, then a cell with a stray backtick', ['Revenue', 'Client', '$ 7,746    $ `7,835']],
+    ['a label past spacer lines, then figures', ['Revenue', '', 'Client', NBSP, '', '9,350']],
+    ['a figure row behind a 60-character label', ['Revenue', `${'P'.repeat(60)}  $ 9,350`]],
+    ['nil dash cells', ['Revenue', '', '—', '', '—']],
+    ['a hyphen nil cell', ['Revenue', '-', 'Client', '499.1']],
+    ['an en dash nil cell under a label', ['Revenue', 'Client', '–']],
+  ])('passes over an equal line labelling a table row of %s', (_label, row) => {
+    const text = body(...row, 'Prose.', 'Revenue', 'Revenue grew 18% this year.');
+    expect(matchSectionLine(text, 'revenue')).toEqual({
+      offset: text.lastIndexOf('Revenue\nRevenue grew'),
+      equal: true,
+    });
+  });
+
+  it.each([
+    ['prose with a figure after one space', ['Revenue', 'The effective rate was 21%.']],
+    ['a label ending in punctuation, then figures', ['Revenue', 'Client:', '$ 9,350']],
+    ['a label opening lowercase, then figures', ['Revenue', 'net of returns', '$ 9,350']],
+    ['a label over 60 characters, then figures', ['Revenue', `Client ${'x'.repeat(60)}`, '9,350']],
+    ['two labels, then figures', ['Revenue', 'Client', 'Commercial', '$ 9,350']],
+    ['a figure row behind a 61-character label', ['Revenue', `${'P'.repeat(61)}  $ 9,350`]],
+    [
+      'a table set on one line, its label past 60 characters',
+      [
+        'Revenue',
+        'Three months ended June 30,  2026  2025  $ Change  % Change Product revenue  $157,947   $749,313   (79)%',
+      ],
+    ],
+    ['a quoted sentence, then a page number', ['Revenue', 'See “Note 2. Revenue.”', '51']],
+    [
+      'a sentence closing a parenthesis, then a page number',
+      ['Revenue', 'See Note 2 (Revenue.)', '51'],
+    ],
+    ['a dash inside prose', ['Revenue', 'Product sales — net', 'Prose.']],
+  ])('keeps an equal line over %s', (_label, row) => {
+    const text = body('Prose.', ...row);
+    expect(matchSectionLine(text, 'revenue')).toEqual({
+      offset: text.indexOf('Revenue'),
+      equal: true,
+    });
+  });
+
+  it('lands on a row label when no line equals the needle otherwise, ahead of a prefix line', () => {
+    const text = body(
+      'Total Revenue Growth',
+      'Prose.',
+      'Total revenue',
+      '$ 36,835    $ 32,187',
+      'Prose.',
+      'Total revenue',
+      'Product sales.......  $4,759',
+    );
+    expect(matchSectionLine(text, 'total revenue')).toEqual({
+      offset: text.indexOf('Total revenue\n'),
+      equal: false,
+    });
+    expect(matchSectionLine(body('Prose.', 'Total revenue', '$ 36,835'), 'total revenue')).toEqual({
+      offset: 7,
+      equal: false,
+    });
   });
 
   it('never takes a lowercase line in the prefix tier — the equal heading wins over the bullet', () => {
@@ -2037,6 +2340,15 @@ describe('findSectionLine — a section the outline omits, by the document’s o
   it('matches the last line of a text with no trailing newline', () => {
     expect(findSectionLine('Prose.\nCompetition', 'competition')).toBe(7);
   });
+
+  // The key reads a space into a run-in marker (#180), one character past the line.
+  it.each(['Part I Financial Information', 'Part IFinancial Information'])(
+    'lands "%s" on a line whose marker runs into its title',
+    (section) => {
+      const text = body('Prose.', 'Part IFinancial Information', 'Section prose.');
+      expect(findSectionLine(text, section)).toBe(text.indexOf('Part'));
+    },
+  );
 });
 
 describe('findSectionLine — no landing on a TOC row, a cross-reference, or a longer title (#166)', () => {
@@ -2106,6 +2418,29 @@ describe('findSectionLine — no landing on a TOC row, a cross-reference, or a l
       'The exhibits are listed below.',
     );
     expect(findSectionLine(text, 'part iv')).toBe(text.lastIndexOf('PART IV'));
+  });
+
+  // A marker run straight into its title (#180) is a marker row too. The page
+  // cell under a TOC row reads as figures, so a row the test missed would rank
+  // as a table-row label ahead of the prefix line (#184).
+  it.each([
+    [
+      'a TOC Part row over a run-in Item row over its page number',
+      ['Part IFinancial Information', 'Item 1Financial Statements', '3'],
+      'Part IFinancial Information (continued)',
+    ],
+    [
+      'a TOC title cell over a run-in Item row',
+      ['Legal Proceedings', 'Item 2Properties'],
+      'Legal Proceedings (continued)',
+    ],
+  ])('skips %s', (_label, toc, prefixLine) => {
+    const section = toc[0] ?? '';
+    const text = body(...toc, '', 'Body prose.', '', prefixLine, 'Section prose.');
+    expect(matchSectionLine(text, section)).toEqual({
+      offset: text.indexOf(prefixLine),
+      equal: false,
+    });
   });
 
   it('skips a TOC Part row whose Item row wraps onto a line ending in its page number', () => {
@@ -2300,6 +2635,77 @@ describe('isTocHeading — a detected heading on a table-of-contents row (#174)'
   ])('answers false for %s', (_label, text, heading) => {
     expect(isTocHeading(text, detected(text, heading))).toBe(false);
   });
+
+  it('flags a bare marker whose title wraps once over its page cell (#183)', () => {
+    // The shape of DRDGOLD's 20-F 0001628280-26-064355 at its Item 14 TOC row.
+    const toc =
+      'ITEM 13.\nDEFAULTS, DIVIDEND ARREARAGES AND DELINQUENCIES\n79\n' +
+      'ITEM 14.\nMATERIAL MODIFICATIONS TO THE RIGHTS OF SECURITY HOLDERS AND USE OF\nPROCEEDS\n79\n' +
+      'ITEM 15.\nCONTROLS AND PROCEDURES\n79\n';
+    const body =
+      'ITEM 14. MATERIAL MODIFICATIONS TO THE RIGHTS OF SECURITY HOLDERS AND USE OF PROCEEDS\nNone\n\n' +
+      'ITEM 15. CONTROLS AND PROCEDURES\n15(a). Disclosure Controls and Procedures\n';
+    const text = `${toc}\n----------------------------------------\n\n${body}`;
+    const wrappedTitle = 'MATERIAL MODIFICATIONS TO THE RIGHTS OF SECURITY HOLDERS AND USE OF';
+    expect(isTocHeading(text, detected(text, `ITEM 14. ${wrappedTitle}`))).toBe(true);
+    expect(isTocHeading(text, detected(text, wrappedTitle))).toBe(true);
+    expect(isTocHeading(text, detected(text, `ITEM 14. ${wrappedTitle} PROCEEDS`))).toBe(false);
+  });
+
+  it('flags a mixed-case title whose wrap opens lowercase over its page cell (#183)', () => {
+    const title =
+      'Item 5. Market for Registrant’s Common Equity, Related Stockholder Matters and Issuer Purchases';
+    const text = `${title}\nof Equity Securities\n12\nItem 6. Reserved\n13\n`;
+    expect(isTocHeading(text, detected(text, title))).toBe(true);
+  });
+
+  // A body heading over one line and a number keeps its rank: the three lines
+  // must sit consecutively, and the middle one must continue the title's case.
+  it.each([
+    [
+      'a wrapped body heading with no page cell under it',
+      'ITEM 14. MATERIAL MODIFICATIONS TO THE RIGHTS OF SECURITY HOLDERS AND USE OF\nPROCEEDS\nNone\n\nITEM 15. CONTROLS\n',
+      'ITEM 14. MATERIAL MODIFICATIONS TO THE RIGHTS OF SECURITY HOLDERS AND USE OF',
+    ],
+    [
+      'a mixed-case heading over a body sentence and a page number',
+      'Item 4. Mine Safety Disclosures\nNot applicable.\n31\n',
+      'Item 4. Mine Safety Disclosures',
+    ],
+    [
+      'an all-caps heading over a body sentence and a page number',
+      'ITEM 4. MINE SAFETY DISCLOSURES\nNot applicable.\n31\n',
+      'ITEM 4. MINE SAFETY DISCLOSURES',
+    ],
+    [
+      'an all-caps heading over a page-footer line and a lettered page',
+      // DRDGOLD's 20-F at its NOTE 22 page footer.
+      'NOTE 22 ASSET HELD FOR SALE\nDRDGOLD Limited Consolidated Annual Financial Statements 2026\nF-50\n\nNOTES continued\n',
+      'NOTE 22 ASSET HELD FOR SALE',
+    ],
+    [
+      'an all-caps heading over a one-word line and a page number, spaced apart',
+      'ITEM 4. MINE SAFETY DISCLOSURES\n\nNONE\n\n31\n',
+      'ITEM 4. MINE SAFETY DISCLOSURES',
+    ],
+    // Only the spacer under the heading sets it apart: the one-word line and page
+    // number sit together as the wrapped TOC row's last two lines do.
+    [
+      'an all-caps heading spaced from a one-word line over a page number',
+      'ITEM 4. MINE SAFETY DISCLOSURES\n\nNONE\n31\n',
+      'ITEM 4. MINE SAFETY DISCLOSURES',
+    ],
+  ])('answers false for %s (#183)', (_label, text, heading) => {
+    expect(isTocHeading(text, detected(text, heading))).toBe(false);
+  });
+
+  // Characterization of the #183 rule's known overreach: an all-caps body heading
+  // over a one-word all-caps line and a page number on consecutive lines has the
+  // wrapped TOC row's shape. `section` still lands on it as its tier's only match.
+  it('flags an all-caps heading over a one-word all-caps line and a page number (#183)', () => {
+    const text = 'ITEM 4. MINE SAFETY DISCLOSURES\nNONE\n31\n';
+    expect(isTocHeading(text, detected(text, 'ITEM 4. MINE SAFETY DISCLOSURES'))).toBe(true);
+  });
 });
 
 describe('withoutSubItemLabel — a leading 20-F sub-item label on a folded key (#175)', () => {
@@ -2439,6 +2845,35 @@ describe('findSectionLine — the whole-document scan stays linear (#166)', () =
       'a prefix candidate, a Page word, then a long whitespace run',
       (n: number) => `Competition  Page${' '.repeat(n)}1x\n`,
     ],
+    // The table-row label test reads two content lines past each equal line (#184).
+    ['equal lines over labels throughout', (n: number) => fill('Competition\nClient\n', n)],
+    [
+      'equal lines over labels and spacer runs',
+      (n: number) => fill(`Competition\n${' \n'.repeat(20)}Client\n${' \n'.repeat(20)}`, n),
+    ],
+    ['an equal line over one long row', (n: number) => `Competition\n${fill('a1 ', n)}\n`],
+    ['equal lines over nil dash cells throughout', (n: number) => fill('Competition\n—\n—\n', n)],
+    [
+      'an equal line over a long label and figures',
+      (n: number) => `Competition\n${fill('a ', n)}  5\n`,
+    ],
+    [
+      'equal lines over quoted labels, then figures',
+      (n: number) => fill('Competition\nSee “Note 2”)\n5\n', n),
+    ],
+    [
+      'an equal line, a label, then a long dotted leader',
+      (n: number) => `Competition\nClient\nSales${'.'.repeat(n)}  5\n`,
+    ],
+    [
+      'an equal line over a long whitespace run before a figure',
+      (n: number) => `Competition\nSales${' '.repeat(n)}5x\n`,
+    ],
+    [
+      'an equal line over one long line ending in a break',
+      (n: number) => `Competition\n${fill('§1 x', n)}\ny`,
+    ],
+    ['an equal line over breaks throughout', (n: number) => `Competition\n${fill('  \r\n', n)}`],
   ])('%s', (_label, build) => {
     expectLinear((text) => findSectionLine(text, 'Competition'), build, 320_000, 200);
   });
@@ -2462,6 +2897,9 @@ describe('the heading key, the label strip, and the TOC-row test stay linear (#1
     ['labelled TOC rows throughout', (n: number) => fill('3D. Risk Factors\n6\n', n)],
     ['one long labelled line', (n: number) => `3D. ${fill('RISK ', n)}\n`],
     ['repeated label tokens on one line', (n: number) => `${fill('3D. ', n)}x\n`],
+    // The key's abutting-marker read (#180).
+    ['a Part marker before a long whitespace run', (n: number) => `Part${' '.repeat(n)}IVx\n`],
+    ['abutting markers throughout', (n: number) => fill('Item 1Financial Statements\n', n)],
   ])('a line scan over %s (5k → 80k)', (_label, build) => {
     expectLinear(lineScan, build, 80_000, 200);
   });
@@ -2484,6 +2922,37 @@ describe('the heading key, the label strip, and the TOC-row test stay linear (#1
       'a titled heading over a long wrapped line',
       'Item 1. Business',
       (n: number) => `Item 1. Business\n${fill('of x ', n)}  5\n`,
+    ],
+    // The wrapped-title step (#183): title, continuation, and page cell.
+    [
+      'a bare marker over a long wrapped title and its continuation',
+      'Item 1.',
+      (n: number) => `Item 1.\n${fill('RISK ', n)}\nFACTORS\n5\n`,
+    ],
+    [
+      'a titled heading over a long continuation line',
+      'ITEM 1. RISK',
+      (n: number) => `ITEM 1. RISK\n${fill('FACTORS ', n)}\n5\n`,
+    ],
+    [
+      'a mixed-case heading over a long lowercase continuation',
+      'Item 1. Risk',
+      (n: number) => `Item 1. Risk\n${fill('of x ', n)}\n5\n`,
+    ],
+    [
+      'a heading and continuation over a long whitespace line',
+      'ITEM 1. RISK',
+      (n: number) => `ITEM 1. RISK\nFACTORS\n${' '.repeat(n)}5x\n`,
+    ],
+    [
+      'a heading over one long line ending in a break',
+      'ITEM 1. RISK',
+      (n: number) => `ITEM 1. RISK\n${fill('§1 x', n)}\ny`,
+    ],
+    [
+      'a heading over breaks throughout',
+      'ITEM 1. RISK',
+      (n: number) => `ITEM 1. RISK\n${fill('  \r\n', n)}`,
     ],
   ])('the TOC-row test over %s (5k → 80k)', (_label, heading, build) => {
     expectLinear((text) => isTocHeading(text, { heading, offset: 0 }), build, 80_000, 200);
@@ -2660,6 +3129,92 @@ describe('get_filing section — the line fallback after every heading tier (#16
     '',
   ].join('\n');
 
+  /**
+   * A 10-K shaped like Microsoft's 2004 0001193125-04-150689: every `Revenue`
+   * line labels a table row — the selected-data row, then the segment table's
+   * label over a client label over figures — ahead of the MD&A segment heading.
+   */
+  const SEGMENT_TABLE_DOC = [
+    'SELECTED FINANCIAL DATA',
+    '',
+    'Revenue',
+    '',
+    '$ 22,956    $ 25,296    $ 28,365    $ 32,187    $ 36,835',
+    '',
+    'Total revenue',
+    '',
+    '$ 36,835',
+    '',
+    'SEGMENT PRODUCT REVENUE/OPERATING INCOME (LOSS)',
+    '',
+    'Revenue',
+    '',
+    'Client',
+    '',
+    '$ 9,350    $ 9,732    $ 10,394',
+    '',
+    'Segment prose.',
+    '',
+  ].join('\n');
+  /**
+   * A 10-K shaped like Aware's 2005 0001188112-05-000453: the MD&A heading, then
+   * a `Revenue:` label over a dotted-leader row.
+   */
+  const CONTRACT_REVENUE_DOC = [
+    'CONTRACT REVENUE',
+    '',
+    'Contract revenue prose.',
+    '',
+    'Revenue:',
+    'Product sales.......  $4,759  $4,309  $4,530',
+    '',
+  ].join('\n');
+
+  it.each([
+    ['Microsoft 2004', '0001193125-04-150689', SEGMENT_TABLE_DOC, 'SEGMENT PRODUCT REVENUE/'],
+    ['Aware 2005', '0001188112-05-000453', CONTRACT_REVENUE_DOC, 'CONTRACT REVENUE\n'],
+  ])(
+    'lands %s "revenue" on a heading containing it, past its table-row labels (#184)',
+    async (_label, accession, text, start) => {
+      const page = await sectionPage(accession, '10-K', text, 'revenue');
+      expect(page.content.startsWith(start)).toBe(true);
+      expect(page.notice).toBeUndefined();
+      expect(page.rendered).toContain(page.content.slice(0, 60));
+    },
+  );
+
+  it('lands "revenue" on an MD&A subheading over a table set on one line (#184)', async () => {
+    // AMC Robotics' S-1 0001493152-26-047958 sets its whole MD&A revenue table on one line.
+    const text = [
+      'Prose.',
+      'Revenue',
+      '',
+      'Three months ended June 30,  2026  2025  $ Change  % Change Product revenue  $157,947   $749,313   (79)% Total Revenue  $937,177   $1,394,201   (33)%',
+      '',
+      'Notes prose.',
+      'Revenue',
+      'Revenue is recognized when control transfers.',
+    ].join('\n');
+    const page = await sectionPage('0001493152-26-047958', 'S-1', text, 'revenue');
+    expect(page.content.startsWith('Revenue\n\nThree months ended')).toBe(true);
+    expect(page.rendered).toContain('Revenue\n\nThree months ended');
+  });
+
+  // Characterization: a row label still lands when no heading contains the value.
+  it('lands "total revenue" on its table-row label under the plain line notice (#184)', async () => {
+    const page = await sectionPage(
+      '0001193125-04-150689',
+      '10-K',
+      SEGMENT_TABLE_DOC,
+      'total revenue',
+    );
+    expect(page.content.startsWith('Total revenue\n\n$ 36,835')).toBe(true);
+    const notice =
+      "No detected heading matches section 'total revenue', so this page starts at the first document line that does.";
+    expect(page.notice).toBe(notice);
+    expect(page.rendered).toContain(notice);
+  });
+
   it.each([
     ['summary', 'EXECUTIVE SUMMARY\n'],
     ['compensation', 'COMPENSATION DISCUSSION AND ANALYSIS\n'],
@@ -2826,6 +3381,63 @@ describe('get_filing section — a body heading ahead of a table-of-contents row
     ].join('\n');
     const page = await sectionPage('0000950170-25-026848', '10-K', text, 'item 6');
     expect(page.content.startsWith('Item 6. Reserved.\n\n36')).toBe(true);
+    expect(page.notice).toBeUndefined();
+  });
+
+  /** DRDGOLD's 20-F TOC around Item 14, whose title wraps over its page cell, then the body. */
+  const WRAPPED_TOC_20F = [
+    'PART II',
+    'ITEM 13.',
+    'DEFAULTS, DIVIDEND ARREARAGES AND DELINQUENCIES',
+    '79',
+    'ITEM 14.',
+    'MATERIAL MODIFICATIONS TO THE RIGHTS OF SECURITY HOLDERS AND USE OF',
+    'PROCEEDS',
+    '79',
+    'ITEM 15.',
+    'CONTROLS AND PROCEDURES',
+    '79',
+    '',
+    '----------------------------------------',
+    '',
+    'ITEM 13. DEFAULTS, DIVIDEND ARREARAGES AND DELINQUENCIES',
+    'None',
+    '',
+    'ITEM 14. MATERIAL MODIFICATIONS TO THE RIGHTS OF SECURITY HOLDERS AND USE OF PROCEEDS',
+    'None',
+    '',
+    'ITEM 15. CONTROLS AND PROCEDURES',
+    '15(a). Disclosure Controls and Procedures',
+    '',
+  ].join('\n');
+
+  it.each([
+    [
+      'item 14',
+      'ITEM 14. MATERIAL MODIFICATIONS TO THE RIGHTS OF SECURITY HOLDERS AND USE OF PROCEEDS\nNone',
+    ],
+    [
+      'material modifications to the rights of security holders',
+      'ITEM 14. MATERIAL MODIFICATIONS TO THE RIGHTS OF SECURITY HOLDERS AND USE OF PROCEEDS\nNone',
+    ],
+    ['item 13', 'ITEM 13. DEFAULTS, DIVIDEND ARREARAGES AND DELINQUENCIES\nNone'],
+    ['item 15', 'ITEM 15. CONTROLS AND PROCEDURES\n15(a).'],
+  ])(
+    'lands "%s" on the body heading, past a TOC row whose title wraps (#183)',
+    async (section, start) => {
+      const page = await sectionPage('0001628280-26-064355', '20-F', WRAPPED_TOC_20F, section);
+      expect(page.content.startsWith(start)).toBe(true);
+      expect(page.notice).toBeUndefined();
+      expect(page.rendered).toContain(start);
+    },
+  );
+
+  // The #183 rule reads this body heading as a TOC row; alone in its tier it still lands.
+  it('lands on an all-caps heading over a one-word line and a page number (#183)', async () => {
+    const text =
+      'Item 3. Legal Proceedings\n\nNone.\n\nITEM 4. MINE SAFETY DISCLOSURES\nNONE\n31\n\nItem 5. Other\n';
+    const page = await sectionPage('0000000001-26-000001', '10-Q', text, 'item 4');
+    expect(page.content.startsWith('ITEM 4. MINE SAFETY DISCLOSURES\nNONE\n31')).toBe(true);
     expect(page.notice).toBeUndefined();
   });
 });
