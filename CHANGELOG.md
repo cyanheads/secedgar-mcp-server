@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.15.14](changelog/0.15.x/0.15.14.md) — 2026-10-23
+
+A cancelled tool call stops sending SEC requests and a call is bounded by a 40 s SEC failure budget; response bodies are read inside the retry ladder; secedgar_search_filings accepts filed_after or filed_before alone; get_filing section and heading detection fixes.
+
 ## [0.15.13](changelog/0.15.x/0.15.13.md) — 2026-10-18 · 🛡️ Security
 
 get_filing's section lands on body headings ahead of table-of-contents rows and matches 20-F sub-items and NBSP-led 8-K Items; SEC calls that get no HTTP response retry, then fail as retryable sec_unreachable.

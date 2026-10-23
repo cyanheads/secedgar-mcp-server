@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-10-04 12:50:21
+Generated on: 2026-10-23 17:32:35
 
 ```text
 secedgar-mcp-server/
@@ -199,6 +199,7 @@ secedgar-mcp-server/
 │   │       │   ├── tickers-sync.ts
 │   │       │   └── types.ts
 │   │       ├── beneficial-ownership-parser.ts
+│   │       ├── call-scope.ts
 │   │       ├── concept-map.ts
 │   │       ├── concept-series.ts
 │   │       ├── edgar-api-service.ts
