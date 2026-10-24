@@ -366,16 +366,19 @@ const tickersJson = {
 };
 
 function makeFetchMock() {
-  const zip = zipSync({
-    'CIK0000320193.json': strToU8(JSON.stringify(apple)),
-    'CIK0000789019.json': strToU8(JSON.stringify(msft)),
-    'CIK0000310158.json': strToU8(JSON.stringify(merck)),
-    'CIK0001018724.json': strToU8(JSON.stringify(amazon)),
-    'CIK0001990000.json': strToU8(JSON.stringify(quarterlyOnlyFiler)),
-    // Ingest order is scan order: the oversized filer's row comes before the later one's.
-    'CIK0001990001.json': strToU8(JSON.stringify(oversizedFiler)),
-    'CIK0001990002.json': strToU8(JSON.stringify(laterFiler)),
-  });
+  const zip = zipSync(
+    {
+      'CIK0000320193.json': strToU8(JSON.stringify(apple)),
+      'CIK0000789019.json': strToU8(JSON.stringify(msft)),
+      'CIK0000310158.json': strToU8(JSON.stringify(merck)),
+      'CIK0001018724.json': strToU8(JSON.stringify(amazon)),
+      'CIK0001990000.json': strToU8(JSON.stringify(quarterlyOnlyFiler)),
+      // Ingest order is scan order: the oversized filer's row comes before the later one's.
+      'CIK0001990001.json': strToU8(JSON.stringify(oversizedFiler)),
+      'CIK0001990002.json': strToU8(JSON.stringify(laterFiler)),
+    },
+    { level: 1 },
+  );
   return vi.fn(async (url: string, init?: RequestInit) => {
     const u = String(url);
     if (u.includes('company_tickers.json')) {

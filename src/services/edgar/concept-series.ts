@@ -162,7 +162,10 @@ function annualReportYearEnds(
 
 /** The latest of a report's year-long ends — its own fiscal year. */
 function ownYearEnd(ends: ReadonlySet<string>): string {
-  return [...ends].reduce((latest, end) => (end > latest ? end : latest));
+  return [...ends].reduce((latest, end) => {
+    if (end > latest) return end;
+    return latest;
+  });
 }
 
 /** Each report's own year end, sorted and each listed once. */
