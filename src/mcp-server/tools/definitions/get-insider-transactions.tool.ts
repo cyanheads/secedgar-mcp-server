@@ -6,6 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { fixedPoint } from '@/mcp-server/tools/fixed-point.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -18,6 +19,7 @@ import {
   parseForm4Xml,
   type ReportingOwner,
 } from '@/services/edgar/ownership-parser.js';
+import { sameCik } from '@/services/edgar/same-cik.js';
 import { SubmissionsArchiveWalk } from '@/services/edgar/submissions-archive.js';
 import type { FilingsRecent } from '@/services/edgar/types.js';
 
@@ -70,11 +72,6 @@ function windowForm4Rows(block: FilingsRecent, inWindow: (date: string) => boole
 function describeWindow(filedAfter: string | undefined, filedBefore: string | undefined): string {
   if (filedAfter && filedBefore) return `between ${filedAfter} and ${filedBefore}`;
   return filedAfter ? `on or after ${filedAfter}` : `on or before ${filedBefore}`;
-}
-
-/** True when two CIKs name the same filer, however each is zero-padded. */
-function sameCik(a: string, b: string): boolean {
-  return a.replace(/^0+/, '') === b.replace(/^0+/, '');
 }
 
 function matchesFilter(tx: InsiderTransaction, filter: 'purchase' | 'sale' | 'all'): boolean {
@@ -675,7 +672,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
             : `${tx.shares_traded.toLocaleString()} shares acquired`
           : 'shares not reported';
       const priceStr =
-        tx.price_per_share !== undefined ? `@ $${tx.price_per_share.toFixed(2)}` : '';
+        tx.price_per_share !== undefined ? `@ $${fixedPoint(tx.price_per_share, 2)}` : '';
       const ownedStr =
         tx.shares_owned_after !== undefined
           ? ` | owns ${tx.shares_owned_after.toLocaleString()} after`

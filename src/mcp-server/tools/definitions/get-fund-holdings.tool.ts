@@ -11,6 +11,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { fixedPoint } from '@/mcp-server/tools/fixed-point.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -428,10 +429,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
               .describe(
                 'What balance counts — NS number of shares, PA principal amount, NC number of contracts, OU other.',
               ),
-            currency: z
-              .string()
-              .optional()
-              .describe('ISO 4217 currency the position is denominated in.'),
+            currency: z.string().optional().describe('ISO 4217 denomination; value_usd stays USD.'),
             value_usd: z
               .number()
               .optional()
@@ -877,18 +875,18 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       );
       const value =
         h.value_usd !== undefined
-          ? `${formatUsd(h.value_usd)} ($${h.value_usd.toLocaleString('en-US')})`
+          ? `USD ${formatUsd(h.value_usd)} ($${h.value_usd.toLocaleString('en-US')})`
           : 'value N/A';
       const pct =
         h.percent_of_net_assets !== undefined
-          ? `${h.percent_of_net_assets.toFixed(4)}% of net assets`
+          ? `${fixedPoint(h.percent_of_net_assets)}% of net assets`
           : 'percent N/A';
       const balance =
         h.balance !== undefined
           ? `${h.balance.toLocaleString()} ${h.units ?? 'units'}`
           : 'balance N/A';
       lines.push(
-        `${balance} | ${value}${h.currency && h.currency !== 'USD' ? ` (${h.currency})` : ''} | ${pct}`,
+        `${balance}${h.currency ? ` | denomination: ${h.currency}` : ''} | ${value} | ${pct}`,
       );
       const tags = [h.asset_category, h.issuer_category, h.country, h.payoff_profile].filter(
         Boolean,

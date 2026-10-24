@@ -371,6 +371,37 @@ describe('getInsiderTransactionsTool', () => {
     expect(() => getInsiderTransactionsTool.input.parse({ company: '' })).toThrow();
   });
 
+  it('preserves sub-cent price digits on both response surfaces', async () => {
+    mockApi.tryGetFilingDocument.mockResolvedValue(SALE_XML.replace('175.50', '222.1932'));
+    const result = await runToolContract(getInsiderTransactionsTool, { company: 'AAPL' });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      transactions: [{ price_per_share: 222.1932 }],
+    });
+    expect(blockText(result.content)).toContain('@ $222.1932');
+  });
+
+  it.each([true, false])(
+    'keeps zero and unreported prices distinct (reported=%s)',
+    async (reported) => {
+      mockApi.tryGetFilingDocument.mockResolvedValue(
+        reported
+          ? SALE_XML.replace('175.50', '0')
+          : SALE_XML.replace(
+              '<transactionPricePerShare><value>175.50</value></transactionPricePerShare>',
+              '',
+            ),
+      );
+      const result = await runToolContract(getInsiderTransactionsTool, { company: 'AAPL' });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        transactions: [{ price_per_share: reported ? 0 : undefined }],
+      });
+      if (reported) expect(blockText(result.content)).toContain('@ $0.00');
+      else expect(blockText(result.content)).not.toContain('@ $');
+    },
+  );
+
   it('formats transaction output correctly (#46: magnitude + direction)', () => {
     const output = {
       issuer_name: 'Apple Inc.',

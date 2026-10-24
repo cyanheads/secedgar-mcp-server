@@ -3,7 +3,7 @@
  * @module tests/mcp-server/tools/definitions/get-institutional-holdings.tool
  */
 
-import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getInstitutionalHoldingsTool } from '@/mcp-server/tools/definitions/get-institutional-holdings.tool.js';
@@ -242,6 +242,283 @@ beforeEach(() => {
 });
 
 describe('getInstitutionalHoldingsTool', () => {
+  it.each([
+    null,
+    '<edgarSubmission/>',
+    '<amendmentInfo><amendmentType>UNKNOWN</amendmentType></amendmentInfo>',
+  ])('retains amendment identity when its header is unreadable: %s', async (header) => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [
+          {
+            form: '13F-HR/A',
+            accessionNumber: 'amend',
+            filingDate: '2025-08-14',
+            reportDate: '2024-12-31',
+          },
+          {
+            form: '13F-HR',
+            accessionNumber: 'original',
+            filingDate: '2025-02-15',
+            reportDate: '2024-12-31',
+          },
+        ],
+      }),
+    );
+    mockApi.tryGetFilingDocument.mockImplementation(async (_cik, accession, document) =>
+      accession === 'amend'
+        ? header
+        : document === 'primary_doc.xml'
+          ? PRIMARY_DOC_XML
+          : INFO_TABLE_XML,
+    );
+    const result = await runToolContract(getInstitutionalHoldingsTool, { company: '0000102909' });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      total_positions: 2,
+      amendments: [
+        {
+          accession_number: 'amend',
+          filing_date: '2025-08-14',
+          amendment_type: 'UNAVAILABLE',
+          unavailable_reason: header ? 'unreadable_header' : 'missing_header',
+        },
+      ],
+    });
+    expect(blockText(result.content)).toContain('UNAVAILABLE');
+    expect(blockText(result.content)).toContain(header ? 'unreadable_header' : 'missing_header');
+  });
+
+  it.each([0, 1, 100])(
+    'composes amendment, paging and dataframe notices at offset %s',
+    async (offset) => {
+      mockApi.getSubmissions.mockResolvedValue(
+        buildSubmissions({
+          filings: [
+            {
+              form: '13F-HR/A',
+              accessionNumber: 'amend',
+              filingDate: '2025-08-14',
+              reportDate: '2024-12-31',
+            },
+            {
+              form: '13F-HR',
+              accessionNumber: 'original',
+              filingDate: '2025-02-15',
+              reportDate: '2024-12-31',
+            },
+          ],
+        }),
+      );
+      const bridge = stubBridge();
+      vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+      const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
+      const result = await getInstitutionalHoldingsTool.handler(
+        getInstitutionalHoldingsTool.input.parse({ company: '0000102909', limit: 1, offset }),
+        ctx,
+      );
+      expect(result.holdings).toHaveLength(offset >= 2 ? 0 : 1);
+      expect(bridge.registerDataframe.mock.calls[0]?.[1].rows).toHaveLength(2);
+      const notice = String(getEnrichment(ctx).notice);
+      expect(notice).toContain('original report');
+      expect(notice).toContain('amend');
+      expect(notice).toContain('df_TEST0_TEST1');
+      if (offset === 100) expect(notice).toContain('at or past');
+      if (offset === 0) expect(getEnrichment(ctx).truncated).toBe(true);
+    },
+  );
+
+  it('continues the archive after finding the original and keeps recent same-period amendments', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [
+          {
+            form: '13F-HR/A',
+            accessionNumber: 'recent-amend',
+            filingDate: '2026-08-14',
+            reportDate: '2024-12-31',
+          },
+          { form: '8-K', accessionNumber: 'recent-other', filingDate: '2026-01-01' },
+        ],
+        files: [
+          { name: 'older', filingCount: 2, filingFrom: '2024-12-31', filingTo: '2025-03-31' },
+          { name: 'later', filingCount: 1, filingFrom: '2025-04-01', filingTo: '2025-12-31' },
+        ],
+      }),
+    );
+    mockApi.fetchArchivePage.mockImplementation(async (name) =>
+      filingsBlock(
+        name === 'older'
+          ? [
+              {
+                form: '13F-HR',
+                accessionNumber: 'original',
+                filingDate: '2025-02-15',
+                reportDate: '2024-12-31',
+              },
+            ]
+          : [
+              {
+                form: '13F-HR/A',
+                accessionNumber: 'later-amend',
+                filingDate: '2025-08-14',
+                reportDate: '2024-12-31',
+              },
+              {
+                form: '13F-HR/A',
+                accessionNumber: 'other-period',
+                filingDate: '2025-08-14',
+                reportDate: '2025-03-31',
+              },
+            ],
+      ),
+    );
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000102909',
+      quarter: '2024-Q4',
+    });
+    expect(result.structuredContent).toMatchObject({
+      accession_number: 'original',
+      amendment_search_complete: true,
+      amendments: [{ accession_number: 'recent-amend' }, { accession_number: 'later-amend' }],
+    });
+    expect(mockApi.fetchArchivePage.mock.calls.map((c) => c[0])).toEqual(['older', 'later']);
+    const scopes = [
+      ...mockApi.fetchArchivePage.mock.calls.map((c) => c[1]),
+      ...mockApi.tryGetFilingDocument.mock.calls.map((c) => c[3]),
+    ];
+    expect(new Set(scopes).size).toBe(1);
+  });
+
+  it('keeps an original when optional archive discovery fails operationally', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [
+          {
+            form: '13F-HR',
+            accessionNumber: 'original',
+            filingDate: '2025-02-15',
+            reportDate: '2024-12-31',
+          },
+        ],
+        files: [
+          { name: 'archive', filingCount: 1, filingFrom: '2024-12-31', filingTo: '2025-01-31' },
+        ],
+      }),
+    );
+    mockApi.fetchArchivePage.mockRejectedValue(
+      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'SEC unavailable'),
+    );
+    const result = await runToolContract(getInstitutionalHoldingsTool, { company: '0000102909' });
+    expect(result.structuredContent).toMatchObject({
+      total_positions: 2,
+      amendment_search_complete: false,
+    });
+    expect(blockText(result.content)).toContain('discovery incomplete');
+  });
+
+  it('marks bounded amendment discovery incomplete at ten pages', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [
+          {
+            form: '13F-HR',
+            accessionNumber: 'original',
+            filingDate: '2025-12-31',
+            reportDate: '2024-12-31',
+          },
+        ],
+        files: Array.from({ length: 11 }, (_, i) => ({
+          name: `archive-${i}`,
+          filingCount: 1,
+          filingFrom: `2025-${String(i + 1).padStart(2, '0')}-01`,
+          filingTo: `2025-${String(i + 1).padStart(2, '0')}-28`,
+        })),
+      }),
+    );
+    mockApi.fetchArchivePage.mockResolvedValue(filingsBlock([]));
+    const result = await runToolContract(getInstitutionalHoldingsTool, { company: '0000102909' });
+    expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(10);
+    expect(result.structuredContent).toMatchObject({ amendment_search_complete: false });
+    const text = result.content.map((_, i) => blockText(result.content, i)).join('\n');
+    expect(text).toContain('10 pages');
+    expect(text).toContain('Additional amendments may exist');
+  });
+  it('characterizes original-only rows with an unrelated-period amendment', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [
+          {
+            form: '13F-HR/A',
+            accessionNumber: 'amend-other',
+            filingDate: '2025-08-14',
+            reportDate: '2024-09-30',
+          },
+          {
+            form: '13F-HR',
+            accessionNumber: 'original',
+            filingDate: '2025-02-15',
+            reportDate: '2024-12-31',
+          },
+        ],
+      }),
+    );
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000102909',
+      limit: 1,
+    });
+    expect(result.structuredContent).toMatchObject({
+      accession_number: 'original',
+      total_positions: 2,
+      next_offset: 1,
+      holdings: [{ cusip: '037833100', market_value_usd: 5000000 }],
+    });
+    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledTimes(2);
+  });
+
+  it('discloses same-period amendments while keeping original rows and paging', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [
+          {
+            form: '13F-HR/A',
+            accessionNumber: 'amend',
+            filingDate: '2025-08-14',
+            reportDate: '2024-12-31',
+          },
+          {
+            form: '13F-HR',
+            accessionNumber: 'original',
+            filingDate: '2025-02-15',
+            reportDate: '2024-12-31',
+          },
+        ],
+      }),
+    );
+    mockApi.tryGetFilingDocument.mockImplementation(async (_cik, accession, document) =>
+      accession === 'amend'
+        ? '<edgarSubmission><formData><coverPage><amendmentInfo><amendmentType>NEW HOLDINGS</amendmentType></amendmentInfo></coverPage></formData></edgarSubmission>'
+        : document === 'primary_doc.xml'
+          ? PRIMARY_DOC_XML
+          : INFO_TABLE_XML,
+    );
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000102909',
+      limit: 1,
+    });
+    expect(result.structuredContent).toMatchObject({
+      accession_number: 'original',
+      total_positions: 2,
+      next_offset: 1,
+      amendments: [
+        { accession_number: 'amend', filing_date: '2025-08-14', amendment_type: 'NEW HOLDINGS' },
+      ],
+    });
+    const text = result.content.map((_, i) => blockText(result.content, i)).join('\n');
+    expect(text).toContain('NEW HOLDINGS');
+    expect(text).toContain('secedgar_get_filing');
+    expect(text).toContain('original report');
+  });
   it('returns holdings for a valid institution', async () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({ company: '0000102909' });

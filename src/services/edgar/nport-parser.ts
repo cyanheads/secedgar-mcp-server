@@ -132,7 +132,7 @@ function parseHolding(el: Element): NportHolding {
     lei: realValue(childText(el, 'lei')),
     balance: parseNumber(childText(el, 'balance')),
     units: childText(el, 'units'),
-    currency: childText(el, 'curCd'),
+    currency: childText(el, 'curCd') ?? childAttr(el, 'currencyConditional', 'curCd'),
     value_usd: parseNumber(childText(el, 'valUSD')),
     percent_of_net_assets: parseNumber(childText(el, 'pctVal')),
     payoff_profile: childText(el, 'payoffProfile'),

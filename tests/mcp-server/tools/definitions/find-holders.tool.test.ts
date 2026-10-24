@@ -113,6 +113,115 @@ afterEach(() => {
 });
 
 describe('findHoldersTool', () => {
+  it('characterizes a complete single-document sample without a continuation', async () => {
+    const result = await runToolContract(findHoldersTool, { issuer: 'Apple', cusip: '037833100' });
+    expect(result.structuredContent).toMatchObject({ fetched: 1, holders_in_quarter: 1 });
+    expect(result.content.map((_, i) => blockText(result.content, i)).join('\n')).not.toContain(
+      'Continue with secedgar_search_filings',
+    );
+  });
+
+  it.each([
+    ['eq', 12000],
+    ['gte', 10000],
+  ] as const)('states the document ceiling for %s totals', async (relation, total) => {
+    const response = eftsPage(
+      Array.from({ length: 100 }, (_, i) => hit({ accession: `a-${i}` })),
+      total,
+    );
+    response.hits.total.relation = relation;
+    mockApi.searchFilings.mockResolvedValue(response);
+    const result = await runToolContract(findHoldersTool, { issuer: 'Apple', cusip: '037833100' });
+    expect(result.structuredContent).toMatchObject({
+      fetched: 500,
+      total_filings: total,
+      total_is_exact: relation === 'eq',
+    });
+    const text = result.content.map((_, i) => blockText(result.content, i)).join('\n');
+    expect(text).toContain('10000-document paging ceiling');
+    expect(text).toContain('10000 reported documents');
+    expect(text).toContain('unreachable by paging');
+    expect(text).toContain('offset + limit exceeds 10000');
+    if (relation === 'gte') expect(text).toContain('lower bound');
+  });
+
+  it('keeps phrase quoting and the all-other-period notice in continuation guidance', async () => {
+    mockApi.searchFilings.mockResolvedValue(
+      eftsPage(
+        Array.from({ length: 100 }, (_, i) =>
+          hit({ accession: `other-${i}`, periodEnding: '2024-12-31' }),
+        ),
+        700,
+      ),
+    );
+    const result = await runToolContract(findHoldersTool, { issuer: 'Apple', quarter: '2025-Q4' });
+    expect(result.structuredContent).toMatchObject({ holders: [], holders_in_quarter: 0 });
+    const text = result.content.map((_, i) => blockText(result.content, i)).join('\n');
+    expect(text).toContain('amendments restating other quarters');
+    expect(text).toContain(
+      JSON.stringify({
+        query: '"Apple Inc."',
+        forms: ['13F-HR'],
+        filed_after: '2026-01-01',
+        filed_before: '2026-03-31',
+        sort: 'relevance',
+        offset: 500,
+        limit: 100,
+      }),
+    );
+    expect(text).toContain('latest filing_date');
+  });
+
+  it('does not advertise another window when exactly 500 matching documents were fetched', async () => {
+    mockApi.searchFilings.mockResolvedValue(
+      eftsPage(
+        Array.from({ length: 100 }, (_, i) => hit({ accession: `complete-${i}` })),
+        500,
+      ),
+    );
+    const result = await runToolContract(findHoldersTool, { issuer: 'Apple', cusip: '037833100' });
+    expect(result.structuredContent).toMatchObject({ fetched: 500, total_filings: 500 });
+    expect(result.content.map((_, i) => blockText(result.content, i)).join('\n')).not.toContain(
+      'Continue with secedgar_search_filings',
+    );
+  });
+
+  it.each([false, true])('continues a bounded document sample with canvas=%s', async (canvas) => {
+    let page = 0;
+    mockApi.searchFilings.mockImplementation(async () =>
+      eftsPage(
+        Array.from({ length: 100 }, (_, i) =>
+          hit({ accession: `p${page++}-${i}`, periodEnding: '2025-12-31' }),
+        ),
+        6462,
+      ),
+    );
+    if (canvas) vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+    const result = await runToolContract(findHoldersTool, {
+      issuer: 'AAPL',
+      cusip: '037833100',
+      quarter: '2025-Q4',
+      limit: 1,
+    });
+    const text = result.content.map((_, i) => blockText(result.content, i)).join('\n');
+    expect(text).toContain('Continue with secedgar_search_filings');
+    expect(text).toContain(
+      JSON.stringify({
+        query: '037833100',
+        forms: ['13F-HR'],
+        filed_after: '2026-01-01',
+        filed_before: '2026-03-31',
+        sort: 'relevance',
+        offset: 500,
+        limit: 100,
+      }),
+    );
+    expect(text).toContain('sample.filer_cik');
+    expect(text).toContain('results.cik');
+    expect(text).toContain('2025-12-31');
+    if (canvas) expect(text).toContain('df_TEST0_TEST1');
+    expect(result.structuredContent).toMatchObject({ fetched: 500, holders_in_quarter: 500 });
+  });
   it('defaults to the newest quarter whose 45-day deadline has passed', async () => {
     const ctx = createMockContext({ errors: findHoldersTool.errors });
     const input = findHoldersTool.input.parse({ issuer: 'AAPL', cusip: '037833100' });

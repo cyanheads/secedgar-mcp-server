@@ -4,9 +4,8 @@
  * ownership triangle alongside secedgar_get_insider_transactions (Form 4 officers and
  * directors) and secedgar_get_institutional_holdings (13F portfolios): this tool covers the
  * 5%-and-over stakes, activist and passive. Discovery runs off the issuer's own submissions
- * feed — SEC cross-lists a 13D/G under every CIK party to it, so the issuer's history
- * already carries the filings made about it and the archive document is reachable on the
- * issuer's own path.
+ * feed — SEC cross-lists a 13D/G under every CIK party to it. Each document's issuer CIK
+ * must therefore match before its ownership is attributed to the requested company.
  * @module mcp-server/tools/definitions/get-beneficial-owners
  */
 
@@ -25,6 +24,7 @@ import {
 } from '@/services/edgar/beneficial-ownership-parser.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, rawDocumentName } from '@/services/edgar/edgar-api-service.js';
+import { sameCik } from '@/services/edgar/same-cik.js';
 
 /**
  * First filing date on which every beneficial-ownership filing arrived in the structured
@@ -33,6 +33,12 @@ import { getEdgarApiService, rawDocumentName } from '@/services/edgar/edgar-api-
  * same day. Filings before it are text or HTML documents with no XML to parse.
  */
 const STRUCTURED_FROM = '2024-12-18';
+
+/** Maximum schedule documents examined in one newest-first scan. */
+const FILING_SCAN_CAP = 50;
+
+/** Maximum matching filings a caller can request. */
+const FILING_RESULT_CAP = 20;
 
 /** Legacy form names that carry the same disclosure with no parseable XML. */
 const LEGACY_FORMS = ['SC 13D', 'SC 13D/A', 'SC 13G', 'SC 13G/A'];
@@ -136,10 +142,10 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       .number()
       .int()
       .min(1)
-      .max(20)
+      .max(FILING_RESULT_CAP)
       .default(10)
       .describe(
-        'Number of filings to fetch and parse, newest first. Each filing is a separate document fetch, so this is the cost of the call as well as its depth. Default 10; a widely-held company can have dozens of blockholder filings a year.',
+        'Number of successfully parsed filings naming the requested issuer to return, newest first. Other-issuer schedules and failed documents do not consume this limit; at most 50 documents are examined. Default 10.',
       ),
   }),
   // The company-identifier keys other tools take. `issuer` is this tool's only company
@@ -156,11 +162,31 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     total_structured_filings: z
       .number()
       .describe(
-        'Structured 13D/13G filings matching form_kind in the recent submissions window, before limit.',
+        'Indexed 13D/13G schedules matching form/amendment filters in the recent submissions window.',
       ),
-    filings_parsed: z
+    filings_parsed: z.number().describe('Matching parsed filings, capped by limit.'),
+    filings_examined: z.number().describe('Matches + exclusions + failures; at most 50 documents.'),
+    filings_excluded_other_issuer: z
       .number()
-      .describe('Filings fetched and parsed: total_structured_filings capped by limit.'),
+      .describe('Schedules naming another issuer; no rows returned.'),
+    filings_not_examined: z
+      .number()
+      .describe('Indexed schedules beyond the result limit or 50-document ceiling.'),
+    filings_failed: z
+      .array(
+        z
+          .object({
+            accession_number: z.string().describe('Accession to inspect with secedgar_get_filing.'),
+            reason: z
+              .enum(['document_not_found', 'unparseable'])
+              .describe('Document returned 404, or could not be parsed with a usable issuer CIK.'),
+          })
+          .describe('One failed document.'),
+      )
+      .describe('Failures in scan order; successes retained.'),
+    partial: z
+      .boolean()
+      .describe('True when filings_failed is nonempty, independently of truncation.'),
     structured_coverage_from: z
       .string()
       .describe(
@@ -299,7 +325,9 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
         truncated: z
           .boolean()
-          .describe('True when more structured filings exist than limit fetched.'),
+          .describe(
+            'True when indexed schedules remain unexamined after the result limit or scan ceiling.',
+          ),
       })
       .optional()
       .describe(
@@ -311,10 +339,15 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance when no filings matched, naming the coverage boundary and the fallback.'),
-    truncated: z.boolean().optional().describe('True when filings were capped by limit.'),
+      .describe('Exclusions, document recovery, scan bounds, and dataframe guidance.'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when schedules remain unexamined after the result limit or 50-document ceiling.',
+      ),
     shown: z.number().optional().describe('Number of filings returned.'),
-    cap: z.number().optional().describe('The limit cap applied.'),
+    cap: z.number().optional().describe('Result limit or document ceiling that stopped scanning.'),
   },
 
   async handler(input, ctx) {
@@ -356,7 +389,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       if (input.form_kind !== 'all' && schedule !== input.form_kind) continue;
       if (!input.include_amendments && form.endsWith('/A')) continue;
       totalMatching++;
-      if (selected.length < input.limit) {
+      if (selected.length < FILING_SCAN_CAP) {
         selected.push({
           form,
           schedule,
@@ -385,9 +418,14 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       );
     }
 
-    // Fetch and parse each selected filing. A document that 404s or does not parse as a
-    // schedule is dropped rather than failing the call — one malformed filing must not
-    // hide every other blockholder in the list.
+    // Each examined document has exactly one outcome: matching, other issuer, or failed.
+    // Failures and exclusions do not spend the caller's matching-filing limit.
+    let examined = 0;
+    let otherIssuer = 0;
+    const failed: Array<{
+      accession_number: string;
+      reason: 'document_not_found' | 'unparseable';
+    }> = [];
     const filings: Array<{
       form: string;
       schedule: BeneficialOwnershipForm;
@@ -404,18 +442,29 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     }> = [];
 
     for (const ref of selected) {
+      if (filings.length >= input.limit) break;
+      ctx.signal.throwIfAborted();
       const xml = await api.tryGetFilingDocument(
         match.cik,
         ref.accessionNumber,
         ref.document,
         scope,
       );
+      examined++;
       const parsed = xml ? parseBeneficialOwnershipXml(xml) : undefined;
-      if (!parsed) {
-        ctx.log.debug('Skipping unparseable beneficial-ownership filing', {
-          accessionNumber: ref.accessionNumber,
-          document: ref.document,
+      if (
+        !parsed?.issuer_cik ||
+        !/^\d+$/.test(parsed.issuer_cik) ||
+        !/[1-9]/.test(parsed.issuer_cik)
+      ) {
+        failed.push({
+          accession_number: ref.accessionNumber,
+          reason: xml === null ? 'document_not_found' : 'unparseable',
         });
+        continue;
+      }
+      if (!sameCik(parsed.issuer_cik, match.cik)) {
+        otherIssuer++;
         continue;
       }
       const purpose = clip(parsed.purpose_of_transaction, PURPOSE_MAX_CHARS);
@@ -448,7 +497,8 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       });
     }
 
-    const truncated = totalMatching > filings.length;
+    const notExamined = totalMatching - examined;
+    const truncated = notExamined > 0;
 
     // One row per reporting person — the grain the ownership question is asked at, and the
     // grain that joins to the insider and 13F dataframes on issuer_cik.
@@ -497,20 +547,31 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       if (registered) dataset = { ...toDatasetField(registered), truncated };
     }
 
-    if (filings.length === 0) {
-      ctx.enrich.notice(
-        `${totalMatching} structured filings are indexed for ${submissions.name}, but none of the ${selected.length} fetched parsed as a SCHEDULE 13D or 13G document. Read one directly with secedgar_get_filing on an accession number from secedgar_search_filings.`,
+    const guidance: string[] = [];
+    if (otherIssuer > 0)
+      guidance.push(
+        `${otherIssuer} examined filings name another issuer and contribute no ownership rows.`,
       );
-    } else if (truncated) {
+    if (failed.length > 0)
+      guidance.push(
+        `${failed.length} documents failed; this is a partial result. Inspect the accessions in filings_failed with secedgar_get_filing; document_not_found means SEC returned 404, and unparseable means no schedule with a usable issuer CIK could be read.`,
+      );
+    if (truncated) {
+      guidance.push(
+        examined === FILING_SCAN_CAP
+          ? `${notExamined} indexed schedules remain unexamined after the 50-document scan ceiling. Narrow with form_kind or include_amendments=false; raising limit does not extend this ceiling.`
+          : `${notExamined} indexed schedules remain unexamined after the ${input.limit}-filing result limit. ${input.limit < FILING_RESULT_CAP ? 'Raise limit to reach further back, or narrow with form_kind or include_amendments=false.' : 'Narrow with form_kind or include_amendments=false.'}`,
+      );
+    }
+    if (dataset) guidance.push(dataframeGuidance(dataset));
+    if (truncated) {
       ctx.enrich.truncated({
         shown: filings.length,
-        cap: input.limit,
-        guidance:
-          `${totalMatching} structured blockholder filings are indexed for this issuer. Raise limit to reach further back, or narrow with form_kind or include_amendments=false.` +
-          (dataset ? ` ${dataframeGuidance(dataset)}` : ''),
+        cap: examined === FILING_SCAN_CAP ? FILING_SCAN_CAP : input.limit,
+        guidance: guidance.join(' '),
       });
-    } else if (dataset) {
-      ctx.enrich.notice(dataframeGuidance(dataset));
+    } else if (guidance.length > 0) {
+      ctx.enrich.notice(guidance.join(' '));
     }
 
     ctx.log.info('Beneficial owners retrieved', {
@@ -529,6 +590,11 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       form_kind: input.form_kind,
       total_structured_filings: totalMatching,
       filings_parsed: filings.length,
+      filings_examined: examined,
+      filings_excluded_other_issuer: otherIssuer,
+      filings_not_examined: notExamined,
+      filings_failed: failed,
+      partial: failed.length > 0,
       structured_coverage_from: STRUCTURED_FROM,
       legacy_filings_before_coverage: legacyCount,
       filings,
@@ -540,8 +606,13 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     const lines: string[] = [
       `**5%+ beneficial owners of ${result.issuer_name}** (CIK ${result.issuer_cik}) — input "${result.issuer}"`,
       `Schedule filter: ${result.form_kind} | ${result.filings_parsed} of ${result.total_structured_filings} structured filings parsed`,
+      `${result.filings_examined} examined | ${result.filings_excluded_other_issuer} excluded for another issuer | ${result.filings_failed.length} failed | ${result.filings_not_examined} not examined | partial: ${result.partial}`,
       `Structured coverage starts ${result.structured_coverage_from}; ${result.legacy_filings_before_coverage} legacy SC 13D/SC 13G filings sit before it in the submissions window (read those with secedgar_get_filing).`,
     ];
+
+    for (const failure of result.filings_failed) {
+      lines.push(`Failed document: ${failure.accession_number} — ${failure.reason}`);
+    }
 
     for (const f of result.filings) {
       lines.push('');
@@ -592,7 +663,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
 
     if (result.dataset) {
       const note = result.dataset.truncated
-        ? ' (truncated — more structured filings exist beyond limit)'
+        ? ' (truncated — indexed schedules remain unexamined)'
         : '';
       lines.push(
         `\nDataset: ${result.dataset.name} (${result.dataset.row_count} reporting-person rows, expires ${result.dataset.expires_at})${note} — query with secedgar_dataframe_query.`,

@@ -677,6 +677,14 @@ Every 10-K filing includes prior-year comparatives. Apple's 2023 10-K reports 20
 
 Insider trading (Form 4) is a common workflow, but Form 4 documents are structured XML requiring dedicated parsing — transaction codes, derivative vs. non-derivative tables, footnotes. The first release served insider trading through the general-purpose tools: filter company filings to `forms: ["4"]`, then read individual filings. `secedgar_get_insider_transactions` later added the dedicated parser, and the same approach carried over to 13F information tables, SCHEDULE 13D/13G, and NPORT-P.
 
+The submissions feed cross-lists schedules under investors as well as issuers. `secedgar_get_beneficial_owners` therefore checks each parsed issuer CIK before attributing ownership, comparing without zero-padding. Its newest-first scan stops at `limit` matching parsed filings or 50 examined documents. `total_structured_filings = filings_examined + filings_not_examined`, and `filings_examined = filings_parsed + filings_excluded_other_issuer + filings_failed.length`. A missing document records `document_not_found`; an unreadable schedule or unusable issuer identity records `unparseable`. These failures set `partial` and retain successful filings; `truncated` instead identifies unexamined schedules. Inline and dataframe ownership rows contain only matching schedules, and the notice composes document recovery with the applicable scan bound and dataframe guidance.
+
+### Why disclose 13F amendments separately?
+
+`secedgar_get_institutional_holdings` retains the original report's rows, consolidation and paging. Same-period amendments are metadata rather than silently merged positions: restatements and new-holdings amendments have different meanings, and callers can inspect each accession with `secedgar_get_filing`. Discovery continues through the relevant submissions archive coverage, bounded at ten pages; incomplete discovery is explicit. Header lookup failures preserve amendment identity and the successful original, while cancellation propagates. All chained reads share one `CallScope` and failure budget; a rate-limit block or exhausted budget stops further optional reads.
+
+`secedgar_find_holders` keeps its five-page document sample. Its continuation notice reuses `secedgar_search_filings` with the exact query, filing dates, relevance sort and fetched-document offset, avoiding a second paging API. Results are filtered by reporting period and deduplicated across both tools by filer CIK and latest filing date. Reachable documents are `min(total_filings, 10000)`; a lower-bound total does not claim paging can reach beyond EDGAR's window.
+
 ### Why not wrap an existing npm package?
 
 `sec-edgar-toolkit` (the only open-source TS option) is AGPL-3.0 licensed — any server wrapping it must be open-sourced. The SEC APIs are simple REST endpoints with no auth, so a thin service layer with rate limiting is more appropriate than a dependency.

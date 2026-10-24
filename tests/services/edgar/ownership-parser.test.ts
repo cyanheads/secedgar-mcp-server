@@ -311,6 +311,16 @@ describe('parseInfoTableXml', () => {
 // ---------------------------------------------------------------------------
 
 describe('parseThirteenFCoverPage', () => {
+  it.each(['RESTATEMENT', 'NEW HOLDINGS'])(
+    'reads a nested namespace-prefixed amendment type %s',
+    (type) => {
+      expect(
+        parseThirteenFCoverPage(
+          `<f:edgarSubmission><f:formData><f:coverPage><f:amendmentInfo><f:amendmentType>${type}</f:amendmentType></f:amendmentInfo></f:coverPage></f:formData></f:edgarSubmission>`,
+        ),
+      ).toMatchObject({ amendmentType: type });
+    },
+  );
   it('falls back to reportCalendarOrQuarter when periodOfReport is absent', () => {
     const xml = `<edgarSubmission><formData><coverPage>
       <reportCalendarOrQuarter>09-30-2020</reportCalendarOrQuarter>

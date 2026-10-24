@@ -180,6 +180,27 @@ describe('parseNportHeader', () => {
 });
 
 describe('parseNportXml', () => {
+  it.each(['', 'n:'])('reads conditional currency with namespace prefix %j', (prefix) => {
+    const xml = FULL.replace(
+      '<curCd>USD</curCd>',
+      `<${prefix}currencyConditional curCd=" TWD " exchangeRt="0.03094200"/>`,
+    );
+    const [holding] = parseNportXml(xml).holdings;
+    expect(holding?.currency).toBe('TWD');
+    expect(holding?.value_usd).toBe(107695624555.2);
+  });
+
+  it('preserves plain currency precedence and leaves missing currency absent', () => {
+    const xml = FULL.replace(
+      '<curCd>USD</curCd>',
+      '<curCd>USD</curCd><currencyConditional curCd="TWD"/>',
+    ).replace('<curCd>EUR</curCd>', '');
+    const [plain, missing] = parseNportXml(xml).holdings;
+    expect(plain?.currency).toBe('USD');
+    expect(missing?.currency).toBeUndefined();
+    expect(plain?.value_usd).toBe(107695624555.2);
+  });
+
   it('carries the fund-level totals', () => {
     const report = parseNportXml(FULL);
     expect(report.net_assets_usd).toBe(1421263311402.89);

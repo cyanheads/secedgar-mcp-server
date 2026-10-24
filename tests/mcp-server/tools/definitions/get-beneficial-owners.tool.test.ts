@@ -13,7 +13,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getBeneficialOwnersTool } from '@/mcp-server/tools/definitions/get-beneficial-owners.tool.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import type { FilingsRecent } from '@/services/edgar/types.js';
-import { blockText, wireError } from '../../../support/assertions.js';
+import { bag, blockText, wireError } from '../../../support/assertions.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
   const actual = await importActual<typeof import('@/services/edgar/edgar-api-service.js')>();
@@ -131,6 +131,7 @@ const mockApi = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockApi.tryGetFilingDocument.mockReset();
   vi.mocked(getCanvasBridge).mockReturnValue(undefined as never);
   vi.mocked(getEdgarApiService).mockReturnValue(mockApi as never);
   mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
@@ -153,6 +154,274 @@ beforeEach(() => {
 });
 
 describe('getBeneficialOwnersTool', () => {
+  it('backfills beyond another issuer and failed documents until limit matching successes', async () => {
+    mockApi.getSubmissions.mockResolvedValue({
+      name: 'Apple Inc.',
+      filings: {
+        recent: recent(
+          ['other', 'missing', 'bad', 'own', 'older'].map((accessionNumber) => ({
+            accessionNumber,
+            form: 'SCHEDULE 13G',
+            filingDate: '2026-04-29',
+          })),
+        ),
+      },
+    });
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+    mockApi.tryGetFilingDocument
+      .mockResolvedValueOnce(thirteenG('Wrong Owner', 8).replace('0000320193', '0000920760'))
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce('<not-a-schedule/>')
+      .mockResolvedValueOnce(thirteenG('Correct Owner', 7).replace('0000320193', '320193'));
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL', limit: 1 });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      total_structured_filings: 5,
+      filings_examined: 4,
+      filings_not_examined: 1,
+      filings_parsed: 1,
+      filings_excluded_other_issuer: 1,
+      partial: true,
+      truncated: true,
+      filings_failed: [
+        { accession_number: 'missing', reason: 'document_not_found' },
+        { accession_number: 'bad', reason: 'unparseable' },
+      ],
+      filings: [{ accession_number: 'own' }],
+      dataset: { truncated: true, row_count: 1 },
+    });
+    expect(mockApi.tryGetFilingDocument.mock.calls.map((call) => call[1])).toEqual([
+      'other',
+      'missing',
+      'bad',
+      'own',
+    ]);
+    expect(bridge.registerDataframe.mock.calls[0]?.[1].rows).toEqual([
+      expect.objectContaining({ issuer_cik: '0000320193', reporting_person: 'Correct Owner' }),
+    ]);
+    const text = result.content
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('\n');
+    expect(text).not.toContain('Wrong Owner');
+    for (const value of [
+      'missing',
+      'document_not_found',
+      'bad',
+      'unparseable',
+      '4 examined',
+      '1 excluded',
+      '1 not examined',
+      'partial',
+      'Raise limit',
+      'secedgar_get_filing',
+      'df_TEST0_TEST1',
+    ]) {
+      expect(text).toContain(value);
+    }
+  });
+
+  it.each([
+    ['document_not_found', null],
+    ['unparseable', '<not-a-schedule/>'],
+    [
+      'unparseable',
+      thirteenG('Unknown Issuer', 7).replace('<issuerCik>0000320193</issuerCik>', ''),
+    ],
+  ])('discloses all failed documents as %s without false limit recovery', async (reason, xml) => {
+    mockApi.tryGetFilingDocument.mockResolvedValue(xml);
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL' });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      filings_parsed: 0,
+      filings_examined: 2,
+      filings_not_examined: 0,
+      filings_excluded_other_issuer: 0,
+      partial: true,
+      filings_failed: [
+        { accession_number: '0000000001-26-000001', reason },
+        { accession_number: '0000000002-26-000002', reason },
+      ],
+    });
+    const text = result.content
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('\n');
+    expect(text).toContain(String(reason));
+    expect(text).toContain('secedgar_get_filing');
+    expect(text).not.toContain('Raise limit');
+    expect(bag(result.structuredContent).truncated).not.toBe(true);
+  });
+
+  it('returns an accurately empty result when every schedule names another issuer', async () => {
+    mockApi.tryGetFilingDocument.mockResolvedValue(
+      thirteenG('Wrong Owner', 7).replace('0000320193', '920760'),
+    );
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL' });
+    expect(result.structuredContent).toMatchObject({
+      filings_parsed: 0,
+      filings_examined: 2,
+      filings_excluded_other_issuer: 2,
+      filings_not_examined: 0,
+      filings_failed: [],
+      partial: false,
+      filings: [],
+    });
+    expect(bridge.registerDataframe).not.toHaveBeenCalled();
+    expect(
+      result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n'),
+    ).toContain('2 examined filings name another issuer');
+    expect(blockText(result.content)).not.toContain('none of');
+  });
+
+  it.each([50, 51])('examines at most 50 of %i indexed schedules', async (total) => {
+    mockApi.getSubmissions.mockResolvedValue({
+      name: 'Apple Inc.',
+      filings: {
+        recent: recent(
+          Array.from({ length: total }, (_, i) => ({
+            accessionNumber: `other-${i}`,
+            form: 'SCHEDULE 13G',
+            filingDate: '2026-04-29',
+          })),
+        ),
+      },
+    });
+    mockApi.tryGetFilingDocument.mockResolvedValue(
+      thirteenG('Other', 7).replace('0000320193', '920760'),
+    );
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL', limit: 1 });
+    expect(result.structuredContent).toMatchObject({
+      total_structured_filings: total,
+      filings_examined: 50,
+      filings_not_examined: total - 50,
+      filings_excluded_other_issuer: 50,
+      filings_parsed: 0,
+      partial: false,
+      filings_failed: [],
+    });
+    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledTimes(50);
+    expect(bag(result.structuredContent).truncated === true).toBe(total === 51);
+    if (total === 51) {
+      const text = result.content
+        .map((block) => (block.type === 'text' ? block.text : ''))
+        .join('\n');
+      expect(text).toContain('50-document scan ceiling');
+      expect(text).not.toContain('Raise limit');
+    }
+  });
+
+  it('names the scan ceiling when the fiftieth document also fills the result limit', async () => {
+    mockApi.getSubmissions.mockResolvedValue({
+      name: 'Apple Inc.',
+      filings: {
+        recent: recent(
+          Array.from({ length: 51 }, (_, i) => ({
+            accessionNumber: `filing-${i}`,
+            form: 'SCHEDULE 13G',
+            filingDate: '2026-04-29',
+          })),
+        ),
+      },
+    });
+    mockApi.tryGetFilingDocument.mockImplementation(async (_cik, accession) =>
+      thirteenG('Owner', 7).replace('0000320193', accession === 'filing-49' ? '320193' : '920760'),
+    );
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL', limit: 1 });
+    expect(result.structuredContent).toMatchObject({
+      filings_examined: 50,
+      filings_parsed: 1,
+      filings_excluded_other_issuer: 49,
+      filings_not_examined: 1,
+      truncated: true,
+      cap: 50,
+      filings: [{ accession_number: 'filing-49' }],
+    });
+    const text = result.content
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('\n');
+    expect(text).toContain('50-document scan ceiling');
+    expect(text).not.toContain('Raise limit');
+  });
+
+  it('does not recommend raising an already maximal result limit', async () => {
+    mockApi.getSubmissions.mockResolvedValue({
+      name: 'Apple Inc.',
+      filings: {
+        recent: recent(
+          Array.from({ length: 21 }, (_, i) => ({
+            accessionNumber: `filing-${i}`,
+            form: 'SCHEDULE 13G',
+            filingDate: '2026-04-29',
+          })),
+        ),
+      },
+    });
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL', limit: 20 });
+    expect(result.structuredContent).toMatchObject({
+      filings_parsed: 20,
+      filings_examined: 20,
+      filings_not_examined: 1,
+      truncated: true,
+      cap: 20,
+    });
+    const text = result.content
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('\n');
+    expect(text).toContain('form_kind');
+    expect(text).not.toContain('Raise limit');
+  });
+
+  it('preserves a document service failure instead of returning an incomplete success', async () => {
+    const failure = new Error('SEC document service unavailable');
+    mockApi.tryGetFilingDocument.mockRejectedValueOnce(failure);
+    const ctx = createMockContext({ errors: getBeneficialOwnersTool.errors });
+    await expect(
+      getBeneficialOwnersTool.handler(getBeneficialOwnersTool.input.parse({ issuer: 'AAPL' }), ctx),
+    ).rejects.toBe(failure);
+    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops between documents with the caller cancellation reason intact', async () => {
+    const controller = new AbortController();
+    const reason = new Error('Caller stopped ownership scan');
+    mockApi.tryGetFilingDocument.mockImplementationOnce(async () => {
+      controller.abort(reason);
+      return thirteenG('Other', 7).replace('0000320193', '920760');
+    });
+    const ctx = createMockContext({
+      errors: getBeneficialOwnersTool.errors,
+      signal: controller.signal,
+    });
+    await expect(
+      getBeneficialOwnersTool.handler(getBeneficialOwnersTool.input.parse({ issuer: 'AAPL' }), ctx),
+    ).rejects.toBe(reason);
+    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a matching filing despite one missing document, without truncating the dataset', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+    mockApi.tryGetFilingDocument.mockResolvedValueOnce(null);
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL', limit: 2 });
+    expect(result.structuredContent).toMatchObject({
+      filings_examined: 2,
+      filings_parsed: 1,
+      filings_not_examined: 0,
+      filings_excluded_other_issuer: 0,
+      partial: true,
+      filings_failed: [{ accession_number: '0000000001-26-000001', reason: 'document_not_found' }],
+      dataset: { truncated: false, row_count: 1 },
+    });
+    const text = result.content
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('\n');
+    expect(text).toContain('document_not_found');
+    expect(text).toContain('df_TEST0_TEST1');
+    expect(text).not.toContain('Raise limit');
+    expect(bag(result.structuredContent).truncated).not.toBe(true);
+  });
+
   it('selects the structured schedules out of the issuer submissions feed', async () => {
     const ctx = createMockContext({ errors: getBeneficialOwnersTool.errors });
     const input = getBeneficialOwnersTool.input.parse({ issuer: 'AAPL' });
@@ -188,6 +457,8 @@ describe('getBeneficialOwnersTool', () => {
     );
     // The scope carries the caller's own signal, so a cancel reaches SEC (#179).
     expect(mockApi.tryGetFilingDocument.mock.calls[0]?.[3].signal).toBe(ctx.signal);
+    // A newest matching schedule still costs exactly one document request.
+    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledTimes(1);
   });
 
   it('excludes amendments when asked, and marks the ones it keeps', async () => {
@@ -408,7 +679,7 @@ describe('getBeneficialOwnersTool', () => {
     const result = await getBeneficialOwnersTool.handler(input, ctx);
 
     expect(result.filings_parsed).toBe(0);
-    expect(getEnrichment(ctx).notice).toContain('none of the 2 fetched parsed');
+    expect(getEnrichment(ctx).notice).toContain('2 documents failed; this is a partial result');
   });
 
   it('fails on an ambiguous issuer name rather than picking one', async () => {
@@ -454,6 +725,11 @@ describe('getBeneficialOwnersTool', () => {
       form_kind: 'all',
       total_structured_filings: 1,
       filings_parsed: 1,
+      filings_examined: 1,
+      filings_excluded_other_issuer: 0,
+      filings_not_examined: 0,
+      filings_failed: [],
+      partial: false,
       structured_coverage_from: '2024-12-18',
       legacy_filings_before_coverage: 23,
       filings: [

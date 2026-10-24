@@ -101,6 +101,8 @@ export interface ParsedInfoTable {
 
 /** Identity fields from a 13F cover page (`primary_doc.xml`). */
 export interface ThirteenFCoverPage {
+  /** Cover-page amendment classification, when the filer supplies a recognized value. */
+  amendmentType?: 'RESTATEMENT' | 'NEW HOLDINGS';
   /** `coverPage/filingManager/name`, entities decoded. */
   filerName: string | undefined;
   /** Period of report as YYYY-MM-DD. */
@@ -373,7 +375,11 @@ export function parseThirteenFCoverPage(xml: string): ThirteenFCoverPage {
   const period = [findTag(nodes, 'periodOfReport'), findTag(nodes, 'reportCalendarOrQuarter')]
     .map((el) => (el ? textContent(el).trim() : ''))
     .find((text) => /^\d{2}-\d{2}-\d{4}$/.test(text));
+  const amendmentType = nodeText(findTag(nodes, 'amendmentInfo'), 'amendmentType');
   return {
+    ...(amendmentType === 'RESTATEMENT' || amendmentType === 'NEW HOLDINGS'
+      ? { amendmentType }
+      : {}),
     filerName: nodeText(findTag(nodes, 'filingManager'), 'name'),
     reportingPeriod: period && `${period.slice(6)}-${period.slice(0, 2)}-${period.slice(3, 5)}`,
   };

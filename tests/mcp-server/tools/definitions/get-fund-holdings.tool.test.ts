@@ -9,7 +9,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getFundHoldingsTool } from '@/mcp-server/tools/definitions/get-fund-holdings.tool.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
@@ -35,6 +35,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 }));
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import { blockText } from '../../../support/assertions.js';
 
 interface FilingRow {
   accessionNumber: string;
@@ -724,6 +725,75 @@ describe('getFundHoldingsTool — report selection', () => {
 });
 
 describe('getFundHoldingsTool — response', () => {
+  it('renders a numeric tiny weight without rounding or exponent notation', async () => {
+    mockApi.tryGetFilingDocument.mockResolvedValue(
+      VOO_REPORT.replace('<pctVal>7.5</pctVal>', '<pctVal>0.000000123456</pctVal>'),
+    );
+    const result = await runToolContract(getFundHoldingsTool, { fund: 'VOO' });
+    expect(result.structuredContent).toMatchObject({
+      holdings: [
+        { percent_of_net_assets: 6.6 },
+        { percent_of_net_assets: 4.9 },
+        { percent_of_net_assets: 0.000000123456 },
+      ],
+    });
+    expect(blockText(result.content)).toContain('0.000000123456% of net assets');
+  });
+
+  it('preserves denomination and tiny weights on both surfaces and the full dataframe', async () => {
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+    mockApi.tryGetFilingDocument.mockResolvedValue(
+      report({
+        seriesId: 'S000002839',
+        reportDate: '2026-03-31',
+        holdings: [
+          { name: 'TSMC', pct: 0.000049236691, value: 26450346837.19 },
+          { name: 'Missing currency', pct: 0, value: 0 },
+        ],
+      })
+        .replace(
+          '<curCd>USD</curCd>',
+          '<n:currencyConditional curCd="TWD" exchangeRt="0.03094200"/>',
+        )
+        .replace('<curCd>USD</curCd>', ''),
+    );
+    const result = await runToolContract(getFundHoldingsTool, { fund: 'VOO', limit: 1 });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      holdings: [
+        {
+          currency: 'TWD',
+          value_usd: 26450346837.19,
+          percent_of_net_assets: 0.000049236691,
+        },
+      ],
+      next_offset: 1,
+    });
+    const text = blockText(result.content);
+    expect(text).toContain('denomination: TWD');
+    expect(text).toContain('USD $26.45B ($26,450,346,837.19)');
+    expect(text).toContain('0.000049236691% of net assets');
+    expect(text).not.toContain('($26,450,346,837.19) (TWD)');
+    expect(bridge.registerDataframe.mock.calls[0]?.[1].rows).toMatchObject([
+      { currency: 'TWD', value_usd: 26450346837.19, percent_of_net_assets: 0.000049236691 },
+      { currency: null, value_usd: 0, percent_of_net_assets: 0 },
+    ]);
+    const last = await runToolContract(getFundHoldingsTool, { fund: 'VOO', limit: 1, offset: 1 });
+    expect(blockText(last.content)).toContain('0% of net assets');
+    expect(blockText(last.content)).not.toContain('denomination:');
+  });
+
+  it('keeps an unreported percentage absent and labels plain USD denomination separately', async () => {
+    mockApi.tryGetFilingDocument.mockResolvedValue(VOO_REPORT.replace('<pctVal>7.5</pctVal>', ''));
+    const result = await runToolContract(getFundHoldingsTool, { fund: 'VOO', offset: 2 });
+    expect(result.structuredContent).toMatchObject({
+      holdings: [{ name: 'NVIDIA Corp', percent_of_net_assets: undefined, currency: 'USD' }],
+    });
+    expect(blockText(result.content)).toContain('denomination: USD | USD $300.00');
+    expect(blockText(result.content)).toContain('percent N/A');
+  });
+
   it('orders positions largest first by percent of net assets', async () => {
     const ctx = createMockContext({ errors: getFundHoldingsTool.errors });
     const input = getFundHoldingsTool.input.parse({ fund: 'VOO' });
@@ -744,6 +814,7 @@ describe('getFundHoldingsTool — response', () => {
     expect(result.holdings).toHaveLength(2);
     expect(result.total_holdings).toBe(3);
     expect(result.next_offset).toBe(2);
+    expect(blockText(getFundHoldingsTool.format!(result))).toContain('Next offset: 2');
     expect(getEnrichment(ctx).truncated).toBe(true);
     expect(getEnrichment(ctx).cap).toBe(2);
   });
@@ -764,6 +835,9 @@ describe('getFundHoldingsTool — response', () => {
 
     expect(result.holdings).toEqual([]);
     expect(getEnrichment(ctx).notice).toContain('at or past the 3 positions');
+    expect(blockText(getFundHoldingsTool.format!(result))).toContain(
+      'Showing 0 of 3 positions from offset 50',
+    );
   });
 
   it('dates every result to the portfolio date and states the publication lag', async () => {
@@ -870,6 +944,7 @@ describe('getFundHoldingsTool — response', () => {
     expect(result.total_holdings).toBe(0);
     expect(result.dataset).toBeUndefined();
     expect(getEnrichment(ctx).notice).toContain('lists no portfolio positions');
+    expect(blockText(getFundHoldingsTool.format!(result))).toContain('Showing 0 of 0 positions');
   });
 
   it('rejects a malformed series ID, report date, and out-of-range paging at the schema', () => {

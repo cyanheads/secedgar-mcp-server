@@ -24,7 +24,7 @@ import type { EftsHit } from '@/services/edgar/types.js';
 const EFTS_PAGE_SIZE = 100;
 
 /**
- * Pages fetched in one call — 500 filer rows. Measured against the Q1 2026
+ * Pages fetched in one call — 500 matching documents. Measured against the Q1 2026
  * filing window (2026-04-01 → 2026-06-30): Apple (CUSIP 037833100) draws 6,652
  * 13F-HR filings, so the budget returns a 500-row sample with the exact total
  * still reported and `dataset.truncated` set; Liberty Live Holdings (530909100)
@@ -210,7 +210,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
     total_filings: z
       .number()
       .describe(
-        '13F-HR filings matching the search key in the window, per the index; slightly over-counts holders (amendments of older quarters, managers amending this one), which holders_in_quarter corrects.',
+        'Matching documents in the filing window, including amendments; holders_in_quarter deduplicates managers and filters period.',
       ),
     total_is_exact: z
       .boolean()
@@ -221,7 +221,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
     holders_in_quarter: z
       .number()
       .describe(
-        'Distinct managers reporting this quarter among fetched filings: the set limit pages and the dataframe holds. Other-quarter amendments drop; a manager that amended counts once, at its latest filing.',
+        'Distinct in-quarter managers in the fetched sample and dataframe; latest filing per CIK wins, other periods excluded.',
       ),
     holders: z
       .array(
@@ -260,11 +260,11 @@ export const findHoldersTool = tool('secedgar_find_holders', {
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
         truncated: z
           .boolean()
-          .describe('True when total_filings exceeds fetched, so more filers exist.'),
+          .describe('True when the fetched sample may omit matching documents.'),
       })
       .optional()
       .describe(
-        'Dataframe of every fetched filer row, keyed by issuer and quarter for cross-issuer joins. Absent when the result fits inline, canvas is unavailable, or staging failed.',
+        'Fetched managers keyed by issuer and quarter for joins. Absent if inline fits, canvas is unavailable or staging fails.',
       ),
   }),
 
@@ -275,7 +275,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance when the search returned no filers — names the likely cause.'),
+      .describe('Continuation, search coverage, empty results, and dataframe guidance.'),
     truncated: z.boolean().optional().describe('True when the inline holders list was capped.'),
     shown: z.number().optional().describe('Number of filers shown inline.'),
     cap: z.number().optional().describe('The limit cap applied.'),
@@ -377,7 +377,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
     }
     const rows = [...byFiler.values()];
 
-    const truncated = hitsFetched < total;
+    const truncated = hitsFetched < total || !totalIsExact;
 
     let dataset:
       | { name: string; row_count: number; expires_at: string; truncated: boolean }
@@ -417,13 +417,14 @@ export const findHoldersTool = tool('secedgar_find_holders', {
      * aggregate over that sample, which is worth saying before someone counts it.
      */
     const sampleNote = truncated
-      ? ` The fetch budget stopped at ${hitsFetched} of ${total} matching filings, and the index served them in that same relevance order, so this is a sample of the holders rather than the first ones by any measure.`
+      ? ` The fetch budget stopped at ${hitsFetched} of ${totalIsExact ? '' : 'at least '}${total} matching documents, and the index served them in that same relevance order, so this is a sample of the holders rather than the first ones by any measure.`
       : '';
     ctx.enrich({
       ordering: `Filers are listed in EDGAR search-relevance order, which reflects text match strength only — it is not a ranking by shares held or market value.${sampleNote} Read a manager's actual position with secedgar_get_institutional_holdings using its filer_cik and quarter "${quarter}".`,
     });
 
     const searchedTerm = searchMode === 'cusip' ? `CUSIP ${searchKey}` : `the phrase ${searchKey}`;
+    const notices: string[] = [];
     if (total === 0) {
       const deadline = addDays(quarterEnd, FILING_DEADLINE_DAYS);
       const cause =
@@ -432,24 +433,34 @@ export const findHoldersTool = tool('secedgar_find_holders', {
           : searchMode === 'cusip'
             ? 'Verify the CUSIP identifies a 13(f)-reportable security and covers the intended share class, or drop cusip to phrase-match the issuer name instead.'
             : 'The issuer name is phrase-matched against filing text and managers may write it differently — pass cusip for an exact match, read one off any secedgar_get_institutional_holdings result.';
-      ctx.enrich.notice(
+      notices.push(
         `No 13F-HR filings matched ${searchedTerm} filed ${filedFrom} to ${filedTo}. ${cause}`,
       );
     } else if (rows.length === 0) {
-      ctx.enrich.notice(
+      notices.push(
         `${total} 13F-HR filings matched ${searchedTerm} in the ${filedFrom} to ${filedTo} window, but none of the ${hitsFetched} fetched report ${quarter} (period ending ${quarterEnd}) — they are amendments restating other quarters. Search the quarter those amendments cover, or a later one.`,
       );
     } else if (rows.length > input.limit) {
-      ctx.enrich.truncated({
-        shown: input.limit,
-        cap: input.limit,
-        guidance: dataset
-          ? truncated
-            ? `${total} filings matched in the window; the fetch budget of ${FETCH_PAGE_BUDGET * EFTS_PAGE_SIZE} retrieved ${hitsFetched}, resolving to ${rows.length} managers reporting ${quarter}. ${dataframeGuidance(dataset)}`
-            : dataframeGuidance(dataset)
-          : 'Raise limit to see more inline, or narrow to a single share class with cusip.',
-      });
+      const guidance = dataset
+        ? truncated
+          ? `${total} filings matched in the window; the fetch budget of ${FETCH_PAGE_BUDGET * EFTS_PAGE_SIZE} retrieved ${hitsFetched}, resolving to ${rows.length} managers reporting ${quarter}. ${dataframeGuidance(dataset)}`
+          : dataframeGuidance(dataset)
+        : 'Raise limit to see more inline, or narrow to a single share class with cusip.';
+      notices.push(guidance);
     }
+    if (truncated) {
+      const reachable = Math.min(total, 10_000);
+      const recipe =
+        hitsFetched < reachable
+          ? ` Continue with secedgar_search_filings ${JSON.stringify({ query: searchKey, forms: ['13F-HR'], filed_after: filedFrom, filed_before: filedTo, sort: 'relevance', offset: hitsFetched, limit: Math.min(EFTS_PAGE_SIZE, 10_000 - hitsFetched) })}. Offset counts documents; a filing may recur across pages. Advance offset by 100 documents per full page, stopping before offset + limit exceeds 10000. forms=["13F-HR"] includes amendments. Filter results by period_ending="${quarterEnd}"; deduplicate across the original sample and subsequent pages by CIK (sample.filer_cik, results.cik), keeping the latest filing_date.`
+          : '';
+      notices.push(
+        `${totalIsExact ? `${total} matching documents` : `At least ${total} matching documents (lower bound)`}; ${reachable} reported documents are reachable within EDGAR's 10000-document paging ceiling.${!totalIsExact || total > 10_000 ? ' Documents beyond that window are unreachable by paging.' : ''}${recipe}`,
+      );
+    }
+    if (rows.length > input.limit) {
+      ctx.enrich.truncated({ shown: input.limit, cap: input.limit, guidance: notices.join(' ') });
+    } else if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     ctx.log.info('Holder search completed', {
       issuer: input.issuer,

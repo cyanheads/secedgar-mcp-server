@@ -122,7 +122,7 @@ SEC EDGAR filings, financials, and ownership data. Look up companies by ticker, 
 
 - `company` is the issuer; `transaction_type` `purchase` (code P), `sale` (code S), or `all` (default); `limit` 1–100 (default 20); does not cover Forms 3 or 5
 - Without a date window it scans up to 100 of the newest Form 4 / 4-A filings; `filed_after` / `filed_before` (inclusive, either alone) read any period since mid-2003, up to 100 filings; `history_scanned_through` names the oldest filing parsed
-- Each transaction carries the reporting person, relationship, `transaction_code` and `transaction_type`, `is_derivative`, unsigned `shares_traded` with `direction` (`acquire` / `dispose`), price per share, and shares owned after; `dataset.truncated` flags filings beyond those parsed, and `filings_other_issuer` counts Form 4s the company filed as a reporting owner of another issuer, which add no rows
+- Each transaction carries the reporting person, relationship, `transaction_code` and `transaction_type`, `is_derivative`, unsigned `shares_traded` with `direction` (`acquire` / `dispose`), price per share, and shares owned after; `dataset.truncated` flags filings beyond those parsed, and `filings_other_issuer` counts Form 4s the company filed as a reporting owner of another issuer, which add no rows. Price text preserves the numeric digits in fixed-point notation, with at least two decimal places.
 
 ---
 
@@ -130,6 +130,7 @@ SEC EDGAR filings, financials, and ownership data. Look up companies by ticker, 
 
 - `company` is the 13F filer (a CIK is most reliable), not a portfolio company, which is `secedgar_find_holders`' job; `quarter` as `YYYY-QN`, defaulting to the newest filing; `limit` 1–500 (default 20) with `offset` / `next_offset`; `consolidate` (default true) merges sub-lines into positions sorted by value
 - Older quarters are found in the archive (up to 10 pages); a quarter covered only by a 13F-NT notice fails as `no_filings_found` naming the notice's accession number and period
+- Holdings and dataframe rows come from the original report. `amendments` discloses same-period accessions, filing dates and cover-page types (`UNAVAILABLE` with a reason when unreadable); read them with `secedgar_get_filing`. `amendment_search_complete=false` warns that bounded or unavailable archive discovery may have missed amendments
 - Holdings carry issuer, CUSIP, `market_value_usd` in whole USD, shares or principal, and `put_call`; `total_holdings_in_filing` counts raw rows and `total_positions` distinct positions; a shared legal name fails as `ambiguous_entity`
 
 ---
@@ -138,21 +139,23 @@ SEC EDGAR filings, financials, and ownership data. Look up companies by ticker, 
 
 - `issuer` as a ticker, CIK, or name, plus an optional 9-character `cusip`, the precise match key (a name phrase-match both over- and under-matches); `quarter` as `YYYY-QN`, defaulting to the newest quarter past its 45-day filing deadline; `limit` 1–100 (default 20) from up to 500 fetched filings
 - Rows carry `filer_cik`, `accession_number`, and `form`, while `search_mode` (`cusip` / `name`), `total_filings`, `fetched`, and `holders_in_quarter` size the result; the list is unranked, so pass a `filer_cik` to `secedgar_get_institutional_holdings` to read the position
+- When matching documents exceed the fetch budget, the notice gives an exact `secedgar_search_filings` continuation with the query, dates and document offset. Filter `results.period_ending` to the quarter end, then deduplicate across the sample's `filer_cik` and search results' `cik`, keeping the latest `filing_date`. Advance by 100 documents per full page; EDGAR's paging ceiling is 10,000 documents, and lower-bound totals may hide more beyond it
 
 ---
 
 ### `secedgar_get_beneficial_owners` <sub>tool</sub>
 
-- `issuer` is the company being held; `form_kind` `all` (default), `13D`, or `13G`; `include_amendments` (default true); `limit` 1–20 filings (default 10), each a separate document fetch
+- `issuer` is the company being held; `form_kind` `all` (default), `13D`, or `13G`; `include_amendments` (default true); `limit` 1–20 matching parsed filings (default 10). The newest-first scan examines at most 50 documents, excluding schedules naming another issuer; exclusions and failed documents do not consume `limit`
 - Each filing lists `reporting_persons` with voting power, dispositive power, and `percent_of_class` per person, which joint filers report for the same shares, so they don't sum; a 13D carries `purpose_of_transaction`, a 13G has none
 - Coverage starts 2024-12-18 with the structured XML schedules; `legacy_filings_before_coverage` counts the issuer's older `SC 13D` / `SC 13G` text filings
+- `total_structured_filings` partitions into `filings_examined` + `filings_not_examined`; examined documents partition into `filings_parsed` + `filings_excluded_other_issuer` + `filings_failed.length`. Failed accessions carry `document_not_found` (404) or `unparseable` (including missing issuer identity), and set `partial`. `truncated` means indexed schedules remain unexamined after the result limit or scan ceiling, independently of failures
 
 ---
 
 ### `secedgar_get_fund_holdings` <sub>tool</sub>
 
 - `fund` as a ticker (`VOO`), series ID (`S000002839`), or CIK; a multi-series trust fails as `series_required` with the series listed, so pass `series_id`; `report_date` picks a period from `available_report_periods`; `limit` 1–100 (default 20) with `offset` / `next_offset`
-- Positions come largest first by `percent_of_net_assets`, with name, CUSIP / ISIN / LEI, `balance` and `units`, `value_usd`, and asset and issuer category, alongside fund net assets, total assets, and total liabilities
+- Positions come largest first by `percent_of_net_assets`, with name, CUSIP / ISIN / LEI, `balance` and `units`, `value_usd`, and asset and issuer category, alongside fund net assets, total assets, and total liabilities. Position `currency` is its denomination; valuations stay in USD. Percentage text preserves the numeric digits in fixed-point notation.
 - Holdings are as of `report_period_date`, roughly two months before `filing_date`; `publication_lag_days` states the gap
 
 ---
