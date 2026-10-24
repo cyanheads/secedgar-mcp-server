@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.15.15](changelog/0.15.x/0.15.15.md) — 2026-10-24
+
+Correct ownership attribution and holdings disclosure, preserve numeric text and fund denominations, and provide holder-search continuation guidance.
+
 ## [0.15.14](changelog/0.15.x/0.15.14.md) — 2026-10-23
 
 A cancelled tool call stops sending SEC requests and a call is bounded by a 40 s SEC failure budget; response bodies are read inside the retry ladder; secedgar_search_filings accepts filed_after or filed_before alone; get_filing section and heading detection fixes.

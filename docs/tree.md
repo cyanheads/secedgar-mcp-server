@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-10-23 17:32:35
+Generated on: 2026-10-24 11:14:02
 
 ```text
 secedgar-mcp-server/
@@ -166,25 +166,26 @@ secedgar-mcp-server/
 │   │   │       ├── concepts.resource.ts
 │   │   │       └── filing-types.resource.ts
 │   │   └── tools/
-│   │       └── definitions/
-│   │           ├── company-search.tool.ts
-│   │           ├── compare-companies.tool.ts
-│   │           ├── dataframe-describe.tool.ts
-│   │           ├── dataframe-drop.tool.ts
-│   │           ├── dataframe-query.tool.ts
-│   │           ├── fetch-frames.tool.ts
-│   │           ├── find-holders.tool.ts
-│   │           ├── get-beneficial-owners.tool.ts
-│   │           ├── get-filing.tool.ts
-│   │           ├── get-financials.tool.ts
-│   │           ├── get-fund-holdings.tool.ts
-│   │           ├── get-insider-transactions.tool.ts
-│   │           ├── get-institutional-holdings.tool.ts
-│   │           ├── get-material-events.tool.ts
-│   │           ├── get-snapshot.tool.ts
-│   │           ├── index.ts
-│   │           ├── search-concepts.tool.ts
-│   │           └── search-filings.tool.ts
+│   │       ├── definitions/
+│   │       │   ├── company-search.tool.ts
+│   │       │   ├── compare-companies.tool.ts
+│   │       │   ├── dataframe-describe.tool.ts
+│   │       │   ├── dataframe-drop.tool.ts
+│   │       │   ├── dataframe-query.tool.ts
+│   │       │   ├── fetch-frames.tool.ts
+│   │       │   ├── find-holders.tool.ts
+│   │       │   ├── get-beneficial-owners.tool.ts
+│   │       │   ├── get-filing.tool.ts
+│   │       │   ├── get-financials.tool.ts
+│   │       │   ├── get-fund-holdings.tool.ts
+│   │       │   ├── get-insider-transactions.tool.ts
+│   │       │   ├── get-institutional-holdings.tool.ts
+│   │       │   ├── get-material-events.tool.ts
+│   │       │   ├── get-snapshot.tool.ts
+│   │       │   ├── index.ts
+│   │       │   ├── search-concepts.tool.ts
+│   │       │   └── search-filings.tool.ts
+│   │       └── fixed-point.ts
 │   ├── services/
 │   │   ├── canvas-bridge/
 │   │   │   ├── canvas-bridge.ts
@@ -209,6 +210,7 @@ secedgar-mcp-server/
 │   │       ├── fiscal-periods.ts
 │   │       ├── nport-parser.ts
 │   │       ├── ownership-parser.ts
+│   │       ├── same-cik.ts
 │   │       ├── submissions-archive.ts
 │   │       ├── trigram-similarity.ts
 │   │       ├── types.ts
@@ -246,7 +248,9 @@ secedgar-mcp-server/
 │   │       │   ├── search-filings.tool.test.ts
 │   │       │   ├── security.test.ts
 │   │       │   └── tool-definitions.test.ts
+│   │       ├── amendment-disclosure.test.ts
 │   │       ├── dataframe-pointers.test.ts
+│   │       ├── fixed-point.test.ts
 │   │       ├── fund-ticker-resolution.test.ts
 │   │       ├── input-aliases.test.ts
 │   │       ├── rate-limit-contract.test.ts
@@ -283,6 +287,7 @@ secedgar-mcp-server/
 │   │       ├── fiscal-periods.test.ts
 │   │       ├── nport-parser.test.ts
 │   │       ├── ownership-parser.test.ts
+│   │       ├── same-cik.test.ts
 │   │       ├── submissions-archive.test.ts
 │   │       └── xml-nodes.test.ts
 │   └── support/
