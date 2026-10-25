@@ -9,6 +9,7 @@ import { McpError, notFound, rateLimited, serviceUnavailable } from '@cyanheads/
 import {
   createPacer,
   httpErrorFromResponse,
+  isRecord,
   logger,
   type Pacer,
   requestContextService,
@@ -80,8 +81,9 @@ const BODY_IDLE_TIMEOUT_MS = 15_000;
 /**
  * `data.reason` once SEC gave no complete, readable answer: the last attempt got no
  * HTTP response (#173) or its body failed to read, or a 200 body was not JSON
- * (#181). Declared retryable on every tool that reaches SEC; set on `data.retryable`
- * here for the same reason as `rate_limited` (#122).
+ * (#181) or lacked the shape its readers index (#186). Declared retryable on every
+ * tool that reaches SEC; set on `data.retryable` here for the same reason as
+ * `rate_limited` (#122).
  */
 const SEC_UNREACHABLE_REASON = 'sec_unreachable';
 
@@ -127,24 +129,31 @@ interface BodyFailedAttempt {
   readonly waitedMs: number;
 }
 
-/** One attempt's body read: its text, or why it failed. */
-type BodyRead = { readonly kind: 'read'; readonly text: string } | BodyFailedAttempt;
+/**
+ * One attempt's body read: its text, or why it failed and the text read before it
+ * did — which only the error-body capture keeps (#202).
+ */
+type BodyRead =
+  | { readonly kind: 'read'; readonly text: string }
+  | (BodyFailedAttempt & { readonly text: string });
 
-/** Where a head read stops: once `stopAt` appears in the text so far, or `maxBytes` have arrived. */
+/** Where a head read stops: once `stopAt`, when given, appears in the text so far, or `maxBytes` have arrived. */
 interface HeadCutoff {
   readonly maxBytes: number;
-  readonly stopAt: string;
+  readonly stopAt?: string;
 }
 
 /**
  * Every way SEC gives no complete, readable answer — each ends as `sec_unreachable`,
- * including a request the call's spent failure budget kept from being sent (#179).
+ * including a request the call's spent failure budget kept from being sent (#179),
+ * and a 200 body that is not the JSON the request reads: not JSON at all (#181), or
+ * JSON without the shape its readers index (#186).
  */
 type Unreadable =
   | UnansweredAttempt
   | BodyFailedAttempt
   | BudgetSpent
-  | { readonly kind: 'not_json'; readonly rejection: unknown };
+  | { readonly kind: 'unexpected_body'; readonly rejection: unknown };
 
 /**
  * How a request's retry ladder ended: on which attempt, and whether the call's
@@ -705,17 +714,17 @@ class EdgarApiService {
    * the last year or 1,000 filings, whichever holds more — + the `files[]`
    * archive-page manifest). Cached per CIK within
    * the ticker-cache TTL — the doc is large and re-read on every archive-paging
-   * scan (#78). A 404 throws (uncached) so a bad CIK still surfaces. Like every
-   * cache here, written only by a completed read — a cancelled one caches nothing.
+   * scan (#78). A 404 throws (uncached) so a bad CIK still surfaces. A body without
+   * the shape the readers index fails as `sec_unreachable` (#186). Like every cache
+   * here, written only by a completed read — a cancelled or rejected one caches nothing.
    */
   async getSubmissions(cik: string, scope: CallScope): Promise<SubmissionsResponse> {
     const padded = cik.padStart(10, '0');
     const cached = this.submissionsCache.get(padded);
     if (cached && this.isFresh(cached.at)) return cached.data;
-    const data = await this.fetchJson<SubmissionsResponse>(
-      `https://data.sec.gov/submissions/CIK${padded}.json`,
-      scope,
-    );
+    const url = `https://data.sec.gov/submissions/CIK${padded}.json`;
+    const data = await this.fetchJson<unknown>(url, scope);
+    if (!isSubmissionsBody(data)) throw unexpectedShape(url, 'a submissions document');
     this.submissionsCache.set(padded, { at: Date.now(), data });
     return data;
   }
@@ -724,16 +733,16 @@ class EdgarApiService {
    * Fetch a submissions archive page (`filings.files[].name`, e.g.
    * `CIK0000320193-submissions-001.json`) — the older filings that don't fit the
    * `recent` window. Read through `SubmissionsArchiveWalk`. The page body is a flat parallel-array object
-   * field-compatible with `FilingsRecent`. Cached per page within the ticker-cache
+   * field-compatible with `FilingsRecent`; one without its six indexed columns fails
+   * as `sec_unreachable`, uncached (#186). Cached per page within the ticker-cache
    * TTL (pages are large and effectively immutable once archived).
    */
   async fetchArchivePage(name: string, scope: CallScope): Promise<FilingsRecent> {
     const cached = this.archivePageCache.get(name);
     if (cached && this.isFresh(cached.at)) return cached.data;
-    const data = await this.fetchJson<FilingsRecent>(
-      `https://data.sec.gov/submissions/${name}`,
-      scope,
-    );
+    const url = `https://data.sec.gov/submissions/${name}`;
+    const data = await this.fetchJson<unknown>(url, scope);
+    if (!isFilingColumns(data)) throw unexpectedShape(url, 'a submissions archive page');
     this.archivePageCache.set(name, { at: Date.now(), data });
     return data;
   }
@@ -1100,9 +1109,12 @@ class EdgarApiService {
 
   /**
    * Paced fetch with retry/backoff. Returns the body's text on 2xx — only its head
-   * when `cutoff` is given — and `null` on 404, whose body is left unread. The body
-   * is read inside the ladder (#181): a 5xx, an attempt that got no HTTP response,
-   * and a 2xx whose body failed to read all retry up to `MAX_RETRIES` attempts, and
+   * when `cutoff` is given — and `null` on 404. A body the ladder has no use for — a
+   * 404's, a retried 5xx's, a 429's, one that lands as the caller cancels — is
+   * cancelled unread (#188); an error the last attempt earns carries a bounded head
+   * of its body, read like any other (#202). The body is read inside the ladder
+   * (#181): a 5xx, an attempt that got no HTTP response, and a 2xx whose body
+   * failed to read all retry up to `MAX_RETRIES` attempts, and
    * then the last attempt decides — a 5xx throws its status-classified `McpError`,
    * the other two `sec_unreachable`. Other non-OK statuses throw at once, as does
    * the local refusal while SEC's rate-limit block is active, and the pacer's
@@ -1128,19 +1140,31 @@ class EdgarApiService {
     let failed: Attempt | BodyFailedAttempt | undefined;
     for (let attempt = 1; ; attempt++) {
       const outcome = scope.remainingMs > 0 ? await this.send(url, headers, scope) : BUDGET_SPENT;
-      // An answer that lands as the caller cancels is not read.
-      scope.signal.throwIfAborted();
+      if (scope.signal.aborted) {
+        // An answer that lands as the caller cancels is not read.
+        if (outcome.kind === 'answered') await discardBody(outcome.response);
+        scope.signal.throwIfAborted();
+      }
       if (outcome.kind === 'budget_spent') {
         // Spent before this attempt could go out — by an earlier request, or by a
-        // concurrent one while this retry waited for its slot.
+        // concurrent one while this retry waited for its slot. A 5xx it ends with had
+        // its body released before the backoff, so the error is built without one.
         if (failed === undefined) throw secUnreachable(url, outcome);
-        throw await this.ladderFailure(url, failed, { attempt: attempt - 1, budgetStopped: true });
+        throw await this.ladderFailure(
+          url,
+          failed,
+          { attempt: attempt - 1, budgetStopped: true },
+          null,
+        );
       }
 
       let last: Attempt | BodyFailedAttempt = outcome;
       if (outcome.kind === 'answered') {
         const { response } = outcome;
-        if (response.status === 404) return null;
+        if (response.status === 404) {
+          await discardBody(response);
+          return null;
+        }
         if (response.ok) {
           const body = await readBody(response, scope, cutoff);
           if (body.kind === 'read') return body.text;
@@ -1149,20 +1173,25 @@ class EdgarApiService {
       }
 
       const transient = last.kind !== 'answered' || RETRYABLE_STATUSES.has(last.response.status);
-      if (!transient) throw await this.ladderFailure(url, last, { attempt, budgetStopped: false });
+      if (!transient) {
+        throw await this.ladderFailure(url, last, { attempt, budgetStopped: false }, scope);
+      }
 
       scope.charge(outcome.waitedMs + (last.kind === 'body_failed' ? last.waitedMs : 0));
       const backoffMs = BASE_BACKOFF_MS * 2 ** (attempt - 1);
       if (attempt < MAX_RETRIES && scope.remainingMs > backoffMs) {
+        if (last.kind === 'answered') await discardBody(last.response);
         scope.charge(backoffMs);
         await sleep(backoffMs, scope.signal);
         failed = last;
         continue;
       }
-      throw await this.ladderFailure(url, last, {
-        attempt,
-        budgetStopped: attempt < MAX_RETRIES || cutByBudget(last),
-      });
+      throw await this.ladderFailure(
+        url,
+        last,
+        { attempt, budgetStopped: attempt < MAX_RETRIES || cutByBudget(last) },
+        scope,
+      );
     }
   }
 
@@ -1171,11 +1200,17 @@ class EdgarApiService {
    * an unreadable body; for an HTTP answer, its status-classified `McpError`, with
    * the 403 and 429 hints. A 5xx ladder the failure budget stopped keeps its status
    * mapping and `data`, and its message says the budget stopped it (#179).
+   *
+   * An HTTP answer's body is read under `scope` for the error's diagnostic
+   * (`errorBodyHead`, #202) — except a 429's, and the one `scope` is `null` for: a
+   * retried 5xx whose body was released before its backoff. Either is built without
+   * a body, the 429's cancelled unread (#188).
    */
   private async ladderFailure(
     url: string,
     last: Attempt | BodyFailedAttempt,
     end: LadderEnd,
+    scope: CallScope | null,
   ): Promise<McpError> {
     if (last.kind !== 'answered') return secUnreachable(url, last, end);
 
@@ -1194,12 +1229,19 @@ class EdgarApiService {
       data.retryAfter = retryAfter;
       data.recovery = { hint: rateLimitHint(retryAfter) };
     }
+    // A 429's body is SEC's full HTML block page; the hint above carries everything
+    // actionable, so the markup is not forwarded (#112).
+    if (scope === null || response.status === 429) {
+      await discardBody(response);
+    } else {
+      const body = await errorBodyHead(response, scope);
+      // The two names `httpErrorFromResponse` gives a body it captures itself.
+      if (body !== undefined) Object.assign(data, { body, responseBody: body });
+    }
     const error = await httpErrorFromResponse(response, {
       service: 'SEC EDGAR',
       data,
-      // SEC answers a rate-limit block with a full HTML page. The recovery hint
-      // above carries everything actionable, so the markup is not forwarded (#112).
-      captureBody: response.status !== 429,
+      captureBody: false,
     });
     if (!end.budgetStopped) return error;
     return new McpError(
@@ -1854,7 +1896,8 @@ async function fetchUntilHeaders(
  * cancel that fails is not a body failure, since the body is being discarded either
  * way. Both cutoff checks run between reads, so neither can cut below one read
  * chunk. Once the caller's signal has fired, the read's rejection is rethrown as
- * it came, never a body failure.
+ * it came, never a body failure. A failed read carries the text that arrived
+ * before it failed.
  */
 async function readBody(
   response: Response,
@@ -1880,7 +1923,7 @@ async function readBody(
       }
       bytes += value.byteLength;
       text += decoder.decode(value, { stream: true });
-      if (cutoff !== undefined && text.includes(cutoff.stopAt)) break;
+      if (cutoff?.stopAt !== undefined && text.includes(cutoff.stopAt)) break;
     }
     return { kind: 'read', text };
   } catch (rejection) {
@@ -1891,6 +1934,7 @@ async function readBody(
       capMs,
       rejection,
       stalled: rejection === stalled,
+      text,
       waitedMs: Date.now() - readFrom,
     };
   } finally {
@@ -1898,6 +1942,49 @@ async function readBody(
       /* the body is being discarded; a cancel racing its end has nothing to report */
     });
   }
+}
+
+/** Body bytes an error keeps as its diagnostic: the bound `httpErrorFromResponse` applies to the bodies it captures. */
+const ERROR_BODY_LIMIT_BYTES = 500;
+
+const utf8 = new TextEncoder();
+
+/**
+ * The diagnostic head of an error response's body: the whole body up to
+ * {@link ERROR_BODY_LIMIT_BYTES}, or that many bytes — never a partial code point —
+ * and `…` for a body cut short. Read through {@link readBody}, so a body that stalls
+ * after its headers ends at the idle limit or the call's budget left, keeping what
+ * arrived, with that wait charged to the budget, and the caller's cancel rethrows at
+ * once (#202) — the framework's own capture awaits each read with no bound or
+ * signal. `undefined` when a failed read left nothing.
+ */
+async function errorBodyHead(response: Response, scope: CallScope): Promise<string | undefined> {
+  // Up to 3 bytes of a split code point stay in the decoder, so a read stopped at
+  // this cutoff still holds more than the limit as text: a body cut short is never
+  // mistaken for a whole one.
+  const read = await readBody(response, scope, { maxBytes: ERROR_BODY_LIMIT_BYTES + 4 });
+  if (read.kind === 'body_failed') scope.charge(read.waitedMs);
+  const bytes = utf8.encode(read.text);
+  if (bytes.byteLength > ERROR_BODY_LIMIT_BYTES) {
+    // A streaming decode holds back the code point the cut splits instead of emitting U+FFFD.
+    const head = new TextDecoder().decode(bytes.subarray(0, ERROR_BODY_LIMIT_BYTES), {
+      stream: true,
+    });
+    return `${head}…`;
+  }
+  if (read.kind === 'read') return read.text;
+  return read.text === '' ? undefined : `${read.text}…`;
+}
+
+/**
+ * Release a body the ladder will not read (#188), so no runtime holds its
+ * connection for it. A cancel that fails changes nothing: the body is discarded
+ * either way.
+ */
+async function discardBody(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => {
+    /* nothing to report for a body being discarded */
+  });
 }
 
 /**
@@ -1958,14 +2045,57 @@ function seconds(ms: number): string {
  * Parse a 200's body as JSON. Every SEC route read as JSON serves JSON, so a body
  * that does not parse — an HTML error page served as a 200 — fails as
  * `sec_unreachable`, unretried since the body arrived whole; the parser's text,
- * which quotes the body, rides `cause` only (#181).
+ * which quotes the body, rides `cause` only (#181). The parse is not a shape check:
+ * the submissions readers check theirs (#186).
  */
 function parseJson<T>(url: string, text: string): T {
   try {
     return JSON.parse(text) as T;
   } catch (rejection) {
-    throw secUnreachable(url, { kind: 'not_json', rejection });
+    throw secUnreachable(url, { kind: 'unexpected_body', rejection });
   }
+}
+
+/** The parallel-array columns every submissions reader indexes, in `filings.recent` and on an archive page. */
+const FILING_COLUMNS = [
+  'accessionNumber',
+  'filingDate',
+  'form',
+  'primaryDocument',
+  'primaryDocDescription',
+  'reportDate',
+] as const satisfies ReadonlyArray<keyof FilingsRecent>;
+
+/**
+ * True when `value` carries the six indexed columns as arrays. Lengths are not
+ * compared and elements are not checked: the readers loop over one column and
+ * default the rest per row (#186).
+ */
+function isFilingColumns(value: unknown): value is FilingsRecent {
+  return isRecord(value) && FILING_COLUMNS.every((column) => Array.isArray(value[column]));
+}
+
+/**
+ * True when `value` carries what the submissions readers index without a guard:
+ * `filings.recent`'s columns, the `filings.files` archive manifest, `tickers`, and
+ * `exchanges` (#186). Empty arrays pass; optional columns are not required.
+ */
+function isSubmissionsBody(value: unknown): value is SubmissionsResponse {
+  if (!isRecord(value) || !Array.isArray(value.tickers) || !Array.isArray(value.exchanges)) {
+    return false;
+  }
+  const { filings } = value;
+  return isRecord(filings) && isFilingColumns(filings.recent) && Array.isArray(filings.files);
+}
+
+/**
+ * A 200 whose JSON lacks the shape its readers index, failed before any cache write
+ * like a body that is not JSON (#186). `what` names the document expected, for the
+ * log's `cause`; the caller sees the message and hint of any unexpected body.
+ */
+function unexpectedShape(url: string, what: string): McpError {
+  const rejection = new TypeError(`The JSON body does not have the shape of ${what}.`);
+  return secUnreachable(url, { kind: 'unexpected_body', rejection });
 }
 
 /**
@@ -1978,7 +2108,9 @@ function parseJson<T>(url: string, text: string): T {
  * to access the url?"), and Bun carries the full request URL on `path` and, for
  * some body failures, in its message. The rejection rides `cause`, which the log
  * records and the caller never sees. A ladder the call's failure budget ended
- * names the attempt it ended on and the budget (#179).
+ * names the attempt it ended on and the budget (#179). A 200 body that is not the
+ * JSON its request reads — unparseable (#181), or without the shape its readers
+ * index (#186) — gets one message and hint for both.
  */
 function secUnreachable(url: string, last: Unreadable, end?: LadderEnd): McpError {
   const host = new URL(url).hostname;
@@ -2018,7 +2150,7 @@ function unreadableText(
         message: `No request sent to SEC EDGAR (${host}): ${BUDGET_STOP_TEXT}, which its earlier requests spent.`,
         hint: `SEC EDGAR (${host}) failed this call's earlier requests until its budget for SEC failures ran out — a network failure between this server and SEC, not a problem with the request. Retry the same call in a minute.`,
       };
-    case 'not_json':
+    case 'unexpected_body':
       return {
         message: `SEC EDGAR (${host}) answered, but its response body is not the JSON this request expects.`,
         hint: `SEC EDGAR (${host}) answered with something other than the JSON it serves for this request, such as a temporary error page — not a problem with the request. Retry the same call in a minute.`,

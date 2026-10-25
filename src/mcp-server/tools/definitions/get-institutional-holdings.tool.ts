@@ -1,6 +1,7 @@
 /**
  * @fileoverview Fetch 13F-HR quarterly institutional holdings by parsing the SEC EDGAR
- * information table XML. Institution lookup only — `company` is the 13F filer.
+ * information table XML, composed with the quarter's 13F-HR/A amendments (#198).
+ * Institution lookup only — `company` is the 13F filer.
  * The reverse direction (which institutions hold an issuer) is secedgar_find_holders,
  * which searches the information tables by CUSIP and returns filer CIKs to feed back
  * into this tool (#81).
@@ -10,13 +11,22 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
 import {
+  type LimitClampOptions,
+  limitClamp,
+  withLimitClamps,
+} from '@/mcp-server/tools/limit-clamp.js';
+import {
   dataframeGuidance,
   getCanvasBridge,
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import { parseInfoTableXml, parseThirteenFCoverPage } from '@/services/edgar/ownership-parser.js';
+import {
+  type HoldingRow,
+  parseInfoTableXml,
+  parseThirteenFCoverPage,
+} from '@/services/edgar/ownership-parser.js';
 import {
   ARCHIVE_PAGE_SCAN_CAP,
   SubmissionsArchiveWalk,
@@ -46,6 +56,8 @@ interface HoldingOut {
   put_call: 'Put' | 'Call' | undefined;
   shares_or_principal_amount: number | undefined;
   shares_or_principal_type: 'SH' | 'PRN' | undefined;
+  /** Accessions the row came from, in application order — several once consolidated. */
+  source_accession_numbers: string[];
   title_of_class: string | undefined;
 }
 
@@ -58,8 +70,9 @@ function addMaybe(a: number | undefined, b: number | undefined): number | undefi
 /**
  * Collapse info-table sub-lines into distinct positions, keyed by (CUSIP ?? issuer, class,
  * put/call). Sums market value and shares; drops `investment_discretion` — a per-sub-line
- * attribute with no meaning once managers/accounts are rolled up. Sorted by value descending,
- * so a small `limit` returns the largest distinct holdings.
+ * attribute with no meaning once managers/accounts are rolled up — and unions the source
+ * accessions, so a position merged across an original and its amendment names both. Sorted
+ * by value descending, so a small `limit` returns the largest distinct holdings.
  */
 function consolidatePositions(rows: HoldingOut[]): HoldingOut[] {
   const byPosition = new Map<string, HoldingOut>();
@@ -72,8 +85,17 @@ function consolidatePositions(rows: HoldingOut[]): HoldingOut[] {
         existing.shares_or_principal_amount,
         r.shares_or_principal_amount,
       );
+      for (const accession of r.source_accession_numbers) {
+        if (!existing.source_accession_numbers.includes(accession)) {
+          existing.source_accession_numbers.push(accession);
+        }
+      }
     } else {
-      byPosition.set(key, { ...r, investment_discretion: undefined });
+      byPosition.set(key, {
+        ...r,
+        investment_discretion: undefined,
+        source_accession_numbers: [...r.source_accession_numbers],
+      });
     }
   }
   return [...byPosition.values()].sort(
@@ -108,6 +130,156 @@ function findInfoTableDocument(items: Array<{ name: string }>): string | undefin
   );
 }
 
+/** Outcome of reading one filing's information table: the parsed rows, or the step that failed. */
+type InfoTableRead =
+  | { kind: 'ok'; holdings: HoldingRow[] }
+  | { kind: 'no_index' }
+  | { kind: 'no_document'; documents: string[] }
+  | { kind: 'no_table'; document: string }
+  | { kind: 'unparseable' };
+
+/**
+ * Read a 13F filing's information table: the index, the table document it names, and the
+ * parse. Two requests. SEC failures other than a 404 throw from the service.
+ */
+async function readInfoTable(
+  api: ReturnType<typeof getEdgarApiService>,
+  cik: string,
+  accession: string,
+  scope: CallScope,
+): Promise<InfoTableRead> {
+  const index = await api.tryGetFilingIndex(cik, accession, scope);
+  if (!index) return { kind: 'no_index' };
+  const document = findInfoTableDocument(index.directory.item);
+  if (!document) return { kind: 'no_document', documents: index.directory.item.map((i) => i.name) };
+  const xml = await api.tryGetFilingDocument(cik, accession, document, scope);
+  if (!xml) return { kind: 'no_table', document };
+  try {
+    return { kind: 'ok', holdings: parseInfoTableXml(xml).holdings };
+  } catch {
+    return { kind: 'unparseable' };
+  }
+}
+
+/**
+ * Normalize one accession's parsed rows to whole USD and tag them with their source. SEC's
+ * 2022 Form 13F amendments (effective 2023-01-03) switched Information Table Column 4 from
+ * thousands of dollars to whole dollars, and an amendment filed after that date reports whole
+ * dollars even for a pre-2023 quarter, so the unit follows each accession's own filing date —
+ * the literal compliance boundary, and always present (unlike the cover-page period).
+ */
+function toHoldingRows(
+  holdings: HoldingRow[],
+  accession: string,
+  filingDate: string,
+): HoldingOut[] {
+  const scale = filingDate < '2023-01-03' ? 1000 : 1;
+  return holdings.map((h) => ({
+    issuer_name: h.issuer_name,
+    title_of_class: h.title_of_class,
+    cusip: h.cusip,
+    market_value_usd: h.value_reported === undefined ? undefined : h.value_reported * scale,
+    shares_or_principal_amount: h.shares_or_principal_amount,
+    shares_or_principal_type: h.shares_or_principal_type,
+    put_call: h.put_call,
+    investment_discretion: h.investment_discretion,
+    source_accession_numbers: [accession],
+  }));
+}
+
+/**
+ * Identity of a raw row for the NEW HOLDINGS containment test. Value is left out: its unit
+ * changed at 2023-01-03, so a resubmitted row filed across that date differs only in scale.
+ */
+const rowIdentity = (r: HoldingOut) =>
+  `${r.cusip ?? r.issuer_name}|${r.title_of_class ?? ''}|${r.put_call ?? ''}|${r.investment_discretion ?? ''}|${r.shares_or_principal_amount ?? ''}|${r.shares_or_principal_type ?? ''}`;
+
+/**
+ * True when `table` repeats every row of `composed`, counting duplicates. A NEW HOLDINGS
+ * amendment should list only the added securities, but some filers resubmit the whole table
+ * under that type (First Eagle's 2026-Q2 amendment repeats all 614 original rows plus 2);
+ * appending it would double the portfolio, so it is applied as the restatement it is.
+ */
+function repeatsEveryRow(table: HoldingOut[], composed: HoldingOut[]): boolean {
+  if (composed.length === 0) return false;
+  const counts = new Map<string, number>();
+  for (const r of table) counts.set(rowIdentity(r), (counts.get(rowIdentity(r)) ?? 0) + 1);
+  for (const r of composed) {
+    const left = counts.get(rowIdentity(r)) ?? 0;
+    if (left === 0) return false;
+    counts.set(rowIdentity(r), left - 1);
+  }
+  return true;
+}
+
+/** How a same-period amendment entered the composed holdings. */
+type AppliedAs = z.infer<typeof amendmentIdentity>['applied_as'];
+
+/** One filing in composition order: the original 13F-HR, or a same-period 13F-HR/A. */
+interface CompositionStep {
+  accession: string;
+  /** `undefined` when the amendment's cover-page type could not be read. */
+  kind: 'original' | 'RESTATEMENT' | 'NEW HOLDINGS' | undefined;
+  row: ThirteenFRow;
+  status: AppliedAs;
+}
+
+/**
+ * Compose a quarter's holdings from its original 13F-HR and same-period amendments, in
+ * acceptance order. A RESTATEMENT replaces everything composed before it (earlier NEW
+ * HOLDINGS included), and the original counts as one: the base is the last restatement whose
+ * table reads, walking back to the original, and nothing before it is read (`superseded`).
+ * Each NEW HOLDINGS after the base is read and appended — or applied as a restatement when
+ * its table repeats every composed row. An amendment whose type or table cannot be read is
+ * `not_applied`; `readTable` returns undefined for it.
+ */
+async function composeHoldings(
+  steps: CompositionStep[],
+  originalRows: HoldingOut[],
+  readTable: (step: CompositionStep) => Promise<HoldingOut[] | undefined>,
+): Promise<{ accessions: string[]; rows: HoldingOut[] }> {
+  let base = 0;
+  let rows = originalRows;
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const step = steps[i] as CompositionStep;
+    if (step.kind === 'original') {
+      base = i;
+      break;
+    }
+    if (step.kind !== 'RESTATEMENT') continue;
+    const table = await readTable(step);
+    if (table) {
+      base = i;
+      rows = table;
+      step.status = 'restatement';
+      break;
+    }
+    step.status = 'not_applied';
+  }
+  for (const step of steps.slice(0, base)) if (!step.kind) step.status = 'not_applied';
+  let applied = [steps[base] as CompositionStep];
+  for (const step of steps.slice(base + 1)) {
+    // A restatement past the base was tried in the backward pass and did not read.
+    if (step.kind !== 'NEW HOLDINGS') {
+      step.status = 'not_applied';
+      continue;
+    }
+    const table = await readTable(step);
+    if (!table) step.status = 'not_applied';
+    else if (repeatsEveryRow(table, rows)) {
+      for (const earlier of applied) if (earlier.kind !== 'original') earlier.status = 'superseded';
+      applied = [step];
+      rows = table;
+      step.status = 'restatement';
+    } else {
+      applied.push(step);
+      rows = [...rows, ...table];
+      step.status = 'new_holdings';
+    }
+  }
+  return { accessions: applied.map((s) => s.accession), rows };
+}
+
 /**
  * Periodic-report forms that mark an operating company (not an institutional manager).
  * A filer with any of these and no 13F-HR is misrouted here — the caller wants
@@ -121,10 +293,26 @@ const NOTICE_FORMS = new Set(['13F-NT', '13F-NT/A']);
 
 /** One 13F-HR, 13F-HR/A or 13F-NT notice row from a submissions block. */
 interface ThirteenFRow {
+  /** EDGAR acceptance timestamp; empty when the block omits it. Orders same-day amendments. */
+  acceptanceDateTime: string;
   accessionNumber: string;
   filingDate: string;
   form: string;
   reportDate: string;
+}
+
+/**
+ * Composition order: acceptance time, which separates two amendments filed the same day
+ * (Advisors Asset Management's 2020-Q2 restatement and new-holdings amendment, 2026-08-27,
+ * a minute apart), then filing date when a block lacks it, then accession. `amendmentNo`
+ * is not a key — filers skip numbers.
+ */
+function compositionOrder(a: ThirteenFRow, b: ThirteenFRow): number {
+  return (
+    (a.acceptanceDateTime || a.filingDate).localeCompare(b.acceptanceDateTime || b.filingDate) ||
+    a.filingDate.localeCompare(b.filingDate) ||
+    a.accessionNumber.localeCompare(b.accessionNumber)
+  );
 }
 
 /**
@@ -139,6 +327,7 @@ function thirteenFRows(block: FilingsRecent): ThirteenFRow[] {
     const form = block.form[i] ?? '';
     if (form !== HOLDINGS_REPORT_FORM && form !== '13F-HR/A' && !NOTICE_FORMS.has(form)) continue;
     out.push({
+      acceptanceDateTime: block.acceptanceDateTime?.[i] ?? '',
       accessionNumber: block.accessionNumber[i] ?? '',
       filingDate: block.filingDate[i] ?? '',
       form,
@@ -172,15 +361,18 @@ function optionalLookupFailure(err: unknown): err is McpError {
 }
 
 const amendmentIdentity = z.object({
-  accession_number: z.string().describe('Amendment accession for secedgar_get_filing.'),
-  filing_date: z.string().describe('Amendment filing date (YYYY-MM-DD).'),
+  accession_number: z.string().describe('Accession for secedgar_get_filing.'),
+  filing_date: z.string().describe('Filing date (YYYY-MM-DD).'),
+  applied_as: z
+    .enum(['restatement', 'new_holdings', 'superseded', 'not_applied'])
+    .describe('Composition role.'),
 });
 const amendmentSchema = z.discriminatedUnion('amendment_type', [
   amendmentIdentity
     .extend({
       amendment_type: z.enum(['RESTATEMENT', 'NEW HOLDINGS']).describe('Cover-page type.'),
     })
-    .describe('Readable amendment.'),
+    .describe('Typed amendment.'),
   amendmentIdentity
     .extend({
       amendment_type: z.literal('UNAVAILABLE').describe('Type could not be read.'),
@@ -188,13 +380,29 @@ const amendmentSchema = z.discriminatedUnion('amendment_type', [
         .enum(['missing_header', 'unreadable_header', 'lookup_failed', 'lookup_stopped'])
         .describe('Why the type is unavailable; inspect with secedgar_get_filing.'),
     })
-    .describe('Amendment with unavailable type.'),
+    .describe('Untyped amendment.'),
 ]);
+type UnavailableReason = Extract<
+  z.infer<typeof amendmentSchema>,
+  { amendment_type: 'UNAVAILABLE' }
+>['unavailable_reason'];
+
+/** `limit`: a page holds at most 500 holdings rows (#197). */
+const holdingsLimit = limitClamp({
+  tool: 'secedgar_get_institutional_holdings',
+  field: 'limit',
+  min: 1,
+  cap: 500,
+  bound: 1000,
+  shape: (n) => n.default(20),
+  description:
+    'Maximum number of holdings rows to return. 13F filings from large institutions can contain thousands of positions. Default 20.',
+});
 
 export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_holdings', {
   title: 'Get Institutional Holdings',
   description:
-    'Read an institutional manager\'s original 13F-HR information table. company is the filer: a 10-digit CIK, ticker, or name; names outside the ticker file use EDGAR entity search, and ambiguous names return candidates. For managers holding an issuer, use secedgar_find_holders and pass its filer_cik here. Positions carry issuer, CUSIP, shares, whole-USD market value, and option designation. Same-period amendments are disclosed separately, never merged; read them with secedgar_get_filing. By default, sub-lines consolidate into positions sorted by value; consolidate=false preserves raw filing order. Page with limit, offset and returned next_offset. When canvas is available, the original report\'s full parsed positions are staged as df_<id>: inspect with secedgar_dataframe_describe, then aggregate or join on cusip + reporting_period with secedgar_dataframe_query. Managers below $100M in 13(f) securities may not file. Use secedgar_search_filings with forms=["13F-HR"] for broader search.',
+    'Read an institutional manager\'s 13F-HR information table for a quarter. company is the filer: a 10-digit CIK, ticker, or name; names outside the ticker file use EDGAR entity search, and ambiguous names return candidates. For managers holding an issuer, use secedgar_find_holders and pass its filer_cik here. Positions carry issuer, CUSIP, shares, whole-USD market value, option designation, and the accessions they came from. Same-period 13F-HR/A amendments are composed in acceptance order: a RESTATEMENT replaces the rows, a NEW HOLDINGS amendment adds its rows, and each amendment reports how it was applied. By default, sub-lines consolidate into positions sorted by value; consolidate=false preserves raw filing order, each filing\'s rows after the last. Page with limit, offset and returned next_offset. When canvas is available, the full composed positions are staged as df_<id>: inspect with secedgar_dataframe_describe, then aggregate or join on cusip + reporting_period with secedgar_dataframe_query. Managers below $100M in 13(f) securities may not file. Use secedgar_search_filings with forms=["13F-HR"] for broader search.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -257,15 +465,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       .describe(
         'Reporting quarter to target, in "YYYY-QN" format (e.g., "2025-Q4"), matched exactly against each 13F-HR\'s period of report. When omitted, returns the most recent 13F-HR in the submissions feed\'s recent window (the last year or 1,000 filings, whichever holds more). Quarters map to the filing window: Q4 2025 = filings submitted roughly Jan–Mar 2026. A quarter older than the recent window is looked up in the archive, reading forward from the quarter end up to 10 archive pages. A quarter the manager covered with a 13F-NT notice (holdings reported by other managers) fails naming that notice.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(500)
-      .default(20)
-      .describe(
-        'Maximum number of holdings rows to return. 13F filings from large institutions can contain thousands of positions. Default 20.',
-      ),
+    limit: holdingsLimit.schema(true),
     offset: z
       .number()
       .int()
@@ -285,27 +485,29 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
   inputAliases: { ticker: 'company', cik: 'company', ticker_or_cik: 'company' },
 
   output: z.object({
-    filer_name: z.string().describe('Name of the institutional filer (the 13F submitter).'),
+    filer_name: z.string().describe('Institutional filer name (the 13F submitter).'),
     filer_cik: z.string().describe('CIK of the 13F filer, zero-padded to 10 digits.'),
     reporting_period: z
       .string()
       .optional()
       .describe('Cover-page quarter end (YYYY-MM-DD). Absent if omitted.'),
-    filing_date: z.string().describe('Date the 13F was submitted (YYYY-MM-DD).'),
-    accession_number: z
-      .string()
-      .describe('Accession number of this 13F-HR — pass to secedgar_get_filing.'),
+    filing_date: z.string().describe('Original 13F-HR filing date (YYYY-MM-DD).'),
+    accession_number: z.string().describe('Original 13F-HR accession for secedgar_get_filing.'),
     amendments: z
-      .array(amendmentSchema.describe('Same-period amendment; its holdings are not merged.'))
+      .array(amendmentSchema.describe('Same-period 13F-HR/A.'))
       .optional()
-      .describe('Known amendments to the original report. Absent when none were found.'),
+      .describe('Known amendments, newest filed first. Absent if none.'),
     amendment_search_complete: z
       .boolean()
       .optional()
       .describe('False if archive discovery was bounded or unavailable.'),
-    total_holdings_in_filing: z
+    composed_accessions: z
+      .array(z.string())
+      .describe('Accessions whose rows form holdings, in application order.'),
+    total_holdings_in_filing: z.number().describe('Original 13F-HR raw row count.'),
+    total_holdings_composed: z
       .number()
-      .describe('Original raw row count before consolidation or paging.'),
+      .describe('Composed raw row count before consolidation or paging.'),
     total_positions: z
       .number()
       .optional()
@@ -329,7 +531,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
               .number()
               .optional()
               .describe(
-                'Whole USD at report date; pre-2023-01-03 filing values scaled from thousands. Absent if unreported.',
+                'Whole USD at report date; values filed before 2023-01-03 scaled from thousands. Absent if unreported.',
               ),
             shares_or_principal_amount: z
               .number()
@@ -349,11 +551,14 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
               .describe(
                 'SOLE sole, DFND shared/advised, OTR other. Absent if unreported or consolidated.',
               ),
+            source_accession_numbers: z
+              .array(z.string())
+              .describe('Accessions the row came from, in application order.'),
           })
           .describe('One row from the 13F information table.'),
       )
       .describe(
-        '`limit` rows from `offset`: positions by market value when consolidate=true, else raw rows in filing order.',
+        '`limit` rows from `offset`: positions by value when consolidate=true, else raw rows in application order.',
       ),
     dataset: z
       .object({
@@ -367,7 +572,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       })
       .optional()
       .describe(
-        'Original-report positions, shaped by consolidate; join on cusip + reporting_period. Amendment positions are excluded. Absent without canvas or holdings.',
+        'Composed positions, shaped by consolidate; join on cusip + reporting_period. Absent without canvas or holdings.',
       ),
   }),
 
@@ -375,7 +580,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     notice: z
       .string()
       .optional()
-      .describe('Amendment disclosure, incomplete discovery, paging, and dataframe guidance.'),
+      .describe('Amendment composition, discovery, paging, and dataframe guidance.'),
     truncated: z
       .boolean()
       .optional()
@@ -385,6 +590,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
   },
 
   async handler(input, ctx) {
+    const limit = holdingsLimit.apply(input.limit, ctx);
     const api = getEdgarApiService();
     const callScope = new CallScope(ctx.signal);
 
@@ -570,42 +776,40 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       );
     }
 
-    // Get the filing index to find the information table document
-    const filingIndex = await api.tryGetFilingIndex(
+    // The original's information table is required: a failure here fails the call.
+    const originalTable = await readInfoTable(
+      api,
       match.cik,
       filingMeta.accessionNumber,
       callScope,
     );
-    if (!filingIndex) {
-      throw ctx.fail(
-        'no_info_table',
-        `Filing ${filingMeta.accessionNumber} index could not be fetched.`,
-      );
-    }
-
-    const infoTableDoc = findInfoTableDocument(filingIndex.directory.item);
-    if (!infoTableDoc) {
-      throw ctx.fail(
-        'no_info_table',
-        `No information table XML found in filing ${filingMeta.accessionNumber}.`,
-        {
-          accession_number: filingMeta.accessionNumber,
-          available_documents: filingIndex.directory.item.map((i) => i.name),
-        },
-      );
-    }
-
-    const xmlText = await api.tryGetFilingDocument(
-      match.cik,
-      filingMeta.accessionNumber,
-      infoTableDoc,
-      callScope,
-    );
-    if (!xmlText) {
-      throw ctx.fail(
-        'no_info_table',
-        `Information table document '${infoTableDoc}' could not be fetched.`,
-      );
+    switch (originalTable.kind) {
+      case 'ok':
+        break;
+      case 'no_index':
+        throw ctx.fail(
+          'no_info_table',
+          `Filing ${filingMeta.accessionNumber} index could not be fetched.`,
+        );
+      case 'no_document':
+        throw ctx.fail(
+          'no_info_table',
+          `No information table XML found in filing ${filingMeta.accessionNumber}.`,
+          {
+            accession_number: filingMeta.accessionNumber,
+            available_documents: originalTable.documents,
+          },
+        );
+      case 'no_table':
+        throw ctx.fail(
+          'no_info_table',
+          `Information table document '${originalTable.document}' could not be fetched.`,
+        );
+      case 'unparseable':
+        throw ctx.fail(
+          'no_info_table',
+          `Failed to parse information table XML for filing ${filingMeta.accessionNumber}.`,
+        );
     }
 
     // Pull reporting period and filing-manager name from the primary_doc.xml cover page.
@@ -621,36 +825,11 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       ? parseThirteenFCoverPage(primaryXml)
       : { filerName: undefined, reportingPeriod: undefined };
 
-    let parsed: ReturnType<typeof parseInfoTableXml>;
-    try {
-      parsed = parseInfoTableXml(xmlText);
-    } catch {
-      throw ctx.fail(
-        'no_info_table',
-        `Failed to parse information table XML for filing ${filingMeta.accessionNumber}.`,
-      );
-    }
-
-    // SEC's 2022 Form 13F amendments (effective 2023-01-03) switched Information Table
-    // Column 4 from thousands of dollars to whole dollars. Normalize older filings (still
-    // reported in thousands) up to whole USD using the filing date — the literal compliance
-    // boundary, and always present (unlike the cover-page reporting period).
-    const valuesInThousands = filingMeta.filingDate < '2023-01-03';
-    const toUsd = (v: number | undefined): number | undefined =>
-      v === undefined ? undefined : valuesInThousands ? v * 1000 : v;
-
-    const rows: HoldingOut[] = parsed.holdings.map((h) => ({
-      issuer_name: h.issuer_name,
-      title_of_class: h.title_of_class,
-      cusip: h.cusip,
-      market_value_usd: toUsd(h.value_reported),
-      shares_or_principal_amount: h.shares_or_principal_amount,
-      shares_or_principal_type: h.shares_or_principal_type,
-      put_call: h.put_call,
-      investment_discretion: h.investment_discretion,
-    }));
-
-    const positions = input.consolidate ? consolidatePositions(rows) : rows;
+    const originalRows = toHoldingRows(
+      originalTable.holdings,
+      filingMeta.accessionNumber,
+      filingMeta.filingDate,
+    );
 
     /** Discovery is optional enrichment after the original is readable. Resume an
      * archive walk that found the original so later-filed amendments are included.
@@ -686,14 +865,14 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
           .map((r) => [r.accessionNumber, r]),
       ).values(),
     ].sort((a, b) => b.filingDate.localeCompare(a.filingDate));
-    const amendments: Array<z.infer<typeof amendmentSchema>> = [];
+    const entries: Array<{
+      amendmentType: 'RESTATEMENT' | 'NEW HOLDINGS' | undefined;
+      step: CompositionStep;
+      unavailableReason: UnavailableReason;
+    }> = [];
     for (const amendment of samePeriod) {
       let amendmentType: 'RESTATEMENT' | 'NEW HOLDINGS' | undefined;
-      let unavailableReason:
-        | 'missing_header'
-        | 'unreadable_header'
-        | 'lookup_failed'
-        | 'lookup_stopped' = 'lookup_stopped';
+      let unavailableReason: UnavailableReason = 'lookup_stopped';
       if (!disclosureBlocked) {
         try {
           const header = await api.tryGetFilingDocument(
@@ -712,18 +891,66 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
             err.code === JsonRpcErrorCode.RateLimited || callScope.remainingMs === 0;
         }
       }
-      amendments.push({
-        accession_number: amendment.accessionNumber,
-        filing_date: amendment.filingDate,
-        ...(amendmentType
-          ? { amendment_type: amendmentType }
-          : { amendment_type: 'UNAVAILABLE', unavailable_reason: unavailableReason }),
+      entries.push({
+        amendmentType,
+        step: {
+          accession: amendment.accessionNumber,
+          kind: amendmentType,
+          row: amendment,
+          status: 'superseded',
+        },
+        unavailableReason,
       });
     }
+
+    // Compose the quarter. Each amendment table read is two more requests (index and
+    // table) on the same CallScope; a 429 or a spent failure budget stops further reads,
+    // as it stops the cover reads above, and a caller cancel still fails the call.
+    const original: CompositionStep = {
+      accession: filingMeta.accessionNumber,
+      kind: 'original',
+      row: filingMeta,
+      status: 'superseded',
+    };
+    const steps = [original, ...entries.map((e) => e.step)].sort((a, b) =>
+      compositionOrder(a.row, b.row),
+    );
+    const composed = await composeHoldings(steps, originalRows, async (step) => {
+      if (disclosureBlocked) return;
+      try {
+        const read = await readInfoTable(api, match.cik, step.accession, callScope);
+        // An amendment exists to change rows: an empty table is unreadable, never a
+        // restatement that blanks the quarter.
+        if (read.kind !== 'ok' || read.holdings.length === 0) return;
+        return toHoldingRows(read.holdings, step.accession, step.row.filingDate);
+      } catch (err) {
+        callScope.signal.throwIfAborted();
+        if (!optionalLookupFailure(err)) throw err;
+        disclosureBlocked =
+          err.code === JsonRpcErrorCode.RateLimited || callScope.remainingMs === 0;
+        return;
+      }
+    });
+    const amendments: Array<z.infer<typeof amendmentSchema>> = entries.map((e) => ({
+      accession_number: e.step.accession,
+      filing_date: e.step.row.filingDate,
+      applied_as: e.step.status,
+      ...(e.amendmentType
+        ? { amendment_type: e.amendmentType }
+        : { amendment_type: 'UNAVAILABLE' as const, unavailable_reason: e.unavailableReason }),
+    }));
+    const positions = input.consolidate ? consolidatePositions(composed.rows) : composed.rows;
+    const notApplied = amendments.filter((a) => a.applied_as === 'not_applied');
+
     const amendmentNotice = [
       ...(amendments.length > 0
         ? [
-            `Holdings and dataframe contain the original report only; ${amendments.length} same-period amendment(s) are not merged. Read each with secedgar_get_filing: ${amendments.map((a) => `${a.accession_number} (filed ${a.filing_date}, ${a.amendment_type}${a.amendment_type === 'UNAVAILABLE' ? `: ${a.unavailable_reason}` : ''})`).join('; ')}.`,
+            `Holdings and dataframe compose the original 13F-HR with its same-period amendments, applied in acceptance order: a RESTATEMENT replaces the rows, NEW HOLDINGS adds them. Amendments, newest filed first: ${amendments.map((a) => `${a.accession_number} (filed ${a.filing_date}, ${a.amendment_type}${a.amendment_type === 'UNAVAILABLE' ? `: ${a.unavailable_reason}` : ''}, ${a.applied_as})`).join('; ')}. Rows come from ${composed.accessions.join(', ')}, in that order.`,
+          ]
+        : []),
+      ...(notApplied.length > 0
+        ? [
+            `Not applied, since the type or information table could not be read: ${notApplied.map((a) => a.accession_number).join(', ')} — inspect with secedgar_get_filing.`,
           ]
         : []),
       ...(!amendmentSearchComplete
@@ -756,6 +983,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
           market_value_usd: p.market_value_usd ?? null,
           put_call: p.put_call ?? null,
           investment_discretion: p.investment_discretion ?? null,
+          source_accession_numbers: p.source_accession_numbers,
         })),
         sourceTool: 'secedgar_get_institutional_holdings',
         queryParams: {
@@ -764,6 +992,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
           quarter: input.quarter,
           consolidate: input.consolidate,
           accession_number: filingMeta.accessionNumber,
+          composed_accessions: composed.accessions,
         },
       });
       if (registered) dataset = toDatasetField(registered);
@@ -772,7 +1001,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     // Offset paging over the whole ordered position list — the retrieval path for
     // rows past `limit` when no canvas is available to hold the full set (#94). The
     // information table is parsed whole, so slicing it is contiguous and stable.
-    const pageEnd = input.offset + input.limit;
+    const pageEnd = input.offset + limit;
     const holdings = positions.slice(input.offset, pageEnd);
     const nextOffset = pageEnd < positions.length ? pageEnd : undefined;
 
@@ -798,7 +1027,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     if (holdings.length > 0 && nextOffset !== undefined) {
       ctx.enrich.truncated({
         shown: holdings.length,
-        cap: input.limit,
+        cap: limit,
         ...(notices.length > 0 && { guidance: notices.join(' ') }),
       });
     } else if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
@@ -806,7 +1035,9 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     ctx.log.info('Institutional holdings retrieved', {
       cik: match.cik,
       accessionNumber: filingMeta.accessionNumber,
-      totalHoldings: parsed.holdings.length,
+      totalHoldings: originalRows.length,
+      composedRows: composed.rows.length,
+      composedAccessions: composed.accessions.length,
       totalPositions: positions.length,
       returned: holdings.length,
       datasetName: dataset?.name,
@@ -820,7 +1051,9 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       accession_number: filingMeta.accessionNumber,
       amendments: amendments.length > 0 ? amendments : undefined,
       amendment_search_complete: amendmentSearchComplete,
-      total_holdings_in_filing: parsed.holdings.length,
+      composed_accessions: composed.accessions,
+      total_holdings_in_filing: originalRows.length,
+      total_holdings_composed: composed.rows.length,
       total_positions: input.consolidate ? positions.length : undefined,
       offset: input.offset,
       next_offset: nextOffset,
@@ -833,17 +1066,18 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     const period = result.reporting_period ? ` (period: ${result.reporting_period})` : '';
     const countLine =
       result.total_positions !== undefined
-        ? `Showing ${result.holdings.length} of ${result.total_positions} positions (consolidated from ${result.total_holdings_in_filing} info-table rows)`
-        : `Showing ${result.holdings.length} of ${result.total_holdings_in_filing} info-table rows`;
+        ? `Showing ${result.holdings.length} of ${result.total_positions} positions (consolidated from ${result.total_holdings_composed} info-table rows)`
+        : `Showing ${result.holdings.length} of ${result.total_holdings_composed} info-table rows`;
     const lines: string[] = [
       `**13F-HR Holdings** — ${result.filer_name} (CIK ${result.filer_cik})`,
       `Filed: ${result.filing_date}${period} | Accession: ${result.accession_number}`,
       countLine,
+      `Composed from: ${result.composed_accessions.join(', ')} (${result.total_holdings_composed} rows; original 13F-HR: ${result.total_holdings_in_filing})`,
     ];
     lines.push(`Page offset: ${result.offset} (${result.holdings.length} shown)`);
     for (const amendment of result.amendments ?? []) {
       lines.push(
-        `Amendment: ${amendment.accession_number}, filed ${amendment.filing_date}, ${amendment.amendment_type}${amendment.amendment_type === 'UNAVAILABLE' ? ` (${amendment.unavailable_reason})` : ''} — read with secedgar_get_filing; holdings remain from the original report.`,
+        `Amendment: ${amendment.accession_number}, filed ${amendment.filing_date}, ${amendment.amendment_type}${amendment.amendment_type === 'UNAVAILABLE' ? ` (${amendment.unavailable_reason})` : ''} — applied as ${amendment.applied_as}${amendment.applied_as === 'not_applied' ? '; inspect with secedgar_get_filing' : ''}.`,
       );
     }
     if (result.amendment_search_complete !== undefined)
@@ -872,7 +1106,9 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       const discStr = h.investment_discretion ? ` | discretion: ${h.investment_discretion}` : '';
 
       lines.push(`**${h.issuer_name}**${classStr}${cusipStr}${putCallStr}`);
-      lines.push(`${sharesStr} | ${valueStr}${discStr}`);
+      lines.push(
+        `${sharesStr} | ${valueStr}${discStr} | source: ${h.source_accession_numbers.join(', ')}`,
+      );
     }
 
     if (result.dataset) {
@@ -888,3 +1124,8 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/** `secedgar_get_institutional_holdings` as this deployment's `EDGAR_CLAMP_OVERSIZED_LIMITS` builds it. */
+export function createGetInstitutionalHoldingsTool(options: LimitClampOptions) {
+  return withLimitClamps(getInstitutionalHoldingsTool, [holdingsLimit], options);
+}

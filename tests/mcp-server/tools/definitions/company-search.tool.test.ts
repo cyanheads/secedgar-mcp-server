@@ -5,10 +5,15 @@
  * @module tests/mcp-server/tools/definitions/company-search.tool
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { companySearchTool } from '@/mcp-server/tools/definitions/company-search.tool.js';
+import {
+  companySearchTool,
+  createCompanySearchTool,
+} from '@/mcp-server/tools/definitions/company-search.tool.js';
+import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import type { CikMatch, FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
 
@@ -48,6 +53,7 @@ import {
   recoveryHint,
   wireError,
 } from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 const mockSubmissions: SubmissionsResponse = {
   cik: '0000320193',
@@ -812,7 +818,7 @@ describe('companySearchTool no_match recovery on the wire (#153)', () => {
     const hint = String(bag(error.data.recovery).hint);
     expect(hint.startsWith('Check `data.suggestions` for near matches. ')).toBe(true);
     expect(hint).toContain('VOO');
-    const text = blockText(result.content);
+    const text = readCommonMark(blockText(result.content));
     expect(text).toContain('MICROSOFT CORP (MSFT)');
     expect(text).toContain('Check `data.suggestions` for near matches.');
   });
@@ -1235,5 +1241,105 @@ describe('companySearchTool — filing_limit above the inline cap (#168)', () =>
     expect(text).toContain(
       'secedgar_search_filings with {"query":"cik:0001045810","filed_after":"2026-07-01","filed_before":"2026-08-06","limit":100}',
     );
+  });
+
+  // Wiring only: the clamp above now runs under EDGAR_CLAMP_OVERSIZED_LIMITS; the
+  // mechanism itself is tabled in tests/mcp-server/tools/limit-clamp.test.ts (#197).
+  describe('under the clamp switch (#197)', () => {
+    const args = { query: 'NVDA', filed_after: '2026-07-01', filed_before: '2026-09-24' };
+
+    it('answers filing_limit 51 exactly as 50 on both surfaces', async () => {
+      mockApi.getSubmissions.mockResolvedValue(recentOnly);
+      const at50 = await runToolContract(companySearchTool, { ...args, filing_limit: 50 });
+      const at51 = await runToolContract(companySearchTool, { ...args, filing_limit: 51 });
+
+      expect(at51).toEqual(at50);
+      expect(at51.structuredContent).toMatchObject({ truncated: true, shown: 50, cap: 50 });
+    });
+
+    it('advertises 1000 as the maximum with the switch on and 50 with it off, which rejects 51', async () => {
+      const maximum = (clampOversizedLimits: boolean) => {
+        const def = buildToolDefinitions({ dropEnabled: false, clampOversizedLimits }).find(
+          (d) => d.name === 'secedgar_company_search',
+        );
+        return (z.toJSONSchema(def!.input, { io: 'input' }) as any).properties.filing_limit.maximum;
+      };
+      expect(maximum(true)).toBe(1000);
+      expect(maximum(false)).toBe(50);
+
+      const off = createCompanySearchTool({ clampOversizedLimits: false });
+      const rejected = await runToolContract(off, { ...args, filing_limit: 51 });
+      expect(rejected.isError).toBe(true);
+      expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(mockApi.resolveCik).not.toHaveBeenCalled();
+    });
+  });
+});
+
+// The filter reads the one normalized form list (#194); the value table lives in
+// tests/mcp-server/tools/form-filter.test.ts.
+describe('companySearchTool form filter (#194)', () => {
+  const call = (args: Record<string, unknown>) => runToolContract(companySearchTool, args as never);
+  /** Two calls' answers on both surfaces, and the archive pages each one read. */
+  const sameAnswer = async (a: Record<string, unknown>, b: Record<string, unknown>) => {
+    mockApi.fetchArchivePage.mockClear();
+    const first = await call(a);
+    const firstPages = mockApi.fetchArchivePage.mock.calls.length;
+    mockApi.fetchArchivePage.mockClear();
+    const second = await call(b);
+    expect(first.isError).toBeFalsy();
+    expect(first.structuredContent).toEqual(second.structuredContent);
+    expect(first.content).toEqual(second.content);
+    expect(firstPages).toBe(mockApi.fetchArchivePage.mock.calls.length);
+    return bag(first.structuredContent);
+  };
+
+  beforeEach(() => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+  });
+
+  it.each([[['']], [['  ']]])(
+    'returns with forms %j what it returns without forms, walking no archive page',
+    async (forms) => {
+      mockApi.getSubmissions.mockResolvedValue(mockPagedSubmissions);
+
+      const structured = await sameAnswer({ query: 'AAPL', forms }, { query: 'AAPL' });
+      expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+      expect(structured.total_filings).toBe(2);
+      expect(structured.notice).toBeUndefined();
+    },
+  );
+
+  it('matches a padded form as it matches the bare one', async () => {
+    const structured = await sameAnswer(
+      { query: 'AAPL', forms: [' 10-K '] },
+      { query: 'AAPL', forms: ['10-K'] },
+    );
+    expect(structured.total_filings).toBe(1);
+  });
+
+  it('names only the normalized forms when nothing matched', async () => {
+    const result = await call({ query: 'AAPL', forms: ['', ' s-1'] });
+
+    const notice = String(bag(result.structuredContent).notice);
+    expect(notice).toBe(
+      'No filings matched form types [S-1] for this entity. Try different form types or remove the filter.',
+    );
+    expect(readCommonMark(blockText(result.content, 1))).toContain(notice);
+  });
+
+  it('stages the dataframe with the normalized forms', async () => {
+    mockApi.getSubmissions.mockResolvedValue(mockPagedSubmissions);
+    const registerDataframe = vi.fn().mockResolvedValue({
+      tableName: 'df_FORMS_HIST1',
+      rowCount: 3,
+      expiresAt: '2026-10-25T00:00:00.000Z',
+      columnSchema: [],
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+
+    await call({ query: 'AAPL', forms: ['10-k ', ''], filing_limit: 2 });
+
+    expect(registerDataframe.mock.calls[0]?.[1].queryParams.forms).toEqual(['10-K']);
   });
 });

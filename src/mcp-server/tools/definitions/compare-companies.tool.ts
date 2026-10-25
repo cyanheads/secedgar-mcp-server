@@ -11,6 +11,11 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  type LimitClampOptions,
+  limitClamp,
+  withLimitClamps,
+} from '@/mcp-server/tools/limit-clamp.js';
+import {
   dataframeGuidance,
   getCanvasBridge,
   toDatasetField,
@@ -53,6 +58,18 @@ const MAX_INLINE_CELLS = 120;
 
 /** Most recent periods the inline matrix can be asked for (`periods`). */
 const MAX_PERIODS = 12;
+
+/** `periods`: a larger value is served at {@link MAX_PERIODS} (#197). */
+const periodsLimit = limitClamp({
+  tool: 'secedgar_compare_companies',
+  field: 'periods',
+  min: 1,
+  cap: MAX_PERIODS,
+  bound: 1000,
+  shape: (n) => n.default(4),
+  description:
+    'Upper bound on how many recent periods the inline matrix covers, newest first — not a guarantee. The matrix is companies x concepts x periods cells, and the inline window drops further older periods when that product is too large to return in one response. The full aligned series is always registered to the dataframe, so dropped periods stay queryable via secedgar_dataframe_query.',
+});
 
 /**
  * The calendar year SEC frames a fiscal year ending on `end` under: the year its
@@ -235,15 +252,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       .describe(
         'Align on fiscal years, each under the calendar-year key SEC frames it as (annual), or on calendar quarters (quarterly). Quarterly comparisons of off-calendar filers are missing at least one calendar quarter per year — see caveats.',
       ),
-    periods: z
-      .number()
-      .int()
-      .min(1)
-      .max(MAX_PERIODS)
-      .default(4)
-      .describe(
-        'Upper bound on how many recent periods the inline matrix covers, newest first — not a guarantee. The matrix is companies x concepts x periods cells, and the inline window drops further older periods when that product is too large to return in one response. The full aligned series is always registered to the dataframe, so dropped periods stay queryable via secedgar_dataframe_query.',
-      ),
+    periods: periodsLimit.schema(true),
   }),
 
   output: z.object({
@@ -392,6 +401,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
   }),
 
   async handler(input, ctx) {
+    const periods = periodsLimit.apply(input.periods, ctx);
     /**
      * A name that is neither a catalog entry nor tag-shaped is reported once,
      * apart from the per-company gaps it would otherwise fill with "reports no
@@ -669,7 +679,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     /** Newest-first, stopping when the next period would breach the cell ceiling. */
     const inlinePeriods: string[] = [];
     let budget = MAX_INLINE_CELLS;
-    for (const period of allPeriods.slice(0, input.periods)) {
+    for (const period of allPeriods.slice(0, periods)) {
       const count = cellsPerPeriod.get(period) ?? 0;
       if (inlinePeriods.length > 0 && count > budget) break;
       inlinePeriods.push(period);
@@ -761,9 +771,9 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
      * when the window dropped periods.
      */
     const widen =
-      inlinePeriods.length < input.periods
+      inlinePeriods.length < periods
         ? 'narrow companies or concepts'
-        : input.periods < MAX_PERIODS
+        : periods < MAX_PERIODS
           ? 'raise periods'
           : undefined;
 
@@ -789,7 +799,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     if (allPeriods.length > inlinePeriods.length) {
       ctx.enrich.truncated({
         shown: inlinePeriods.length,
-        cap: input.periods,
+        cap: periods,
         guidance: `Showing the ${inlinePeriods.length} most-recent of ${allPeriods.length} aligned periods. ${
           dataset
             ? dataframeGuidance(dataset)
@@ -887,3 +897,8 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     return [{ type: 'text', text: out.join('\n') }];
   },
 });
+
+/** `secedgar_compare_companies` as this deployment's `EDGAR_CLAMP_OVERSIZED_LIMITS` builds it. */
+export function createCompareCompaniesTool(options: LimitClampOptions) {
+  return withLimitClamps(compareCompaniesTool, [periodsLimit], options);
+}

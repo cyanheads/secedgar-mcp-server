@@ -3,10 +3,15 @@
  * @module tests/mcp-server/tools/definitions/fetch-frames.tool
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fetchFramesTool } from '@/mcp-server/tools/definitions/fetch-frames.tool.js';
+import {
+  createFetchFramesTool,
+  fetchFramesTool,
+} from '@/mcp-server/tools/definitions/fetch-frames.tool.js';
+import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import { resolveConceptTarget } from '@/services/edgar/concept-map.js';
 import type { FramesResponse } from '@/services/edgar/types.js';
@@ -28,6 +33,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { at, blockText, wireError } from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 const mockFramesResponse: FramesResponse = {
   ccp: 'CY2023',
@@ -161,7 +167,7 @@ describe('fetchFramesTool', () => {
       period: 'CY2023Q4I',
       unit: 'USD',
     });
-    const text = blockText(result.content);
+    const text = readCommonMark(blockText(result.content));
     expect(text).toContain('Check duration vs. instant period');
     expect(text).toContain('period exists (data starts ~CY2009)');
   });
@@ -369,7 +375,7 @@ describe('fetchFramesTool', () => {
       expect(cappedEnrichment.truncated).toBe(true);
       expect(cappedEnrichment.shown).toBe(1);
       expect(cappedEnrichment.cap).toBe(1);
-      expect(String(cappedEnrichment.notice)).not.toContain('secedgar_dataframe_describe');
+      expect(cappedEnrichment.notice).toBe('Continue with offset=1.');
 
       const pastEnd = createMockContext({ errors: fetchFramesTool.errors });
       await fetchFramesTool.handler(
@@ -1378,5 +1384,58 @@ describe('business location', () => {
 
     const { rows } = at(registerDataframe.mock.calls, 0)[1];
     expect(rows.map((r: { location: string | null }) => r.location)).toEqual(['US-CA', null, null]);
+  });
+});
+
+// A limit above the 100-company page is served at 100 while EDGAR_CLAMP_OVERSIZED_LIMITS
+// is on; the mechanism itself is tabled in tests/mcp-server/tools/limit-clamp.test.ts (#197).
+describe('fetchFramesTool — limit above the 100 cap (#197)', () => {
+  beforeEach(() => {
+    mockApi.tryGetFrames.mockResolvedValue(framesWith(150));
+    mockApi.cikToTicker.mockResolvedValue(undefined);
+  });
+
+  const args = { concept: 'assets', period: 'CY2025Q4I' };
+
+  it('answers limit 101 exactly as limit 100, cap and next_offset included', async () => {
+    const at100 = await runToolContract(fetchFramesTool, { ...args, limit: 100 });
+    const at101 = await runToolContract(fetchFramesTool, { ...args, limit: 101 });
+
+    expect(at101).toEqual(at100);
+    expect(at101.structuredContent).toMatchObject({ next_offset: 100, cap: 100, shown: 100 });
+    expect(readCommonMark(blockText(at101.content))).toContain('Next offset: 100');
+  });
+
+  it('answers limit 101 exactly as limit 100 when the frame is staged as a dataframe', async () => {
+    const registerDataframe = vi.fn().mockResolvedValue({
+      tableName: 'df_FRAME_CLAMP',
+      rowCount: 150,
+      expiresAt: '2026-11-01T00:00:00.000Z',
+      columnSchema: [],
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as never);
+
+    const at100 = await runToolContract(fetchFramesTool, { ...args, limit: 100 });
+    const at101 = await runToolContract(fetchFramesTool, { ...args, limit: 101 });
+
+    expect(registerDataframe).toHaveBeenCalledTimes(2);
+    expect(registerDataframe.mock.calls[1]?.[1]).toEqual(registerDataframe.mock.calls[0]?.[1]);
+    expect(at101).toEqual(at100);
+  });
+
+  it('advertises 1000 as the maximum with the switch on and 100 with it off, which rejects 101', async () => {
+    const maximum = (clampOversizedLimits: boolean) => {
+      const def = buildToolDefinitions({ dropEnabled: false, clampOversizedLimits }).find(
+        (d) => d.name === 'secedgar_fetch_frames',
+      );
+      return (z.toJSONSchema(def!.input, { io: 'input' }) as any).properties.limit.maximum;
+    };
+    expect(maximum(true)).toBe(1000);
+    expect(maximum(false)).toBe(100);
+
+    const off = createFetchFramesTool({ clampOversizedLimits: false });
+    const rejected = await runToolContract(off, { ...args, limit: 101 });
+    expect(rejected.isError).toBe(true);
+    expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
   });
 });

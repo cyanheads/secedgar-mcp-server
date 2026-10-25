@@ -8,7 +8,10 @@
  * cap — takes the same ladder as a 5xx and ends as `sec_unreachable` (#173), as
  * does a 2xx whose body fails to read after its headers, and a 200 body that is not
  * JSON fails the same way unretried (#181). Every wait on that ladder is bounded by
- * the call's 40 s failure budget and ends at once on the caller's cancel (#179). A
+ * the call's 40 s failure budget and ends at once on the caller's cancel (#179), the
+ * error body's bounded diagnostic capture included (#202); a body the ladder has no
+ * use for is cancelled unread (#188), and a submissions or archive-page body without
+ * the shape its readers index fails like one that is not JSON (#186). A
  * User-Agent that `fetch` refuses before sending is a configuration error at
  * startup instead, never a no-response attempt. No request ever reaches sec.gov:
  * a real 429 would block this IP for ten minutes.
@@ -340,8 +343,8 @@ function brokenBody(rejection: Error, head = '{"partial":') {
   );
 }
 
-/** A 200 that delivers `head` and then neither another byte nor its end; records its cancellation. */
-function stalledBody(head = 'head ') {
+/** A response that delivers `head` and then neither another byte nor its end; records its cancellation. */
+function stalledBody(head = 'head ', status = 200) {
   const state = { cancelled: false };
   const response = new Response(
     new ReadableStream<Uint8Array>({
@@ -352,7 +355,7 @@ function stalledBody(head = 'head ') {
         state.cancelled = true;
       },
     }),
-    { status: 200 },
+    { status },
   );
   return { response, state };
 }
@@ -373,13 +376,15 @@ function tricklingBody(chunks: string[], gapMs: number) {
 }
 
 /**
- * A 200 whose body hands out `chunks` one per read, recording how many were pulled
- * and whether the rest was cancelled. `endless` keeps it open after the last chunk;
- * `cancelRejects` makes its cancel fail, as a cancel racing a body's end can.
+ * A response (a 200 unless `status` says otherwise) whose body hands out `chunks` one
+ * per read, recording how many were pulled and whether the rest was cancelled.
+ * `highWaterMark: 0` pulls only on a read, so `pulled` counts reads of the body.
+ * `endless` keeps it open after the last chunk; `cancelRejects` makes its cancel
+ * fail, as a cancel racing a body's end can.
  */
 function chunkedBody(
   chunks: string[],
-  options: { cancelRejects?: boolean; endless?: boolean } = {},
+  options: { cancelRejects?: boolean; endless?: boolean; status?: number } = {},
 ) {
   const state = { cancelled: false, pulled: 0 };
   const response = new Response(
@@ -401,7 +406,7 @@ function chunkedBody(
       },
       { highWaterMark: 0 },
     ),
-    { status: 200 },
+    { status: options.status ?? 200 },
   );
   return { response, state };
 }
@@ -421,6 +426,49 @@ const bodyFailedMessage = (ending: string) =>
 
 const NOT_JSON_HINT =
   'SEC EDGAR (www.sec.gov) answered with something other than the JSON it serves for this request, such as a temporary error page — not a problem with the request. Retry the same call in a minute.';
+
+// --- Submissions bodies (#186) ---
+
+const SUBMISSIONS_URL = 'https://data.sec.gov/submissions/CIK0000320193.json';
+const ARCHIVE_PAGE = 'CIK0000320193-submissions-001.json';
+
+/** The parallel-array columns every submissions reader indexes, in `recent` and on an archive page. */
+const FILING_COLUMNS = [
+  'accessionNumber',
+  'filingDate',
+  'form',
+  'primaryDocument',
+  'primaryDocDescription',
+  'reportDate',
+] as const;
+type FilingColumn = (typeof FILING_COLUMNS)[number];
+
+/** A filing block of `rows` rows: the six indexed columns only. */
+const filingColumns = (rows = 1): Record<FilingColumn, string[]> => {
+  const column = (value: string) => Array.from({ length: rows }, () => value);
+  return {
+    accessionNumber: column('0000320193-25-000079'),
+    filingDate: column('2025-10-31'),
+    form: column('10-K'),
+    primaryDocument: column('aapl-20250927.htm'),
+    primaryDocDescription: column('10-K'),
+    reportDate: column('2025-09-27'),
+  };
+};
+
+/** A submissions body with everything the readers index, as SEC serves Apple's. */
+const wellFormedSubmissions = () => ({
+  cik: '0000320193',
+  name: 'Apple Inc.',
+  tickers: ['AAPL'],
+  exchanges: ['Nasdaq'],
+  filings: {
+    recent: filingColumns(),
+    files: [
+      { name: ARCHIVE_PAGE, filingCount: 1268, filingFrom: '1994-01-26', filingTo: '2015-04-28' },
+    ],
+  },
+});
 
 // --- The caller's signal and the call's failure budget (#179) ---
 
@@ -1008,9 +1056,10 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       );
     });
 
-    it('leaves a 404’s body unread and its outcome unchanged', async () => {
+    it('leaves a 404’s body unread, cancels it, and keeps its outcome unchanged (#188)', async () => {
       // `highWaterMark: 0` pulls only on a read, so `pulls` counts reads of the body.
       let pulls = 0;
+      let cancels = 0;
       const notFoundBody = () =>
         new Response(
           new ReadableStream<Uint8Array>(
@@ -1018,6 +1067,9 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
               pull(controller) {
                 pulls++;
                 controller.error(bunReset());
+              },
+              cancel() {
+                cancels++;
               },
             },
             { highWaterMark: 0 },
@@ -1029,13 +1081,18 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       await vi.advanceTimersByTimeAsync(5_000);
       await expect(missing).resolves.toBeNull();
       expect(nullable.fetchMock).toHaveBeenCalledOnce();
+      expect(cancels).toBe(1);
 
-      const throwing = stubSequence(notFoundBody);
-      const error = await rejectionWithTimers(
-        getEdgarApiService().fetchJson(DOCUMENT_URL, scope()),
-      );
-      expect(error.code).toBe(JsonRpcErrorCode.NotFound);
-      expect(throwing.fetchMock).toHaveBeenCalledOnce();
+      for (const read of [
+        () => getEdgarApiService().fetchJson(DOCUMENT_URL, scope()),
+        () => getEdgarApiService().fetchText(DOCUMENT_URL, scope()),
+      ]) {
+        const throwing = stubSequence(notFoundBody);
+        const error = await rejectionWithTimers(read());
+        expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+        expect(throwing.fetchMock).toHaveBeenCalledOnce();
+      }
+      expect(cancels).toBe(3);
       expect(pulls).toBe(0);
     });
 
@@ -1138,6 +1195,296 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
     });
   });
 
+  // --- Bodies the ladder never reads (#188) ---
+
+  describe('a body the ladder does not read is cancelled, never read (#188)', () => {
+    it('cancels each retried 5xx body before its backoff, and reads the last attempt’s whole', async () => {
+      const bodies = [
+        chunkedBody(['busy'], { status: 503 }),
+        chunkedBody(['busy'], { status: 503 }),
+        chunkedBody(['still busy'], { status: 503 }),
+      ];
+      const { fetchMock } = stubSequence(...bodies.map((b) => () => b.response));
+
+      const call = track(getEdgarApiService().fetchText(DOCUMENT_URL, scope()));
+      // Inside the first 1 s backoff: the first 503 is already released.
+      await vi.advanceTimersByTimeAsync(500);
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(bodies[0]?.state).toEqual({ cancelled: true, pulled: 0 });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      await call.done;
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(bodies.map((b) => b.state)).toEqual([
+        { cancelled: true, pulled: 0 },
+        { cancelled: true, pulled: 0 },
+        // Read to its end for the error's diagnostic, and never cancelled after.
+        { cancelled: false, pulled: 1 },
+      ]);
+      expect(call.state.error?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(call.state.error?.data).toMatchObject({ status: 503, body: 'still busy' });
+    });
+
+    it('returns a retry’s 200 after releasing the 5xx bodies before it', async () => {
+      const busy = [chunkedBody(['busy'], { status: 503 }), chunkedBody(['busy'], { status: 503 })];
+      stubSequence(
+        ...busy.map((b) => () => b.response),
+        () => new Response('third try', { status: 200 }),
+      );
+
+      const text = getEdgarApiService().fetchText(DOCUMENT_URL, scope());
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      await expect(text).resolves.toBe('third try');
+      expect(busy.map((b) => b.state)).toEqual([
+        { cancelled: true, pulled: 0 },
+        { cancelled: true, pulled: 0 },
+      ]);
+    });
+
+    it('cancels a 429’s block page unread and still fails as rate_limited with no body', async () => {
+      const page = chunkedBody([SEC_BLOCK_PAGE], { status: 429 });
+      const { fetchMock } = stubSequence(() => page.response);
+
+      const error = await rejectionWithTimers(
+        getEdgarApiService().fetchText(DOCUMENT_URL, scope()),
+      );
+
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(page.state).toEqual({ cancelled: true, pulled: 0 });
+      expect(error.code).toBe(JsonRpcErrorCode.RateLimited);
+      expect(error.data).toMatchObject({ reason: 'rate_limited', retryable: true, status: 429 });
+      expect(error.data).not.toHaveProperty('body');
+      expect(error.data).not.toHaveProperty('responseBody');
+    });
+
+    it('cancels an answer that lands as the caller cancels, and rethrows the caller’s reason', async () => {
+      const caller = new AbortController();
+      const body = chunkedBody(['filing text']);
+      const fetchMock = vi.fn(async () => {
+        caller.abort(CANCELLED);
+        return body.response;
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const call = track(
+        getEdgarApiService().fetchText(DOCUMENT_URL, new CallScope(caller.signal)),
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(call.state.settled).toBe(true);
+      expect(call.state.error as unknown).toBe(CANCELLED);
+      expect(body.state).toEqual({ cancelled: true, pulled: 0 });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+    it('keeps every outcome when the cancel itself rejects', async () => {
+      const api = getEdgarApiService();
+      const failingCancel = (status: number, chunks = ['body']) =>
+        chunkedBody(chunks, { cancelRejects: true, status });
+
+      const notFound = failingCancel(404);
+      stubSequence(() => notFound.response);
+      const missing = api.tryFetchText(DOCUMENT_URL, scope());
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(missing).resolves.toBeNull();
+      expect(notFound.state).toEqual({ cancelled: true, pulled: 0 });
+
+      const retried = failingCancel(503);
+      stubSequence(
+        () => retried.response,
+        () => new Response('second try', { status: 200 }),
+      );
+      const recovered = api.fetchText(`${DOCUMENT_URL}?n=2`, scope());
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(recovered).resolves.toBe('second try');
+      expect(retried.state).toEqual({ cancelled: true, pulled: 0 });
+
+      const caller = new AbortController();
+      const landing = failingCancel(200);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => {
+          caller.abort(CANCELLED);
+          return landing.response;
+        }),
+      );
+      const cancelled = track(api.fetchText(`${DOCUMENT_URL}?n=3`, new CallScope(caller.signal)));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cancelled.state.error as unknown).toBe(CANCELLED);
+      expect(landing.state).toEqual({ cancelled: true, pulled: 0 });
+
+      // The 429 last: it closes the block gate for the rest of the test.
+      const blocked = failingCancel(429, [SEC_BLOCK_PAGE]);
+      stubSequence(() => blocked.response);
+      const error = await rejectionWithTimers(api.fetchText(`${DOCUMENT_URL}?n=4`, scope()));
+      expect(error.code).toBe(JsonRpcErrorCode.RateLimited);
+      expect(error.data).toMatchObject({ reason: 'rate_limited' });
+      expect(blocked.state).toEqual({ cancelled: true, pulled: 0 });
+    });
+
+    it('builds the error a spent budget ends with from the retried 5xx it released: status, url, and message kept, no body', async () => {
+      const busy = chunkedBody(['busy'], { status: 503 });
+      const { fetchMock } = stubSequence(() => busy.response);
+      const callScope = scope();
+
+      const call = track(getEdgarApiService().fetchText(DOCUMENT_URL, callScope));
+      await vi.advanceTimersByTimeAsync(500);
+      // The call's other requests spend its budget while this one sleeps its backoff.
+      callScope.charge(40_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await call.done;
+
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(busy.state).toEqual({ cancelled: true, pulled: 0 });
+      expect(call.state.error?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(call.state.error?.message).toBe(
+        `SEC EDGAR returned HTTP 503 on attempt 1 of 3; ${BUDGET_STOP}.`,
+      );
+      expect(call.state.error?.data).toMatchObject({ status: 503, url: DOCUMENT_URL });
+      expect(call.state.error?.data).not.toHaveProperty('body');
+      expect(call.state.error?.data).not.toHaveProperty('responseBody');
+    });
+  });
+
+  // --- The error body's diagnostic capture (#202) ---
+
+  describe('the error body’s diagnostic capture (#202)', () => {
+    const FORBIDDEN_HINT =
+      'www.sec.gov may be blocking requests. Check EDGAR_USER_AGENT format ("AppName contact@email.com") or retry later.';
+
+    it.each([
+      ['a small body whole', ['forbidden'], 'forbidden', { cancelled: false, pulled: 1 }],
+      [
+        'a body of exactly 500 bytes whole',
+        ['x'.repeat(500)],
+        'x'.repeat(500),
+        { cancelled: false, pulled: 1 },
+      ],
+      [
+        'the first 500 bytes of a longer one, marked cut, the rest cancelled unread',
+        ['a'.repeat(300), 'b'.repeat(300), 'c'.repeat(300)],
+        `${'a'.repeat(300)}${'b'.repeat(200)}…`,
+        { cancelled: true, pulled: 2 },
+      ],
+      [
+        'no partial code point at the 500-byte cut',
+        [`${'x'.repeat(499)}é and more`],
+        `${'x'.repeat(499)}…`,
+        { cancelled: true, pulled: 1 },
+      ],
+      ['an empty body as empty', [], '', { cancelled: false, pulled: 0 }],
+    ])('captures %s on a 403', async (_case, chunks, captured, state) => {
+      const body = chunkedBody(chunks, { status: 403 });
+      stubSequence(() => body.response);
+
+      const error = await rejectionWithTimers(
+        getEdgarApiService().fetchText(DOCUMENT_URL, scope()),
+      );
+
+      expect(error.code).toBe(JsonRpcErrorCode.Forbidden);
+      expect(error.data).toMatchObject({
+        status: 403,
+        statusCode: 403,
+        url: DOCUMENT_URL,
+        body: captured,
+        responseBody: captured,
+        recovery: { hint: FORBIDDEN_HINT },
+      });
+      expect(body.state).toEqual(state);
+    });
+
+    it('captures the last attempt’s body on a 5xx ladder', async () => {
+      stubStatus(503, 'Service Unavailable');
+
+      const error = await rejectionWithTimers(
+        getEdgarApiService().fetchText(DOCUMENT_URL, scope()),
+      );
+
+      expect(error.message).toBe('SEC EDGAR returned HTTP 503.');
+      expect(error.data).toMatchObject({ status: 503, body: 'Service Unavailable' });
+    });
+
+    it('ends a 403 body that stalls after its headers at the 15 s idle limit, keeping what it read and charging the wait', async () => {
+      const body = stalledBody('<html>partial', 403);
+      const { fetchMock } = stubSequence(() => body.response);
+      const callScope = scope();
+
+      const call = track(getEdgarApiService().fetchText(DOCUMENT_URL, callScope));
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(call.state.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await call.done;
+
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(body.state.cancelled).toBe(true);
+      expect(call.state.error?.code).toBe(JsonRpcErrorCode.Forbidden);
+      expect(call.state.error?.message).toBe('SEC EDGAR returned HTTP 403.');
+      expect(call.state.error?.data).toMatchObject({
+        status: 403,
+        url: DOCUMENT_URL,
+        body: '<html>partial…',
+        recovery: { hint: FORBIDDEN_HINT },
+      });
+      expect(callScope.spentMs).toBe(15_000);
+    });
+
+    it('ends a last-attempt 503 body that stalls at the idle limit with its status mapping', async () => {
+      const last = stalledBody('<html>partial', 503);
+      const { starts } = stubSequence(503, 503, () => last.response);
+      const t0 = Date.now();
+
+      const call = track(getEdgarApiService().fetchText(DOCUMENT_URL, scope()));
+      // Attempts at 0, 1 s, and 3 s; the third body's idle limit runs out at 18 s.
+      await vi.advanceTimersByTimeAsync(17_999);
+      expect(call.state.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await call.done;
+
+      expect(starts.map((at) => at - t0)).toEqual([0, 1_000, 3_000]);
+      expect(last.state.cancelled).toBe(true);
+      expect(call.state.error?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(call.state.error?.message).toBe('SEC EDGAR returned HTTP 503.');
+      expect(call.state.error?.data).toMatchObject({ status: 503, body: '<html>partial…' });
+    });
+
+    it('cuts the capture to the call’s budget left', async () => {
+      stubSequence(() => stalledBody('<html>partial', 403).response);
+      const callScope = scope();
+      callScope.charge(33_000);
+
+      const call = track(getEdgarApiService().fetchText(DOCUMENT_URL, callScope));
+      await vi.advanceTimersByTimeAsync(6_999);
+      expect(call.state.settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await call.done;
+
+      expect(call.state.error?.code).toBe(JsonRpcErrorCode.Forbidden);
+      expect(call.state.error?.data).toMatchObject({ body: '<html>partial…' });
+    });
+
+    it('ends at once on the caller’s cancel, rethrowing its reason, and cancels the body', async () => {
+      const caller = new AbortController();
+      const body = stalledBody('<html>partial', 403);
+      const { fetchMock } = stubSequence(() => body.response);
+
+      const call = track(
+        getEdgarApiService().fetchText(DOCUMENT_URL, new CallScope(caller.signal)),
+      );
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(call.state.settled).toBe(false);
+
+      caller.abort(CANCELLED);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(call.state.settled).toBe(true);
+      expect(call.state.error as unknown).toBe(CANCELLED);
+      expect(body.state.cancelled).toBe(true);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+  });
+
   // --- A 200 whose body is not JSON (#181) ---
 
   describe('a 200 whose body is not JSON (#181)', () => {
@@ -1183,6 +1530,164 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       await vi.advanceTimersByTimeAsync(1_000);
 
       await expect(text).resolves.toBe('<html>page</html>');
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+  });
+
+  // --- A submissions body of the wrong shape (#186) ---
+
+  describe('a submissions or archive-page body without the shape its readers index (#186)', () => {
+    const NOT_SHAPED_HINT = NOT_JSON_HINT.replace('www.sec.gov', 'data.sec.gov');
+    const NOT_SHAPED_MESSAGE =
+      'SEC EDGAR (data.sec.gov) answered, but its response body is not the JSON this request expects.';
+    const ARCHIVE_PAGE_URL = `https://data.sec.gov/submissions/${ARCHIVE_PAGE}`;
+
+    /** Serve `first` once, then `then` on every later request. */
+    function stubBodies(first: unknown, then: unknown) {
+      const fetchMock = vi
+        .fn()
+        .mockImplementationOnce(async () => Response.json(first))
+        .mockImplementation(async () => Response.json(then));
+      vi.stubGlobal('fetch', fetchMock);
+      return fetchMock;
+    }
+
+    const withoutColumn = (column: FilingColumn) => {
+      const block: Record<string, unknown> = filingColumns();
+      delete block[column];
+      return block;
+    };
+
+    const submissionsWith = (patch: (body: Record<string, unknown>) => void) => {
+      const body: Record<string, unknown> = structuredClone(wellFormedSubmissions());
+      patch(body);
+      return body;
+    };
+    const filingsOf = (body: Record<string, unknown>) => body.filings as Record<string, unknown>;
+
+    const SUBMISSIONS_SHAPES: Array<[string, unknown]> = [
+      ['an array', []],
+      ['null', null],
+      ['a string', 'Apple Inc.'],
+      // The company_tickers.json payload: an object, but not a submissions body.
+      ['the ticker file', { 0: { cik_str: 320193, ticker: 'AAPL', title: 'Apple Inc.' } }],
+      ['no filings', submissionsWith((b) => delete b.filings)],
+      ['filings an array', submissionsWith((b) => (b.filings = []))],
+      ['no filings.recent', submissionsWith((b) => delete filingsOf(b).recent)],
+      ...FILING_COLUMNS.map((column): [string, unknown] => [
+        `no filings.recent.${column}`,
+        submissionsWith((b) => (filingsOf(b).recent = withoutColumn(column))),
+      ]),
+      [
+        'a recent column that is not an array',
+        submissionsWith((b) => (filingsOf(b).recent = { ...filingColumns(), form: '10-K' })),
+      ],
+      ['no filings.files', submissionsWith((b) => delete filingsOf(b).files)],
+      ['filings.files an object', submissionsWith((b) => (filingsOf(b).files = {}))],
+      ['no tickers', submissionsWith((b) => delete b.tickers)],
+      ['no exchanges', submissionsWith((b) => delete b.exchanges)],
+      ['exchanges a string', submissionsWith((b) => (b.exchanges = 'Nasdaq'))],
+    ];
+
+    it.each(SUBMISSIONS_SHAPES)(
+      'fails getSubmissions on %s as sec_unreachable in one request, and caches nothing',
+      async (_case, body) => {
+        const fetchMock = stubBodies(body, wellFormedSubmissions());
+        const api = getEdgarApiService();
+
+        const error = await rejectionWithTimers(api.getSubmissions('320193', scope()));
+
+        expect(fetchMock).toHaveBeenCalledOnce();
+        expect(error).toBeInstanceOf(McpError);
+        expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(error.message).toBe(NOT_SHAPED_MESSAGE);
+        expect(error.data).toEqual({
+          reason: 'sec_unreachable',
+          retryable: true,
+          url: SUBMISSIONS_URL,
+          recovery: { hint: NOT_SHAPED_HINT },
+        });
+        expect(JSON.stringify({ message: error.message, data: error.data })).not.toMatch(
+          /undefined|Cannot read|is not an object/,
+        );
+
+        // Nothing was cached: the next call refetches and gets the well-formed body.
+        const again = api.getSubmissions('320193', scope());
+        await vi.advanceTimersByTimeAsync(1_000);
+        await expect(again).resolves.toEqual(wellFormedSubmissions());
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it.each<[string, unknown]>([
+      ['an empty object', {}],
+      ['an array', []],
+      ...FILING_COLUMNS.map((column): [string, unknown] => [`no ${column}`, withoutColumn(column)]),
+      ['a column that is not an array', { ...filingColumns(), accessionNumber: 'x' }],
+    ])(
+      'fails fetchArchivePage on %s as sec_unreachable in one request, and caches nothing',
+      async (_case, body) => {
+        const fetchMock = stubBodies(body, filingColumns());
+        const api = getEdgarApiService();
+
+        const error = await rejectionWithTimers(api.fetchArchivePage(ARCHIVE_PAGE, scope()));
+
+        expect(fetchMock).toHaveBeenCalledOnce();
+        expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+        expect(error.message).toBe(NOT_SHAPED_MESSAGE);
+        expect(error.data).toEqual({
+          reason: 'sec_unreachable',
+          retryable: true,
+          url: ARCHIVE_PAGE_URL,
+          recovery: { hint: NOT_SHAPED_HINT },
+        });
+
+        const again = api.fetchArchivePage(ARCHIVE_PAGE, scope());
+        await vi.advanceTimersByTimeAsync(1_000);
+        await expect(again).resolves.toEqual(filingColumns());
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      },
+    );
+
+    it.each<[string, Record<string, unknown>]>([
+      ['as SEC serves an active filer', wellFormedSubmissions()],
+      [
+        'with empty columns, no archive pages, and no tickers or exchanges',
+        {
+          cik: '2095000',
+          name: 'DayFi, Inc.',
+          tickers: [],
+          exchanges: [],
+          filings: { recent: filingColumns(0), files: [] },
+        },
+      ],
+      [
+        'with columns of unequal length, a null exchange, and no optional columns',
+        submissionsWith((b) => {
+          b.exchanges = [null];
+          filingsOf(b).recent = { ...filingColumns(2), reportDate: [] };
+        }),
+      ],
+    ])('passes a submissions body %s unchanged, and caches it', async (_case, body) => {
+      const fetchMock = stubBodies(body, null);
+      const api = getEdgarApiService();
+
+      const first = api.getSubmissions('320193', scope());
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(first).resolves.toEqual(body);
+      await expect(api.getSubmissions('320193', scope())).resolves.toEqual(body);
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+    it('passes an archive page with empty columns and the archive-only columns unchanged, and caches it', async () => {
+      const page = { ...filingColumns(0), acceptanceDateTime: [], size: [], items: [] };
+      const fetchMock = stubBodies(page, null);
+      const api = getEdgarApiService();
+
+      const first = api.fetchArchivePage(ARCHIVE_PAGE, scope());
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(first).resolves.toEqual(page);
+      await expect(api.fetchArchivePage(ARCHIVE_PAGE, scope())).resolves.toEqual(page);
       expect(fetchMock).toHaveBeenCalledOnce();
     });
   });
@@ -1379,28 +1884,32 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       [
         'getSubmissions',
         (callScope: CallScope) => getEdgarApiService().getSubmissions('320193', callScope),
-        { cik: '320193' },
+        JSON.stringify(wellFormedSubmissions()),
+        wellFormedSubmissions(),
       ],
       [
         'fetchArchivePage',
-        (callScope: CallScope) =>
-          getEdgarApiService().fetchArchivePage('CIK0000320193-submissions-001.json', callScope),
-        { cik: '320193' },
+        (callScope: CallScope) => getEdgarApiService().fetchArchivePage(ARCHIVE_PAGE, callScope),
+        JSON.stringify(filingColumns()),
+        filingColumns(),
       ],
       [
         'fetchFullIndexQuarter',
         (callScope: CallScope) => getEdgarApiService().fetchFullIndexQuarter(1998, 1, callScope),
+        '{"cik":"320193"}',
         // The whole body arrives, but it is not a master.idx: no entries parse from it.
         [],
       ],
     ] as const)(
       'caches nothing from a %s read cancelled mid-body',
-      async (_method, read, whole) => {
+      async (_method, read, body, whole) => {
         const caller = new AbortController();
         const fetchMock = vi
           .fn()
-          .mockImplementationOnce(async () => cancellingBody(caller, '{"cik":', '"320193"}'))
-          .mockImplementation(async () => new Response('{"cik":"320193"}', { status: 200 }));
+          .mockImplementationOnce(async () =>
+            cancellingBody(caller, body.slice(0, 8), body.slice(8)),
+          )
+          .mockImplementation(async () => new Response(body, { status: 200 }));
         vi.stubGlobal('fetch', fetchMock);
 
         const cancelled = track(read(new CallScope(caller.signal)));

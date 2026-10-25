@@ -5,7 +5,7 @@
  * and `content[]` — with the same reason whether SEC answered the 429 or the
  * server refused the call without sending it. The same tools declare
  * `sec_unreachable`, the failure once the last attempt gets no complete, readable
- * response (#173, #181). Driven through `runToolContract` over the real `EdgarApiService` with
+ * response (#173, #181), or a submissions body lacks its shape (#186). Driven through `runToolContract` over the real `EdgarApiService` with
  * `globalThis.fetch` stubbed.
  * @module tests/mcp-server/tools/rate-limit-contract
  */
@@ -32,6 +32,7 @@ import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials
 import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { initEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { blockText } from '../../support/assertions.js';
+import { readCommonMark } from '../../support/commonmark.js';
 
 /** Tools that never reach SEC: the static concept catalog and the canvas tools. */
 const OFFLINE_TOOLS = new Set([
@@ -49,7 +50,7 @@ function envelope(result: { structuredContent?: unknown }): ErrorEnvelope {
 
 describe('rate_limited on the tool contracts (#116)', () => {
   it('is declared by every tool that reaches SEC, and by no other', () => {
-    for (const def of buildToolDefinitions({ dropEnabled: true })) {
+    for (const def of buildToolDefinitions({ dropEnabled: true, clampOversizedLimits: true })) {
       const entry = def.errors?.find((e) => e.reason === 'rate_limited');
       if (OFFLINE_TOOLS.has(def.name)) {
         expect(entry, def.name).toBeUndefined();
@@ -66,7 +67,7 @@ describe('rate_limited on the tool contracts (#116)', () => {
 
 describe('sec_unreachable on the tool contracts (#173)', () => {
   it('is declared by exactly the tools that declare rate_limited', () => {
-    const defs = buildToolDefinitions({ dropEnabled: true });
+    const defs = buildToolDefinitions({ dropEnabled: true, clampOversizedLimits: true });
     const declaring = (reason: string) =>
       defs.filter((def) => def.errors?.some((e) => e.reason === reason)).map((def) => def.name);
 
@@ -89,7 +90,7 @@ describe('sec_unreachable on the tool contracts (#173)', () => {
    * from being sent at all (#179).
    */
   it('says the same of every ladder that ends this way, in one string on every tool', () => {
-    const whens = buildToolDefinitions({ dropEnabled: true }).flatMap(
+    const whens = buildToolDefinitions({ dropEnabled: true, clampOversizedLimits: true }).flatMap(
       (def) => def.errors?.filter((e) => e.reason === 'sec_unreachable').map((e) => e.when) ?? [],
     );
     expect(whens).toHaveLength(13);
@@ -206,6 +207,63 @@ describe('a call whose SEC response body fails to read (#181)', () => {
     expect(wire).not.toContain('<html');
     expect(wire).not.toContain('Unexpected token');
     expect(wire).not.toContain('JSON Parse error');
+  });
+});
+
+describe('a call whose submissions body lacks the shape its readers index (#186)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('unmocked fetch')));
+    initEdgarApiService();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('fails as sec_unreachable on both surfaces in one submissions request, with no runtime text', async () => {
+    const tickers = { 0: { cik_str: 320193, ticker: 'AAPL', title: 'Apple Inc.' } };
+    const requests: string[] = [];
+    const fetchMock = vi.fn(async (input: string) => {
+      requests.push(input);
+      const { pathname } = new URL(input);
+      if (pathname === '/files/company_tickers.json') return Response.json(tickers);
+      if (pathname === '/files/company_tickers_mf.json') {
+        return Response.json({ fields: ['cik', 'seriesId', 'classId', 'symbol'], data: [] });
+      }
+      // A JSON object, but the ticker file's, not a submissions body.
+      if (pathname === '/submissions/CIK0000320193.json') return Response.json(tickers);
+      throw new Error(`unrouted fetch: ${input}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pending = runToolContract(companySearchTool, { query: 'AAPL' });
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await pending;
+
+    expect(requests.filter((url) => url.includes('/submissions/'))).toHaveLength(1);
+    expect(result.isError).toBe(true);
+    const message =
+      'SEC EDGAR (data.sec.gov) answered, but its response body is not the JSON this request expects.';
+    const hint =
+      'SEC EDGAR (data.sec.gov) answered with something other than the JSON it serves for this request, such as a temporary error page — not a problem with the request. Retry the same call in a minute.';
+    expect(envelope(result)).toEqual({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message,
+      data: {
+        reason: 'sec_unreachable',
+        retryable: true,
+        url: 'https://data.sec.gov/submissions/CIK0000320193.json',
+        recovery: { hint },
+      },
+    });
+    expect(readCommonMark(blockText(result.content))).toBe(
+      `Error: ${message}\n\nRecovery: ${hint}\n\n(reason sec_unreachable · retryable)`,
+    );
+    const wire = JSON.stringify(result);
+    expect(wire).not.toContain('undefined is not an object');
+    expect(wire).not.toContain('Cannot read properties');
   });
 });
 

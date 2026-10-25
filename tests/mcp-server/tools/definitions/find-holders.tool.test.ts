@@ -6,13 +6,18 @@
  * @module tests/mcp-server/tools/definitions/find-holders.tool
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { findHoldersTool } from '@/mcp-server/tools/definitions/find-holders.tool.js';
+import {
+  createFindHoldersTool,
+  findHoldersTool,
+} from '@/mcp-server/tools/definitions/find-holders.tool.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import type { EftsHit, EftsResponse } from '@/services/edgar/types.js';
 import { blockText, wireError } from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
   const actual = await importActual<typeof import('@/services/edgar/edgar-api-service.js')>();
@@ -505,6 +510,43 @@ describe('findHoldersTool', () => {
     expect(notice).toContain('Raise limit');
   });
 
+  describe('without a canvas at the 100-row limit cap', () => {
+    beforeEach(() => {
+      vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+      mockApi.searchFilings.mockResolvedValue(
+        eftsPage(
+          Array.from({ length: 101 }, (_, i) =>
+            hit({ accession: `0000000000-26-${String(i).padStart(6, '0')}` }),
+          ),
+          101,
+        ),
+      );
+    });
+
+    async function noticeFor(args: Record<string, unknown>) {
+      const ctx = createMockContext({ errors: findHoldersTool.errors });
+      await findHoldersTool.handler(findHoldersTool.input.parse({ limit: 100, ...args }), ctx);
+      expect(getEnrichment(ctx).truncated).toBe(true);
+      return String(getEnrichment(ctx).notice);
+    }
+
+    it('drops the raise-limit advice and points a name search at cusip', async () => {
+      const notice = await noticeFor({ issuer: 'AAPL' });
+      expect(notice).not.toContain('Raise limit');
+      expect(notice).toContain('Narrow to a single share class with cusip.');
+    });
+
+    it('points a cusip search at secedgar_search_filings for the rest', async () => {
+      const notice = await noticeFor({ issuer: 'AAPL', cusip: '037833100' });
+      expect(notice).not.toContain('Raise limit');
+      expect(notice).not.toContain('with cusip');
+      expect(notice).toContain(
+        'Page the remaining managers with secedgar_search_filings {"query":"037833100","forms":["13F-HR"],"filed_after":"2026-04-01","filed_before":"2026-06-30","sort":"relevance","offset":0,"limit":100}',
+      );
+      expect(notice).toContain('period_ending="2026-03-31"');
+    });
+  });
+
   it('fails when the issuer resolves to a bare CIK with no name to phrase-match', async () => {
     mockApi.resolveCik.mockResolvedValue({ cik: '9999999999' });
     const ctx = createMockContext({ errors: findHoldersTool.errors });
@@ -537,7 +579,7 @@ describe('findHoldersTool', () => {
     expect(() => findHoldersTool.input.parse({ issuer: 'AAPL', quarter: 'Q1-2026' })).toThrow();
     expect(() => findHoldersTool.input.parse({ issuer: 'AAPL', quarter: '2026-Q5' })).toThrow();
     expect(() => findHoldersTool.input.parse({ issuer: '  ' })).toThrow();
-    expect(() => findHoldersTool.input.parse({ issuer: 'AAPL', limit: 101 })).toThrow();
+    expect(() => findHoldersTool.input.parse({ issuer: 'AAPL', limit: 1001 })).toThrow();
   });
 
   it('renders the ordering-bearing counts and every holder into format()', () => {
@@ -600,5 +642,69 @@ describe('findHoldersTool parameter names (#152)', () => {
     expect(wireError(result).data.reason).toBe('invalid_arguments');
     expect(blockText(result.content)).toContain('"company"');
     expect(mockApi.resolveCik).not.toHaveBeenCalled();
+  });
+});
+
+// A limit above the 100-filer inline cap is served at 100 while EDGAR_CLAMP_OVERSIZED_LIMITS
+// is on; the mechanism itself is tabled in tests/mcp-server/tools/limit-clamp.test.ts (#197).
+describe('findHoldersTool — limit above the 100 cap (#197)', () => {
+  beforeEach(() => {
+    // 101 distinct in-quarter managers across two EFTS pages: more than the applied 100,
+    // not more than a requested 101, so each `rows > limit` read decides the outcome.
+    const hits = Array.from({ length: 101 }, (_, i) =>
+      hit({ accession: `0000000000-26-${String(i).padStart(6, '0')}` }),
+    );
+    mockApi.searchFilings.mockImplementation(async (params: { from: number }) =>
+      eftsPage(hits.slice(params.from, params.from + 100), 101),
+    );
+  });
+
+  const args = { issuer: 'AAPL', cusip: '037833100' };
+
+  it('answers limit 101 exactly as limit 100, the applied cap included', async () => {
+    const at100 = await runToolContract(findHoldersTool, { ...args, limit: 100 });
+    const at101 = await runToolContract(findHoldersTool, { ...args, limit: 101 });
+
+    expect(at101).toEqual(at100);
+    expect(at101.structuredContent).toMatchObject({
+      holders_in_quarter: 101,
+      cap: 100,
+      shown: 100,
+      truncated: true,
+    });
+    expect(readCommonMark(blockText(at101.content))).toContain(
+      '101 managers reporting 2026-Q1, 100 shown',
+    );
+  });
+
+  it('answers limit 101 exactly as limit 100 when the filers are staged as a dataframe', async () => {
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+
+    const at100 = await runToolContract(findHoldersTool, { ...args, limit: 100 });
+    const at101 = await runToolContract(findHoldersTool, { ...args, limit: 101 });
+
+    expect(bridge.registerDataframe).toHaveBeenCalledTimes(2);
+    expect(bridge.registerDataframe.mock.calls[1]?.[1]).toEqual(
+      bridge.registerDataframe.mock.calls[0]?.[1],
+    );
+    expect(at101).toEqual(at100);
+  });
+
+  it('accepts up to 1000 with the switch on; off, advertises 100 and rejects 101', async () => {
+    const maximum = (clampOversizedLimits: boolean) =>
+      (
+        z.toJSONSchema(createFindHoldersTool({ clampOversizedLimits }).input, {
+          io: 'input',
+        }) as any
+      ).properties.limit.maximum;
+    expect(maximum(true)).toBe(1000);
+    expect(maximum(false)).toBe(100);
+    expect(findHoldersTool.input.safeParse({ ...args, limit: 1000 }).success).toBe(true);
+
+    const off = createFindHoldersTool({ clampOversizedLimits: false });
+    const rejected = await runToolContract(off, { ...args, limit: 101 });
+    expect(rejected.isError).toBe(true);
+    expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
   });
 });

@@ -8,10 +8,14 @@
  * @module tests/mcp-server/tools/definitions/get-fund-holdings.tool
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { getFundHoldingsTool } from '@/mcp-server/tools/definitions/get-fund-holdings.tool.js';
+import {
+  createGetFundHoldingsTool,
+  getFundHoldingsTool,
+} from '@/mcp-server/tools/definitions/get-fund-holdings.tool.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import type { FilingsRecent } from '@/services/edgar/types.js';
 
@@ -35,7 +39,8 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 }));
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
-import { blockText } from '../../../support/assertions.js';
+import { blockText, wireError } from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 interface FilingRow {
   accessionNumber: string;
@@ -929,7 +934,7 @@ describe('getFundHoldingsTool — response', () => {
       expect(enrichment.truncated).toBe(true);
       expect(enrichment.shown).toBe(1);
       expect(enrichment.cap).toBe(1);
-      expect(String(enrichment.notice)).not.toContain('secedgar_dataframe_describe');
+      expect(enrichment.notice).toBe('Continue with offset=1.');
     });
   });
 
@@ -955,7 +960,7 @@ describe('getFundHoldingsTool — response', () => {
     expect(() =>
       getFundHoldingsTool.input.parse({ fund: 'VOO', report_date: '03/31/2026' }),
     ).toThrow();
-    expect(() => getFundHoldingsTool.input.parse({ fund: 'VOO', limit: 101 })).toThrow();
+    expect(() => getFundHoldingsTool.input.parse({ fund: 'VOO', limit: 1001 })).toThrow();
     expect(() => getFundHoldingsTool.input.parse({ fund: 'VOO', offset: -1 })).toThrow();
     expect(() => getFundHoldingsTool.input.parse({ fund: '   ' })).toThrow();
   });
@@ -996,5 +1001,71 @@ describe('getFundHoldingsTool — response', () => {
     expect(rendered).toContain('net assets $1.42T ($1,421,263,311,402.89)');
     expect(rendered).toContain('7.5775% of net assets');
     expect(rendered).toContain('Next offset: 1');
+  });
+});
+
+// A limit above the 100-position page is served at 100 while EDGAR_CLAMP_OVERSIZED_LIMITS
+// is on; the mechanism itself is tabled in tests/mcp-server/tools/limit-clamp.test.ts (#197).
+describe('getFundHoldingsTool — limit above the 100 cap (#197)', () => {
+  beforeEach(() => {
+    mockApi.tryGetFilingDocument.mockResolvedValue(
+      report({
+        seriesId: 'S000002839',
+        seriesName: 'VANGUARD 500 INDEX FUND',
+        reportDate: '2026-03-31',
+        holdings: Array.from({ length: 150 }, (_, i) => ({
+          name: `Position ${i}`,
+          pct: 150 - i,
+          value: 1000 - i,
+        })),
+      }),
+    );
+  });
+
+  const args = { fund: 'VOO' };
+
+  it('answers limit 101 exactly as limit 100, cap and next_offset included', async () => {
+    const at100 = await runToolContract(getFundHoldingsTool, { ...args, limit: 100 });
+    const at101 = await runToolContract(getFundHoldingsTool, { ...args, limit: 101 });
+
+    expect(at101).toEqual(at100);
+    expect(at101.structuredContent).toMatchObject({
+      total_holdings: 150,
+      next_offset: 100,
+      cap: 100,
+      shown: 100,
+    });
+    expect(readCommonMark(blockText(at101.content))).toContain('Next offset: 100');
+  });
+
+  it('answers limit 101 exactly as limit 100 when the portfolio is staged as a dataframe', async () => {
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+
+    const at100 = await runToolContract(getFundHoldingsTool, { ...args, limit: 100 });
+    const at101 = await runToolContract(getFundHoldingsTool, { ...args, limit: 101 });
+
+    expect(bridge.registerDataframe).toHaveBeenCalledTimes(2);
+    expect(bridge.registerDataframe.mock.calls[1]?.[1]).toEqual(
+      bridge.registerDataframe.mock.calls[0]?.[1],
+    );
+    expect(at101).toEqual(at100);
+  });
+
+  it('accepts up to 1000 with the switch on; off, advertises 100 and rejects 101', async () => {
+    const maximum = (clampOversizedLimits: boolean) =>
+      (
+        z.toJSONSchema(createGetFundHoldingsTool({ clampOversizedLimits }).input, {
+          io: 'input',
+        }) as any
+      ).properties.limit.maximum;
+    expect(maximum(true)).toBe(1000);
+    expect(maximum(false)).toBe(100);
+    expect(getFundHoldingsTool.input.safeParse({ ...args, limit: 1000 }).success).toBe(true);
+
+    const off = createGetFundHoldingsTool({ clampOversizedLimits: false });
+    const rejected = await runToolContract(off, { ...args, limit: 101 });
+    expect(rejected.isError).toBe(true);
+    expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
   });
 });

@@ -40,11 +40,13 @@ const COMPANY_INPUT_UNDER_ANOTHER_NAME: Record<string, { key: string; spellings:
   },
 };
 
-const tools = buildToolDefinitions({ dropEnabled: true }).map((def) => ({
-  name: def.name,
-  keys: Object.keys((def.input as unknown as { shape: Record<string, unknown> }).shape),
-  aliases: def.inputAliases ?? {},
-}));
+const tools = buildToolDefinitions({ dropEnabled: true, clampOversizedLimits: true }).map(
+  (def) => ({
+    name: def.name,
+    keys: Object.keys((def.input as unknown as { shape: Record<string, unknown> }).shape),
+    aliases: def.inputAliases ?? {},
+  }),
+);
 
 describe('parameter names across tools (#115)', () => {
   it('declares no retired spelling as a parameter', () => {

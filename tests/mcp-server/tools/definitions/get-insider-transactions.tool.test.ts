@@ -3,10 +3,15 @@
  * @module tests/mcp-server/tools/definitions/get-insider-transactions.tool
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getInsiderTransactionsTool } from '@/mcp-server/tools/definitions/get-insider-transactions.tool.js';
+import {
+  createGetInsiderTransactionsTool,
+  getInsiderTransactionsTool,
+} from '@/mcp-server/tools/definitions/get-insider-transactions.tool.js';
+import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', () => ({
@@ -43,7 +48,13 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 }));
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
-import { blockAt, blockText, caught, recoveryHint } from '../../../support/assertions.js';
+import {
+  blockAt,
+  blockText,
+  caught,
+  recoveryHint,
+  wireError,
+} from '../../../support/assertions.js';
 
 /** A canvas bridge stub whose registerDataframe echoes the rows + truncated flag it received. */
 function stubBridge() {
@@ -585,9 +596,12 @@ describe('getInsiderTransactionsTool', () => {
     });
   });
 
-  // Security: oversized limit is capped by schema
-  it('rejects limit above 100', () => {
-    expect(() => getInsiderTransactionsTool.input.parse({ company: 'AAPL', limit: 101 })).toThrow();
+  // Security: a limit past the 1000 rejection bound fails at the schema; 101 through
+  // 1000 is served at the 100 cap (#197).
+  it('rejects limit above 1000', () => {
+    expect(() =>
+      getInsiderTransactionsTool.input.parse({ company: 'AAPL', limit: 1001 }),
+    ).toThrow();
   });
 });
 
@@ -610,6 +624,23 @@ describe('getInsiderTransactionsTool — canvas registration (#39)', () => {
     const result = await getInsiderTransactionsTool.handler(input, ctx);
 
     expect(result.dataset).toBeUndefined();
+  });
+
+  it('points a capped page below the cap at limit and the filters when no canvas holds the rest', async () => {
+    // Without a canvas the scan stops once limit fills, so one filing must overshoot it.
+    mockApi.tryGetFilingDocument.mockResolvedValue(
+      SALE_XML.replace(/<nonDerivativeTransaction>[\s\S]*<\/nonDerivativeTransaction>/, (tx) =>
+        tx.repeat(3),
+      ),
+    );
+    const ctx = createMockContext({ errors: getInsiderTransactionsTool.errors });
+    const input = getInsiderTransactionsTool.input.parse({ company: 'AAPL', limit: 2 });
+    await getInsiderTransactionsTool.handler(input, ctx);
+
+    expect(getEnrichment(ctx).truncated).toBe(true);
+    expect(getEnrichment(ctx).notice).toBe(
+      'Raise limit (at most 100 inline), or narrow with filed_after, filed_before, or transaction_type.',
+    );
   });
 
   it('registers the full scanned set, caps the inline list, and denormalizes the issuer', async () => {
@@ -1493,6 +1524,7 @@ describe('getInsiderTransactionsTool — caller cancellation (#179)', () => {
       cik: ISSUER_CIK,
       name: 'Apple Inc.',
       tickers: ['AAPL'],
+      exchanges: ['Nasdaq'],
       filings: {
         recent: {
           accessionNumber: column((i) => `0000320193-26-${String(100 + i).padStart(6, '0')}`),
@@ -1576,5 +1608,102 @@ describe('getInsiderTransactionsTool — caller cancellation (#179)', () => {
       message: 'client cancelled',
     });
     expect(result.content).toEqual([{ type: 'text', text: 'Error: client cancelled' }]);
+  });
+});
+
+// Wiring only: the scan depth, the per-filing stop test, the staged set, and the inline
+// page take the applied limit when the switch is on. The mechanism itself is tabled in
+// tests/mcp-server/tools/limit-clamp.test.ts (#197).
+describe('getInsiderTransactionsTool — limit above the 100 cap (#197)', () => {
+  /** SALE_XML with its one transaction repeated `n` times. */
+  const salesXml = (n: number) =>
+    SALE_XML.replace(/<nonDerivativeTransaction>[\s\S]*<\/nonDerivativeTransaction>/, (tx) =>
+      tx.repeat(n),
+    );
+
+  beforeEach(() => {
+    // 100 Form 4s plus the sentinel row the scan asks for.
+    mockApi.getRecentFilingsByForm.mockResolvedValue(
+      Array.from({ length: 101 }, (_, i) => ({
+        accessionNumber: `0001214128-24-${String(i).padStart(6, '0')}`,
+        filingDate: '2024-03-16',
+        primaryDocument: 'form4.xml',
+      })),
+    );
+    mockApi.tryGetFilingDocument.mockResolvedValue(salesXml(2));
+  });
+
+  /** The calls at 100 and at 101: both surfaces, and the SEC reads each made. */
+  const atCapAndAbove = async () => {
+    const run = async (limit: number) => {
+      mockApi.getRecentFilingsByForm.mockClear();
+      mockApi.tryGetFilingDocument.mockClear();
+      const result = await runToolContract(getInsiderTransactionsTool, { company: 'AAPL', limit });
+      return {
+        result,
+        listed: mockApi.getRecentFilingsByForm.mock.calls.map(([, forms, count]) => [forms, count]),
+        parsed: mockApi.tryGetFilingDocument.mock.calls.map(([, accession]) => accession),
+      };
+    };
+    return { at100: await run(100), at101: await run(101) };
+  };
+
+  it('stops the filing scan at 100 transactions when asked for 101', async () => {
+    const { at100, at101 } = await atCapAndAbove();
+
+    // Two transactions a filing: 100 fills after 50 filings, 101 would read a 51st.
+    expect(at100.parsed).toHaveLength(50);
+    expect(at101).toEqual(at100);
+    expect(at101.result.structuredContent).toMatchObject({ filings_scanned: 50 });
+    expect(
+      (at101.result.structuredContent as { transactions: unknown[] }).transactions,
+    ).toHaveLength(100);
+  });
+
+  it('stages the same dataframe at 101 as at 100', async () => {
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+    const { at100, at101 } = await atCapAndAbove();
+
+    expect(bridge.registerDataframe).toHaveBeenCalledTimes(2);
+    expect(bridge.registerDataframe.mock.calls[1]?.[1]).toEqual(
+      bridge.registerDataframe.mock.calls[0]?.[1],
+    );
+    expect(at101).toEqual(at100);
+    expect(at101.result.structuredContent).toMatchObject({
+      dataset: { row_count: 100, truncated: true },
+    });
+  });
+
+  it('reports cap 100 when more transactions parsed than the page shows', async () => {
+    // Three transactions a filing: the 34th filing carries the count past 100.
+    mockApi.tryGetFilingDocument.mockResolvedValue(salesXml(3));
+    const { at100, at101 } = await atCapAndAbove();
+
+    expect(at101).toEqual(at100);
+    expect(at101.result.structuredContent).toMatchObject({
+      truncated: true,
+      shown: 100,
+      cap: 100,
+      // At the cap, raising limit reaches nothing more.
+      notice: 'Narrow with filed_after, filed_before, or transaction_type to reach the rest.',
+    });
+  });
+
+  it('advertises 1000 as the maximum with the switch on and 100 with it off, which rejects 101', async () => {
+    const maximum = (clampOversizedLimits: boolean) => {
+      const def = buildToolDefinitions({ dropEnabled: false, clampOversizedLimits }).find(
+        (d) => d.name === 'secedgar_get_insider_transactions',
+      );
+      return (z.toJSONSchema(def!.input, { io: 'input' }) as any).properties.limit.maximum;
+    };
+    expect(maximum(true)).toBe(1000);
+    expect(maximum(false)).toBe(100);
+
+    const off = createGetInsiderTransactionsTool({ clampOversizedLimits: false });
+    const rejected = await runToolContract(off, { company: 'AAPL', limit: 101 });
+    expect(rejected.isError).toBe(true);
+    expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
   });
 });

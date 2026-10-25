@@ -5,10 +5,15 @@
  * @module tests/mcp-server/tools/definitions/compare-companies.tool
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { compareCompaniesTool } from '@/mcp-server/tools/definitions/compare-companies.tool.js';
+import {
+  compareCompaniesTool,
+  createCompareCompaniesTool,
+} from '@/mcp-server/tools/definitions/compare-companies.tool.js';
+import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import type { CompanyConceptUnit, CompanyFactsResponse } from '@/services/edgar/types.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', () => ({
@@ -804,14 +809,76 @@ describe('compareCompaniesTool', () => {
     });
   });
 
-  it('rejects a periods value above the inline cap', () => {
-    expect(() =>
-      compareCompaniesTool.input.parse({
-        companies: ['CAL', 'JUN'],
-        concepts: ['revenue'],
-        periods: 13,
-      }),
-    ).toThrow();
+  // periods above 12 is served at 12 while EDGAR_CLAMP_OVERSIZED_LIMITS is on; the mechanism
+  // is tabled in tests/mcp-server/tools/limit-clamp.test.ts (#197).
+  describe('periods above the 12 cap (#197)', () => {
+    const args = { companies: ['CAL', 'JUN'], concepts: ['revenue'] };
+
+    beforeEach(() => {
+      const years = Array.from({ length: 14 }, (_, i) => 2012 + i);
+      mockApi.tryGetCompanyFacts.mockResolvedValue({
+        cik: 1,
+        entityName: 'LONG CO',
+        facts: {
+          'us-gaap': {
+            Revenues: {
+              label: 'Revenues',
+              units: {
+                USD: years.map((year) => fact({ frame: `CY${year}`, end: `${year}-12-31` })),
+              },
+            },
+          },
+        },
+      });
+    });
+
+    it('answers periods 13 exactly as periods 12, cap and widening guidance included', async () => {
+      vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+      const at12 = await runToolContract(compareCompaniesTool, { ...args, periods: 12 });
+      const at13 = await runToolContract(compareCompaniesTool, { ...args, periods: 13 });
+
+      expect(at13).toEqual(at12);
+      expect(at13.structuredContent).toMatchObject({ cap: 12, shown: 12 });
+      expect(String((at13.structuredContent as { notice?: string }).notice)).toContain(
+        '12 is the most periods the inline matrix shows',
+      );
+    });
+
+    it('answers periods 13 exactly as periods 12 when the series is staged as a dataframe', async () => {
+      const registerDataframe = vi.fn().mockResolvedValue({
+        name: 'df_PERIO_CLAMP',
+        rowCount: 28,
+        expiresAt: '2026-11-01T00:00:00.000Z',
+      });
+      vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as never);
+      vi.mocked(toDatasetField).mockReturnValue({
+        name: 'df_PERIO_CLAMP',
+        row_count: 28,
+        expires_at: '2026-11-01T00:00:00.000Z',
+      });
+
+      const at12 = await runToolContract(compareCompaniesTool, { ...args, periods: 12 });
+      const at13 = await runToolContract(compareCompaniesTool, { ...args, periods: 13 });
+
+      expect(registerDataframe).toHaveBeenCalledTimes(2);
+      expect(registerDataframe.mock.calls[1]?.[1]).toEqual(registerDataframe.mock.calls[0]?.[1]);
+      expect(at13).toEqual(at12);
+    });
+
+    it('advertises 1000 as the maximum with the switch on and 12 with it off, which rejects 13', async () => {
+      const maximum = (clampOversizedLimits: boolean) => {
+        const def = buildToolDefinitions({ dropEnabled: false, clampOversizedLimits }).find(
+          (d) => d.name === 'secedgar_compare_companies',
+        );
+        return (z.toJSONSchema(def!.input, { io: 'input' }) as any).properties.periods.maximum;
+      };
+      expect(maximum(true)).toBe(1000);
+      expect(maximum(false)).toBe(12);
+
+      const off = createCompareCompaniesTool({ clampOversizedLimits: false });
+      const rejected = await runToolContract(off, { ...args, periods: 13 });
+      expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
+    });
   });
 
   it('bounds companies and concepts', () => {

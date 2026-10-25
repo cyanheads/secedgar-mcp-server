@@ -4,7 +4,7 @@
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
+import { normalizeEnv, parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 import { runtimeCaps } from '@cyanheads/mcp-ts-core/utils';
 
 /** Whether a UTF-16 code unit is a control RFC 9110 bars from a field value: C0 other than tab, or DEL. */
@@ -118,24 +118,56 @@ const ServerConfigSchema = z.object({
     .describe(
       'When the mirror is enabled but a lookup misses (company/concept not yet synced, or a filing newer than the last refresh), fall back to the live SEC API. Default true. Set "false" for strict mirror-only reads.',
     ),
+  clampOversizedLimits: z
+    .stringbool()
+    .default(true)
+    .describe(
+      'Serve a count or size input above the cap its tool applies (a limit, content_limit, periods, preview, or row_limit) at that cap, up to each field\'s rejection bound, instead of rejecting it. Default true. Set "false" to advertise each cap as the maximum and reject anything larger.',
+    ),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
 
+const ENV_VARS = {
+  userAgent: 'EDGAR_USER_AGENT',
+  rateLimitRps: 'EDGAR_RATE_LIMIT_RPS',
+  rateLimitCooldownSeconds: 'EDGAR_RATE_LIMIT_COOLDOWN_SECONDS',
+  tickerCacheTtl: 'EDGAR_TICKER_CACHE_TTL',
+  datasetTtlSeconds: 'EDGAR_DATASET_TTL_SECONDS',
+  dataframeDropEnabled: 'EDGAR_DATAFRAME_DROP_ENABLED',
+  mirrorEnabled: 'EDGAR_MIRROR_ENABLED',
+  mirrorPath: 'EDGAR_MIRROR_PATH',
+  mirrorRefreshCron: 'EDGAR_MIRROR_REFRESH_CRON',
+  mirrorFallbackLive: 'EDGAR_MIRROR_FALLBACK_LIVE',
+  clampOversizedLimits: 'EDGAR_CLAMP_OVERSIZED_LIMITS',
+} as const satisfies Record<keyof ServerConfig, string>;
+
 let _config: ServerConfig | undefined;
 
 export function getServerConfig(): ServerConfig {
-  _config ??= parseEnvConfig(ServerConfigSchema, {
-    userAgent: 'EDGAR_USER_AGENT',
-    rateLimitRps: 'EDGAR_RATE_LIMIT_RPS',
-    rateLimitCooldownSeconds: 'EDGAR_RATE_LIMIT_COOLDOWN_SECONDS',
-    tickerCacheTtl: 'EDGAR_TICKER_CACHE_TTL',
-    datasetTtlSeconds: 'EDGAR_DATASET_TTL_SECONDS',
-    dataframeDropEnabled: 'EDGAR_DATAFRAME_DROP_ENABLED',
-    mirrorEnabled: 'EDGAR_MIRROR_ENABLED',
-    mirrorPath: 'EDGAR_MIRROR_PATH',
-    mirrorRefreshCron: 'EDGAR_MIRROR_REFRESH_CRON',
-    mirrorFallbackLive: 'EDGAR_MIRROR_FALLBACK_LIVE',
-  });
+  _config ??= parseEnvConfig(ServerConfigSchema, ENV_VARS);
   return _config;
+}
+
+const ToolGatesSchema = ServerConfigSchema.pick({
+  dataframeDropEnabled: true,
+  clampOversizedLimits: true,
+});
+
+/**
+ * The switches that shape the tool list, read before `createApp()` by parsing
+ * only their own variables (blank or unset takes the default). Every other
+ * server variable is left to `getServerConfig()` in `setup()`, so an invalid one
+ * fails startup through the framework's configuration banner rather than as an
+ * uncaught throw here. An invalid value of a switch itself reads as its default
+ * here and fails there the same way.
+ */
+export function readToolGates(): z.infer<typeof ToolGatesSchema> {
+  const parsed = ToolGatesSchema.safeParse(
+    normalizeEnv({
+      dataframeDropEnabled: process.env[ENV_VARS.dataframeDropEnabled],
+      clampOversizedLimits: process.env[ENV_VARS.clampOversizedLimits],
+    }),
+  );
+  return parsed.success ? parsed.data : ToolGatesSchema.parse({});
 }

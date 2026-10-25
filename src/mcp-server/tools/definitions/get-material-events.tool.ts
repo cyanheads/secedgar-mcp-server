@@ -8,6 +8,11 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import {
+  type LimitClampOptions,
+  limitClamp,
+  withLimitClamps,
+} from '@/mcp-server/tools/limit-clamp.js';
+import {
   dataframeGuidance,
   getCanvasBridge,
   toDatasetField,
@@ -62,6 +67,18 @@ function zipEightKs(block: FilingsRecent): EventRow[] {
   }
   return rows;
 }
+
+/** `limit`: the inline list holds at most 100 filings (#197). */
+const eventsLimit = limitClamp({
+  tool: 'secedgar_get_material_events',
+  field: 'limit',
+  min: 1,
+  cap: 100,
+  bound: 1000,
+  shape: (n) => n.default(20),
+  description:
+    'Filings returned inline, newest first. Every scanned filing that passes the filter is materialized as a dataframe when there are more than this and a canvas is available. Default 20.',
+});
 
 export const getMaterialEventsTool = tool('secedgar_get_material_events', {
   title: 'Get Material Events',
@@ -142,15 +159,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       .describe(
         'Only include filings filed on or before this date (YYYY-MM-DD). Use alone or with filed_after; together they bound the archive-page scan.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(100)
-      .default(20)
-      .describe(
-        'Filings returned inline, newest first. Every scanned filing that passes the filter is materialized as a dataframe when there are more than this and a canvas is available. Default 20.',
-      ),
+    limit: eventsLimit.schema(true),
   }),
   // Other spellings of the company and filing-date parameters in use across tools (#115).
   inputAliases: {
@@ -320,6 +329,9 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       throw err;
     }
 
+    // Every read of the limit takes the applied value, so a call above the cap answers
+    // exactly as the same call at the cap does, archive walk included (#197).
+    const limit = eventsLimit.apply(input.limit, ctx);
     const filedAfter = input.filed_after || undefined;
     const filedBefore = input.filed_before || undefined;
     const hasDateFilter = Boolean(filedAfter || filedBefore);
@@ -347,12 +359,12 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       scope,
     );
     let matchedSoFar = scanned.filter(passesItems).length;
-    if (hasDateFilter || matchedSoFar < input.limit) {
+    if (hasDateFilter || matchedSoFar < limit) {
       for await (const { block } of walk) {
         const rows = zipEightKs(block).filter(inWindow);
         scanned.push(...rows);
         matchedSoFar += rows.filter(passesItems).length;
-        if (!hasDateFilter && matchedSoFar >= input.limit) break;
+        if (!hasDateFilter && matchedSoFar >= limit) break;
       }
     }
     // Oldest date reached — the deepest archive page read, else the recent window's tail.
@@ -375,7 +387,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       | { name: string; row_count: number; expires_at: string; truncated: boolean }
       | undefined;
     const bridge = getCanvasBridge();
-    if (bridge && matched.length > input.limit) {
+    if (bridge && matched.length > limit) {
       const registered = await bridge.registerDataframe(ctx, {
         rows: matched.map((row) => ({
           cik: match.cik,
@@ -416,7 +428,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
     // further. `ctx.enrich.notice` is last-wins, so it rides on the zero-hit notices.
     // The walk runs newest first, so only an earlier upper bound reaches older filings.
     const depthNote =
-      matched.length < input.limit && archiveTruncated
+      matched.length < limit && archiveTruncated
         ? ` The archive scan stopped after ${walk.pagesRead} pages, at filings from ${historyScannedThrough}; ${
             hasDateFilter
               ? `narrow the window with filed_before=${historyScannedThrough} to reach older ones.`
@@ -439,10 +451,10 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       );
     } else if (depthNote) {
       ctx.enrich.notice(depthNote.trimStart());
-    } else if (matched.length > input.limit) {
+    } else if (matched.length > limit) {
       ctx.enrich.truncated({
-        shown: input.limit,
-        cap: input.limit,
+        shown: limit,
+        cap: limit,
         guidance: dataset
           ? dataframeGuidance(dataset)
           : 'Narrow the date range or the items filter to see the rest.',
@@ -465,7 +477,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       total_8k_scanned: scanned.length,
       item_distribution: itemDistribution,
       history_scanned_through: historyScannedThrough,
-      filings: matched.slice(0, input.limit),
+      filings: matched.slice(0, limit),
       dataset,
     };
   },
@@ -519,3 +531,8 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/** `secedgar_get_material_events` as this deployment's `EDGAR_CLAMP_OVERSIZED_LIMITS` builds it. */
+export function createGetMaterialEventsTool(options: LimitClampOptions) {
+  return withLimitClamps(getMaterialEventsTool, [eventsLimit], options);
+}

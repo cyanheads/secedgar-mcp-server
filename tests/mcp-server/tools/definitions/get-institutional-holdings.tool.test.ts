@@ -3,10 +3,15 @@
  * @module tests/mcp-server/tools/definitions/get-institutional-holdings.tool
  */
 
+import { readFileSync } from 'node:fs';
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { getInstitutionalHoldingsTool } from '@/mcp-server/tools/definitions/get-institutional-holdings.tool.js';
+import {
+  createGetInstitutionalHoldingsTool,
+  getInstitutionalHoldingsTool,
+} from '@/mcp-server/tools/definitions/get-institutional-holdings.tool.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import type { FilingIndex, FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
 
@@ -30,7 +35,15 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 }));
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
-import { blockAt, blockText, caught, records, recoveryHint } from '../../../support/assertions.js';
+import {
+  blockAt,
+  blockText,
+  caught,
+  records,
+  recoveryHint,
+  wireError,
+} from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 /** A canvas bridge stub whose registerDataframe echoes the row count it received. */
 function stubBridge() {
@@ -153,6 +166,7 @@ const mockFilingIndex: FilingIndex = {
  * (filings.recent, name, tickers) carry meaningful values.
  */
 interface FilingSpec {
+  acceptanceDateTime?: string;
   accessionNumber: string;
   filingDate: string;
   form: string;
@@ -163,6 +177,9 @@ interface FilingSpec {
 /** A submissions parallel-array block — the recent window or one archive page. */
 function filingsBlock(filings: FilingSpec[]): FilingsRecent {
   return {
+    ...(filings.some((f) => f.acceptanceDateTime) && {
+      acceptanceDateTime: filings.map((f) => f.acceptanceDateTime ?? ''),
+    }),
     accessionNumber: filings.map((f) => f.accessionNumber),
     filingDate: filings.map((f) => f.filingDate),
     form: filings.map((f) => f.form),
@@ -320,8 +337,12 @@ describe('getInstitutionalHoldingsTool', () => {
       expect(result.holdings).toHaveLength(offset >= 2 ? 0 : 1);
       expect(bridge.registerDataframe.mock.calls[0]?.[1].rows).toHaveLength(2);
       const notice = String(getEnrichment(ctx).notice);
-      expect(notice).toContain('original report');
-      expect(notice).toContain('amend');
+      expect(notice).toContain(
+        'amend (filed 2025-08-14, UNAVAILABLE: unreadable_header, not_applied)',
+      );
+      expect(notice).toContain(
+        'Not applied, since the type or information table could not be read: amend — inspect with secedgar_get_filing.',
+      );
       expect(notice).toContain('df_TEST0_TEST1');
       if (offset === 100) expect(notice).toContain('at or past');
       if (offset === 0) expect(getEnrichment(ctx).truncated).toBe(true);
@@ -476,7 +497,7 @@ describe('getInstitutionalHoldingsTool', () => {
     expect(mockApi.tryGetFilingDocument).toHaveBeenCalledTimes(2);
   });
 
-  it('discloses same-period amendments while keeping original rows and paging', async () => {
+  it('discloses a same-period amendment and pages the composed rows', async () => {
     mockApi.getSubmissions.mockResolvedValue(
       buildSubmissions({
         filings: [
@@ -495,9 +516,15 @@ describe('getInstitutionalHoldingsTool', () => {
         ],
       }),
     );
+    const added = SUBLINE_INFO_TABLE_XML.replace(
+      '<cusip>037833100</cusip>',
+      '<cusip>67066G104</cusip>',
+    );
     mockApi.tryGetFilingDocument.mockImplementation(async (_cik, accession, document) =>
       accession === 'amend'
-        ? '<edgarSubmission><formData><coverPage><amendmentInfo><amendmentType>NEW HOLDINGS</amendmentType></amendmentInfo></coverPage></formData></edgarSubmission>'
+        ? document === 'primary_doc.xml'
+          ? '<edgarSubmission><formData><coverPage><amendmentInfo><amendmentType>NEW HOLDINGS</amendmentType></amendmentInfo></coverPage></formData></edgarSubmission>'
+          : added
         : document === 'primary_doc.xml'
           ? PRIMARY_DOC_XML
           : INFO_TABLE_XML,
@@ -508,16 +535,23 @@ describe('getInstitutionalHoldingsTool', () => {
     });
     expect(result.structuredContent).toMatchObject({
       accession_number: 'original',
-      total_positions: 2,
+      total_holdings_in_filing: 2,
+      total_holdings_composed: 5,
+      total_positions: 3,
       next_offset: 1,
       amendments: [
-        { accession_number: 'amend', filing_date: '2025-08-14', amendment_type: 'NEW HOLDINGS' },
+        {
+          accession_number: 'amend',
+          filing_date: '2025-08-14',
+          amendment_type: 'NEW HOLDINGS',
+          applied_as: 'new_holdings',
+        },
       ],
     });
     const text = result.content.map((_, i) => blockText(result.content, i)).join('\n');
     expect(text).toContain('NEW HOLDINGS');
-    expect(text).toContain('secedgar_get_filing');
-    expect(text).toContain('original report');
+    expect(text).toContain('applied as new_holdings');
+    expect(text).toContain('Composed from: original, amend');
   });
   it('returns holdings for a valid institution', async () => {
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
@@ -894,7 +928,9 @@ describe('getInstitutionalHoldingsTool', () => {
       reporting_period: '2024-12-31',
       filing_date: '2025-02-14',
       accession_number: '0000102909-25-000001',
+      composed_accessions: ['0000102909-25-000001'],
       total_holdings_in_filing: 2,
+      total_holdings_composed: 2,
       offset: 0,
       holdings: [
         {
@@ -906,6 +942,7 @@ describe('getInstitutionalHoldingsTool', () => {
           shares_or_principal_type: 'SH' as const,
           put_call: undefined,
           investment_discretion: 'SOLE' as const,
+          source_accession_numbers: ['0000102909-25-000001'],
         },
         {
           issuer_name: 'NVIDIA CORP',
@@ -916,6 +953,7 @@ describe('getInstitutionalHoldingsTool', () => {
           shares_or_principal_type: 'SH' as const,
           put_call: 'Call' as const,
           investment_discretion: 'DFND' as const,
+          source_accession_numbers: ['0000102909-25-000001'],
         },
       ],
     };
@@ -942,7 +980,9 @@ describe('getInstitutionalHoldingsTool', () => {
       reporting_period: undefined,
       filing_date: '2024-01-01',
       accession_number: 'X-1',
+      composed_accessions: ['X-1'],
       total_holdings_in_filing: 0,
+      total_holdings_composed: 0,
       offset: 0,
       holdings: [],
     };
@@ -972,10 +1012,10 @@ describe('getInstitutionalHoldingsTool', () => {
     expect(serialized).not.toContain('SecretAgent secret@example.com');
   });
 
-  // Security: limit schema capped
-  it('rejects limit above 500', () => {
+  // Security: limit schema bounded (served at 500 above 500, #197)
+  it('rejects limit above 1000', () => {
     expect(() =>
-      getInstitutionalHoldingsTool.input.parse({ company: '0000102909', limit: 501 }),
+      getInstitutionalHoldingsTool.input.parse({ company: '0000102909', limit: 1001 }),
     ).toThrow();
   });
 });
@@ -1996,5 +2036,603 @@ describe('getInstitutionalHoldingsTool — filer_name entity decoding (#132)', (
       filer_name: 'SMITH & WESSON ADVISORS',
       reporting_period: '2025-12-31',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// same-period amendment composition (#198)
+// ---------------------------------------------------------------------------
+
+describe('getInstitutionalHoldingsTool — amendment composition (#198)', () => {
+  const fixture = (name: string) =>
+    readFileSync(new URL(`../../../fixtures/13f/${name}`, import.meta.url), 'utf8');
+
+  /** A cover page carrying an amendment type (or none, for an original). */
+  const cover = (type?: string, period = '12-31-2024') =>
+    `<edgarSubmission><formData><coverPage><reportCalendarOrQuarter>${period}</reportCalendarOrQuarter>${type ? `<isAmendment>true</isAmendment><amendmentInfo><amendmentType>${type}</amendmentType></amendmentInfo>` : ''}<filingManager><name>Manager LLC</name></filingManager></coverPage></formData></edgarSubmission>`;
+
+  interface Row {
+    cusip: string;
+    discretion?: string;
+    name?: string;
+    putCall?: string;
+    shares: number;
+    shareType?: string;
+    title?: string;
+    value: number;
+  }
+  const table = (rows: Row[]) =>
+    `<informationTable xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable">${rows
+      .map(
+        (r) =>
+          `<infoTable><nameOfIssuer>${r.name ?? `ISSUER ${r.cusip}`}</nameOfIssuer><titleOfClass>${r.title ?? 'COM'}</titleOfClass><cusip>${r.cusip}</cusip><value>${r.value}</value><shrsOrPrnAmt><sshPrnamt>${r.shares}</sshPrnamt><sshPrnamtType>${r.shareType ?? 'SH'}</sshPrnamtType></shrsOrPrnAmt>${r.putCall ? `<putCall>${r.putCall}</putCall>` : ''}<investmentDiscretion>${r.discretion ?? 'SOLE'}</investmentDiscretion></infoTable>`,
+      )
+      .join('')}</informationTable>`;
+
+  interface Served {
+    cover: string | null;
+    index?: FilingIndex | null;
+    table?: string | null;
+  }
+
+  /** Route every read by accession; a read of an unlisted accession fails the test. */
+  function serve(filings: Record<string, Served>) {
+    mockApi.tryGetFilingIndex.mockImplementation(async (_cik: string, accession: string) => {
+      const f = filings[accession];
+      if (!f) throw new Error(`unexpected index read: ${accession}`);
+      return f.index === undefined ? mockFilingIndex : f.index;
+    });
+    mockApi.tryGetFilingDocument.mockImplementation(
+      async (_cik: string, accession: string, doc: string) => {
+        const f = filings[accession];
+        if (!f) throw new Error(`unexpected document read: ${accession}/${doc}`);
+        if (doc === 'primary_doc.xml') return f.cover;
+        if (doc === 'infotable.xml') return f.table ?? null;
+        return null;
+      },
+    );
+  }
+
+  /** Accessions whose information table was requested, in request order. */
+  const tableReads = () =>
+    mockApi.tryGetFilingDocument.mock.calls
+      .filter((c) => c[2] !== 'primary_doc.xml')
+      .map((c) => c[1]);
+
+  const submissionsOf = (filings: FilingSpec[]) =>
+    mockApi.getSubmissions.mockResolvedValue(buildSubmissions({ filings }));
+  /** An original 13F-HR or a 13F-HR/A row for the 2024-Q4 period unless another is given. */
+  const hr = (accessionNumber: string, filingDate: string, reportDate = '2024-12-31') => ({
+    form: '13F-HR',
+    accessionNumber,
+    filingDate,
+    reportDate,
+  });
+  const hra = (accessionNumber: string, filingDate: string, reportDate = '2024-12-31') => ({
+    ...hr(accessionNumber, filingDate, reportDate),
+    form: '13F-HR/A',
+  });
+
+  const contentOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    readCommonMark(result.content.map((_, i) => blockText(result.content, i)).join('\n'));
+
+  type Holding = { cusip?: string; source_accession_numbers?: string[] } & Record<string, unknown>;
+  const holdingsOf = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    (result.structuredContent as { holdings: Holding[] }).holdings;
+
+  const BRK_ORIGINAL = '0000950123-25-005701';
+  const BRK_NEW = '0000950123-25-008361';
+
+  function serveBerkshire() {
+    submissionsOf([
+      {
+        form: '13F-HR/A',
+        accessionNumber: BRK_NEW,
+        filingDate: '2025-08-14',
+        reportDate: '2025-03-31',
+        acceptanceDateTime: '2025-08-14T20:10:02.000Z',
+      },
+      {
+        form: '13F-HR',
+        accessionNumber: BRK_ORIGINAL,
+        filingDate: '2025-05-15',
+        reportDate: '2025-03-31',
+        acceptanceDateTime: '2025-05-15T20:06:43.000Z',
+      },
+    ]);
+    serve({
+      [BRK_ORIGINAL]: {
+        cover: fixture('berkshire-2025q1-original-primary_doc.xml'),
+        table: fixture('berkshire-2025q1-original-infotable.xml'),
+      },
+      [BRK_NEW]: {
+        cover: fixture('berkshire-2025q1-new-holdings-primary_doc.xml'),
+        table: fixture('berkshire-2025q1-new-holdings-infotable.xml'),
+      },
+    });
+  }
+
+  it('appends a NEW HOLDINGS amendment and consolidates across filings (Berkshire 2025-Q1)', async () => {
+    serveBerkshire();
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0001067983',
+      quarter: '2025-Q1',
+      limit: 500,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      accession_number: BRK_ORIGINAL,
+      filing_date: '2025-05-15',
+      total_holdings_in_filing: 110,
+      total_holdings_composed: 114,
+      total_positions: 39,
+      composed_accessions: [BRK_ORIGINAL, BRK_NEW],
+      amendments: [
+        { accession_number: BRK_NEW, amendment_type: 'NEW HOLDINGS', applied_as: 'new_holdings' },
+      ],
+    });
+    const holdings = holdingsOf(result);
+    expect(holdings).toHaveLength(39);
+    expect(holdings.find((h) => h.cusip === '670346105')).toMatchObject({
+      market_value_usd: 692_738_413,
+      source_accession_numbers: [BRK_NEW],
+    });
+    expect(holdings.find((h) => h.cusip === '526057302')).toMatchObject({
+      shares_or_principal_amount: 152_774,
+      market_value_usd: 16_663_060,
+      source_accession_numbers: [BRK_ORIGINAL, BRK_NEW],
+    });
+    expect(holdings.find((h) => h.cusip === 'H1467J104')).toMatchObject({
+      source_accession_numbers: [BRK_ORIGINAL],
+    });
+    // content[] carries the composed counts, each amendment's role, and each row's sources.
+    const text = contentOf(result);
+    expect(text).toContain('Showing 39 of 39 positions (consolidated from 114 info-table rows)');
+    expect(text).toContain(
+      `Composed from: ${BRK_ORIGINAL}, ${BRK_NEW} (114 rows; original 13F-HR: 110)`,
+    );
+    expect(text).toContain(
+      `Amendment: ${BRK_NEW}, filed 2025-08-14, NEW HOLDINGS — applied as new_holdings.`,
+    );
+    expect(text).toContain(`source: ${BRK_ORIGINAL}, ${BRK_NEW}`);
+  });
+
+  it('returns the original rows in filing order, then the amendment rows, with consolidate=false', async () => {
+    serveBerkshire();
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0001067983',
+      quarter: '2025-Q1',
+      limit: 500,
+      consolidate: false,
+    });
+    const holdings = holdingsOf(result);
+    expect(holdings).toHaveLength(114);
+    expect(holdings[0]?.cusip).toBe('02005N100');
+    expect(holdings[109]?.cusip).toBe('H1467J104');
+    // Raw rows are never merged, so each names exactly the one accession it came from.
+    expect(holdings.slice(0, 110).map((h) => h.source_accession_numbers)).toEqual(
+      Array.from({ length: 110 }, () => [BRK_ORIGINAL]),
+    );
+    expect(holdings.slice(110).map((h) => [h.cusip, h.source_accession_numbers])).toEqual([
+      ['23331A109', [BRK_NEW]],
+      ['526057104', [BRK_NEW]],
+      ['526057302', [BRK_NEW]],
+      ['670346105', [BRK_NEW]],
+    ]);
+  });
+
+  it('pages and stages the composed set, keeping the original on the accession column', async () => {
+    serveBerkshire();
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+    const page = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0001067983',
+      quarter: '2025-Q1',
+      consolidate: false,
+      limit: 3,
+      offset: 111,
+    });
+    expect(page.structuredContent).toMatchObject({ offset: 111, next_offset: undefined });
+    expect(holdingsOf(page).map((h) => h.cusip)).toEqual(['526057104', '526057302', '670346105']);
+    const rows = bridge.registerDataframe.mock.calls[0]?.[1].rows ?? [];
+    expect(rows).toHaveLength(114);
+    expect(rows[113]).toMatchObject({
+      accession_number: BRK_ORIGINAL,
+      cusip: '670346105',
+      source_accession_numbers: [BRK_NEW],
+    });
+    expect(page.structuredContent).toMatchObject({ dataset: { row_count: 114 } });
+  });
+
+  const A: Row = { cusip: 'AAAAAAAA1', shares: 100, value: 1000, discretion: 'SOLE' };
+  const B: Row = { cusip: 'BBBBBBBB2', shares: 200, value: 2000, discretion: 'DFND' };
+  const C: Row = { cusip: 'CCCCCCCC3', shares: 300, value: 3000 };
+
+  it('applies a NEW HOLDINGS amendment that repeats every composed row as a restatement (First Eagle shape)', async () => {
+    submissionsOf([hra('fe-amend', '2026-09-01'), hr('fe-orig', '2026-08-14')]);
+    serve({
+      'fe-orig': { cover: cover(), table: table([A, B]) },
+      // Every original row again (value is not part of the match), plus one new row.
+      'fe-amend': { cover: cover('NEW HOLDINGS'), table: table([{ ...A, value: 1100 }, B, C]) },
+    });
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000102909',
+      consolidate: false,
+    });
+    expect(result.structuredContent).toMatchObject({
+      total_holdings_in_filing: 2,
+      total_holdings_composed: 3,
+      composed_accessions: ['fe-amend'],
+      amendments: [{ accession_number: 'fe-amend', applied_as: 'restatement' }],
+    });
+    expect(
+      holdingsOf(result).map((h) => [h.cusip, h.market_value_usd, h.source_accession_numbers]),
+    ).toEqual([
+      ['AAAAAAAA1', 1100, ['fe-amend']],
+      ['BBBBBBBB2', 2000, ['fe-amend']],
+      ['CCCCCCCC3', 3000, ['fe-amend']],
+    ]);
+  });
+
+  it('appends a NEW HOLDINGS table that repeats a composed row fewer times than it appears', async () => {
+    submissionsOf([hra('nh', '2026-09-01'), hr('orig', '2026-08-14')]);
+    serve({
+      orig: { cover: cover(), table: table([A, A]) },
+      nh: { cover: cover('NEW HOLDINGS'), table: table([A, C]) },
+    });
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000102909',
+      consolidate: false,
+    });
+    expect(result.structuredContent).toMatchObject({
+      total_holdings_composed: 4,
+      composed_accessions: ['orig', 'nh'],
+      amendments: [{ applied_as: 'new_holdings' }],
+    });
+  });
+
+  // A row matches only on every identity field; one that differs in any of them is a
+  // new row, so the amendment appends instead of restating.
+  it.each<[string, Row]>([
+    ['CUSIP', { ...A, cusip: 'AAAAAAAA9' }],
+    ['title of class', { ...A, title: 'CL B' }],
+    ['put/call', { ...A, putCall: 'Put' }],
+    ['investment discretion', { ...A, discretion: 'OTR' }],
+    ['share amount', { ...A, shares: 101 }],
+    ['share type', { ...A, shareType: 'PRN' }],
+  ])(
+    'appends a NEW HOLDINGS table whose copy of a composed row differs in %s',
+    async (_field, changed) => {
+      submissionsOf([hra('nh', '2026-09-01'), hr('orig', '2026-08-14')]);
+      serve({
+        orig: { cover: cover(), table: table([A, B]) },
+        nh: { cover: cover('NEW HOLDINGS'), table: table([changed, B, C]) },
+      });
+      const result = await runToolContract(getInstitutionalHoldingsTool, {
+        company: '0000102909',
+        consolidate: false,
+      });
+      expect(result.structuredContent).toMatchObject({
+        total_holdings_composed: 5,
+        composed_accessions: ['orig', 'nh'],
+        amendments: [{ accession_number: 'nh', applied_as: 'new_holdings' }],
+      });
+    },
+  );
+
+  it('keeps only the last restatement and reads no superseded table (Corient shape)', async () => {
+    submissionsOf([hra('r2', '2026-09-20'), hra('r1', '2026-09-10'), hr('orig', '2026-08-14')]);
+    serve({
+      orig: { cover: cover(), table: table([A, B]) },
+      r1: { cover: cover('RESTATEMENT'), table: table([A]) },
+      r2: { cover: cover('RESTATEMENT'), table: table([B, C]) },
+    });
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000102909',
+      consolidate: false,
+    });
+    expect(result.structuredContent).toMatchObject({
+      accession_number: 'orig',
+      total_holdings_in_filing: 2,
+      total_holdings_composed: 2,
+      composed_accessions: ['r2'],
+      amendments: [
+        { accession_number: 'r2', applied_as: 'restatement' },
+        { accession_number: 'r1', applied_as: 'superseded' },
+      ],
+    });
+    expect(holdingsOf(result).map((h) => h.cusip)).toEqual(['BBBBBBBB2', 'CCCCCCCC3']);
+    expect(tableReads()).toEqual(['orig', 'r2']);
+    expect(mockApi.tryGetFilingIndex.mock.calls.map((c) => c[1])).toEqual(['orig', 'r2']);
+  });
+
+  it('applies a restatement, then a later NEW HOLDINGS, superseding the original (Berkshire 2023-Q3 shape)', async () => {
+    submissionsOf([
+      hra('nh', '2027-05-15'),
+      hra('restate', '2026-09-01'),
+      hr('orig', '2026-08-14'),
+    ]);
+    serve({
+      orig: { cover: cover(), table: table([A]) },
+      restate: { cover: cover('RESTATEMENT'), table: table([B]) },
+      nh: { cover: cover('NEW HOLDINGS'), table: table([C]) },
+    });
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000102909',
+      consolidate: false,
+    });
+    expect(result.structuredContent).toMatchObject({
+      composed_accessions: ['restate', 'nh'],
+      amendments: [
+        { accession_number: 'nh', applied_as: 'new_holdings' },
+        { accession_number: 'restate', applied_as: 'restatement' },
+      ],
+    });
+    expect(holdingsOf(result).map((h) => [h.cusip, h.source_accession_numbers])).toEqual([
+      ['BBBBBBBB2', ['restate']],
+      ['CCCCCCCC3', ['nh']],
+    ]);
+  });
+
+  it('orders same-day amendments by acceptance time, not accession or listing order (AAM 2020-Q2 shape)', async () => {
+    submissionsOf([
+      {
+        form: '13F-HR/A',
+        accessionNumber: '0001999371-26-018935',
+        filingDate: '2026-08-27',
+        reportDate: '2024-12-31',
+        acceptanceDateTime: '2026-08-27T17:49:03.000Z',
+      },
+      {
+        form: '13F-HR/A',
+        accessionNumber: '0001999371-26-018936',
+        filingDate: '2026-08-27',
+        reportDate: '2024-12-31',
+        acceptanceDateTime: '2026-08-27T17:48:03.000Z',
+      },
+      {
+        form: '13F-HR',
+        accessionNumber: 'orig',
+        filingDate: '2020-08-14',
+        reportDate: '2024-12-31',
+        acceptanceDateTime: '2020-08-14T16:00:00.000Z',
+      },
+    ]);
+    serve({
+      orig: { cover: cover(), table: table([A]) },
+      '0001999371-26-018936': { cover: cover('RESTATEMENT'), table: table([B]) },
+      '0001999371-26-018935': { cover: cover('NEW HOLDINGS'), table: table([C]) },
+    });
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000102909',
+      consolidate: false,
+    });
+    expect(result.structuredContent).toMatchObject({
+      composed_accessions: ['0001999371-26-018936', '0001999371-26-018935'],
+    });
+    // The 2026 restatement reports whole dollars; only the 2020 original was in thousands.
+    expect(holdingsOf(result).map((h) => [h.cusip, h.market_value_usd])).toEqual([
+      ['BBBBBBBB2', 2000],
+      ['CCCCCCCC3', 3000],
+    ]);
+  });
+
+  it('normalizes each accession by its own filing date (Whitebox 2022-Q3 shape)', async () => {
+    submissionsOf([
+      hra('nh-2026', '2026-05-01', '2022-09-30'),
+      hr('orig-2022', '2022-11-14', '2022-09-30'),
+    ]);
+    serve({
+      'orig-2022': { cover: cover(undefined, '09-30-2022'), table: table([A]) },
+      'nh-2026': {
+        cover: cover('NEW HOLDINGS', '09-30-2022'),
+        table: table([{ ...C, value: 3105 }]),
+      },
+    });
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000102909',
+      consolidate: false,
+    });
+    expect(holdingsOf(result).map((h) => [h.cusip, h.market_value_usd])).toEqual([
+      ['AAAAAAAA1', 1_000_000],
+      ['CCCCCCCC3', 3105],
+    ]);
+  });
+
+  it('supersedes an amendment accepted before the original it would amend, reading no table for it', async () => {
+    submissionsOf([hr('late-orig', '2026-09-01'), hra('early-nh', '2026-08-01')]);
+    serve({
+      'late-orig': { cover: cover(), table: table([A]) },
+      'early-nh': { cover: cover('NEW HOLDINGS'), table: table([C]) },
+    });
+    const result = await runToolContract(getInstitutionalHoldingsTool, { company: '0000102909' });
+    expect(result.structuredContent).toMatchObject({
+      composed_accessions: ['late-orig'],
+      amendments: [{ accession_number: 'early-nh', applied_as: 'superseded' }],
+    });
+    expect(tableReads()).toEqual(['late-orig']);
+  });
+
+  it.each<[string, Served]>([
+    ['its index is unavailable', { cover: cover('NEW HOLDINGS'), index: null }],
+    [
+      'its index lists no information table',
+      {
+        cover: cover('NEW HOLDINGS'),
+        index: {
+          directory: {
+            name: 'x',
+            item: [{ name: 'primary_doc.xml', type: '', size: '1', 'last-modified': '' }],
+          },
+        },
+      },
+    ],
+    ['its table is unavailable', { cover: cover('NEW HOLDINGS'), table: null }],
+    ['its table holds no rows', { cover: cover('NEW HOLDINGS'), table: table([]) }],
+  ])(
+    'does not apply a NEW HOLDINGS amendment when %s, and names it in the notice',
+    async (_label, served) => {
+      submissionsOf([hra('bad', '2026-09-01'), hr('orig', '2026-08-14')]);
+      serve({ orig: { cover: cover(), table: table([A]) }, bad: served });
+      const result = await runToolContract(getInstitutionalHoldingsTool, { company: '0000102909' });
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        composed_accessions: ['orig'],
+        total_holdings_composed: 1,
+        amendments: [
+          { accession_number: 'bad', amendment_type: 'NEW HOLDINGS', applied_as: 'not_applied' },
+        ],
+      });
+      const text = contentOf(result);
+      expect(text).toContain(
+        'Not applied, since the type or information table could not be read: bad',
+      );
+    },
+  );
+
+  it('falls back to the earlier base when the last restatement table cannot be read', async () => {
+    submissionsOf([
+      hra('nh', '2026-09-20'),
+      hra('r-bad', '2026-09-10'),
+      hra('r-good', '2026-09-01'),
+      hr('orig', '2026-08-14'),
+    ]);
+    serve({
+      orig: { cover: cover(), table: table([A]) },
+      'r-good': { cover: cover('RESTATEMENT'), table: table([B]) },
+      'r-bad': { cover: cover('RESTATEMENT'), table: null },
+      nh: { cover: cover('NEW HOLDINGS'), table: table([C]) },
+    });
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000102909',
+      consolidate: false,
+    });
+    expect(result.structuredContent).toMatchObject({
+      composed_accessions: ['r-good', 'nh'],
+      amendments: [
+        { accession_number: 'nh', applied_as: 'new_holdings' },
+        { accession_number: 'r-bad', applied_as: 'not_applied' },
+        { accession_number: 'r-good', applied_as: 'restatement' },
+      ],
+    });
+    expect(holdingsOf(result).map((h) => h.cusip)).toEqual(['BBBBBBBB2', 'CCCCCCCC3']);
+  });
+
+  it('does not apply an amendment whose type is unavailable, and reads no table for it', async () => {
+    submissionsOf([hra('untyped', '2026-09-01'), hr('orig', '2026-08-14')]);
+    serve({
+      orig: { cover: cover(), table: table([A]) },
+      untyped: { cover: cover(), table: table([C]) },
+    });
+    const result = await runToolContract(getInstitutionalHoldingsTool, { company: '0000102909' });
+    expect(result.structuredContent).toMatchObject({
+      composed_accessions: ['orig'],
+      amendments: [
+        {
+          amendment_type: 'UNAVAILABLE',
+          unavailable_reason: 'unreadable_header',
+          applied_as: 'not_applied',
+        },
+      ],
+    });
+    expect(tableReads()).toEqual(['orig']);
+  });
+
+  it('adds only the additive fields to a quarter with no amendment', async () => {
+    const result = await runToolContract(getInstitutionalHoldingsTool, { company: '0000102909' });
+    expect(result.structuredContent).toMatchObject({
+      accession_number: '0000102909-24-000001',
+      total_holdings_in_filing: 2,
+      total_holdings_composed: 2,
+      total_positions: 2,
+      composed_accessions: ['0000102909-24-000001'],
+      holdings: [
+        {
+          cusip: '037833100',
+          market_value_usd: 5000000,
+          source_accession_numbers: ['0000102909-24-000001'],
+        },
+        {
+          cusip: '594918104',
+          market_value_usd: 3000000,
+          source_accession_numbers: ['0000102909-24-000001'],
+        },
+      ],
+    });
+    expect((result.structuredContent as { amendments?: unknown }).amendments).toBeUndefined();
+    expect(mockApi.tryGetFilingIndex).toHaveBeenCalledTimes(1);
+    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledTimes(2);
+  });
+
+  it('shares one CallScope across every cover, index, and table read', async () => {
+    serveBerkshire();
+    await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0001067983',
+      quarter: '2025-Q1',
+    });
+    const scopes = [
+      ...mockApi.tryGetFilingIndex.mock.calls.map((c) => c[2]),
+      ...mockApi.tryGetFilingDocument.mock.calls.map((c) => c[3]),
+    ];
+    expect(scopes).toHaveLength(6);
+    expect(new Set(scopes).size).toBe(1);
+    expect(scopes[0]).toBeInstanceOf(CallScope);
+  });
+});
+
+// A limit above the 500-row page is served at 500 while EDGAR_CLAMP_OVERSIZED_LIMITS is
+// on; the mechanism itself is tabled in tests/mcp-server/tools/limit-clamp.test.ts (#197).
+describe('getInstitutionalHoldingsTool — limit above the 500 cap (#197)', () => {
+  beforeEach(() => {
+    mockApi.tryGetFilingDocument.mockImplementation(
+      async (_cik: string, _accn: string, docName: string) => {
+        if (docName === 'primary_doc.xml') return PRIMARY_DOC_XML;
+        if (docName === 'infotable.xml') return infoTableWith(600);
+        return null;
+      },
+    );
+  });
+
+  const args = { company: '0000102909' };
+
+  it('answers limit 501 exactly as limit 500, cap and next_offset included', async () => {
+    const at500 = await runToolContract(getInstitutionalHoldingsTool, { ...args, limit: 500 });
+    const at501 = await runToolContract(getInstitutionalHoldingsTool, { ...args, limit: 501 });
+
+    expect(at501).toEqual(at500);
+    expect(at501.structuredContent).toMatchObject({ next_offset: 500, cap: 500, shown: 500 });
+    expect(readCommonMark(blockText(at501.content))).toContain('Next offset: 500');
+  });
+
+  it('answers limit 501 exactly as limit 500 when the positions are staged as a dataframe', async () => {
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+
+    const at500 = await runToolContract(getInstitutionalHoldingsTool, { ...args, limit: 500 });
+    const at501 = await runToolContract(getInstitutionalHoldingsTool, { ...args, limit: 501 });
+
+    expect(bridge.registerDataframe).toHaveBeenCalledTimes(2);
+    expect(bridge.registerDataframe.mock.calls[1]?.[1]).toEqual(
+      bridge.registerDataframe.mock.calls[0]?.[1],
+    );
+    expect(at501).toEqual(at500);
+  });
+
+  it('accepts up to 1000 with the switch on; off, advertises 500 and rejects 501', async () => {
+    const maximum = (clampOversizedLimits: boolean) => {
+      const { input } = createGetInstitutionalHoldingsTool({ clampOversizedLimits });
+      const limit = z.toJSONSchema(input, { io: 'input' }).properties?.limit;
+      return typeof limit === 'object' ? limit.maximum : undefined;
+    };
+    expect(maximum(true)).toBe(1000);
+    expect(maximum(false)).toBe(500);
+    expect(getInstitutionalHoldingsTool.input.safeParse({ ...args, limit: 1000 }).success).toBe(
+      true,
+    );
+
+    const off = createGetInstitutionalHoldingsTool({ clampOversizedLimits: false });
+    const rejected = await runToolContract(off, { ...args, limit: 501 });
+    expect(rejected.isError).toBe(true);
+    expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
   });
 });

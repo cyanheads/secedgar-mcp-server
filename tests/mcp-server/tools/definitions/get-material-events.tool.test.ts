@@ -5,13 +5,18 @@
  * @module tests/mcp-server/tools/definitions/get-material-events.tool
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { getMaterialEventsTool } from '@/mcp-server/tools/definitions/get-material-events.tool.js';
+import {
+  createGetMaterialEventsTool,
+  getMaterialEventsTool,
+} from '@/mcp-server/tools/definitions/get-material-events.tool.js';
+import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import type { FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
-import { blockText } from '../../../support/assertions.js';
+import { blockText, wireError } from '../../../support/assertions.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/edgar/edgar-api-service.js')>();
@@ -399,7 +404,8 @@ describe('getMaterialEventsTool', () => {
     expect(() =>
       getMaterialEventsTool.input.parse({ company: 'AAPL', filed_after: '04/30/2026' }),
     ).toThrow();
-    expect(() => getMaterialEventsTool.input.parse({ company: 'AAPL', limit: 101 })).toThrow();
+    // Above the 1000 rejection bound; 101 through 1000 is served at the 100 cap (#197).
+    expect(() => getMaterialEventsTool.input.parse({ company: 'AAPL', limit: 1001 })).toThrow();
     expect(() => getMaterialEventsTool.input.parse({ company: '  ' })).toThrow();
     expect(
       getMaterialEventsTool.input.parse({ company: 'AAPL', items: ['2.02', '12'] }).items,
@@ -817,6 +823,119 @@ describe('getMaterialEventsTool parameter names (#115)', () => {
 
     expect(result.isError).toBe(true);
     expect(blockText(result.content)).toContain('bogus');
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
+  });
+});
+
+// Wiring only: the archive walk's entry and stop tests, the staging test, and the page
+// take the applied limit when the switch is on. The mechanism itself is tabled in
+// tests/mcp-server/tools/limit-clamp.test.ts (#197).
+describe('getMaterialEventsTool — limit above the 100 cap (#197)', () => {
+  /** `n` 8-Ks, one a day, newest first from 2026-09-30. */
+  const recent = (n: number): FilingSpec[] =>
+    Array.from({ length: n }, (_, i) => ({
+      accession: `0000320193-26-${String(i).padStart(6, '0')}`,
+      date: new Date(Date.UTC(2026, 8, 30 - i)).toISOString().slice(0, 10),
+      items: '8.01',
+    }));
+  const FILES = [1, 2].map((n) => ({
+    name: `CIK0000320193-submissions-00${n}.json`,
+    filingCount: 10,
+    filingFrom: `${2015 - n}-01-01`,
+    filingTo: `${2015 - n}-12-31`,
+  }));
+
+  beforeEach(() => {
+    mockApi.fetchArchivePage.mockImplementation(async (name: string) =>
+      block(
+        Array.from({ length: 10 }, (_, j) => ({
+          accession: `${name}-${j}`,
+          date: `2014-${String(12 - j).padStart(2, '0')}-01`,
+          items: '8.01',
+        })),
+      ),
+    );
+  });
+
+  /** The calls at 100 and at 101: both surfaces, and the archive pages each read. */
+  const atCapAndAbove = async () => {
+    const run = async (limit: number) => {
+      mockApi.fetchArchivePage.mockClear();
+      const result = await runToolContract(getMaterialEventsTool, { company: 'AAPL', limit });
+      return { result, pagesRead: mockApi.fetchArchivePage.mock.calls.map(([name]) => name) };
+    };
+    return { at100: await run(100), at101: await run(101) };
+  };
+
+  it('stops the archive walk at 100 when asked for 101', async () => {
+    // The recent block holds exactly 100 8-Ks: 100 fills the limit, 101 would walk the archive.
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({ filings: recent(100), files: FILES }),
+    );
+    const { at100, at101 } = await atCapAndAbove();
+
+    expect(at100.pagesRead).toEqual([]);
+    expect(at101).toEqual(at100);
+    expect(at101.result.structuredContent).toMatchObject({
+      total_matched: 100,
+      history_scanned_through: '2026-06-23',
+    });
+  });
+
+  it('stops the archive walk on the page that fills 100 when asked for 101', async () => {
+    // 90 recent 8-Ks: the first archive page fills 100, 101 would read the second.
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({ filings: recent(90), files: FILES }),
+    );
+    const { at100, at101 } = await atCapAndAbove();
+
+    expect(at100.pagesRead).toEqual(['CIK0000320193-submissions-001.json']);
+    expect(at101).toEqual(at100);
+    expect(at101.result.structuredContent).toMatchObject({
+      total_matched: 100,
+      // The first archive file's filingFrom: the walk stopped there.
+      history_scanned_through: '2014-01-01',
+    });
+  });
+
+  it('stages the same dataframe and shows 100 with cap 100 at 101', async () => {
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+    // 101 8-Ks: more than the applied 100 stages and truncates, more than a requested 101
+    // would not.
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({ filings: recent(101), files: FILES }),
+    );
+    const { at100, at101 } = await atCapAndAbove();
+
+    expect(bridge.registerDataframe).toHaveBeenCalledTimes(2);
+    expect(bridge.registerDataframe.mock.calls[1]?.[1]).toEqual(
+      bridge.registerDataframe.mock.calls[0]?.[1],
+    );
+    expect(at101).toEqual(at100);
+    expect(at101.result.structuredContent).toMatchObject({
+      truncated: true,
+      shown: 100,
+      cap: 100,
+      dataset: { row_count: 101 },
+    });
+    expect((at101.result.structuredContent as { filings: unknown[] }).filings).toHaveLength(100);
+  });
+
+  it('advertises 1000 as the maximum with the switch on and 100 with it off, which rejects 101', async () => {
+    const maximum = (clampOversizedLimits: boolean) => {
+      const def = buildToolDefinitions({ dropEnabled: false, clampOversizedLimits }).find(
+        (d) => d.name === 'secedgar_get_material_events',
+      );
+      return (z.toJSONSchema(def!.input, { io: 'input' }) as any).properties.limit.maximum;
+    };
+    expect(maximum(true)).toBe(1000);
+    expect(maximum(false)).toBe(100);
+
+    const off = createGetMaterialEventsTool({ clampOversizedLimits: false });
+    const rejected = await runToolContract(off, { company: 'AAPL', limit: 101 });
+    expect(rejected.isError).toBe(true);
+    expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
     expect(mockApi.resolveCik).not.toHaveBeenCalled();
   });
 });

@@ -8,6 +8,11 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { fixedPoint } from '@/mcp-server/tools/fixed-point.js';
 import {
+  type LimitClampOptions,
+  limitClamp,
+  withLimitClamps,
+} from '@/mcp-server/tools/limit-clamp.js';
+import {
   dataframeGuidance,
   getCanvasBridge,
   toDatasetField,
@@ -93,6 +98,21 @@ function ownerRelationship(owner: ReportingOwner): string {
   return parts.join(', ') || 'Unknown';
 }
 
+/** Transactions the inline list holds at most; `limit` clamps here (#197). */
+const INLINE_TRANSACTION_CAP = 100;
+
+/** `limit`: the inline list holds at most 100 transactions (#197). */
+const transactionsLimit = limitClamp({
+  tool: 'secedgar_get_insider_transactions',
+  field: 'limit',
+  min: 1,
+  cap: INLINE_TRANSACTION_CAP,
+  bound: 1000,
+  shape: (n) => n.default(20),
+  description:
+    'Maximum number of transactions to return across all Form 4 filings fetched. Filings are scanned newest-first. Default 20.',
+});
+
 export const getInsiderTransactionsTool = tool('secedgar_get_insider_transactions', {
   title: 'Get Insider Transactions',
   description:
@@ -146,15 +166,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       .describe(
         'Filter by direction. "purchase" = open-market buys (code P). "sale" = open-market sells (code S). "all" includes grants, awards, exercises, gifts, and other coded transaction types as well.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(100)
-      .default(20)
-      .describe(
-        'Maximum number of transactions to return across all Form 4 filings fetched. Filings are scanned newest-first. Default 20.',
-      ),
+    limit: transactionsLimit.schema(true),
     filed_after: z
       .union([
         z.literal(''),
@@ -333,6 +345,9 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
     }
 
+    // Every read of the limit takes the applied value, so a call above the cap answers
+    // exactly as the same call at the cap does, scan depth included (#197).
+    const limit = transactionsLimit.apply(input.limit, ctx);
     const filedAfter = input.filed_after || undefined;
     const filedBefore = input.filed_before || undefined;
     const dateWindow = filedAfter || filedBefore ? { filedAfter, filedBefore } : undefined;
@@ -354,7 +369,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     // sentinel row (metadata only) detects Form 4 filings beyond the scan window so
     // `dataset.truncated` is truthful.
     const scanCap = Math.min(
-      bridge ? Math.max(input.limit * 5, scanFloor) : input.limit * 5,
+      bridge ? Math.max(limit * 5, scanFloor) : limit * 5,
       INSIDER_FILING_SCAN_CAP,
     );
 
@@ -448,7 +463,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     let scannedWholeWindow = true;
 
     for (const filing of filingsToScan) {
-      if (transactions.length >= input.limit && filingsScanned >= scanFloor) {
+      if (transactions.length >= limit && filingsScanned >= scanFloor) {
         scannedWholeWindow = false;
         break;
       }
@@ -612,12 +627,16 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       if (registered) dataset = { ...toDatasetField(registered), truncated };
     }
 
-    const inlineTransactions = transactions.slice(0, input.limit);
-    if (transactions.length > input.limit) {
+    const inlineTransactions = transactions.slice(0, limit);
+    if (transactions.length > limit) {
       ctx.enrich.truncated({
         shown: inlineTransactions.length,
-        cap: input.limit,
-        ...(dataset && { guidance: dataframeGuidance(dataset) }),
+        cap: limit,
+        guidance: dataset
+          ? dataframeGuidance(dataset)
+          : limit < INLINE_TRANSACTION_CAP
+            ? `Raise limit (at most ${INLINE_TRANSACTION_CAP} inline), or narrow with filed_after, filed_before, or transaction_type.`
+            : 'Narrow with filed_after, filed_before, or transaction_type to reach the rest.',
       });
     } else if (dataset) {
       ctx.enrich.notice(dataframeGuidance(dataset));
@@ -713,3 +732,8 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/** `secedgar_get_insider_transactions` as this deployment's `EDGAR_CLAMP_OVERSIZED_LIMITS` builds it. */
+export function createGetInsiderTransactionsTool(options: LimitClampOptions) {
+  return withLimitClamps(getInsiderTransactionsTool, [transactionsLimit], options);
+}

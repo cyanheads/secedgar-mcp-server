@@ -3,11 +3,16 @@
  * @module tests/mcp-server/tools/definitions/dataframe-query.tool
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { DUCKDB_ERROR_REASONS, SQL_GATE_REASONS } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
+import {
+  createDataframeQueryTool,
+  dataframeQueryTool,
+} from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
+import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 
 vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
   getCanvasBridge: vi.fn(),
@@ -784,5 +789,70 @@ describe('dataframeQueryTool', () => {
     const blocks = dataframeQueryTool.format!(result);
 
     expect(blockText(blocks)).toContain('No rows');
+  });
+});
+
+// preview and row_limit above 10000 are served at 10000 while EDGAR_CLAMP_OVERSIZED_LIMITS
+// is on; the mechanism itself is tabled in tests/mcp-server/tools/limit-clamp.test.ts (#197).
+describe('preview and row_limit above the 10000 cap (#197)', () => {
+  /** A canvas that holds 12,000 rows and honors rowLimit and preview as the provider does. */
+  function canvasOf(total: number) {
+    const all = Array.from({ length: total }, (_, i) => ({ id: String(i) }));
+    mockBridge.query.mockImplementation(
+      async (_ctx: unknown, _sql: string, options: { rowLimit: number; preview?: number }) => {
+        const capped = all.slice(0, options.rowLimit);
+        return {
+          result: {
+            columns: ['id'],
+            rowCount: capped.length,
+            rows: options.preview === undefined ? capped : capped.slice(0, options.preview),
+            truncated: all.length > options.rowLimit,
+          },
+          meta: undefined,
+        };
+      },
+    );
+    vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+  }
+
+  const sql = 'SELECT * FROM df_BIG';
+
+  it.each([
+    ['row_limit', { row_limit: 10_000 }, { row_limit: 10_001 }],
+    ['preview', { row_limit: 10_000, preview: 10_000 }, { row_limit: 10_000, preview: 10_001 }],
+  ])('answers %s 10001 exactly as 10000, canvas call included', async (_field, atCap, overCap) => {
+    canvasOf(12_000);
+    const atCapResult = await runToolContract(dataframeQueryTool, { sql, ...atCap });
+    const overCapResult = await runToolContract(dataframeQueryTool, { sql, ...overCap });
+
+    expect(mockBridge.query).toHaveBeenCalledTimes(2);
+    expect(mockBridge.query.mock.calls[1]?.[2]).toEqual(mockBridge.query.mock.calls[0]?.[2]);
+    expect(mockBridge.query.mock.calls[1]?.[2]).toMatchObject({ rowLimit: 10_000 });
+    expect(overCapResult).toEqual(atCapResult);
+    expect(overCapResult.structuredContent).toMatchObject({ cap: 10_000, shown: 10_000 });
+    expect(String((overCapResult.structuredContent as { notice?: string }).notice)).toContain(
+      'more than row_limit (10000)',
+    );
+  });
+
+  it('advertises 100000 as both maxima with the switch on and 10000 with it off, which rejects 10001', async () => {
+    const properties = (clampOversizedLimits: boolean) => {
+      const def = buildToolDefinitions({ dropEnabled: false, clampOversizedLimits }).find(
+        (d) => d.name === 'secedgar_dataframe_query',
+      );
+      return (z.toJSONSchema(def!.input, { io: 'input' }) as any).properties;
+    };
+    expect(properties(true).row_limit.maximum).toBe(100_000);
+    expect(properties(true).preview.maximum).toBe(100_000);
+    expect(properties(false).row_limit.maximum).toBe(10_000);
+    expect(properties(false).preview.maximum).toBe(10_000);
+
+    canvasOf(12_000);
+    const off = createDataframeQueryTool({ clampOversizedLimits: false });
+    for (const overCap of [{ row_limit: 10_001 }, { preview: 10_001 }]) {
+      const rejected = await runToolContract(off, { sql, ...overCap });
+      expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
+    }
+    expect(mockBridge.query).not.toHaveBeenCalled();
   });
 });

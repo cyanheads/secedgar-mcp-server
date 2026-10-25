@@ -45,9 +45,9 @@ export interface SubmissionsResponse {
  * Parallel arrays from the submissions API filings — both the inline `recent`
  * window and the older archive pages (`filings.files[].name`, e.g.
  * `CIK0000320193-submissions-001.json`). An archive page is a flat parallel-array
- * object at the JSON root, field-compatible with `recent` plus the extra columns
- * below (present on archive pages, absent from `recent`). Only the first six arrays
- * are consumed; the rest document the real archive-page shape.
+ * object at the JSON root carrying the same columns as `recent`. The six required
+ * arrays, `items` (8-K item codes), and `acceptanceDateTime` (13F amendment
+ * ordering) are consumed; the optional rest document the real shape.
  */
 export interface FilingsRecent {
   acceptanceDateTime?: string[];

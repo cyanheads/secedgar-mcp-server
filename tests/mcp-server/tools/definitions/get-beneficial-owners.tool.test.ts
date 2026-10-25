@@ -7,13 +7,18 @@
  * @module tests/mcp-server/tools/definitions/get-beneficial-owners.tool
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { getBeneficialOwnersTool } from '@/mcp-server/tools/definitions/get-beneficial-owners.tool.js';
+import {
+  createGetBeneficialOwnersTool,
+  getBeneficialOwnersTool,
+} from '@/mcp-server/tools/definitions/get-beneficial-owners.tool.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import type { FilingsRecent } from '@/services/edgar/types.js';
 import { bag, blockText, wireError } from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
   const actual = await importActual<typeof import('@/services/edgar/edgar-api-service.js')>();
@@ -710,7 +715,7 @@ describe('getBeneficialOwnersTool', () => {
 
   it('rejects a blank issuer and an out-of-range limit at the schema', () => {
     expect(() => getBeneficialOwnersTool.input.parse({ issuer: '   ' })).toThrow();
-    expect(() => getBeneficialOwnersTool.input.parse({ issuer: 'AAPL', limit: 21 })).toThrow();
+    expect(() => getBeneficialOwnersTool.input.parse({ issuer: 'AAPL', limit: 1001 })).toThrow();
     expect(() => getBeneficialOwnersTool.input.parse({ issuer: 'AAPL', limit: 0 })).toThrow();
     expect(() =>
       getBeneficialOwnersTool.input.parse({ issuer: 'AAPL', form_kind: 'SC 13D' }),
@@ -784,5 +789,80 @@ describe('getBeneficialOwnersTool parameter names (#152)', () => {
     expect(wireError(result).data.reason).toBe('invalid_arguments');
     expect(blockText(result.content)).toContain('"company"');
     expect(mockApi.resolveCik).not.toHaveBeenCalled();
+  });
+});
+
+// A limit above the 20-filing result cap is served at 20 while EDGAR_CLAMP_OVERSIZED_LIMITS
+// is on; the mechanism itself is tabled in tests/mcp-server/tools/limit-clamp.test.ts (#197).
+describe('getBeneficialOwnersTool — limit above the 20 cap (#197)', () => {
+  beforeEach(() => {
+    mockApi.getSubmissions.mockResolvedValue({
+      name: 'Apple Inc.',
+      filings: {
+        recent: recent(
+          Array.from({ length: 25 }, (_, i) => ({
+            accessionNumber: `filing-${i}`,
+            form: 'SCHEDULE 13G',
+            filingDate: '2026-04-29',
+          })),
+        ),
+      },
+    });
+  });
+
+  const args = { issuer: 'AAPL' };
+
+  it('answers limit 21 exactly as limit 20, the applied cap included', async () => {
+    const at20 = await runToolContract(getBeneficialOwnersTool, { ...args, limit: 20 });
+    const at21 = await runToolContract(getBeneficialOwnersTool, { ...args, limit: 21 });
+
+    expect(at21).toEqual(at20);
+    expect(at21.structuredContent).toMatchObject({
+      filings_parsed: 20,
+      filings_examined: 20,
+      filings_not_examined: 5,
+      cap: 20,
+      shown: 20,
+    });
+    const text = at21.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n');
+    expect(readCommonMark(text)).toContain(
+      '5 indexed schedules remain unexamined after the 20-filing result limit',
+    );
+    // 20 documents read per call: the 21st filing is never fetched.
+    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledTimes(40);
+  });
+
+  it('answers limit 21 exactly as limit 20 when the owners are staged as a dataframe', async () => {
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+
+    const at20 = await runToolContract(getBeneficialOwnersTool, { ...args, limit: 20 });
+    const at21 = await runToolContract(getBeneficialOwnersTool, { ...args, limit: 21 });
+
+    expect(bridge.registerDataframe).toHaveBeenCalledTimes(2);
+    expect(bridge.registerDataframe.mock.calls[1]?.[1]).toEqual(
+      bridge.registerDataframe.mock.calls[0]?.[1],
+    );
+    expect(bridge.registerDataframe.mock.calls[1]?.[1]).toMatchObject({
+      queryParams: { limit: 20 },
+    });
+    expect(at21).toEqual(at20);
+  });
+
+  it('accepts up to 1000 with the switch on; off, advertises 20 and rejects 21', async () => {
+    const maximum = (clampOversizedLimits: boolean) =>
+      (
+        z.toJSONSchema(createGetBeneficialOwnersTool({ clampOversizedLimits }).input, {
+          io: 'input',
+        }) as any
+      ).properties.limit.maximum;
+    expect(maximum(true)).toBe(1000);
+    expect(maximum(false)).toBe(20);
+    expect(getBeneficialOwnersTool.input.safeParse({ ...args, limit: 1000 }).success).toBe(true);
+
+    const off = createGetBeneficialOwnersTool({ clampOversizedLimits: false });
+    const rejected = await runToolContract(off, { ...args, limit: 21 });
+    expect(rejected.isError).toBe(true);
+    expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
   });
 });

@@ -6,6 +6,12 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { normalizeFormFilter } from '@/mcp-server/tools/form-filter.js';
+import {
+  type LimitClampOptions,
+  limitClamp,
+  withLimitClamps,
+} from '@/mcp-server/tools/limit-clamp.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -77,6 +83,18 @@ function zipFilings(block: FilingsRecent): FilingEntry[] {
   }
   return rows;
 }
+
+/** `filing_limit`: the inline list holds at most 50 filings (#168, #197). */
+const filingLimitClamp = limitClamp({
+  tool: 'secedgar_company_search',
+  field: 'filing_limit',
+  min: 1,
+  cap: INLINE_FILING_CAP,
+  bound: 1000,
+  shape: (n) => n.default(10),
+  description:
+    'Maximum number of filings to return in the inline list; when more match, the notice names where the rest are.',
+});
 
 export const companySearchTool = tool('secedgar_company_search', {
   description:
@@ -155,15 +173,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       .describe(
         'Filter filings to specific form types (e.g., ["10-K", "10-Q", "8-K"]), matched exactly (case-insensitive) — list an amendment such as "10-K/A" to include it. Without this, returns all form types.',
       ),
-    filing_limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(1000)
-      .default(10)
-      .describe(
-        'Maximum number of filings to return in the inline list. The list holds at most 50; a larger value returns 50, and the notice names where the rest are.',
-      ),
+    filing_limit: filingLimitClamp.schema(true),
     filed_after: z
       .union([
         z.literal(''),
@@ -377,16 +387,17 @@ export const companySearchTool = tool('secedgar_company_search', {
 
     // Every read of the limit takes the applied value, so a call above the cap answers
     // exactly as the same call at the cap does (#168).
-    const filingLimit = Math.min(input.filing_limit, INLINE_FILING_CAP);
+    const filingLimit = filingLimitClamp.apply(input.filing_limit, ctx);
     const filedAfter = input.filed_after || undefined;
     const filedBefore = input.filed_before || undefined;
-    const formTypes = input.forms?.length ? input.forms : undefined;
+    // Blank elements are no filter: they must not trigger the under-fill archive walk (#194).
+    const formTypes = normalizeFormFilter(input.forms);
 
     if (input.include_filings) {
       const hasDateFilter = Boolean(filedAfter || filedBefore);
 
       const matches = (f: FilingEntry) =>
-        (!formTypes || formTypes.some((ft) => f.form.toUpperCase() === ft.toUpperCase())) &&
+        (!formTypes || formTypes.includes(f.form.toUpperCase())) &&
         (!filedAfter || f.filing_date >= filedAfter) &&
         (!filedBefore || f.filing_date <= filedBefore);
 
@@ -452,7 +463,7 @@ export const companySearchTool = tool('secedgar_company_search', {
           sourceTool: 'secedgar_company_search',
           queryParams: {
             cik: match.cik,
-            forms: input.forms,
+            forms: formTypes,
             filed_after: filedAfter,
             filed_before: filedBefore,
           },
@@ -462,9 +473,9 @@ export const companySearchTool = tool('secedgar_company_search', {
       }
     }
 
-    if (input.include_filings && input.forms?.length && totalFilings === 0) {
+    if (input.include_filings && formTypes && totalFilings === 0) {
       ctx.enrich.notice(
-        `No filings matched form types [${input.forms.join(', ')}] for this entity. Try different form types or remove the filter.`,
+        `No filings matched form types [${formTypes.join(', ')}] for this entity. Try different form types or remove the filter.`,
       );
     } else if (
       filings !== undefined &&
@@ -560,3 +571,8 @@ export const companySearchTool = tool('secedgar_company_search', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/** `secedgar_company_search` as this deployment's `EDGAR_CLAMP_OVERSIZED_LIMITS` builds it. */
+export function createCompanySearchTool(options: LimitClampOptions) {
+  return withLimitClamps(companySearchTool, [filingLimitClamp], options);
+}

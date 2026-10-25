@@ -13,6 +13,11 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { fixedPoint } from '@/mcp-server/tools/fixed-point.js';
 import {
+  type LimitClampOptions,
+  limitClamp,
+  withLimitClamps,
+} from '@/mcp-server/tools/limit-clamp.js';
+import {
   dataframeGuidance,
   getCanvasBridge,
   toDatasetField,
@@ -225,6 +230,18 @@ function daysBetween(from: string, to: string): number {
   return Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000);
 }
 
+/** `limit`: a page holds at most 100 positions (#197). */
+const positionsLimit = limitClamp({
+  tool: 'secedgar_get_fund_holdings',
+  field: 'limit',
+  min: 1,
+  cap: 100,
+  bound: 1000,
+  shape: (n) => n.default(20),
+  description:
+    'Number of positions to return inline, largest first by percent of net assets. Default 20. A broad index fund reports thousands of positions, so the inline list is a preview — read the whole portfolio from the dataframe, or page it with offset.',
+});
+
 export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
   title: 'Get Fund Holdings',
   description:
@@ -300,15 +317,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       .describe(
         'Target a specific reporting period by its last day (YYYY-MM-DD), e.g. "2025-12-31". Omit for the most recent report. Period ends follow the fund\'s own fiscal quarters, which are not always calendar quarters — Direxion funds report to February, May, August, and November. available_report_periods in the response lists the ones this call identified; a period missing from that list is still worth requesting directly, since a report the submissions window no longer dates is dated by reading it.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(100)
-      .default(20)
-      .describe(
-        'Number of positions to return inline, largest first by percent of net assets. Default 20. A broad index fund reports thousands of positions, so the inline list is a preview — read the whole portfolio from the dataframe, or page it with offset.',
-      ),
+    limit: positionsLimit.schema(true),
     offset: z
       .number()
       .int()
@@ -498,6 +507,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
   },
 
   async handler(input, ctx) {
+    const limit = positionsLimit.apply(input.limit, ctx);
     const api = getEdgarApiService();
     const scope = new CallScope(ctx.signal);
 
@@ -751,7 +761,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       if (registered) dataset = toDatasetField(registered);
     }
 
-    const pageEnd = input.offset + input.limit;
+    const pageEnd = input.offset + limit;
     const holdings = positions.slice(input.offset, pageEnd);
     const nextOffset = pageEnd < positions.length ? pageEnd : undefined;
 
@@ -779,8 +789,8 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
     } else if (nextOffset !== undefined) {
       ctx.enrich.truncated({
         shown: holdings.length,
-        cap: input.limit,
-        ...(dataset && { guidance: dataframeGuidance(dataset) }),
+        cap: limit,
+        guidance: dataset ? dataframeGuidance(dataset) : `Continue with offset=${nextOffset}.`,
       });
     } else if (dataset) {
       ctx.enrich.notice(dataframeGuidance(dataset));
@@ -907,3 +917,8 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/** `secedgar_get_fund_holdings` as this deployment's `EDGAR_CLAMP_OVERSIZED_LIMITS` builds it. */
+export function createGetFundHoldingsTool(options: LimitClampOptions) {
+  return withLimitClamps(getFundHoldingsTool, [positionsLimit], options);
+}

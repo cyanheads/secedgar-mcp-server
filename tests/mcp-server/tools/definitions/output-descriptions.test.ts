@@ -29,9 +29,12 @@ const encoder = new TextEncoder();
  * The success schema the framework advertises — `output.extend(enrichment)` — for
  * every definition, the drop tool included while its gate is off.
  */
-const tools = (buildToolDefinitions({ dropEnabled: false }) as unknown as DefinitionSchemas[]).map(
-  (def) => ({ name: def.name, schema: def.output.extend(def.enrichment ?? {}) }),
-);
+const tools = (
+  buildToolDefinitions({
+    dropEnabled: false,
+    clampOversizedLimits: true,
+  }) as unknown as DefinitionSchemas[]
+).map((def) => ({ name: def.name, schema: def.output.extend(def.enrichment ?? {}) }));
 
 /** Every `description` string in a JSON Schema, in document order. */
 function descriptionsIn(node: unknown): string[] {

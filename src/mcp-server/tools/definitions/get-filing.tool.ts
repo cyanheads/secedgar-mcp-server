@@ -5,6 +5,11 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import {
+  type LimitClampOptions,
+  limitClamp,
+  withLimitClamps,
+} from '@/mcp-server/tools/limit-clamp.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import { filingArchiveUrl, getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import type { FilingDocumentHeader, FilingHeaders } from '@/services/edgar/filing-headers.js';
@@ -150,6 +155,18 @@ const documentEntrySchema = z
   })
   .describe('One document entry from the filing.');
 
+/** `content_limit`: a page holds at most 200,000 characters (#197). */
+const contentLimit = limitClamp({
+  tool: 'secedgar_get_filing',
+  field: 'content_limit',
+  min: 1000,
+  cap: 200_000,
+  bound: 1_000_000,
+  shape: (n) => n.default(50000),
+  description:
+    'Maximum characters of document text to return per page. 10-K filings can exceed 500,000 characters; S-1/A can exceed 1,000,000. Default 50,000 captures ~12,000 words (typically business overview, risk factors, and MD&A). Increase to 200,000 for full financial statements, or decrease for quick summaries. Use offset or section for subsequent pages.',
+});
+
 export const getFilingTool = tool('secedgar_get_filing', {
   description:
     "Fetch a specific filing's metadata and document content by accession number. Returns the primary document as readable text. Use offset/next_offset for multi-page access to large filings (10-K, S-1 can exceed 1M chars): pass the next_offset from a truncated response as offset, without section, to read the next page. Use section to jump directly to a heading (e.g. 'risk factors', 'item 7') without needing an offset.",
@@ -248,15 +265,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .describe(
         'Company CIK, digits only (resolve via secedgar_company_search if you have a ticker or name). Optional but recommended — speeds up archive lookup. If omitted, likely filing CIKs are inferred from SEC search metadata and archive paths.',
       ),
-    content_limit: z
-      .number()
-      .int()
-      .min(1000)
-      .max(200000)
-      .default(50000)
-      .describe(
-        'Maximum characters of document text to return per page. 10-K filings can exceed 500,000 characters; S-1/A can exceed 1,000,000. Default 50,000 captures ~12,000 words (typically business overview, risk factors, and MD&A). Increase to 200,000 for full financial statements, or decrease for quick summaries. Use offset or section for subsequent pages.',
-      ),
+    content_limit: contentLimit.schema(true),
     document: z
       .string()
       .optional()
@@ -375,6 +384,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
   async handler(input, ctx) {
     const api = getEdgarApiService();
     const scope = new CallScope(ctx.signal);
+    const pageLimit = contentLimit.apply(input.content_limit, ctx);
 
     const accn = normalizeAccessionNumber(input.accession_number);
     const documentKey = input.document ?? PRIMARY_SENTINEL;
@@ -596,7 +606,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
     const { text, truncated, totalLength, nextOffset } = windowText(
       fullText,
       effectiveOffset,
-      input.content_limit,
+      pageLimit,
     );
 
     // Emit outline on first-page truncated responses (not on subsequent pages or section jumps)
@@ -620,7 +630,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       const outlineCut = detected && outline && outlineCutNote(outline, detected);
       ctx.enrich.truncated({
         shown: text.length,
-        cap: input.content_limit,
+        cap: pageLimit,
         guidance: [fallbackNotice, lineNotice, paging, outlineCut].filter(Boolean).join(' '),
       });
     } else if (fallbackNotice || lineNotice) {
@@ -701,6 +711,11 @@ export const getFilingTool = tool('secedgar_get_filing', {
     ];
   },
 });
+
+/** `secedgar_get_filing` as this deployment's `EDGAR_CLAMP_OVERSIZED_LIMITS` builds it. */
+export function createGetFilingTool(options: LimitClampOptions) {
+  return withLimitClamps(getFilingTool, [contentLimit], options);
+}
 
 /**
  * A heading or `section` value folded for {@link sectionMatches}: Unicode

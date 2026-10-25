@@ -6,11 +6,23 @@
 
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { companySearchTool } from '@/mcp-server/tools/definitions/company-search.tool.js';
-import { fetchFramesTool } from '@/mcp-server/tools/definitions/fetch-frames.tool.js';
-import { getFilingTool } from '@/mcp-server/tools/definitions/get-filing.tool.js';
+import {
+  companySearchTool,
+  createCompanySearchTool,
+} from '@/mcp-server/tools/definitions/company-search.tool.js';
+import {
+  createFetchFramesTool,
+  fetchFramesTool,
+} from '@/mcp-server/tools/definitions/fetch-frames.tool.js';
+import {
+  createGetFilingTool,
+  getFilingTool,
+} from '@/mcp-server/tools/definitions/get-filing.tool.js';
 import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials.tool.js';
-import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
+import {
+  createSearchFilingsTool,
+  searchFilingsTool,
+} from '@/mcp-server/tools/definitions/search-filings.tool.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', async (importOriginal) => ({
   getEdgarApiService: vi.fn(),
@@ -141,12 +153,19 @@ describe('companySearchTool — input validation', () => {
     expect(() => companySearchTool.input.parse({ query: 'AAPL', filing_limit: 0 })).toThrow();
   });
 
-  // Above the 50-filing inline list the call is served at 50 (#168); only absurd values fail.
-  it('accepts filing_limit 51 and 1000, and rejects 1001', () => {
-    for (const filing_limit of [51, 1000]) {
-      expect(() => companySearchTool.input.parse({ query: 'AAPL', filing_limit })).not.toThrow();
-    }
-    expect(() => companySearchTool.input.parse({ query: 'AAPL', filing_limit: 1001 })).toThrow();
+  // Above the 50-filing inline list the call is served at 50 (#168); only absurd values
+  // fail. Switched off, the bound returns to the 50 cap (#197).
+  it('accepts filing_limit 51 and 1000 and rejects 1001 with the clamp on; off, rejects 51', () => {
+    const parse = (input: typeof companySearchTool, filing_limit: number) =>
+      input.input.safeParse({ query: 'AAPL', filing_limit }).success;
+    const off = createCompanySearchTool({ clampOversizedLimits: false });
+
+    expect(parse(companySearchTool, 51)).toBe(true);
+    expect(parse(companySearchTool, 1000)).toBe(true);
+    expect(parse(companySearchTool, 1001)).toBe(false);
+    expect(parse(off, 50)).toBe(true);
+    expect(parse(off, 51)).toBe(false);
+    expect(parse(off, 1001)).toBe(false);
   });
 
   it('SQL injection in query does not expose internals in error data', async () => {
@@ -187,8 +206,17 @@ describe('searchFilingsTool — input validation', () => {
     expect(() => searchFilingsTool.input.parse({ query: '   ' })).toThrow();
   });
 
-  it('rejects limit above 100', () => {
-    expect(() => searchFilingsTool.input.parse({ query: 'test', limit: 101 })).toThrow();
+  it('accepts limit up to 1000 and rejects 1001 with the clamp on; off, rejects 101 (#197)', () => {
+    const parse = (input: typeof searchFilingsTool, limit: number) =>
+      input.input.safeParse({ query: 'test', limit }).success;
+    const off = createSearchFilingsTool({ clampOversizedLimits: false });
+
+    expect(parse(searchFilingsTool, 101)).toBe(true);
+    expect(parse(searchFilingsTool, 1000)).toBe(true);
+    expect(parse(searchFilingsTool, 1001)).toBe(false);
+    expect(parse(off, 100)).toBe(true);
+    expect(parse(off, 101)).toBe(false);
+    expect(parse(off, 1001)).toBe(false);
   });
 
   it('rejects limit below 1', () => {
@@ -272,13 +300,17 @@ describe('getFilingTool — input validation', () => {
     ).toThrow();
   });
 
-  it('rejects content_limit above 200000', () => {
-    expect(() =>
-      getFilingTool.input.parse({
-        accession_number: '0000320193-23-000106',
-        content_limit: 200001,
-      }),
-    ).toThrow();
+  it('accepts content_limit up to 1000000 and rejects 1000001 with the clamp on; off, rejects 200001 (#197)', () => {
+    const parse = (input: typeof getFilingTool, content_limit: number) =>
+      input.input.safeParse({ accession_number: '0000320193-23-000106', content_limit }).success;
+    const off = createGetFilingTool({ clampOversizedLimits: false });
+
+    expect(parse(getFilingTool, 200001)).toBe(true);
+    expect(parse(getFilingTool, 1_000_000)).toBe(true);
+    expect(parse(getFilingTool, 1_000_001)).toBe(false);
+    expect(parse(off, 200000)).toBe(true);
+    expect(parse(off, 200001)).toBe(false);
+    expect(parse(off, 1_000_001)).toBe(false);
   });
 
   it('path traversal in document param is rejected — file not in index', async () => {
@@ -439,10 +471,17 @@ describe('fetchFramesTool — input validation', () => {
     ).toThrow();
   });
 
-  it('rejects limit above 100', () => {
-    expect(() =>
-      fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2023', limit: 101 }),
-    ).toThrow();
+  it('accepts limit up to 1000 and rejects 1001 with the clamp on; off, rejects 101 (#197)', () => {
+    const parse = (input: typeof fetchFramesTool, limit: number) =>
+      input.input.safeParse({ concept: 'revenue', period: 'CY2023', limit }).success;
+    const off = createFetchFramesTool({ clampOversizedLimits: false });
+
+    expect(parse(fetchFramesTool, 101)).toBe(true);
+    expect(parse(fetchFramesTool, 1000)).toBe(true);
+    expect(parse(fetchFramesTool, 1001)).toBe(false);
+    expect(parse(off, 100)).toBe(true);
+    expect(parse(off, 101)).toBe(false);
+    expect(parse(off, 1001)).toBe(false);
   });
 
   it('accepts CY####, CY####Q#, and CY####Q#I periods (#25)', () => {

@@ -9,6 +9,11 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  type LimitClampOptions,
+  limitClamp,
+  withLimitClamps,
+} from '@/mcp-server/tools/limit-clamp.js';
+import {
   dataframeGuidance,
   getCanvasBridge,
   toDatasetField,
@@ -34,6 +39,9 @@ const EFTS_PAGE_SIZE = 100;
  * the caller can use.
  */
 const FETCH_PAGE_BUDGET = 5;
+
+/** Filer rows a call lists inline at most; `limit` clamps here (#197). */
+const INLINE_HOLDER_CAP = 100;
 
 /** Days after a quarter end by which a 13F-HR is due. */
 const FILING_DEADLINE_DAYS = 45;
@@ -94,6 +102,18 @@ function hitToHolder(hit: EftsHit): HolderRow {
     period_ending: hit._source.period_ending ?? undefined,
   };
 }
+
+/** `limit`: a call lists at most 100 filers inline (#197). */
+const holdersLimit = limitClamp({
+  tool: 'secedgar_find_holders',
+  field: 'limit',
+  min: 1,
+  cap: INLINE_HOLDER_CAP,
+  bound: 1000,
+  shape: (n) => n.default(20),
+  description:
+    'Filer rows returned inline. The full fetched set (up to 500 rows) is materialized as a dataframe when a canvas is available. Default 20.',
+});
 
 export const findHoldersTool = tool('secedgar_find_holders', {
   title: 'Find Holders',
@@ -168,15 +188,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
       .describe(
         'Reporting quarter to search, "YYYY-QN" (e.g. "2026-Q1"). Omit for the newest quarter whose 45-day filing deadline has passed — the applied quarter and its filing window are echoed in the response. A quarter still inside its deadline returns nothing, because the filings do not exist yet.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(100)
-      .default(20)
-      .describe(
-        'Filer rows returned inline. The full fetched set (up to 500 rows) is materialized as a dataframe when a canvas is available. Default 20.',
-      ),
+    limit: holdersLimit.schema(true),
   }),
   // The company-identifier keys other tools take. `issuer` is this tool's only company
   // input (`cusip` is a separate 9-character key), so each maps one-to-one (#152).
@@ -282,6 +294,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
   },
 
   async handler(input, ctx) {
+    const limit = holdersLimit.apply(input.limit, ctx);
     const api = getEdgarApiService();
     const scope = new CallScope(ctx.signal);
     const cusip = input.cusip?.toUpperCase() || undefined;
@@ -333,8 +346,12 @@ export const findHoldersTool = tool('secedgar_find_holders', {
      * One row per manager, keyed by filer CIK. A manager that amended its report
      * for this same quarter files twice inside one window — 7 of Cracker Barrel's
      * 256 Q1 2026 filings — and listing it twice would inflate a holder count by
-     * a few percent. The later filing wins: the amendment supersedes the original
-     * and its accession is the one worth reading.
+     * a few percent. The later filing's row is kept, and it identifies the manager,
+     * not the position: a RESTATEMENT amendment replaces the original, but a NEW
+     * HOLDINGS amendment carries only the rows it adds, so neither accession alone
+     * holds the quarter's position. The follow-up this tool names is
+     * secedgar_get_institutional_holdings with the filer_cik and quarter, which
+     * composes the original with its amendments.
      */
     const byFiler = new Map<string, HolderRow>();
     const seen = new Set<string>();
@@ -383,7 +400,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
       | { name: string; row_count: number; expires_at: string; truncated: boolean }
       | undefined;
     const bridge = getCanvasBridge();
-    if (bridge && rows.length > input.limit) {
+    if (bridge && rows.length > limit) {
       const registered = await bridge.registerDataframe(ctx, {
         rows: rows.map((row) => ({
           issuer: input.issuer,
@@ -440,12 +457,16 @@ export const findHoldersTool = tool('secedgar_find_holders', {
       notices.push(
         `${total} 13F-HR filings matched ${searchedTerm} in the ${filedFrom} to ${filedTo} window, but none of the ${hitsFetched} fetched report ${quarter} (period ending ${quarterEnd}) — they are amendments restating other quarters. Search the quarter those amendments cover, or a later one.`,
       );
-    } else if (rows.length > input.limit) {
+    } else if (rows.length > limit) {
       const guidance = dataset
         ? truncated
           ? `${total} filings matched in the window; the fetch budget of ${FETCH_PAGE_BUDGET * EFTS_PAGE_SIZE} retrieved ${hitsFetched}, resolving to ${rows.length} managers reporting ${quarter}. ${dataframeGuidance(dataset)}`
           : dataframeGuidance(dataset)
-        : 'Raise limit to see more inline, or narrow to a single share class with cusip.';
+        : limit < INLINE_HOLDER_CAP
+          ? 'Raise limit to see more inline, or narrow to a single share class with cusip.'
+          : searchMode === 'name'
+            ? 'Narrow to a single share class with cusip.'
+            : `Page the remaining managers with secedgar_search_filings ${JSON.stringify({ query: searchKey, forms: ['13F-HR'], filed_after: filedFrom, filed_before: filedTo, sort: 'relevance', offset: 0, limit: EFTS_PAGE_SIZE })}, keeping period_ending="${quarterEnd}" and deduplicating by CIK.`;
       notices.push(guidance);
     }
     if (truncated) {
@@ -458,8 +479,8 @@ export const findHoldersTool = tool('secedgar_find_holders', {
         `${totalIsExact ? `${total} matching documents` : `At least ${total} matching documents (lower bound)`}; ${reachable} reported documents are reachable within EDGAR's 10000-document paging ceiling.${!totalIsExact || total > 10_000 ? ' Documents beyond that window are unreachable by paging.' : ''}${recipe}`,
       );
     }
-    if (rows.length > input.limit) {
-      ctx.enrich.truncated({ shown: input.limit, cap: input.limit, guidance: notices.join(' ') });
+    if (rows.length > limit) {
+      ctx.enrich.truncated({ shown: limit, cap: limit, guidance: notices.join(' ') });
     } else if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     ctx.log.info('Holder search completed', {
@@ -485,7 +506,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
       total_is_exact: totalIsExact,
       fetched: hitsFetched,
       holders_in_quarter: rows.length,
-      holders: rows.slice(0, input.limit),
+      holders: rows.slice(0, limit),
       dataset,
     };
   },
@@ -522,3 +543,8 @@ export const findHoldersTool = tool('secedgar_find_holders', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/** `secedgar_find_holders` as this deployment's `EDGAR_CLAMP_OVERSIZED_LIMITS` builds it. */
+export function createFindHoldersTool(options: LimitClampOptions) {
+  return withLimitClamps(findHoldersTool, [holdersLimit], options);
+}

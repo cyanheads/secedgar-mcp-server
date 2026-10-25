@@ -766,7 +766,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
         shown: inlineData.length,
         cap: input.limit,
         guidance: `Showing the ${inlineData.length} most-recent of ${data.length} periods. ${
-          dataset ? dataframeGuidance(dataset) : 'Raise limit to see more inline.'
+          dataset ? dataframeGuidance(dataset) : 'Omit limit to return every period inline.'
         }`,
       });
     } else if (dataset) {

@@ -13,6 +13,12 @@ import {
   notFound,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
+import { normalizeFormFilter } from '@/mcp-server/tools/form-filter.js';
+import {
+  type LimitClampOptions,
+  limitClamp,
+  withLimitClamps,
+} from '@/mcp-server/tools/limit-clamp.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -264,14 +270,12 @@ function toCanvasRow(row: SearchRow): Record<string, unknown> {
  * True when a filing's form matches a requested form, counting amendments
  * (requested "10-K" matches "10-K" and "10-K/A"), mirroring EFTS forms
  * semantics so the archive-backed arms honor the same forms contract as the
- * post-2001 full-text path.
+ * post-2001 full-text path. `requestedForms` arrives normalized (uppercase,
+ * trimmed, no blanks — `normalizeFormFilter`).
  */
 function formMatches(filingForm: string, requestedForms: string[]): boolean {
   const f = filingForm.toUpperCase();
-  return requestedForms.some((req) => {
-    const r = req.toUpperCase();
-    return f === r || f.startsWith(`${r}/`);
-  });
+  return requestedForms.some((r) => f === r || f.startsWith(`${r}/`));
 }
 
 /** Count filings by form, dropping the field when nothing carried a form. */
@@ -566,7 +570,6 @@ async function collectSubmissionsRows(
     throw err;
   }
   const companyName = submissions.name;
-  const forms = args.forms?.length ? args.forms : undefined;
 
   const rows: SearchRow[] = [];
   const pushBlock = (block: FilingsRecent) => {
@@ -574,7 +577,7 @@ async function collectSubmissionsRows(
       const form = block.form[i] ?? '';
       const filingDate = block.filingDate[i] ?? '';
       if (filingDate < args.startDate || filingDate > args.endDate) continue;
-      if (forms && !formMatches(form, forms)) continue;
+      if (args.forms && !formMatches(form, args.forms)) continue;
       rows.push({
         accession_number: block.accessionNumber[i] ?? '',
         form: form || null,
@@ -768,6 +771,17 @@ async function fetchEftsRows(
   };
 }
 
+/** `limit`: a page holds at most 100 filings, one EDGAR full-text window (#197). */
+const resultsLimit = limitClamp({
+  tool: 'secedgar_search_filings',
+  field: 'limit',
+  min: 1,
+  cap: 100,
+  bound: 1000,
+  shape: (n) => n.default(20),
+  description: 'Results per page.',
+});
+
 export const searchFilingsTool = tool('secedgar_search_filings', {
   description:
     "Search EDGAR filings since 1993. Full-text search covers 2001-present (the EFTS index floor); pre-2001 date ranges (to 1993) are served from the archives by form and entity/date. Pre-2001 free text needs entity scope (ticker:/cik:) — with it, the tool reads the entity's matching filings and matches the terms locally, which costs a few seconds (SEC's request rate caps the scan at roughly 5s for the 50-document maximum). A range crossing 2001-01-01 is split at the boundary and the two eras merged, each row tagged with its source. Supports exact phrases, boolean operators, wildcards, and entity targeting (ticker:AAPL or cik:320193 in query). When the match set outruns the inline list it is also staged as df_<id> — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query.",
@@ -904,7 +918,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .describe(
         'Only include filings filed on or before this date (YYYY-MM-DD). Use alone or with filed_after; alone, the search starts at 2001-01-01, or at 1993-01-01 (the archive start) for a date before 2001.',
       ),
-    limit: z.number().int().min(1).max(100).default(20).describe('Results per page. Max 100.'),
+    limit: resultsLimit.schema(true),
     offset: z
       .number()
       .int()
@@ -1066,12 +1080,19 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
   }),
 
   async handler(input, ctx): Promise<SearchFilingsResult> {
+    // Every route below reads this one list, never `input.forms` (#194).
+    const forms = normalizeFormFilter(input.forms);
+    // ...and this applied limit, never the requested one, so a call above the cap answers
+    // exactly as the same call at the cap does, the relevance fetch size included (#197).
+    const limit = resultsLimit.apply(input.limit, ctx);
+
     // Browse mode (#79): EFTS accepts a forms-only or entity-scoped request with no
     // full-text term, but rejects one with neither ("Blank search not valid"). Guard
-    // the both-absent shape here — checked against the RAW query/forms (before the
-    // entity token is stripped), so a bare cik:/ticker: query still passes (it has raw
-    // content even though it strips to blank). A date range does not stand alone.
-    if (!input.query?.trim() && !input.forms?.length) {
+    // the both-absent shape here — checked against the RAW query (before the entity
+    // token is stripped), so a bare cik:/ticker: query still passes (it has raw content
+    // even though it strips to blank). A date range does not stand alone, and neither
+    // does a forms list of blanks.
+    if (!input.query?.trim() && !forms) {
       throw ctx.fail(
         'missing_criteria',
         'A full-text query or a forms filter is required — a date range alone is not a valid search.',
@@ -1124,7 +1145,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       if (entityCik) {
         archive = await collectSubmissionsRows(ctx, scope, {
           entityCik,
-          forms: input.forms,
+          forms,
           startDate,
           endDate: archiveEnd,
         });
@@ -1141,7 +1162,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       } else {
         // Unscoped + no free text → forms are guaranteed present by the missing_criteria guard.
         archive = await collectFullIndexRows(scope, {
-          forms: input.forms ?? [],
+          forms: forms ?? [],
           startDate,
           endDate: archiveEnd,
         });
@@ -1150,7 +1171,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       const efts = straddles
         ? await fetchEftsRows(scope, {
             query,
-            forms: input.forms,
+            forms,
             entityCik,
             startDate: EFTS_FULLTEXT_FLOOR,
             endDate,
@@ -1163,7 +1184,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       const archiveIncomplete = archive.scanTruncated || (scan?.capped ?? false);
       const eftsWindowIncomplete = efts !== undefined && !efts.totalIsExact;
 
-      const formsNote = input.forms?.length ? `, forms ${input.forms.join(', ')}` : '';
+      const formsNote = forms ? `, forms ${forms.join(', ')}` : '';
       const scopeNote = entityCik ? `CIK ${entityCik}` : 'full-index browse';
       const archiveSource = entityCik
         ? 'the entity submissions history'
@@ -1195,12 +1216,12 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         totalIsExact: !archiveIncomplete && !eftsWindowIncomplete,
         totalDocuments: efts?.totalDocuments,
         sort: input.sort,
-        limit: input.limit,
+        limit,
         offset: input.offset,
         queryParams: {
           query: hasFreeText ? query : undefined,
           entity_cik: entityCik,
-          forms: input.forms,
+          forms,
           filed_after: startDate,
           filed_before: endDate,
           source: straddles ? 'efts+archive' : entityCik ? 'submissions' : 'full-index',
@@ -1214,7 +1235,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         zeroHitCriteria: [
           ...(hasFreeText ? [`"${query}"`] : []),
           ...(entityCik ? [`CIK ${entityCik}`] : []),
-          ...(input.forms?.length ? [`forms [${input.forms.join(', ')}]`] : []),
+          ...(forms ? [`forms [${forms.join(', ')}]`] : []),
           `dates ${startDate} to ${endDate}`,
         ].join(', '),
         scan,
@@ -1227,12 +1248,12 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     // existing pass-through behavior so callers paying for relevance get it.
     const wideFetch = entityCik !== undefined || input.sort !== 'relevance';
     const fetchFrom = wideFetch ? 0 : input.offset;
-    const fetchSize = wideFetch ? 100 : input.limit;
+    const fetchSize = wideFetch ? 100 : limit;
 
     const response = await api.searchFilings(
       {
         query,
-        forms: input.forms,
+        forms,
         ciks: entityCik ? [entityCik] : undefined,
         startDate: dates?.startDate,
         endDate: dates?.endDate,
@@ -1265,8 +1286,8 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     // since collapsing keeps first-occurrence order. `limit` filings from the whole
     // window would reappear on the next page, `limit` documents on (#124).
     const pageRows = wideFetch
-      ? rows.slice(input.offset, input.offset + input.limit)
-      : rows.slice(0, collapseEftsHits(response.hits.hits.slice(0, input.limit)).length);
+      ? rows.slice(input.offset, input.offset + limit)
+      : rows.slice(0, collapseEftsHits(response.hits.hits.slice(0, limit)).length);
     const results = pageRows.map(toInlineResult);
 
     // The filings in hand — the rows the dataframe holds. EFTS's own form_filter
@@ -1280,7 +1301,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     const bridge = getCanvasBridge();
     // Materialize the filings already fetched — no additional EFTS calls. Skip when
     // the response fits inline or when there's no canvas.
-    if (bridge && rows.length > input.limit) {
+    if (bridge && rows.length > limit) {
       // Truncated when matches exist beyond the window fetched — the dataframe then
       // holds a sample of the matching filings.
       const truncated = !windowComplete;
@@ -1289,7 +1310,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         sourceTool: 'secedgar_search_filings',
         queryParams: {
           query,
-          forms: input.forms,
+          forms,
           filed_after: dates?.startDate,
           filed_before: dates?.endDate,
           entity_cik: entityCik,
@@ -1310,7 +1331,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
 
     const searched = entityCik
       ? `${query ? `${query} ` : ''}(entity scope: CIK ${entityCik})`
-      : query || (input.forms?.length ? `(browse: forms ${input.forms.join(', ')})` : '');
+      : query || (forms ? `(browse: forms ${forms.join(', ')})` : '');
     // A window the caller spelled out is already in their arguments; a filled one is not.
     const effectiveQuery = dates?.filled
       ? `${searched} (filed ${dates.startDate} to ${dates.endDate})`
@@ -1323,7 +1344,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       const criteria: string[] = [];
       if (query) criteria.push(`"${query}"`);
       if (entityCik) criteria.push(`entity CIK ${entityCik}`);
-      if (input.forms?.length) criteria.push(`forms [${input.forms.join(', ')}]`);
+      if (forms) criteria.push(`forms [${forms.join(', ')}]`);
       if (dates) criteria.push(`dates ${dates.startDate} to ${dates.endDate}`);
       const criteriaText = criteria.length > 0 ? criteria.join(', ') : 'the given criteria';
       ctx.enrich.notice(
@@ -1374,7 +1395,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       if (dataset) guidance.push(dataframeGuidance(dataset));
       ctx.enrich.truncated({
         shown: results.length,
-        cap: input.limit,
+        cap: limit,
         ...(guidance.length > 0 && { guidance: guidance.join(' ') }),
       });
     }
@@ -1440,3 +1461,8 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/** `secedgar_search_filings` as this deployment's `EDGAR_CLAMP_OVERSIZED_LIMITS` builds it. */
+export function createSearchFilingsTool(options: LimitClampOptions) {
+  return withLimitClamps(searchFilingsTool, [resultsLimit], options);
+}

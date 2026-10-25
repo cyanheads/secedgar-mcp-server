@@ -4,9 +4,15 @@
  * @module tests/mcp-server/tools/definitions/get-filing.tool
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { getFilingTool } from '@/mcp-server/tools/definitions/get-filing.tool.js';
+import {
+  createGetFilingTool,
+  getFilingTool,
+} from '@/mcp-server/tools/definitions/get-filing.tool.js';
+import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import type { CachedExtract } from '@/services/edgar/filing-to-text.js';
 import type { FilingIndex, SubmissionsResponse } from '@/services/edgar/types.js';
@@ -63,6 +69,7 @@ import {
   recoveryHint,
   wireError,
 } from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 const ACCN = '0000320193-23-000106';
 const ACCN_NO_DASHES = '000032019323000106';
@@ -750,7 +757,7 @@ describe('binary documents (#96)', () => {
       requested_document: oddScan,
       document_type: 'GRAPHIC',
     });
-    const text = blockText(result.content);
+    const text = readCommonMark(blockText(result.content));
     expect(text).toContain(`Document '${oddScan}' is a GRAPHIC entry and holds no readable text.`);
     expect(text).toContain(`${oddScan} [GRAPHIC, binary]`);
     expect(text).toContain('stt-20241231.htm [10-K]');
@@ -1499,7 +1506,7 @@ describe('section targeting — whitespace and quote folding (#106)', () => {
       expect(error.data.outline).toEqual(STYLED_HEADINGS);
       expect(bag(error.data.recovery).hint).toBe(hint);
       const textStart = `Error: ${message}\n\nRecovery: ${hint}\n\n(reason section_not_found`;
-      expect(blockText(result.content).slice(0, textStart.length)).toBe(textStart);
+      expect(readCommonMark(blockText(result.content)).slice(0, textStart.length)).toBe(textStart);
       expect(vi.mocked(windowText)).not.toHaveBeenCalled();
     },
   );
@@ -3449,7 +3456,7 @@ describe('primary document selection (#161)', () => {
       type: '8-K',
       description: '8-K',
     });
-    const text = allText(result);
+    const text = readCommonMark(allText(result));
     expect(text).toContain(`Primary (1 total): ${FORM_DOC} [8-K]`);
     expect(text).toContain(`Exhibits (1 total): ${EXHIBIT_DOC} [EX-99.1]`);
     // The header types the scan GRAPHIC, which files it under auxiliary as on the success path.
@@ -3461,8 +3468,9 @@ describe('primary document selection (#161)', () => {
 
     const error = wireError(result);
     expect(error.data).toMatchObject({ reason: 'binary_document', document_type: 'GRAPHIC' });
-    expect(allText(result)).toContain(`Primary (1 total): ${FORM_DOC} [8-K]`);
-    expect(allText(result)).toContain(`Exhibits (1 total): ${EXHIBIT_DOC} [EX-99.1]`);
+    const text = readCommonMark(allText(result));
+    expect(text).toContain(`Primary (1 total): ${FORM_DOC} [8-K]`);
+    expect(text).toContain(`Exhibits (1 total): ${EXHIBIT_DOC} [EX-99.1]`);
     expect(mockApi.tryGetFilingDocument).not.toHaveBeenCalled();
   });
 
@@ -3472,8 +3480,9 @@ describe('primary document selection (#161)', () => {
     const result = await call();
 
     expect(wireError(result).data.reason).toBe('no_documents');
-    expect(allText(result)).toContain(`Primary (1 total): ${FORM_DOC} [8-K]`);
-    expect(allText(result)).toContain(`Exhibits (1 total): ${EXHIBIT_DOC} [EX-99.1]`);
+    const text = readCommonMark(allText(result));
+    expect(text).toContain(`Primary (1 total): ${FORM_DOC} [8-K]`);
+    expect(text).toContain(`Exhibits (1 total): ${EXHIBIT_DOC} [EX-99.1]`);
   });
 
   it('reports the typed primary beside a requested exhibit', async () => {
@@ -3549,5 +3558,49 @@ describe('primary document selection (#161)', () => {
     expect(result.isError).toBe(true);
     expect(allText(result)).toContain('request cancelled');
     expect(allText(result)).not.toContain('document_not_found');
+  });
+});
+
+// content_limit above the 200,000-character page is served at 200,000 while
+// EDGAR_CLAMP_OVERSIZED_LIMITS is on; the mechanism itself is tabled in
+// tests/mcp-server/tools/limit-clamp.test.ts (#197).
+describe('content_limit above the 200000 cap (#197)', () => {
+  beforeEach(async () => {
+    const actual = await vi.importActual<typeof import('@/services/edgar/filing-to-text.js')>(
+      '@/services/edgar/filing-to-text.js',
+    );
+    // One unbroken run, so the window cuts at exactly the limit it is handed.
+    vi.mocked(filingToExtract).mockReturnValue('A'.repeat(300_000));
+    vi.mocked(windowText).mockImplementation(actual.windowText);
+  });
+
+  const args = { accession_number: ACCN, cik: '320193' };
+
+  it('answers content_limit 200001 exactly as 200000, the page, cap, and next_offset included', async () => {
+    const at200000 = await runToolContract(getFilingTool, { ...args, content_limit: 200_000 });
+    const at200001 = await runToolContract(getFilingTool, { ...args, content_limit: 200_001 });
+
+    expect(at200001).toEqual(at200000);
+    expect(at200001.structuredContent).toMatchObject({
+      next_offset: 200_000,
+      cap: 200_000,
+      shown: 200_000,
+    });
+    expect(readCommonMark(blockText(at200001.content))).toContain('next_offset: 200000');
+  });
+
+  it('advertises 1000000 as the maximum with the switch on and 200000 with it off, which rejects 200001', async () => {
+    const maximum = (clampOversizedLimits: boolean) => {
+      const def = buildToolDefinitions({ dropEnabled: false, clampOversizedLimits }).find(
+        (d) => d.name === 'secedgar_get_filing',
+      );
+      return (z.toJSONSchema(def!.input, { io: 'input' }) as any).properties.content_limit.maximum;
+    };
+    expect(maximum(true)).toBe(1_000_000);
+    expect(maximum(false)).toBe(200_000);
+
+    const off = createGetFilingTool({ clampOversizedLimits: false });
+    const rejected = await runToolContract(off, { ...args, content_limit: 200_001 });
+    expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
   });
 });

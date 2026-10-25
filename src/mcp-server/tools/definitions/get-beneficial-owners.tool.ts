@@ -12,6 +12,11 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  type LimitClampOptions,
+  limitClamp,
+  withLimitClamps,
+} from '@/mcp-server/tools/limit-clamp.js';
+import {
   dataframeGuidance,
   getCanvasBridge,
   toDatasetField,
@@ -37,7 +42,7 @@ const STRUCTURED_FROM = '2024-12-18';
 /** Maximum schedule documents examined in one newest-first scan. */
 const FILING_SCAN_CAP = 50;
 
-/** Maximum matching filings a caller can request. */
+/** Maximum matching filings one call returns. */
 const FILING_RESULT_CAP = 20;
 
 /** Legacy form names that carry the same disclosure with no parseable XML. */
@@ -70,6 +75,18 @@ interface FilingRef {
   form: string;
   schedule: BeneficialOwnershipForm;
 }
+
+/** `limit`: a call returns at most 20 matching filings (#197). */
+const filingsLimit = limitClamp({
+  tool: 'secedgar_get_beneficial_owners',
+  field: 'limit',
+  min: 1,
+  cap: FILING_RESULT_CAP,
+  bound: 1000,
+  shape: (n) => n.default(10),
+  description:
+    'Number of successfully parsed filings naming the requested issuer to return, newest first. Other-issuer schedules and failed documents do not consume this limit; at most 50 documents are examined. Default 10.',
+});
 
 export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
   title: 'Get Beneficial Owners',
@@ -138,15 +155,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       .describe(
         'Whether to include amendments (SCHEDULE 13D/A, SCHEDULE 13G/A). Amendments carry the current position and are how an ongoing stake is tracked, so they are included by default. Set false to see only filings that opened a new position.',
       ),
-    limit: z
-      .number()
-      .int()
-      .min(1)
-      .max(FILING_RESULT_CAP)
-      .default(10)
-      .describe(
-        'Number of successfully parsed filings naming the requested issuer to return, newest first. Other-issuer schedules and failed documents do not consume this limit; at most 50 documents are examined. Default 10.',
-      ),
+    limit: filingsLimit.schema(true),
   }),
   // The company-identifier keys other tools take. `issuer` is this tool's only company
   // input, so each maps one-to-one (#152).
@@ -351,6 +360,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
   },
 
   async handler(input, ctx) {
+    const limit = filingsLimit.apply(input.limit, ctx);
     const api = getEdgarApiService();
     const scope = new CallScope(ctx.signal);
 
@@ -442,7 +452,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     }> = [];
 
     for (const ref of selected) {
-      if (filings.length >= input.limit) break;
+      if (filings.length >= limit) break;
       ctx.signal.throwIfAborted();
       const xml = await api.tryGetFilingDocument(
         match.cik,
@@ -540,7 +550,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
           issuer_cik: match.cik,
           form_kind: input.form_kind,
           include_amendments: input.include_amendments,
-          limit: input.limit,
+          limit,
         },
         truncated,
       });
@@ -560,14 +570,14 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       guidance.push(
         examined === FILING_SCAN_CAP
           ? `${notExamined} indexed schedules remain unexamined after the 50-document scan ceiling. Narrow with form_kind or include_amendments=false; raising limit does not extend this ceiling.`
-          : `${notExamined} indexed schedules remain unexamined after the ${input.limit}-filing result limit. ${input.limit < FILING_RESULT_CAP ? 'Raise limit to reach further back, or narrow with form_kind or include_amendments=false.' : 'Narrow with form_kind or include_amendments=false.'}`,
+          : `${notExamined} indexed schedules remain unexamined after the ${limit}-filing result limit. ${limit < FILING_RESULT_CAP ? 'Raise limit to reach further back, or narrow with form_kind or include_amendments=false.' : 'Narrow with form_kind or include_amendments=false.'}`,
       );
     }
     if (dataset) guidance.push(dataframeGuidance(dataset));
     if (truncated) {
       ctx.enrich.truncated({
         shown: filings.length,
-        cap: examined === FILING_SCAN_CAP ? FILING_SCAN_CAP : input.limit,
+        cap: examined === FILING_SCAN_CAP ? FILING_SCAN_CAP : limit,
         guidance: guidance.join(' '),
       });
     } else if (guidance.length > 0) {
@@ -673,3 +683,8 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/** `secedgar_get_beneficial_owners` as this deployment's `EDGAR_CLAMP_OVERSIZED_LIMITS` builds it. */
+export function createGetBeneficialOwnersTool(options: LimitClampOptions) {
+  return withLimitClamps(getBeneficialOwnersTool, [filingsLimit], options);
+}

@@ -1561,7 +1561,7 @@ describe('dataframe registration (#72)', () => {
       expect(result.dataset).toBeUndefined();
       const notice = String(getEnrichment(ctx).notice);
       expect(notice).not.toContain('secedgar_dataframe_describe');
-      expect(notice).toContain('Raise limit');
+      expect(notice).toContain('Omit limit to return every period inline.');
     });
 
     it('reaches both structuredContent and content[] through the real tool pipeline', async () => {
@@ -3910,7 +3910,10 @@ describe('explicit annual on an instant concept (#167)', () => {
     expect(result.data).toHaveLength(3);
     const enrichment = getEnrichment(ctx);
     expect(enrichment).toMatchObject({ truncated: true, shown: 3, cap: 3 });
-    expect(String(enrichment.notice)).toContain('most-recent of 5 periods');
+    // limit tops out at 100, while omitting it inlines every period.
+    expect(enrichment.notice).toBe(
+      'Showing the 3 most-recent of 5 periods. Omit limit to return every period inline.',
+    );
   });
 
   it('stages the year ends as an annual dataframe', async () => {

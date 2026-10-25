@@ -11,6 +11,7 @@
  * @module tests/mcp-server/tools/definitions/tool-definitions
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { describe, expect, it } from 'vitest';
 import { dataframeDropTool } from '@/mcp-server/tools/definitions/dataframe-drop.tool.js';
 import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
@@ -40,8 +41,8 @@ function registeredNames(defs: readonly { name: string }[]): string[] {
 
 describe('buildToolDefinitions', () => {
   it('lists every tool in both gate states, so the manifest count does not vary', () => {
-    const off = buildToolDefinitions({ dropEnabled: false });
-    const on = buildToolDefinitions({ dropEnabled: true });
+    const off = buildToolDefinitions({ dropEnabled: false, clampOversizedLimits: true });
+    const on = buildToolDefinitions({ dropEnabled: true, clampOversizedLimits: true });
 
     expect(off).toHaveLength(17);
     expect(on).toHaveLength(17);
@@ -50,13 +51,15 @@ describe('buildToolDefinitions', () => {
   });
 
   it('registers no duplicate tool names', () => {
-    const names = buildToolDefinitions({ dropEnabled: false }).map((def) => def.name);
+    const names = buildToolDefinitions({ dropEnabled: false, clampOversizedLimits: true }).map(
+      (def) => def.name,
+    );
 
     expect(new Set(names).size).toBe(names.length);
   });
 
   describe('with EDGAR_DATAFRAME_DROP_ENABLED off', () => {
-    const defs = buildToolDefinitions({ dropEnabled: false });
+    const defs = buildToolDefinitions({ dropEnabled: false, clampOversizedLimits: true });
     const drop = defs.find((def) => def.name === 'secedgar_dataframe_drop');
 
     it('keeps secedgar_dataframe_drop out of the registered set', () => {
@@ -85,8 +88,43 @@ describe('buildToolDefinitions', () => {
     });
   });
 
+  // Every #197 row as registered: the switch picks the advertised maximum, so a
+  // tool listed through its plain definition instead of its factory fails here.
+  describe('EDGAR_CLAMP_OVERSIZED_LIMITS maxima (#197)', () => {
+    const rows = [
+      ['secedgar_company_search', 'filing_limit', 50, 1000],
+      ['secedgar_search_filings', 'limit', 100, 1000],
+      ['secedgar_get_filing', 'content_limit', 200_000, 1_000_000],
+      ['secedgar_get_material_events', 'limit', 100, 1000],
+      ['secedgar_get_insider_transactions', 'limit', 100, 1000],
+      ['secedgar_get_institutional_holdings', 'limit', 500, 1000],
+      ['secedgar_find_holders', 'limit', 100, 1000],
+      ['secedgar_get_beneficial_owners', 'limit', 20, 1000],
+      ['secedgar_get_fund_holdings', 'limit', 100, 1000],
+      ['secedgar_fetch_frames', 'limit', 100, 1000],
+      ['secedgar_compare_companies', 'periods', 12, 1000],
+      ['secedgar_dataframe_query', 'row_limit', 10_000, 100_000],
+      ['secedgar_dataframe_query', 'preview', 10_000, 100_000],
+    ] as const;
+
+    const maximum = (clampOversizedLimits: boolean, name: string, field: string) => {
+      const def = buildToolDefinitions({ dropEnabled: false, clampOversizedLimits }).find(
+        (d) => d.name === name,
+      );
+      const schema = z.toJSONSchema(def!.input, { io: 'input' }) as {
+        properties: Record<string, { maximum?: number }>;
+      };
+      return schema.properties[field]?.maximum;
+    };
+
+    it.each(rows)('%s %s advertises its cap off and its bound on', (name, field, cap, bound) => {
+      expect(maximum(false, name, field)).toBe(cap);
+      expect(maximum(true, name, field)).toBe(bound);
+    });
+  });
+
   describe('with EDGAR_DATAFRAME_DROP_ENABLED on', () => {
-    const defs = buildToolDefinitions({ dropEnabled: true });
+    const defs = buildToolDefinitions({ dropEnabled: true, clampOversizedLimits: true });
 
     it('registers secedgar_dataframe_drop live, with no disabled marker', () => {
       const drop = defs.find((def) => def.name === 'secedgar_dataframe_drop');

@@ -11,6 +11,11 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  type LimitClampOptions,
+  limitClamp,
+  withLimitClamps,
+} from '@/mcp-server/tools/limit-clamp.js';
+import {
   dataframeGuidance,
   getCanvasBridge,
   toDatasetField,
@@ -33,6 +38,17 @@ import { fiscalQ4Caveats } from '@/services/edgar/fiscal-periods.js';
 function businessLocation(loc: string): string | undefined {
   return loc && loc !== '-' ? loc : undefined;
 }
+
+/** `limit`: a page holds at most 100 companies (#197). */
+const frameLimit = limitClamp({
+  tool: 'secedgar_fetch_frames',
+  field: 'limit',
+  min: 1,
+  cap: 100,
+  bound: 1000,
+  shape: (n) => n.default(25),
+  description: 'Number of companies to return.',
+});
 
 export const fetchFramesTool = tool('secedgar_fetch_frames', {
   description:
@@ -108,7 +124,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       .describe(
         'Unit of measure. Use "USD-per-shares" (or equivalently "USD/shares") for EPS, "shares" for share counts, "pure" for ratios. Ignored when concept resolves to a friendly name with a known unit.',
       ),
-    limit: z.number().int().min(1).max(100).default(25).describe('Number of companies to return.'),
+    limit: frameLimit.schema(true),
     offset: z
       .number()
       .int()
@@ -296,7 +312,8 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     // Offset paging over the whole sorted frame — the retrieval path for ranks past
     // `limit` when no canvas is available to hold the full set (#89). The frame is
     // fetched whole, so slicing it is contiguous and stable across pages.
-    const pageEnd = input.offset + input.limit;
+    const limit = frameLimit.apply(input.limit, ctx);
+    const pageEnd = input.offset + limit;
     const sliced = sorted.slice(input.offset, pageEnd);
     const nextOffset = pageEnd < sorted.length ? pageEnd : undefined;
     const data = sliced.map(({ entry, cik, ticker, location }, i) => ({
@@ -349,8 +366,8 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     } else if (nextOffset !== undefined) {
       ctx.enrich.truncated({
         shown: sliced.length,
-        cap: input.limit,
-        ...(dataset && { guidance: dataframeGuidance(dataset) }),
+        cap: limit,
+        guidance: dataset ? dataframeGuidance(dataset) : `Continue with offset=${nextOffset}.`,
       });
     } else if (dataset) {
       ctx.enrich.notice(dataframeGuidance(dataset));
@@ -502,3 +519,8 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/** `secedgar_fetch_frames` as this deployment's `EDGAR_CLAMP_OVERSIZED_LIMITS` builds it. */
+export function createFetchFramesTool(options: LimitClampOptions) {
+  return withLimitClamps(fetchFramesTool, [frameLimit], options);
+}

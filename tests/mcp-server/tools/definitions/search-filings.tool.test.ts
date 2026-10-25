@@ -3,10 +3,15 @@
  * @module tests/mcp-server/tools/definitions/search-filings.tool
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
+import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
+import {
+  createSearchFilingsTool,
+  searchFilingsTool,
+} from '@/mcp-server/tools/definitions/search-filings.tool.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import type { EftsResponse } from '@/services/edgar/types.js';
 
@@ -46,6 +51,7 @@ import {
   recoveryHint,
   wireError,
 } from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 // EFTS also sends form_filter aggregation buckets, which EftsResponse omits and the tool ignores.
 const mockEftsResponse: EftsResponse & { aggregations: unknown } = {
@@ -2904,7 +2910,7 @@ describe('searchFilingsTool date window (#185)', () => {
         expect(error.message).toContain(
           'drop the text terms and browse by form type (forms: ["10-K"]) and date',
         );
-        expect(allText(result)).toContain(hint);
+        expect(readCommonMark(allText(result))).toContain(hint);
       }
 
       // The advice taken literally: text dropped with no forms is still no search; with forms it is one.
@@ -3334,5 +3340,303 @@ describe('searchFilingsTool date window (#185)', () => {
         '1998Q1–1999Q4; end the range at 1997-12-31 to read the older ones.',
       );
     });
+  });
+});
+
+// Every route reads the one normalized form list (#194). The value table lives in
+// tests/mcp-server/tools/form-filter.test.ts; these cases prove each route's wiring.
+describe('searchFilingsTool form filter (#194)', () => {
+  const call = (args: Record<string, unknown>) => runToolContract(searchFilingsTool, args as never);
+  const allText = (result: Awaited<ReturnType<typeof call>>) =>
+    result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+  const apiCalls = () => Object.values(mockApi).reduce((n, fn) => n + fn.mock.calls.length, 0);
+  /** Two calls' answers on both surfaces, and the SEC requests each one made. */
+  const sameAnswer = async (a: Record<string, unknown>, b: Record<string, unknown>) => {
+    mockApi.searchFilings.mockClear();
+    const first = await call(a);
+    const firstRequests = mockApi.searchFilings.mock.calls.map(([params]) => params);
+    mockApi.searchFilings.mockClear();
+    const second = await call(b);
+    const secondRequests = mockApi.searchFilings.mock.calls.map(([params]) => params);
+    expect(first.isError).toBeFalsy();
+    expect(first.structuredContent).toEqual(second.structuredContent);
+    expect(first.content).toEqual(second.content);
+    expect(firstRequests).toEqual(secondRequests);
+    return bag(first.structuredContent);
+  };
+  const recent = { filed_after: '2026-10-01', filed_before: '2026-10-02' };
+  const pre2001 = { filed_after: '1996-11-01', filed_before: '1996-11-01' };
+  const indexEntry = (accessionNumber: string, form: string) => ({
+    cik: accessionNumber.slice(0, 10),
+    companyName: 'SOME FILER INC',
+    form,
+    filingDate: '1996-11-01',
+    accessionNumber,
+  });
+  const fullIndexRows = (...more: ReturnType<typeof indexEntry>[]) =>
+    mockApi.fetchFullIndexQuarter.mockResolvedValue([
+      indexEntry('0000320193-96-000023', '10-K'),
+      indexEntry('0000002488-96-000040', '10-Q'),
+      ...more,
+    ]);
+
+  it.each([
+    ['an empty element', [''], recent],
+    ['a whitespace-only element', ['   '], recent],
+    ['an empty element on a pre-2001 range', [''], pre2001],
+  ])('rejects %s alone as missing_criteria before reaching SEC', async (_, forms, dates) => {
+    const result = await call({ forms, ...dates });
+
+    expect(wireError(result).data.reason).toBe('missing_criteria');
+    expect(readCommonMark(allText(result))).toContain(
+      'A full-text query or a forms filter is required',
+    );
+    expect(apiCalls()).toBe(0);
+  });
+
+  describe('from 2001 on', () => {
+    it('searches a query beside a blank element without a form filter', async () => {
+      const structured = await sameAnswer(
+        { query: 'material weakness', forms: [''], ...recent },
+        { query: 'material weakness', ...recent },
+      );
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining({ query: 'material weakness', forms: undefined }),
+        expect.any(CallScope),
+      );
+      expect(structured.effectiveQuery).toBe('material weakness');
+    });
+
+    it('filters on the named form alone and labels the browse with it', async () => {
+      const structured = await sameAnswer(
+        { forms: ['', '10-K'], ...recent },
+        { forms: ['10-K'], ...recent },
+      );
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining({ forms: ['10-K'] }),
+        expect.any(CallScope),
+      );
+      expect(structured.effectiveQuery).toBe('(browse: forms 10-K)');
+      expect(readCommonMark(allText(await call({ forms: ['', '10-K'], ...recent })))).toContain(
+        '(browse: forms 10-K)',
+      );
+    });
+
+    it.each([[[' 10-K ']], [['10-k']]])('sends %j to EDGAR as 10-K', async (forms) => {
+      await sameAnswer({ forms, ...recent }, { forms: ['10-K'], ...recent });
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining({ forms: ['10-K'] }),
+        expect.any(CallScope),
+      );
+    });
+
+    it('names only the normalized forms when nothing matched', async () => {
+      mockApi.searchFilings.mockResolvedValue({
+        ...mockEftsResponse,
+        hits: { total: { value: 0, relation: 'eq' }, hits: [] },
+      });
+      const result = await call({ forms: ['', ' 8-k '], ...recent });
+
+      const notice = String(bag(result.structuredContent).notice);
+      expect(notice).toBe(
+        'No filings matched forms [8-K], dates 2026-10-01 to 2026-10-02. Broaden the query, remove the form filter, or widen the date range.',
+      );
+      expect(readCommonMark(allText(result))).toContain(notice);
+    });
+
+    it('stages the dataframe with the normalized forms', async () => {
+      const registerDataframe = vi.fn().mockResolvedValue({
+        tableName: 'df_FORMS_EFTS1',
+        rowCount: 2,
+        expiresAt: '2026-10-25T00:00:00.000Z',
+        columnSchema: [],
+      });
+      vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+
+      await call({ query: 'material weakness', forms: [' 10-k', ''], ...recent, limit: 1 });
+
+      expect(registerDataframe.mock.calls[0]?.[1].queryParams.forms).toEqual(['10-K']);
+    });
+  });
+
+  describe('before 2001', () => {
+    it.each([[[' 10-K ']], [['10-k']], [['', '10-K']]])(
+      'matches the full-index browse on %j as on 10-K',
+      async (forms) => {
+        fullIndexRows();
+        const structured = await sameAnswer({ forms, ...pre2001 }, { forms: ['10-K'], ...pre2001 });
+        expect(structured.total).toBe(1);
+        expect(structured.effectiveQuery).toBe(
+          '(pre-2001 archive: full-index browse, forms 10-K, 1996-11-01 to 1996-11-01)',
+        );
+      },
+    );
+
+    it('names only the normalized forms when the full-index matched nothing', async () => {
+      mockApi.fetchFullIndexQuarter.mockResolvedValue([]);
+      const result = await call({ forms: ['  ', 's-1'], ...pre2001 });
+
+      const notice = String(bag(result.structuredContent).notice);
+      expect(notice).toContain('No filings matched forms [S-1], dates 1996-11-01 to 1996-11-01.');
+      expect(readCommonMark(allText(result))).toContain(notice);
+    });
+
+    it('stages the full-index dataframe with the normalized forms', async () => {
+      fullIndexRows(indexEntry('0000002488-96-000041', '10-K'));
+      const registerDataframe = vi.fn().mockResolvedValue({
+        tableName: 'df_FORMS_IDX01',
+        rowCount: 2,
+        expiresAt: '2026-10-25T00:00:00.000Z',
+        columnSchema: [],
+      });
+      vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+
+      await call({ forms: ['10-k ', ''], ...pre2001, limit: 1 });
+
+      expect(registerDataframe.mock.calls[0]?.[1].queryParams.forms).toEqual(['10-K']);
+    });
+
+    it('returns a cik: history with a blank element what it returns without forms', async () => {
+      mockApi.getSubmissions.mockResolvedValue(
+        submissionsWith([
+          { accession: 'SUB-1996-10K', date: '1996-12-13', form: '10-K' },
+          { accession: 'SUB-1996-10Q', date: '1996-08-09', form: '10-Q' },
+        ]),
+      );
+      const scope = { query: 'cik:320193', filed_after: '1996-01-01', filed_before: '1996-12-31' };
+
+      const structured = await sameAnswer({ ...scope, forms: [''] }, scope);
+      expect(structured.total).toBe(2);
+      expect(structured.effectiveQuery).toBe(
+        '(pre-2001 archive: CIK 0000320193, 1996-01-01 to 1996-12-31)',
+      );
+    });
+
+    it('matches a cik: history on a padded form as on 10-K', async () => {
+      mockApi.getSubmissions.mockResolvedValue(
+        submissionsWith([
+          { accession: 'SUB-1996-10K', date: '1996-12-13', form: '10-K' },
+          { accession: 'SUB-1996-10Q', date: '1996-08-09', form: '10-Q' },
+        ]),
+      );
+      const scope = { query: 'cik:320193', filed_after: '1996-01-01', filed_before: '1996-12-31' };
+
+      const structured = await sameAnswer(
+        { ...scope, forms: [' 10-K '] },
+        { ...scope, forms: ['10-K'] },
+      );
+      expect(structured.total).toBe(1);
+    });
+  });
+
+  it('sends the normalized forms to both sides of a range crossing 2001-01-01', async () => {
+    fullIndexRows();
+    const range = { filed_after: '1996-11-01', filed_before: '2001-01-31' };
+
+    await sameAnswer({ forms: [' 10-k', ''], ...range }, { forms: ['10-K'], ...range });
+    expect(mockApi.searchFilings).toHaveBeenCalledWith(
+      expect.objectContaining({ forms: ['10-K'], startDate: '2001-01-01' }),
+      expect.any(CallScope),
+    );
+  });
+});
+
+// Wiring only: every read of `limit` takes the applied value when the switch is on — the
+// date-sorted page, the relevance fetch size, the pre-2001 archive page, and dataframe
+// staging. The mechanism itself is tabled in tests/mcp-server/tools/limit-clamp.test.ts (#197).
+describe('searchFilingsTool — limit above the 100 cap (#197)', () => {
+  /** `n` one-document filings, newest first from 2026-09-30, in a window of 500 matches. */
+  const window = (n: number) =>
+    eftsWindow(
+      Array.from({ length: n }, (_, i) => {
+        const date = new Date(Date.UTC(2026, 8, 30 - i)).toISOString().slice(0, 10);
+        const accession = `0001318605-26-${String(i).padStart(6, '0')}`;
+        return documentHit(`${accession}:doc${i}.htm`, '8-K', '8-K', null, date);
+      }),
+      500,
+    );
+
+  /** `n` pre-2001 full-index 10-K rows, one per filer, all filed 1996-11-01. */
+  const fullIndex = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      cik: String(100_000 + i),
+      companyName: `FILER ${i} INC`,
+      form: '10-K',
+      filingDate: '1996-11-01',
+      accessionNumber: `00${100_000 + i}-96-000001`,
+    }));
+
+  /** The calls at 100 and at 101: both surfaces, and the full-text requests each made. */
+  const atCapAndAbove = async (args: Record<string, unknown>) => {
+    const run = async (limit: number) => {
+      mockApi.searchFilings.mockClear();
+      const result = await runToolContract(searchFilingsTool, { ...args, limit } as never);
+      return { result, requests: mockApi.searchFilings.mock.calls.map(([params]) => params) };
+    };
+    return { at100: await run(100), at101: await run(101) };
+  };
+
+  it('answers limit 101 exactly as limit 100 on a date-sorted page', async () => {
+    mockApi.searchFilings.mockResolvedValue(window(150));
+    const { at100, at101 } = await atCapAndAbove({ query: '"going concern"' });
+
+    expect(at101).toEqual(at100);
+    expect(at101.result.structuredContent).toMatchObject({ cap: 100, shown: 100 });
+    expect((at101.result.structuredContent as SearchContent).results).toHaveLength(100);
+  });
+
+  it('fetches and pages a relevance search at 100 when asked for 101', async () => {
+    mockApi.searchFilings.mockResolvedValue(window(150));
+    const { at100, at101 } = await atCapAndAbove({ query: '"going concern"', sort: 'relevance' });
+
+    expect(at101).toEqual(at100);
+    expect(at101.requests).toEqual([expect.objectContaining({ from: 0, size: 100 })]);
+    expect((at101.result.structuredContent as SearchContent).results).toHaveLength(100);
+  });
+
+  it('answers limit 101 exactly as limit 100 on a pre-2001 archive browse', async () => {
+    mockApi.fetchFullIndexQuarter.mockResolvedValue(fullIndex(150));
+    const { at100, at101 } = await atCapAndAbove({
+      forms: ['10-K'],
+      filed_after: '1996-11-01',
+      filed_before: '1996-11-30',
+    });
+
+    expect(at101).toEqual(at100);
+    expect(at101.result.structuredContent).toMatchObject({ total: 150, cap: 100, shown: 100 });
+  });
+
+  it('stages the same dataframe at 101 as at 100', async () => {
+    // 101 filings: more than the applied 100 stages, more than a requested 101 would not.
+    mockApi.searchFilings.mockResolvedValue(window(101));
+    const registerDataframe = vi.fn().mockResolvedValue({
+      tableName: 'df_SEARCH_CLAMP',
+      rowCount: 101,
+      expiresAt: '2026-11-01T00:00:00.000Z',
+      columnSchema: [],
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+
+    const { at100, at101 } = await atCapAndAbove({ query: '"going concern"' });
+
+    expect(registerDataframe).toHaveBeenCalledTimes(2);
+    expect(registerDataframe.mock.calls[1]?.[1]).toEqual(registerDataframe.mock.calls[0]?.[1]);
+    expect(at101).toEqual(at100);
+  });
+
+  it('advertises 1000 as the maximum with the switch on and 100 with it off, which rejects 101', async () => {
+    const maximum = (clampOversizedLimits: boolean) => {
+      const def = buildToolDefinitions({ dropEnabled: false, clampOversizedLimits }).find(
+        (d) => d.name === 'secedgar_search_filings',
+      );
+      return (z.toJSONSchema(def!.input, { io: 'input' }) as any).properties.limit.maximum;
+    };
+    expect(maximum(true)).toBe(1000);
+    expect(maximum(false)).toBe(100);
+
+    const off = createSearchFilingsTool({ clampOversizedLimits: false });
+    const rejected = await runToolContract(off, { query: '"going concern"', limit: 101 });
+    expect(rejected.isError).toBe(true);
+    expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
   });
 });

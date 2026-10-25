@@ -129,9 +129,26 @@ describe('EdgarApiService — request URL shape (#156)', () => {
     ['unpadded', '320193'],
   ])('data.sec.gov reads given a %s CIK keep the padded path', (_form, cik) => {
     it('getSubmissions', async () => {
+      // The smallest body with the shape every submissions reader indexes (#186).
+      const recent = Object.fromEntries(
+        [
+          'accessionNumber',
+          'filingDate',
+          'form',
+          'primaryDocument',
+          'primaryDocDescription',
+          'reportDate',
+        ].map((column) => [column, []]),
+      );
       const fetchMock = serveOnly(
         'https://data.sec.gov/submissions/CIK0000320193.json',
-        '{"cik":"320193","name":"Apple Inc."}',
+        JSON.stringify({
+          cik: '320193',
+          name: 'Apple Inc.',
+          tickers: [],
+          exchanges: [],
+          filings: { recent, files: [] },
+        }),
       );
       await expect(getEdgarApiService().getSubmissions(cik, scope())).resolves.toMatchObject({
         name: 'Apple Inc.',
