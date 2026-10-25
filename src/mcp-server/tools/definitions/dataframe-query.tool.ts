@@ -149,9 +149,9 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
     {
       reason: 'denied_function',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The SQL calls a file-reading or external-data table function (read_csv, read_parquet, glob), a function that reads an engine setting (current_setting, current_schema), or one that runs SQL or names a table from a string (query_table, or query() over anything but a single string literal)',
+      when: 'The SQL calls a file-reading or external-data table function (read_csv, read_parquet, glob), a function that reads an engine setting (current_setting, current_schema — an unqualified current_schema is refused even where it names a column, which reads qualified as <table>.current_schema), or one that runs SQL or names a table from a string (query_table, or query() over anything but a single string literal)',
       recovery:
-        'Remove the function the message names and query only the df_<id> tables secedgar_dataframe_describe lists.',
+        'Remove the function the message names, or qualify a column it names with its table, and query only the df_<id> tables secedgar_dataframe_describe lists.',
       thrownBy: 'service',
     },
     {
