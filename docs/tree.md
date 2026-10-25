@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-10-24 11:14:02
+Generated on: 2026-10-25 08:03:05
 
 ```text
 secedgar-mcp-server/
@@ -31,6 +31,7 @@ secedgar-mcp-server/
 │   ├── 0.13.x/
 │   ├── 0.14.x/
 │   ├── 0.15.x/
+│   ├── 0.16.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
@@ -185,7 +186,9 @@ secedgar-mcp-server/
 │   │       │   ├── index.ts
 │   │       │   ├── search-concepts.tool.ts
 │   │       │   └── search-filings.tool.ts
-│   │       └── fixed-point.ts
+│   │       ├── fixed-point.ts
+│   │       ├── form-filter.ts
+│   │       └── limit-clamp.ts
 │   ├── services/
 │   │   ├── canvas-bridge/
 │   │   │   ├── canvas-bridge.ts
@@ -217,6 +220,14 @@ secedgar-mcp-server/
 │   │       └── xml-nodes.ts
 │   └── index.ts
 ├── tests/
+│   ├── config/
+│   │   └── server-config.test.ts
+│   ├── fixtures/
+│   │   └── 13f/
+│   │       ├── berkshire-2025q1-new-holdings-infotable.xml
+│   │       ├── berkshire-2025q1-new-holdings-primary_doc.xml
+│   │       ├── berkshire-2025q1-original-infotable.xml
+│   │       └── berkshire-2025q1-original-primary_doc.xml
 │   ├── mcp-server/
 │   │   ├── prompts/
 │   │   │   └── definitions/
@@ -251,8 +262,10 @@ secedgar-mcp-server/
 │   │       ├── amendment-disclosure.test.ts
 │   │       ├── dataframe-pointers.test.ts
 │   │       ├── fixed-point.test.ts
+│   │       ├── form-filter.test.ts
 │   │       ├── fund-ticker-resolution.test.ts
 │   │       ├── input-aliases.test.ts
+│   │       ├── limit-clamp.test.ts
 │   │       ├── rate-limit-contract.test.ts
 │   │       └── strict-inputs.test.ts
 │   ├── scripts/
@@ -290,8 +303,10 @@ secedgar-mcp-server/
 │   │       ├── same-cik.test.ts
 │   │       ├── submissions-archive.test.ts
 │   │       └── xml-nodes.test.ts
-│   └── support/
-│       └── assertions.ts
+│   ├── support/
+│   │   ├── assertions.ts
+│   │   └── commonmark.ts
+│   └── index.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes

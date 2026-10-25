@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.16.0](changelog/0.16.x/0.16.0.md) — 2026-10-25 · ⚠️ Breaking
+
+Over-cap limits are served at the cap behind EDGAR_CLAMP_OVERSIZED_LIMITS, 13F-HR/A amendments are composed into secedgar_get_institutional_holdings, and secedgar_dataframe_query now refuses an unqualified current_schema (breaking).
+
 ## [0.15.15](changelog/0.15.x/0.15.15.md) — 2026-10-24
 
 Correct ownership attribution and holdings disclosure, preserve numeric text and fund denominations, and provide holder-search continuation guidance.
