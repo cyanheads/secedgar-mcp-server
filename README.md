@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/secedgar-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/secedgar-mcp-server) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/secedgar-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/secedgar-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/secedgar-mcp-server) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/secedgar-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.4.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.4-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -67,6 +67,14 @@ SEC EDGAR filings, financials, and ownership data. Look up companies by ticker, 
 | Prompt | Description |
 |:---|:---|
 | `secedgar_company_analysis` | Structured analysis of a company's SEC filings: financial trends, risk factors, material events |
+
+### Skills
+
+| Skill | Description |
+|:---|:---|
+| `secedgar-guide` | Which tool answers each ownership question, where CIKs, accession numbers, CUSIPs, and fund series IDs come from, and the coverage limits to check before reporting data absent |
+
+The skill ships in `skills/secedgar-guide/SKILL.md`. Plugin hosts load it from the package, and MCP clients that support the Skills extension read it from the server as `skill://secedgar-guide/SKILL.md`.
 
 ## Capability reference
 
@@ -247,116 +255,33 @@ Agent-friendly output:
 
 ## Getting started
 
-### Public Hosted Instance
+Connect to the hosted instance, no install:
 
-A public instance is available at `https://secedgar.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP:
-
-```json
-{
-  "mcpServers": {
-    "secedgar-mcp-server": {
-      "type": "streamable-http",
-      "url": "https://secedgar.caseyjhand.com/mcp"
-    }
-  }
-}
+```sh
+claude mcp add --transport http secedgar-mcp-server https://secedgar.caseyjhand.com/mcp
 ```
 
-### Self-Hosted / Local
+Or run it locally:
 
-Add the following to your MCP client configuration file.
-
-```json
-{
-  "mcpServers": {
-    "secedgar-mcp-server": {
-      "type": "stdio",
-      "command": "bunx",
-      "args": ["@cyanheads/secedgar-mcp-server@latest"],
-      "env": {
-        "EDGAR_USER_AGENT": "YourAppName your-email@example.com",
-        "MCP_TRANSPORT_TYPE": "stdio"
-      }
-    }
-  }
-}
+```sh
+claude mcp add secedgar-mcp-server -e EDGAR_USER_AGENT="YourAppName your-email@example.com" -- npx -y @cyanheads/secedgar-mcp-server
 ```
 
-Or with npx (no Bun required):
+For other clients, add this to the MCP config file:
 
 ```json
 {
   "mcpServers": {
     "secedgar-mcp-server": {
-      "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@cyanheads/secedgar-mcp-server@latest"],
-      "env": {
-        "EDGAR_USER_AGENT": "YourAppName your-email@example.com",
-        "MCP_TRANSPORT_TYPE": "stdio"
-      }
+      "args": ["-y", "@cyanheads/secedgar-mcp-server"],
+      "env": { "EDGAR_USER_AGENT": "YourAppName your-email@example.com" }
     }
   }
 }
 ```
 
-Or with Docker:
-
-```json
-{
-  "mcpServers": {
-    "secedgar-mcp-server": {
-      "type": "stdio",
-      "command": "docker",
-      "args": [
-        "run", "-i", "--rm",
-        "-e", "MCP_TRANSPORT_TYPE=stdio",
-        "-e", "EDGAR_USER_AGENT=YourAppName your-email@example.com",
-        "ghcr.io/cyanheads/secedgar-mcp-server:latest"
-      ]
-    }
-  }
-}
-```
-
-For Streamable HTTP, set the transport and start the server:
-
-```sh
-MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
-# Server listens at http://localhost:3010/mcp
-```
-
-### Prerequisites
-
-- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
-- A User-Agent string in SEC's `"AppName contact@email.com"` format; no account or key required.
-
-### Installation
-
-1. **Clone the repository:**
-
-```sh
-git clone https://github.com/cyanheads/secedgar-mcp-server.git
-```
-
-2. **Navigate into the directory:**
-
-```sh
-cd secedgar-mcp-server
-```
-
-3. **Install dependencies:**
-
-```sh
-bun install
-```
-
-4. **Configure environment:**
-
-```sh
-cp .env.example .env
-# edit .env and set EDGAR_USER_AGENT
-```
+SEC requires a User-Agent in `"AppName contact@email.com"` form on every request; no account or key is needed. For Docker or a source build, see [Running the server](#running-the-server).
 
 ## Configuration
 
@@ -389,27 +314,40 @@ See [`.env.example`](./.env.example) for the full list of optional overrides.
 
 ### Local development
 
-- **Build and run the production version:**
+Requires [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
+
+- **Clone and install:**
+
+  ```sh
+  git clone https://github.com/cyanheads/secedgar-mcp-server.git
+  cd secedgar-mcp-server && bun install
+  cp .env.example .env   # set EDGAR_USER_AGENT
+  ```
+
+- **Build and run:**
 
   ```sh
   bun run rebuild
-  bun run start:http   # or start:stdio
+  bun run start:http   # or start:stdio; HTTP listens at http://localhost:3010/mcp
   ```
 
 - **Run checks and tests:**
+
   ```sh
-  bun run devcheck     # Lints, formats, type-checks
-  bun run test         # Runs test suite
+  bun run devcheck     # Lint, format, typecheck, security
+  bun run test         # Vitest test suite
+  bun run lint:mcp     # Validate MCP definitions against spec
   ```
 
 ### Docker
 
 ```sh
-docker build -t secedgar-mcp-server .
-docker run -e EDGAR_USER_AGENT="MyApp my@email.com" -p 3010:3010 secedgar-mcp-server
+docker run --rm -e EDGAR_USER_AGENT="YourAppName your-email@example.com" -p 3010:3010 ghcr.io/cyanheads/secedgar-mcp-server:latest
 ```
 
-The image defaults to HTTP on port 3010 and ships the mirror CLI, so a running container can bootstrap and refresh its own mirror:
+The image defaults to HTTP transport on port 3010, stateless session mode, and logs to `/var/log/secedgar-mcp-server`. To run it over stdio from an MCP client, use `"command": "docker"` with `"args": ["run", "-i", "--rm", "-e", "MCP_TRANSPORT_TYPE=stdio", "-e", "EDGAR_USER_AGENT=YourAppName your-email@example.com", "ghcr.io/cyanheads/secedgar-mcp-server:latest"]`. To build locally, `docker build -t secedgar-mcp-server .`; OpenTelemetry peer dependencies are installed by default — build with `--build-arg OTEL_ENABLED=false` to omit them.
+
+The image ships the mirror CLI, so a running container can bootstrap and refresh its own mirror:
 
 ```sh
 docker exec <container> bun run mirror:verify    # sync status + sample reads
