@@ -484,7 +484,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       })
       .optional()
       .describe(
-        'Dataframe of every position, each row carrying the fund keys; joins 13F and insider dataframes on cusip. Absent when canvas is unavailable or the report had no positions.',
+        'Dataframe of every position, each row carrying the fund keys; joins 13F and 13D/G dataframes on cusip. Absent when canvas is unavailable or the report had no positions.',
       ),
   }),
 

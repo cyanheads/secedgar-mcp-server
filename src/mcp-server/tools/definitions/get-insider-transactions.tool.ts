@@ -6,6 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { fixedPoint } from '@/mcp-server/tools/fixed-point.js';
 import {
   type LimitClampOptions,
@@ -537,6 +538,8 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     }
 
     const windowText = dateWindow && describeWindow(filedAfter, filedBefore);
+    // The notices are authored Markdown, so the caller's company text is escaped.
+    const companyText = escapeMarkdownInline(input.company);
     if (windowText && filingBatch.length === 0) {
       // The walk runs newest first, so only an earlier upper bound reaches older filings.
       const walkNote = walk?.truncated
@@ -547,7 +550,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
           ? ' Structured Form 4 filings begin in mid-2003, so an earlier window finds none.'
           : '';
       ctx.enrich.notice(
-        `No Form 4 filings filed ${windowText} for '${input.company}'.${walkNote}${eraNote}`,
+        `No Form 4 filings filed ${windowText} for '${companyText}'.${walkNote}${eraNote}`,
       );
     } else if (transactions.length === 0) {
       const filterNote =
@@ -558,7 +561,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       const scope = windowText
         ? `the ${filingsScanned} ${filings} filed ${windowText}`
         : `the ${filingsScanned} most recent ${filings}`;
-      const lead = `No insider transactions found for '${input.company}'${filterNote} in ${scope}`;
+      const lead = `No insider transactions found for '${companyText}'${filterNote} in ${scope}`;
       if (filingsOtherIssuer > 0 && filingsOtherIssuer === filingsScanned) {
         // Every filing read is another issuer's insider activity, so no filter or
         // broader form search surfaces this company's rows from them (#157).

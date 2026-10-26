@@ -7,6 +7,7 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { describe, expect, it } from 'vitest';
 import { searchConceptsTool } from '@/mcp-server/tools/definitions/search-concepts.tool.js';
 import { blockAt, blockText } from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 describe('searchConceptsTool', () => {
   it('returns concepts for a keyword match', async () => {
@@ -44,6 +45,18 @@ describe('searchConceptsTool', () => {
     const enrichment = getEnrichment(ctx);
     expect(typeof enrichment.notice).toBe('string');
     expect(enrichment.notice).toContain('zzz_no_match_concept');
+  });
+
+  it('escapes the search text inside the authored no-match notice', async () => {
+    const ctx = createMockContext();
+    const input = searchConceptsTool.input.parse({ search: 'zzz *no* [match](x)' });
+    await searchConceptsTool.handler(input, ctx);
+
+    const notice = getEnrichment(ctx).notice;
+    expect(typeof notice).toBe('string');
+    expect(readCommonMark(String(notice))).toBe(
+      'No concepts matched "zzz *no* [match](x)". Try a broader search term, a different group, or call with no filters to see the full catalog.',
+    );
   });
 
   it('does not populate enrichment notice when concepts are found', async () => {

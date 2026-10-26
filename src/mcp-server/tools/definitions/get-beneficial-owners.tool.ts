@@ -91,7 +91,7 @@ const filingsLimit = limitClamp({
 export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
   title: 'Get Beneficial Owners',
   description:
-    "List the 5%-and-over beneficial owners of a public company, parsed from the structured SCHEDULE 13D and SCHEDULE 13G filings made about it. The input is the ISSUER — the company being held — which is the opposite direction from secedgar_get_institutional_holdings, where the input is the manager. 13D is the activist form and carries the filer's stated purpose of the transaction; 13G is the passive form and has no purpose field at all, which is the substantive difference between a stake that intends to influence control and one that does not. Every filing is returned with each reporting person listed separately, because voting power, dispositive power, and percent of class are reported per person even on a joint filing where several funds and their controlling principal report overlapping shares — summing those percentages double-counts the same position. Coverage starts at 2024-12-18, when SEC replaced the legacy SC 13D / SC 13G text filings with this XML format; earlier stakes are readable but not parseable, and the response reports how many of them the issuer has. The full parsed set is materialized as df_<id> when a canvas is available, one row per reporting person, so it joins against the insider and 13F dataframes on issuer CIK — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query.",
+    "List the 5%-and-over beneficial owners of a public company, parsed from the structured SCHEDULE 13D and SCHEDULE 13G filings made about it. The input is the ISSUER — the company being held — which is the opposite direction from secedgar_get_institutional_holdings, where the input is the manager. 13D is the activist form and carries the filer's stated purpose of the transaction; 13G is the passive form and has no purpose field at all, which is the substantive difference between a stake that intends to influence control and one that does not. Every filing is returned with each reporting person listed separately, because voting power, dispositive power, and percent of class are reported per person even on a joint filing where several funds and their controlling principal report overlapping shares — summing those percentages double-counts the same position. Coverage starts at 2024-12-18, when SEC replaced the legacy SC 13D / SC 13G text filings with this XML format; earlier stakes are readable but not parseable, and the response reports how many of them the issuer has. The full parsed set is materialized as df_<id> when a canvas is available, one row per reporting person, so it joins against the insider dataframes on issuer CIK and the 13F and NPORT-P dataframes on CUSIP — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   errors: [
@@ -340,7 +340,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       })
       .optional()
       .describe(
-        'Dataframe with one row per reporting person across parsed filings; joins insider and 13F dataframes on issuer_cik. Absent when canvas is unavailable or nothing parsed.',
+        'Dataframe with one row per reporting person across parsed filings; joins insider dataframes on issuer_cik, and 13F and NPORT-P dataframes on cusip. Absent when canvas is unavailable or nothing parsed.',
       ),
   }),
 
@@ -511,7 +511,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     const truncated = notExamined > 0;
 
     // One row per reporting person — the grain the ownership question is asked at, and the
-    // grain that joins to the insider and 13F dataframes on issuer_cik.
+    // grain that joins to the insider dataframes on issuer_cik and the 13F and NPORT-P ones on cusip.
     let dataset:
       | { name: string; row_count: number; expires_at: string; truncated: boolean }
       | undefined;

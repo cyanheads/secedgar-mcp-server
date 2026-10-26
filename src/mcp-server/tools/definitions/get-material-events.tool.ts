@@ -7,6 +7,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import {
   type LimitClampOptions,
   limitClamp,
@@ -439,10 +440,12 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
     if (scanned.length === 0) {
       // Cut short by the cap, the empty result covers only the span scanned, and a
       // wider range would reach nothing further — the depth sentence names the lever.
+      // The notice is authored Markdown, so SEC's entity name inside it is escaped.
+      const name = escapeMarkdownInline(submissions.name);
       ctx.enrich.notice(
         depthNote
-          ? `${submissions.name} filed no 8-K ${windowText}${hasDateFilter ? ' as far back as the scan reached' : ''}.${depthNote} List every form type with secedgar_company_search.`
-          : `${submissions.name} filed no 8-K ${windowText}. Widen the date range, or list every form type with secedgar_company_search.`,
+          ? `${name} filed no 8-K ${windowText}${hasDateFilter ? ' as far back as the scan reached' : ''}.${depthNote} List every form type with secedgar_company_search.`
+          : `${name} filed no 8-K ${windowText}. Widen the date range, or list every form type with secedgar_company_search.`,
       );
     } else if (matched.length === 0) {
       const present = Object.keys(itemDistribution).sort().join(', ');

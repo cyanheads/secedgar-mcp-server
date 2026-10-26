@@ -46,7 +46,9 @@ export const dataframeDescribeTool = tool('secedgar_dataframe_describe', {
             created_at: z.string().describe('ISO 8601 creation timestamp.'),
             expires_at: z
               .string()
-              .describe('ISO 8601 expiry timestamp. Sliding TTL touched on every dataframe op.'),
+              .describe(
+                'ISO 8601 expiry timestamp, fixed when the table is staged; queries do not extend it.',
+              ),
             row_count: z.number().describe('Rows materialized in the dataframe.'),
             truncated: z
               .boolean()

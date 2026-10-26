@@ -5,6 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import {
   type LimitClampOptions,
   limitClamp,
@@ -560,10 +561,12 @@ export const getFilingTool = tool('secedgar_get_filing', {
       const landing = blank
         ? undefined
         : resolveSection(fullText, headings, input.section, PROXY_FORM_RE.test(form ?? ''));
+      // The notices are authored Markdown, so the caller's section text is escaped.
+      const sectionText = escapeMarkdownInline(input.section);
       if (landing?.source === 'line') {
-        lineNotice = `No detected heading matches section '${input.section}', so this page starts at the first document line that does.`;
+        lineNotice = `No detected heading matches section '${sectionText}', so this page starts at the first document line that does.`;
       } else if (landing?.source === 'line-over-heading') {
-        lineNotice = `No detected heading equals section '${input.section}', so this page starts at the first document line that does, ahead of headings that only contain it.`;
+        lineNotice = `No detected heading equals section '${sectionText}', so this page starts at the first document line that does, ahead of headings that only contain it.`;
       }
       if (landing === undefined) {
         // Render the outline into the message itself — clients reliably see only
@@ -619,7 +622,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
     // guidance. The outline is emitted only on a truncated page, so the cut
     // always has guidance to join.
     const fallbackNotice = unservedPrimary
-      ? `The filing index names ${unservedPrimary} as the primary document, but the SEC archive does not serve it, so this text is the full submission file ${targetName}.`
+      ? `The filing index names ${escapeMarkdownInline(unservedPrimary)} as the primary document, but the SEC archive does not serve it, so this text is the full submission file ${escapeMarkdownInline(targetName)}.`
       : undefined;
     if (truncated) {
       // section outranks offset, so a caller who keeps it reads this page again.

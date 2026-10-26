@@ -13,6 +13,7 @@ import {
   notFound,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { normalizeFormFilter } from '@/mcp-server/tools/form-filter.js';
 import {
   type LimitClampOptions,
@@ -1233,7 +1234,8 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
           ? `Merged across the ${EFTS_FULLTEXT_FLOOR} boundary — filings from ${EFTS_FULLTEXT_FLOOR} on come from the full-text index, earlier ones from ${archiveSource}. Read each row's source; the EFTS-only fields (period_ending, ticker, file_description, matched_documents, sic, location) are null on archive rows.${windowNote}${quarterNote}${scanNote}`
           : `Served from ${archiveSource} — full-text search covers 2001-present only.${quarterNote}${scanNote}`,
         zeroHitCriteria: [
-          ...(hasFreeText ? [`"${query}"`] : []),
+          // The notice is authored Markdown, so the caller's text inside it is escaped.
+          ...(hasFreeText ? [`"${escapeMarkdownInline(query)}"`] : []),
           ...(entityCik ? [`CIK ${entityCik}`] : []),
           ...(forms ? [`forms [${forms.join(', ')}]`] : []),
           `dates ${startDate} to ${endDate}`,
@@ -1340,9 +1342,9 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     if (totalDocuments === 0) {
       // Genuine no-match — EFTS returned zero hits. Echo all active criteria; on the
       // browse path (no query text) lead with the form/entity criteria instead of an
-      // empty quoted query.
+      // empty quoted query. The notice is authored Markdown, so the query is escaped.
       const criteria: string[] = [];
-      if (query) criteria.push(`"${query}"`);
+      if (query) criteria.push(`"${escapeMarkdownInline(query)}"`);
       if (entityCik) criteria.push(`entity CIK ${entityCik}`);
       if (forms) criteria.push(`forms [${forms.join(', ')}]`);
       if (dates) criteria.push(`dates ${dates.startDate} to ${dates.endDate}`);

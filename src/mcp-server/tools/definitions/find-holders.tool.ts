@@ -8,6 +8,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import {
   type LimitClampOptions,
   limitClamp,
@@ -186,7 +187,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
       ])
       .optional()
       .describe(
-        'Reporting quarter to search, "YYYY-QN" (e.g. "2026-Q1"). Omit for the newest quarter whose 45-day filing deadline has passed — the applied quarter and its filing window are echoed in the response. A quarter still inside its deadline returns nothing, because the filings do not exist yet.',
+        'Reporting quarter to search, "YYYY-QN" (e.g. "2026-Q1"). Omit for the newest quarter whose 45-day filing deadline has passed — the applied quarter and its filing window are echoed in the response. A quarter still inside its deadline returns only the managers that filed early, so its set is incomplete until the deadline passes.',
       ),
     limit: holdersLimit.schema(true),
   }),
@@ -440,7 +441,11 @@ export const findHoldersTool = tool('secedgar_find_holders', {
       ordering: `Filers are listed in EDGAR search-relevance order, which reflects text match strength only — it is not a ranking by shares held or market value.${sampleNote} Read a manager's actual position with secedgar_get_institutional_holdings using its filer_cik and quarter "${quarter}".`,
     });
 
-    const searchedTerm = searchMode === 'cusip' ? `CUSIP ${searchKey}` : `the phrase ${searchKey}`;
+    // The notices are authored Markdown, so the issuer phrase inside them is escaped.
+    const searchedTerm =
+      searchMode === 'cusip'
+        ? `CUSIP ${searchKey}`
+        : `the phrase ${escapeMarkdownInline(searchKey)}`;
     const notices: string[] = [];
     if (total === 0) {
       const deadline = addDays(quarterEnd, FILING_DEADLINE_DAYS);
