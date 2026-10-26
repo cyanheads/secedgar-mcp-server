@@ -48,6 +48,7 @@ await createApp({
   tools: buildToolDefinitions({ dropEnabled, clampOversizedLimits }),
   resources: [conceptsResource, filingTypesResource],
   prompts: [companyAnalysisPrompt],
+  skills: 'skills',
   // No tool calls ctx.requestInput, so no HTTP session state is needed and every
   // request can land on any instance. MCP_SESSION_MODE still overrides this when
   // it carries a meaningful value.
