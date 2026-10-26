@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-10-25 08:03:05
+Generated on: 2026-10-26 07:13:52
 
 ```text
 secedgar-mcp-server/
@@ -32,6 +32,7 @@ secedgar-mcp-server/
 │   ├── 0.14.x/
 │   ├── 0.15.x/
 │   ├── 0.16.x/
+│   ├── 0.17.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
@@ -52,6 +53,8 @@ secedgar-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -155,6 +158,9 @@ secedgar-mcp-server/
 │   ├── release-github.ts
 │   ├── split-changelog.ts
 │   └── tree.ts
+├── skills/
+│   └── secedgar-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -323,7 +329,9 @@ secedgar-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

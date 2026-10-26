@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.17.0](changelog/0.17.x/0.17.0.md) — 2026-10-26
+
+Publishes the secedgar-guide Agent Skill over MCP, escapes caller and SEC text inside notices, corrects dataframe join-key and TTL descriptions, and moves to mcp-ts-core 0.13.18 and DuckDB 2.
+
 ## [0.16.0](changelog/0.16.x/0.16.0.md) — 2026-10-25 · ⚠️ Breaking
 
 Over-cap limits are served at the cap behind EDGAR_CLAMP_OVERSIZED_LIMITS, 13F-HR/A amendments are composed into secedgar_get_institutional_holdings, and secedgar_dataframe_query now refuses an unqualified current_schema (breaking).
