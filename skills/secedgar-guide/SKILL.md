@@ -33,7 +33,7 @@ Not here: market prices, quotes, or returns (the only prices are the per-share p
 
 - **XBRL tagging phased in from 2009.** Earlier years appear only as comparatives restated in later filings, so they are sparse. No financial facts for a year means the year was never tagged, not that the company did not report the line. Read the 10-K or 10-Q text instead.
 - **Foreign private issuers file 20-F or 40-F**, where a domestic company files 10-K, and many report under `ifrs-full`. Check those forms before saying no annual report exists, and on `no_concept_data` retry with the taxonomy its hint names. secedgar_fetch_frames holds no IFRS filers at all, so a cross-company screen silently leaves them out.
-- **Structured coverage has start dates.** Form 4 XML starts in mid-2003. SCHEDULE 13D/13G XML starts 2024-12-18; earlier stakes are legacy `SC 13D` / `SC 13G` text filings, and a forms filter spanning that date lists both spellings.
+- **Structured coverage has start dates.** Form 4 XML starts in mid-2003. SCHEDULE 13D/13G XML starts 2024-12-18; earlier stakes are legacy `SC 13D` / `SC 13G` text filings, so a forms filter spanning that date must list both spellings.
 - **Ownership filings lag their period.** A 13F-HR is due 45 days after its quarter ends, so a quarter still inside that window holds only the managers that filed early. An NPORT-P publishes about two months after its period. Managers under $100M in 13(f) securities file no 13F, and a 13F-NT means another manager reported the holdings.
 - **Fiscal Q4 is not a quarterly fact.** A quarterly series skips the calendar quarter a filer's fiscal Q4 spans. Derive that quarter as the annual total minus the three reported quarters, as the caveat says, instead of reporting it missing.
 
