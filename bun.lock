@@ -5,8 +5,8 @@
     "": {
       "name": "@cyanheads/secedgar-mcp-server",
       "dependencies": {
-        "@cyanheads/mcp-ts-core": "^0.13.16",
-        "@duckdb/node-api": "^1.5.6-r.2",
+        "@cyanheads/mcp-ts-core": "^0.13.18",
+        "@duckdb/node-api": "^2.0.0-r.1",
         "better-sqlite3": "^13.0.3",
         "domhandler": "^6.0.1",
         "domutils": "^4.0.2",
@@ -76,27 +76,27 @@
 
     "@biomejs/cli-win32-x64": ["@biomejs/cli-win32-x64@2.6.3", "", { "os": "win32", "cpu": "x64" }, "sha512-GhtOPphBWlnCepqpNk/w5eGN5oGRCzL20EbAkL1XCIpyboeVC9R642noyT43l8LSenGS4qz9IL8sKPfwY37V/Q=="],
 
-    "@cyanheads/mcp-ts-core": ["@cyanheads/mcp-ts-core@0.13.16", "", { "dependencies": { "@hono/node-server": "^2.1.5", "@modelcontextprotocol/server": "^2.3.1", "@opentelemetry/api": "~1.9.1", "hono": "^4.13.13", "jose": "^6.2.13", "pino": "^10.4.0", "zod": "^4.6.7" }, "peerDependencies": { "@duckdb/node-api": "^1.5.5-r.1 || ^1.5.6-r.1", "@hono/otel": "^1.1.2", "@modelcontextprotocol/client": "^2.1.0", "@modelcontextprotocol/ext-apps": "^2.0.0", "@opentelemetry/api-logs": "^0.223.0", "@opentelemetry/exporter-logs-otlp-http": "^0.223.0", "@opentelemetry/exporter-metrics-otlp-http": "^0.223.0", "@opentelemetry/exporter-trace-otlp-http": "^0.223.0", "@opentelemetry/instrumentation-http": "^0.223.0", "@opentelemetry/instrumentation-pino": "^0.69.0", "@opentelemetry/resources": "^2.10.0", "@opentelemetry/sdk-logs": "^0.223.0", "@opentelemetry/sdk-metrics": "^2.10.0", "@opentelemetry/sdk-node": "^0.223.0", "@opentelemetry/sdk-trace-node": "^2.10.0", "@opentelemetry/semantic-conventions": "^1.43.0", "@supabase/supabase-js": "^2.110.8", "better-sqlite3": "^13.0.1", "chrono-node": "^2.10.1", "defuddle": "^0.19.2", "diff": "^9.0.0", "fast-check": "^4.9.0", "fast-xml-parser": "^5.10.1", "js-yaml": "^5.2.2", "linkedom": "^0.18.13", "node-cron": "^4.6.0", "openai": "^6.48.0 || ^7.0.0", "papaparse": "^5.5.4", "partial-json": "^0.1.7", "pdf-lib": "^1.17.1", "sanitize-html": "^2.17.6", "unpdf": "^1.6.2", "vitest": ">=4.0.0" }, "optionalPeers": ["@duckdb/node-api", "@hono/otel", "@modelcontextprotocol/client", "@modelcontextprotocol/ext-apps", "@opentelemetry/api-logs", "@opentelemetry/exporter-logs-otlp-http", "@opentelemetry/exporter-metrics-otlp-http", "@opentelemetry/exporter-trace-otlp-http", "@opentelemetry/instrumentation-http", "@opentelemetry/instrumentation-pino", "@opentelemetry/resources", "@opentelemetry/sdk-logs", "@opentelemetry/sdk-metrics", "@opentelemetry/sdk-node", "@opentelemetry/sdk-trace-node", "@opentelemetry/semantic-conventions", "@supabase/supabase-js", "better-sqlite3", "chrono-node", "defuddle", "diff", "fast-check", "fast-xml-parser", "js-yaml", "linkedom", "node-cron", "openai", "papaparse", "partial-json", "pdf-lib", "sanitize-html", "unpdf", "vitest"], "bin": { "mcp-ts-core": "dist/cli/init.js" } }, "sha512-9htDsCHOND3aQywFQrdlhnMjzLaTaZiTP1Gu25G9+7vATVWX2IOjU54i/g9wqCrBZparZT2CQ3fhpEHtUtZA6A=="],
+    "@cyanheads/mcp-ts-core": ["@cyanheads/mcp-ts-core@0.13.18", "", { "dependencies": { "@hono/node-server": "^2.1.5", "@modelcontextprotocol/server": "^2.4.0", "@opentelemetry/api": "~1.10.0", "hono": "^4.13.13", "jose": "^6.2.13", "pino": "^10.4.0", "zod": "^4.6.7" }, "peerDependencies": { "@duckdb/node-api": "^1.5.5-r.1 || ^1.5.6-r.1 || ^2.0.0-r.1", "@hono/otel": "^1.1.2", "@modelcontextprotocol/client": "^2.1.0", "@modelcontextprotocol/ext-apps": "^2.0.0", "@opentelemetry/exporter-logs-otlp-http": "^0.300.0", "@opentelemetry/exporter-metrics-otlp-http": "^0.300.0", "@opentelemetry/exporter-trace-otlp-http": "^0.300.0", "@opentelemetry/instrumentation-http": "^0.300.0", "@opentelemetry/instrumentation-pino": "^0.70.0", "@opentelemetry/resources": "^3.0.0", "@opentelemetry/sdk-logs": "^3.0.0", "@opentelemetry/sdk-metrics": "^3.0.0", "@opentelemetry/sdk-node": "^0.300.0", "@opentelemetry/sdk-trace": "^3.0.0", "@opentelemetry/semantic-conventions": "^1.43.0", "@supabase/supabase-js": "^2.110.8", "better-sqlite3": "^13.0.1", "chrono-node": "^2.10.1", "defuddle": "^0.19.2", "diff": "^9.0.0", "fast-check": "^4.9.0", "fast-xml-parser": "^5.10.1", "js-yaml": "^5.2.2", "linkedom": "^0.18.13", "node-cron": "^4.6.0", "openai": "^6.48.0 || ^7.0.0", "papaparse": "^5.5.4", "partial-json": "^0.1.7", "pdf-lib": "^1.17.1", "sanitize-html": "^2.17.6", "unpdf": "^1.6.2", "vitest": ">=4.0.0" }, "optionalPeers": ["@duckdb/node-api", "@hono/otel", "@modelcontextprotocol/client", "@modelcontextprotocol/ext-apps", "@opentelemetry/exporter-logs-otlp-http", "@opentelemetry/exporter-metrics-otlp-http", "@opentelemetry/exporter-trace-otlp-http", "@opentelemetry/instrumentation-http", "@opentelemetry/instrumentation-pino", "@opentelemetry/resources", "@opentelemetry/sdk-logs", "@opentelemetry/sdk-metrics", "@opentelemetry/sdk-node", "@opentelemetry/sdk-trace", "@opentelemetry/semantic-conventions", "@supabase/supabase-js", "better-sqlite3", "chrono-node", "defuddle", "diff", "fast-check", "fast-xml-parser", "js-yaml", "linkedom", "node-cron", "openai", "papaparse", "partial-json", "pdf-lib", "sanitize-html", "unpdf", "vitest"], "bin": { "mcp-ts-core": "dist/cli/init.js" } }, "sha512-/rsAPr0v6xuDmbPy0ooxic2haiof4S84zPxXDDZVHHbo+b+WTP4tTycXwnZp2Pq/POKXngMljEWPiKXsGfIl0Q=="],
 
-    "@duckdb/node-api": ["@duckdb/node-api@1.5.6-r.2", "", { "dependencies": { "@duckdb/node-bindings": "1.5.6-r.2" } }, "sha512-xDXSabc44PIe7xzTVYtfXKkp1eqvXJSOPoYfgtcdj5ThYiy1lyNI1AGx8NHIg134pwy2xW4iqQ5IvKXVD/OKPg=="],
+    "@duckdb/node-api": ["@duckdb/node-api@2.0.0-r.1", "", { "dependencies": { "@duckdb/node-bindings": "2.0.0-r.1" } }, "sha512-SA4oG7X9UNpSJsr99b7rbJxSs7n5KqMEGV1kC04TxdsYHjGH6w4kGEOiC/yXzvgWr6Jd1WRQD9RUPTX6qGdEwg=="],
 
-    "@duckdb/node-bindings": ["@duckdb/node-bindings@1.5.6-r.2", "", { "dependencies": { "detect-libc": "^2.1.2" }, "optionalDependencies": { "@duckdb/node-bindings-darwin-arm64": "1.5.6-r.2", "@duckdb/node-bindings-darwin-x64": "1.5.6-r.2", "@duckdb/node-bindings-linux-arm64": "1.5.6-r.2", "@duckdb/node-bindings-linux-arm64-musl": "1.5.6-r.2", "@duckdb/node-bindings-linux-x64": "1.5.6-r.2", "@duckdb/node-bindings-linux-x64-musl": "1.5.6-r.2", "@duckdb/node-bindings-win32-arm64": "1.5.6-r.2", "@duckdb/node-bindings-win32-x64": "1.5.6-r.2" } }, "sha512-VthQ+73BXaxJCAcMEb5/tsArNaDcQ1DusAzlh7F6VXgoWRnK3F/j5+IQaHnlbSVNuYH5aGDZZIpAUQZvJrshlA=="],
+    "@duckdb/node-bindings": ["@duckdb/node-bindings@2.0.0-r.1", "", { "dependencies": { "detect-libc": "^2.1.2" }, "optionalDependencies": { "@duckdb/node-bindings-darwin-arm64": "2.0.0-r.1", "@duckdb/node-bindings-darwin-x64": "2.0.0-r.1", "@duckdb/node-bindings-linux-arm64": "2.0.0-r.1", "@duckdb/node-bindings-linux-arm64-musl": "2.0.0-r.1", "@duckdb/node-bindings-linux-x64": "2.0.0-r.1", "@duckdb/node-bindings-linux-x64-musl": "2.0.0-r.1", "@duckdb/node-bindings-win32-arm64": "2.0.0-r.1", "@duckdb/node-bindings-win32-x64": "2.0.0-r.1" } }, "sha512-R8mrpS9FFUNUL5Xi4NgirZWuP9/1KVEqy6b91a7s7TptIKnu4ZZLch3yBrN+GeWz3hoo5RUctfbaORLRFgqgwQ=="],
 
-    "@duckdb/node-bindings-darwin-arm64": ["@duckdb/node-bindings-darwin-arm64@1.5.6-r.2", "", { "os": "darwin", "cpu": "arm64" }, "sha512-JGNh1WQtlXrxDs6/5dmSH0tGBrn4Kl/GTlzay/KlIb0rJLray5c5PdZOl6o+ApOsAbgoQ2tRWuFFtoqwsfPqrQ=="],
+    "@duckdb/node-bindings-darwin-arm64": ["@duckdb/node-bindings-darwin-arm64@2.0.0-r.1", "", { "os": "darwin", "cpu": "arm64" }, "sha512-vay0TmtEaUM7Dm7z1nXlxy2KOcwlY3Xq+wAHRbkuOYmJu//qjcZBT7ijT4qE6m5qGyuLSOiq3w36ShCYApL4yg=="],
 
-    "@duckdb/node-bindings-darwin-x64": ["@duckdb/node-bindings-darwin-x64@1.5.6-r.2", "", { "os": "darwin", "cpu": "x64" }, "sha512-kx3tVfqytffRXgJ4AN7wB4dBaSS2WrmA0iy3dfIa7tbDYI8bFf+muZp6jtbsWAxhx+BzHV+wRmtMC/Ygmh/FTw=="],
+    "@duckdb/node-bindings-darwin-x64": ["@duckdb/node-bindings-darwin-x64@2.0.0-r.1", "", { "os": "darwin", "cpu": "x64" }, "sha512-mkPKjf7YR6xk8r5nVyHYjbybrQxMW+mfXJwl2otSKi8bireJV+xaOodyxqzP2cqPB95rpIg1owfYjFfUyLi7NQ=="],
 
-    "@duckdb/node-bindings-linux-arm64": ["@duckdb/node-bindings-linux-arm64@1.5.6-r.2", "", { "os": "linux", "cpu": "arm64", "libc": "glibc" }, "sha512-x/JvEl57X19PBlemOAQuyv0gf3QuP+GrnDZKLnCc6rDY/u8tlPYlzPoKHxWgcSu4FKXMSY0RXosgEm9ulMkOhA=="],
+    "@duckdb/node-bindings-linux-arm64": ["@duckdb/node-bindings-linux-arm64@2.0.0-r.1", "", { "os": "linux", "cpu": "arm64", "libc": "glibc" }, "sha512-V+oOWVY8qq7t5Uh+j8Hf+iwb4pLx2GsxAso1oGBP7ubf38QN1FGoPclJ8ByZob+ZcLdSDgwlS7QUbMB9pnCi2A=="],
 
-    "@duckdb/node-bindings-linux-arm64-musl": ["@duckdb/node-bindings-linux-arm64-musl@1.5.6-r.2", "", { "os": "linux", "cpu": "arm64", "libc": "musl" }, "sha512-scmH9rLsHc2npzWmJwEmhfPMlG/H3U+sHTqBEPs/eUQfD2OYf5uqo5M87BDOiStBaZICCDEpTnMOxoe4mgh2lw=="],
+    "@duckdb/node-bindings-linux-arm64-musl": ["@duckdb/node-bindings-linux-arm64-musl@2.0.0-r.1", "", { "os": "linux", "cpu": "arm64", "libc": "musl" }, "sha512-AAmQa/uI4LDfyY7zldUwU0Qnpv+yjQPxr0k2uJQylo0tyXWzQ1O0bBWfnDmN0ulym124gFRwr+fzlHyvxCt1FA=="],
 
-    "@duckdb/node-bindings-linux-x64": ["@duckdb/node-bindings-linux-x64@1.5.6-r.2", "", { "os": "linux", "cpu": "x64", "libc": "glibc" }, "sha512-Vrr5W9xrQB6Xnv4mgFuyzbvjKBrjMCQdAQiIWzcDOuKW+HpJKhjSUuNnOXplFmryy2eTsP/t7fodiqrgDPJYRA=="],
+    "@duckdb/node-bindings-linux-x64": ["@duckdb/node-bindings-linux-x64@2.0.0-r.1", "", { "os": "linux", "cpu": "x64", "libc": "glibc" }, "sha512-0VdXZQlCnD6oWwJABkp3ihZGBic/6Ora4PQekHv9jwa4Fe2OVcgm0hGtn6yyNGhURVDzZllMITEF98zdo6ussQ=="],
 
-    "@duckdb/node-bindings-linux-x64-musl": ["@duckdb/node-bindings-linux-x64-musl@1.5.6-r.2", "", { "os": "linux", "cpu": "x64", "libc": "musl" }, "sha512-GyLPoJcDRvi7vJMRnBNmI5kT95aaTVwgaFKBvpROen317oxckaA+OsBJovH+vtJlU7D+i+9mwmGN8wuDQAdJtg=="],
+    "@duckdb/node-bindings-linux-x64-musl": ["@duckdb/node-bindings-linux-x64-musl@2.0.0-r.1", "", { "os": "linux", "cpu": "x64", "libc": "musl" }, "sha512-8GCE/ye+w5GJsCgAk2owUyQA55rtoiBRe2T8A42CaqGbNNZm9hOj3C96d6flT82p7YhQVA8AzA40k9Pn30kJDg=="],
 
-    "@duckdb/node-bindings-win32-arm64": ["@duckdb/node-bindings-win32-arm64@1.5.6-r.2", "", { "os": "win32", "cpu": "arm64" }, "sha512-cHb9onfkRv8UG4iWMguu/5//aiJjzUyVncPEL3qkwmHgWtkgDP2psy8TExwoMvtnA+gTAQlIOebpanQ9ZYyzWw=="],
+    "@duckdb/node-bindings-win32-arm64": ["@duckdb/node-bindings-win32-arm64@2.0.0-r.1", "", { "os": "win32", "cpu": "arm64" }, "sha512-k47ASHylCPfUe7H+MvaNqsSwXGv8fjxixMF0vqJghp/wUUdAERMi1WNkPIjOj31cJ+O0x+Srdlfe4N0Diofm7Q=="],
 
-    "@duckdb/node-bindings-win32-x64": ["@duckdb/node-bindings-win32-x64@1.5.6-r.2", "", { "os": "win32", "cpu": "x64" }, "sha512-iFPP94+k8ODB0k0FnELFO5vFB3IkI203RiaPa/9gfymE3AaugLFiN/2oOLhKqvowXWzRLuDBF4dJXRAWJDJ0KA=="],
+    "@duckdb/node-bindings-win32-x64": ["@duckdb/node-bindings-win32-x64@2.0.0-r.1", "", { "os": "win32", "cpu": "x64" }, "sha512-8moS6xWPmM4UahiUhkfNSPFQG+7kpN2zu8w39C+K9Xgn8Z4Ctu5jOSTdXlybYrLofLH8jwgoNFiUOLMXLD4giw=="],
 
     "@hono/node-server": ["@hono/node-server@2.1.5", "", { "peerDependencies": { "hono": "^4 || ^5.0.0-0" } }, "sha512-MgP/I06GdvsilDspMk/qmRzpk8LOUStP6jFAbSRi40W09DhoyUn+Mj7eyKICPqeYKybOjVFLVIAQzvu1bfIa7Q=="],
 
@@ -118,7 +118,7 @@
 
     "@nodelib/fs.walk": ["@nodelib/fs.walk@1.2.8", "", { "dependencies": { "@nodelib/fs.scandir": "2.1.5", "fastq": "^1.6.0" } }, "sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg=="],
 
-    "@opentelemetry/api": ["@opentelemetry/api@1.9.1", "", {}, "sha512-gLyJlPHPZYdAk1JENA9LeHejZe1Ti77/pTeFm/nMXmQH/HFZlcS/O2XJB+L8fkbrNSqhdtlvjBVjxwUYanNH5Q=="],
+    "@opentelemetry/api": ["@opentelemetry/api@1.10.0", "", {}, "sha512-lMkyes8iHrG+mk6WH7X70MdCLI2RS0FwNBY1PyQ8UemaijE2m5mv5A0Niy3HtbYTFrgkUEQjFMXmSAk2hQDuPQ=="],
 
     "@oxc-project/types": ["@oxc-project/types@0.155.0", "", {}, "sha512-SeE8JPwW1xs1tHeNycjUtUBdhorRa8o4jlvjwk49R7/Z291i+4DQa7JJIgOm/TaYQZx+QrPQbVJ/9c8dMIZN8Q=="],
 

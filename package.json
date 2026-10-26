@@ -20,6 +20,7 @@
     "AGENTS.md",
     "Dockerfile",
     "server.json",
+    "skills/",
     "scripts/edgar-mirror-init.ts",
     "scripts/edgar-mirror-refresh.ts",
     "scripts/edgar-mirror-verify.ts",
@@ -96,8 +97,8 @@
     "access": "public"
   },
   "dependencies": {
-    "@cyanheads/mcp-ts-core": "^0.13.16",
-    "@duckdb/node-api": "^1.5.6-r.2",
+    "@cyanheads/mcp-ts-core": "^0.13.18",
+    "@duckdb/node-api": "^2.0.0-r.1",
     "better-sqlite3": "^13.0.3",
     "domhandler": "^6.0.1",
     "domutils": "^4.0.2",
