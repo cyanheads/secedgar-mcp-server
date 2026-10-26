@@ -3444,6 +3444,18 @@ describe('searchFilingsTool form filter (#194)', () => {
       expect(readCommonMark(allText(result))).toContain(notice);
     });
 
+    it('escapes the forms inside the authored no-match notice', async () => {
+      mockApi.searchFilings.mockResolvedValue({
+        ...mockEftsResponse,
+        hits: { total: { value: 0, relation: 'eq' }, hits: [] },
+      });
+      const result = await call({ forms: ['*8-k*'], ...recent });
+
+      expect(readCommonMark(allText(result))).toContain(
+        'No filings matched forms [*8-K*], dates 2026-10-01 to 2026-10-02.',
+      );
+    });
+
     it('stages the dataframe with the normalized forms', async () => {
       const registerDataframe = vi.fn().mockResolvedValue({
         tableName: 'df_FORMS_EFTS1',
@@ -3479,6 +3491,15 @@ describe('searchFilingsTool form filter (#194)', () => {
       const notice = String(bag(result.structuredContent).notice);
       expect(notice).toContain('No filings matched forms [S-1], dates 1996-11-01 to 1996-11-01.');
       expect(readCommonMark(allText(result))).toContain(notice);
+    });
+
+    it('escapes the forms inside the authored full-index no-match notice', async () => {
+      mockApi.fetchFullIndexQuarter.mockResolvedValue([]);
+      const result = await call({ forms: ['*s-1*'], ...pre2001 });
+
+      expect(readCommonMark(allText(result))).toContain(
+        'No filings matched forms [*S-1*], dates 1996-11-01 to 1996-11-01.',
+      );
     });
 
     it('stages the full-index dataframe with the normalized forms', async () => {

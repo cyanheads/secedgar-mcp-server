@@ -1237,7 +1237,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
           // The notice is authored Markdown, so the caller's text inside it is escaped.
           ...(hasFreeText ? [`"${escapeMarkdownInline(query)}"`] : []),
           ...(entityCik ? [`CIK ${entityCik}`] : []),
-          ...(forms ? [`forms [${forms.join(', ')}]`] : []),
+          ...(forms ? [`forms [${escapeMarkdownInline(forms.join(', '))}]`] : []),
           `dates ${startDate} to ${endDate}`,
         ].join(', '),
         scan,
@@ -1342,11 +1342,11 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     if (totalDocuments === 0) {
       // Genuine no-match — EFTS returned zero hits. Echo all active criteria; on the
       // browse path (no query text) lead with the form/entity criteria instead of an
-      // empty quoted query. The notice is authored Markdown, so the query is escaped.
+      // empty quoted query. The notice is authored Markdown, so the query and forms are escaped.
       const criteria: string[] = [];
       if (query) criteria.push(`"${escapeMarkdownInline(query)}"`);
       if (entityCik) criteria.push(`entity CIK ${entityCik}`);
-      if (forms) criteria.push(`forms [${forms.join(', ')}]`);
+      if (forms) criteria.push(`forms [${escapeMarkdownInline(forms.join(', '))}]`);
       if (dates) criteria.push(`dates ${dates.startDate} to ${dates.endDate}`);
       const criteriaText = criteria.length > 0 ? criteria.join(', ') : 'the given criteria';
       ctx.enrich.notice(

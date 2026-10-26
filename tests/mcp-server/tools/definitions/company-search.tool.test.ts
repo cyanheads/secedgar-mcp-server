@@ -1328,6 +1328,14 @@ describe('companySearchTool form filter (#194)', () => {
     expect(readCommonMark(blockText(result.content, 1))).toContain(notice);
   });
 
+  it('escapes the form types inside the authored no-match notice', async () => {
+    const result = await call({ query: 'AAPL', forms: ['*s-1*'] });
+
+    expect(readCommonMark(blockText(result.content, 1))).toContain(
+      'No filings matched form types [*S-1*] for this entity.',
+    );
+  });
+
   it('stages the dataframe with the normalized forms', async () => {
     mockApi.getSubmissions.mockResolvedValue(mockPagedSubmissions);
     const registerDataframe = vi.fn().mockResolvedValue({

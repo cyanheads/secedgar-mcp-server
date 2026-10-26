@@ -6,6 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { normalizeFormFilter } from '@/mcp-server/tools/form-filter.js';
 import {
   type LimitClampOptions,
@@ -474,8 +475,9 @@ export const companySearchTool = tool('secedgar_company_search', {
     }
 
     if (input.include_filings && formTypes && totalFilings === 0) {
+      // The notice is authored Markdown, so the caller's form types are escaped.
       ctx.enrich.notice(
-        `No filings matched form types [${formTypes.join(', ')}] for this entity. Try different form types or remove the filter.`,
+        `No filings matched form types [${escapeMarkdownInline(formTypes.join(', '))}] for this entity. Try different form types or remove the filter.`,
       );
     } else if (
       filings !== undefined &&
