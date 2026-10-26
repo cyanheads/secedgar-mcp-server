@@ -14,10 +14,25 @@ import {
   filterAgentDocEntries,
   filterNativeBindingEntries,
 } from '../../scripts/clean-mcpb.js';
-import {
-  AGENT_DOC_ENTRY as LINT_AGENT_DOC,
-  NATIVE_BINDING_ENTRY as LINT_NATIVE_BINDING,
-} from '../../scripts/lint-packaging.js';
+
+/**
+ * Loaded at run time by URL rather than imported: `lint-packaging.ts` carries a
+ * fallback `import('../src/mcp-server/skills.js')` that resolves only inside the
+ * mcp-ts-core repository, so a static import pulls it into this project's
+ * typecheck and fails `tsc`.
+ */
+const lintPackaging: { AGENT_DOC_ENTRY: unknown; NATIVE_BINDING_ENTRY: unknown } = await import(
+  new URL('../../scripts/lint-packaging.ts', import.meta.url).href
+);
+
+function exportedRegExp(name: keyof typeof lintPackaging): RegExp {
+  const value = lintPackaging[name];
+  if (!(value instanceof RegExp)) throw new Error(`lint-packaging.ts exports no RegExp ${name}`);
+  return value;
+}
+
+const LINT_AGENT_DOC = exportedRegExp('AGENT_DOC_ENTRY');
+const LINT_NATIVE_BINDING = exportedRegExp('NATIVE_BINDING_ENTRY');
 
 describe('bundle entry patterns', () => {
   it('declares the same AGENT_DOC_ENTRY in both scripts', () => {
