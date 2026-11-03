@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.17.1](changelog/0.17.x/0.17.1.md) — 2026-11-02
+
+Fixes EDGAR full-text search retries, escaping, and offset limits; matches company names across punctuation; answers over-cap compare_companies lists up to the cap; keeps beneficial-owner line breaks; reads agent-filed, 2000–2001, and structured XML filings in get_filing.
+
 ## [0.17.0](changelog/0.17.x/0.17.0.md) — 2026-10-26
 
 Publishes the secedgar-guide Agent Skill over MCP, escapes caller and SEC text inside notices, corrects dataframe join-key and TTL descriptions, and moves to mcp-ts-core 0.13.18 and DuckDB 2.

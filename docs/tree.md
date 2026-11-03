@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-10-26 07:13:52
+Generated on: 2026-11-03 04:15:36
 
 ```text
 secedgar-mcp-server/
@@ -229,11 +229,14 @@ secedgar-mcp-server/
 │   ├── config/
 │   │   └── server-config.test.ts
 │   ├── fixtures/
-│   │   └── 13f/
-│   │       ├── berkshire-2025q1-new-holdings-infotable.xml
-│   │       ├── berkshire-2025q1-new-holdings-primary_doc.xml
-│   │       ├── berkshire-2025q1-original-infotable.xml
-│   │       └── berkshire-2025q1-original-primary_doc.xml
+│   │   ├── 13f/
+│   │   │   ├── berkshire-2025q1-new-holdings-infotable.xml
+│   │   │   ├── berkshire-2025q1-new-holdings-primary_doc.xml
+│   │   │   ├── berkshire-2025q1-original-infotable.xml
+│   │   │   └── berkshire-2025q1-original-primary_doc.xml
+│   │   └── get-filing/
+│   │       ├── maplebear-13da-primary_doc.xml
+│   │       └── maplebear-13da-rendering.html
 │   ├── mcp-server/
 │   │   ├── prompts/
 │   │   │   └── definitions/
