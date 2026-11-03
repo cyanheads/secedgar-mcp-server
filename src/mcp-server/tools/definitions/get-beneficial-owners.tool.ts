@@ -11,7 +11,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import {
   type LimitClampOptions,
   limitClamp,
@@ -83,7 +83,7 @@ function clip(text: string | undefined, max: number): { text: string | undefined
  * paragraph. The caller follows the quote with a blank line before anything else it writes.
  */
 function quote(text: string, indent = ''): string[] {
-  return escapeMarkdownInline(text)
+  return escapeInline(text)
     .split('\n')
     .map((line) => `${indent}> ${line}`);
 }
@@ -677,10 +677,11 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
   },
 
   format: (result) => {
-    // Filer-written strings and the issuer's EDGAR name render through escapeMarkdownInline, the
-    // free text as a blockquote, so content[] reads back the structuredContent value as text.
+    // Filer-written strings, the issuer's EDGAR name, and the caller's issuer input render
+    // through escapeInline, the free text as a blockquote, so content[] reads back
+    // the structuredContent value as text (#200, #221).
     const lines: string[] = [
-      `**5%+ beneficial owners of ${escapeMarkdownInline(result.issuer_name)}** (CIK ${result.issuer_cik}) — input "${result.issuer}"`,
+      `**5%+ beneficial owners of ${escapeInline(result.issuer_name)}** (CIK ${result.issuer_cik}) — input "${escapeInline(result.issuer)}"`,
       `Schedule filter: ${result.form_kind} | ${result.filings_parsed} of ${result.total_structured_filings} structured filings parsed`,
       `${result.filings_examined} examined | ${result.filings_excluded_other_issuer} excluded for another issuer | ${result.filings_failed.length} failed | ${result.filings_not_examined} not examined | partial: ${result.partial}`,
       `Structured coverage starts ${result.structured_coverage_from}; ${result.legacy_filings_before_coverage} legacy SC 13D/SC 13G filings sit before it in the submissions window (read those with secedgar_get_filing).`,
@@ -693,13 +694,13 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     for (const f of result.filings) {
       lines.push('');
       const amendment = f.is_amendment
-        ? ` (amendment${f.amendment_number ? ` no. ${escapeMarkdownInline(f.amendment_number)}` : ''})`
+        ? ` (amendment${f.amendment_number ? ` no. ${escapeInline(f.amendment_number)}` : ''})`
         : '';
       lines.push(`## ${f.form}${amendment} — filed ${f.filing_date} [${f.accession_number}]`);
       const bits = [`Schedule ${f.schedule}`];
       if (f.event_date) bits.push(`event ${f.event_date}`);
-      if (f.security_class) bits.push(escapeMarkdownInline(f.security_class));
-      if (f.cusips.length > 0) bits.push(`CUSIP ${escapeMarkdownInline(f.cusips.join(', '))}`);
+      if (f.security_class) bits.push(escapeInline(f.security_class));
+      if (f.cusips.length > 0) bits.push(`CUSIP ${escapeInline(f.cusips.join(', '))}`);
       lines.push(bits.join(' | '));
 
       for (const p of f.reporting_persons) {
@@ -710,11 +711,11 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
             ? `${p.aggregate_amount_owned.toLocaleString()} shares`
             : 'amount N/A';
         const idBits: string[] = [];
-        if (p.cik) idBits.push(`CIK ${escapeMarkdownInline(p.cik)}`);
-        if (p.citizenship) idBits.push(escapeMarkdownInline(p.citizenship));
-        if (p.person_types.length > 0) idBits.push(escapeMarkdownInline(p.person_types.join('/')));
+        if (p.cik) idBits.push(`CIK ${escapeInline(p.cik)}`);
+        if (p.citizenship) idBits.push(escapeInline(p.citizenship));
+        if (p.person_types.length > 0) idBits.push(escapeInline(p.person_types.join('/')));
         lines.push(
-          `- **${escapeMarkdownInline(p.name)}**${idBits.length > 0 ? ` (${idBits.join(', ')})` : ''}`,
+          `- **${escapeInline(p.name)}**${idBits.length > 0 ? ` (${idBits.join(', ')})` : ''}`,
         );
         lines.push(`  ${owned} | ${pct}`);
         lines.push(

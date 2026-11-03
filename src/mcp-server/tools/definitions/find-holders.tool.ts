@@ -8,8 +8,9 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
+import { markdown } from '@cyanheads/mcp-ts-core/utils';
 import { MAX_RELEVANCE_OFFSET } from '@/mcp-server/tools/definitions/search-filings.tool.js';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import {
   type LimitClampOptions,
   limitClamp,
@@ -21,8 +22,12 @@ import {
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
-import { cleanDisplayName, getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import type { EftsHit } from '@/services/edgar/types.js';
+import {
+  cleanDisplayName,
+  getEdgarApiService,
+  pickPreferredTicker,
+} from '@/services/edgar/edgar-api-service.js';
+import type { CikMatch, EftsHit } from '@/services/edgar/types.js';
 
 /**
  * Hits returned by one EFTS request. The endpoint ignores the `size` parameter
@@ -57,6 +62,35 @@ const QUARTER_END_SUFFIX = ['03-31', '06-30', '09-30', '12-31'] as const;
  * out; a slash inside the name (`CULLEN/FROST BANKERS, INC.`) stays (#205).
  */
 const TRAILING_QUALIFIER = /[\\/][A-Za-z]{1,6}[\\/]?$/;
+
+/** A registry name as the phrase a name search quotes: minus one trailing qualifier. */
+function namePhrase(name: string): string {
+  return name.replace(TRAILING_QUALIFIER, '').trimEnd();
+}
+
+/** A ticker-file row: a current registrant, which always carries a name and a ticker. */
+type Registrant = CikMatch & { name: string; ticker: string };
+
+const isRegistrant = (entry: CikMatch): entry is Registrant => Boolean(entry.name && entry.ticker);
+
+/**
+ * Every current registrant other than `cik` whose registry name, as {@link namePhrase}
+ * reduces it, is `phrase` (case-insensitive). The search matches their holders too, since
+ * information tables print neither qualifier (#224). Former names carry no ticker and
+ * never count; a CIK listed under several tickers counts once, under the ticker its CIK
+ * lookup picks.
+ */
+function registrantsSharingPhrase(phrase: string, cik: string, entries: CikMatch[]): Registrant[] {
+  const target = phrase.toLowerCase();
+  const byCik = new Map<string, Registrant>();
+  for (const entry of entries) {
+    if (!isRegistrant(entry) || entry.cik === cik) continue;
+    if (namePhrase(entry.name).toLowerCase() !== target) continue;
+    const existing = byCik.get(entry.cik);
+    if (!existing || pickPreferredTicker(existing, entry) === entry) byCik.set(entry.cik, entry);
+  }
+  return [...byCik.values()];
+}
 
 /** One filer row as returned inline and materialized on the canvas. */
 interface HolderRow {
@@ -318,7 +352,9 @@ export const findHoldersTool = tool('secedgar_find_holders', {
     notice: z
       .string()
       .optional()
-      .describe('Continuation, search coverage, empty results, and dataframe guidance.'),
+      .describe(
+        'Continuation, search coverage, shared names, empty results, and dataframe guidance.',
+      ),
     truncated: z.boolean().optional().describe('True when the inline holders list was capped.'),
     shown: z.number().optional().describe('Number of filers shown inline.'),
     cap: z.number().optional().describe('The limit cap applied.'),
@@ -334,6 +370,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
     // company lookup runs and the issuer input is carried through as a label.
     let resolvedName: string | undefined;
     let resolvedCik: string | undefined;
+    let phrase: string | undefined;
     if (!cusip) {
       const resolved = await api.resolveCik(input.issuer, scope);
       const candidates = Array.isArray(resolved) ? resolved : [resolved];
@@ -357,6 +394,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
       }
       resolvedName = match.name;
       resolvedCik = match.cik;
+      phrase = namePhrase(match.name);
     }
 
     const quarter = input.quarter || latestClosedQuarter(new Date().toISOString().slice(0, 10));
@@ -368,7 +406,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
     const filedFrom = addDays(quarterEnd, 1);
     const filedTo = nextQuarterEndDate(quarter);
 
-    const searchKey = cusip ?? `"${resolvedName?.replace(TRAILING_QUALIFIER, '').trimEnd()}"`;
+    const searchKey = cusip ?? `"${phrase}"`;
     const searchMode = cusip ? ('cusip' as const) : ('name' as const);
 
     // EFTS answers with a full page regardless of the requested size, so the
@@ -473,10 +511,22 @@ export const findHoldersTool = tool('secedgar_find_holders', {
 
     // The notices are authored Markdown, so the issuer phrase inside them is escaped.
     const searchedTerm =
-      searchMode === 'cusip'
-        ? `CUSIP ${searchKey}`
-        : `the phrase ${escapeMarkdownInline(searchKey)}`;
+      searchMode === 'cusip' ? `CUSIP ${searchKey}` : `the phrase ${escapeInline(searchKey)}`;
     const notices: string[] = [];
+    // A zero-hit search has no holders to mix, so only a search that matched reads the
+    // in-memory registry for another registrant the phrase names (#224).
+    const others =
+      phrase !== undefined && resolvedCik !== undefined && total > 0
+        ? registrantsSharingPhrase(phrase, resolvedCik, await api.getAllEntries(scope))
+        : [];
+    if (others.length > 0) {
+      const named = new Intl.ListFormat('en', { type: 'conjunction' }).format(
+        others.map((o) => `${escapeInline(o.name)} (CIK ${o.cik}, ${o.ticker})`),
+      );
+      notices.push(
+        `${escapeInline(searchKey)} is also the name of ${named}, so these holders can include ${others.length === 1 ? "that company's" : "those companies'"}. Pass cusip to match one issuer.`,
+      );
+    }
     if (total === 0) {
       const deadline = addDays(quarterEnd, FILING_DEADLINE_DAYS);
       const cause =
@@ -547,22 +597,23 @@ export const findHoldersTool = tool('secedgar_find_holders', {
   },
 
   format: (result) => {
+    // Names and the searched phrase are upstream or caller text, escaped to read back as written.
     const lines = [
-      `**13F holders of ${result.issuer}** — ${result.quarter}, filed ${result.filed_from} to ${result.filed_to}`,
+      `**13F holders of ${escapeInline(result.issuer)}** — ${result.quarter}, filed ${result.filed_from} to ${result.filed_to}`,
     ];
     if (result.resolved_issuer_name) {
       lines.push(
-        `Resolved issuer: ${result.resolved_issuer_name} (CIK ${result.resolved_issuer_cik})`,
+        `Resolved issuer: ${escapeInline(result.resolved_issuer_name)} (CIK ${result.resolved_issuer_cik})`,
       );
     }
     lines.push(
-      `Matched by ${result.search_mode}: ${result.search_key}`,
+      `Matched by ${result.search_mode}: ${escapeInline(result.search_key)}`,
       `${result.total_filings} filings in the window (${result.total_is_exact ? 'exact count' : 'lower bound'}); ${result.fetched} fetched, ${result.holders_in_quarter} managers reporting ${result.quarter}, ${result.holders.length} shown`,
     );
 
     for (const h of result.holders) {
       lines.push(
-        `- ${h.filer_name} (CIK ${h.filer_cik}) — ${h.form ?? '13F-HR'} ${h.filing_date} [${h.accession_number}]`,
+        `- ${escapeInline(h.filer_name)} (CIK ${h.filer_cik}) — ${h.form ?? '13F-HR'} ${h.filing_date} [${h.accession_number}]`,
       );
     }
 

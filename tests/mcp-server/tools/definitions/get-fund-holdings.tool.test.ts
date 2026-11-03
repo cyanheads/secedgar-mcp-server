@@ -1004,6 +1004,101 @@ describe('getFundHoldingsTool — response', () => {
   });
 });
 
+/**
+ * A position's USD value scaled by magnitude beside its exact amount, and its balance to every
+ * digit (#222). The scale rule itself is tabled in tests/mcp-server/tools/format-usd.test.ts;
+ * this case proves the wiring.
+ */
+describe('getFundHoldingsTool — position value rendering (#222)', () => {
+  it("puts a short position's sign before the $ and keeps every digit of its balance", () => {
+    const rendered = blockText(
+      getFundHoldingsTool.format!(
+        getFundHoldingsTool.output.parse({
+          fund: 'VOO',
+          class_ids: [],
+          registrant_cik: '0000036405',
+          registrant_name: 'VANGUARD INDEX FUNDS',
+          filing_date: '2026-05-28',
+          form: 'NPORT-P',
+          accession_number: '0000036405-26-000325',
+          total_holdings: 1,
+          offset: 0,
+          available_report_periods: [],
+          holdings: [
+            {
+              name: 'Short Co',
+              balance: 1234.5678,
+              units: 'NS',
+              value_usd: -375_000,
+              percent_of_net_assets: -0.5,
+            },
+          ],
+        }),
+      ),
+    );
+    expect(rendered).toContain('1,234.5678 NS | USD -$375.00K (-$375,000) | -0.5% of net assets');
+  });
+});
+
+/**
+ * Filer and caller strings in content[] read back under CommonMark as structuredContent carries
+ * them (#221): the series name in the bold heading, the fund input in quotes, the registrant
+ * name, and each holding's name in bold with its title in parentheses.
+ */
+describe('getFundHoldingsTool — filer and caller strings read back from content[] (#221)', () => {
+  it('renders the names, the fund input, and the title so a CommonMark parse reads each back', async () => {
+    const fund = 'ACME *x* _y_ `z` [a](b) &amp; \\DE\\';
+    const seriesName = 'FUND *500* _y_ `z` [a](b) &amp; \\';
+    const registrant = 'TRUST *x* _y_ `z` [a](b) &amp; \\DE\\';
+    const holdingName = '# HOLDING *x* _y_ `z` [a](b) &amp; \\';
+    const title = 'CL _A_ *x* `w` [l](u) &amp; \\';
+    /** XML character data that decodes to `value`. */
+    const xmlText = (value: string) => value.replaceAll('&', '&amp;');
+    mockApi.getSubmissions.mockResolvedValue({
+      name: registrant,
+      filings: {
+        recent: recent([
+          {
+            accessionNumber: '0000036405-26-000325',
+            filingDate: '2026-05-28',
+            reportDate: '2026-03-31',
+          },
+        ]),
+      },
+    });
+    mockApi.tryGetFilingDocument.mockResolvedValue(
+      report({
+        seriesId: 'S000002839',
+        seriesName: xmlText(seriesName),
+        reportDate: '2026-03-31',
+        holdings: [{ name: xmlText(holdingName), pct: 6.6, value: 200, cusip: '037833100' }],
+      }).replace('<balance>', `<title>${xmlText(title)}</title><balance>`),
+    );
+
+    const result = await runToolContract(getFundHoldingsTool, { fund });
+    const output = getFundHoldingsTool.output.parse(result.structuredContent);
+    const [holding] = output.holdings;
+    expect([
+      output.fund,
+      output.series_name,
+      output.registrant_name,
+      holding?.name,
+      holding?.title,
+    ]).toEqual([fund, seriesName, registrant, holdingName, title]);
+
+    const lines = readCommonMark(blockText(result.content)).split('\n');
+    expect(lines).toContain(
+      `⟨strong⟩${output.series_name} portfolio⟨/strong⟩ — input "${output.fund}"`,
+    );
+    expect(lines.find((line) => line.startsWith('Registrant: '))).toBe(
+      `Registrant: ${output.registrant_name} (CIK ${output.registrant_cik}) | series ${output.series_id} | classes ${output.class_ids.join(', ')}`,
+    );
+    expect(lines).toContain(
+      `⟨strong⟩${holding?.name}⟨/strong⟩ (${holding?.title}) — CUSIP 037833100`,
+    );
+  });
+});
+
 // A limit above the 100-position page is served at 100 while EDGAR_CLAMP_OVERSIZED_LIMITS
 // is on; the mechanism itself is tabled in tests/mcp-server/tools/limit-clamp.test.ts (#197).
 describe('getFundHoldingsTool — limit above the 100 cap (#197)', () => {

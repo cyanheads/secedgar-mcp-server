@@ -1376,3 +1376,50 @@ describe('companySearchTool form filter (#194)', () => {
     expect(registerDataframe.mock.calls[0]?.[1].queryParams.forms).toEqual(['10-K']);
   });
 });
+
+// SEC's strings are not the tool's text: content[] escapes them, so a CommonMark
+// parse reads back each structuredContent value (#221).
+describe('companySearchTool — SEC strings in content[] (#221)', () => {
+  it('reads back the name, SIC description, and filing description as structuredContent carries them', async () => {
+    // A trailing backslash ahead of the bold's closing asterisks, as SEC conforms the name.
+    const name = 'US BANCORP \\DE\\';
+    const sicDescription = 'NATIONAL *COMMERCIAL* BANKS _x_ `y` [a](b) &amp; <b>z</b>';
+    // Its line breaks open lines of their own, which must not start a list or a heading.
+    const description = 'EX-99 *DRAFT* \\\n1. not a list\n# not a heading';
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000036104', name, ticker: 'USB' });
+    mockApi.getSubmissions.mockResolvedValue({
+      ...mockSubmissions,
+      cik: '0000036104',
+      exchanges: ['NYSE'],
+      filings: {
+        recent: {
+          accessionNumber: ['0000036104-26-000001'],
+          filingDate: ['2026-01-15'],
+          form: ['8-K'],
+          primaryDocDescription: [description],
+          primaryDocument: ['usb-8k.htm'],
+          reportDate: ['2026-01-14'],
+        },
+        files: [],
+      },
+      name,
+      sic: '6021',
+      sicDescription,
+      tickers: ['USB'],
+    });
+
+    const result = await runToolContract(companySearchTool, { query: 'USB' });
+
+    expect(result.isError).toBeFalsy();
+    const output = companySearchTool.output.parse(result.structuredContent);
+    expect(output.name).toBe(name);
+    expect(output.sic_description).toBe(sicDescription);
+    expect(output.filings?.[0]?.description).toBe(description);
+    const text = readCommonMark(blockText(result.content));
+    expect(text).toContain(`⟨strong⟩${name}⟨/strong⟩ (USB)\nCIK: 0000036104`);
+    expect(text).toContain(`| SIC: 6021 (${sicDescription}) | Exchange: NYSE\n`);
+    expect(text).toContain(
+      `8-K 2026-01-15 (period: 2026-01-14) — ${description} — usb-8k.htm [0000036104-26-000001]`,
+    );
+  });
+});

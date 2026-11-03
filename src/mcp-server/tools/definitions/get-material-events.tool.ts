@@ -7,7 +7,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import {
   type LimitClampOptions,
   limitClamp,
@@ -443,7 +443,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       // Cut short by the cap, the empty result covers only the span scanned, and a
       // wider range would reach nothing further — the depth sentence names the lever.
       // The notice is authored Markdown, so SEC's entity name inside it is escaped.
-      const name = escapeMarkdownInline(submissions.name);
+      const name = escapeInline(submissions.name);
       ctx.enrich.notice(
         depthNote
           ? `${name} filed no 8-K ${windowText}${hasDateFilter ? ' as far back as the scan reached' : ''}.${depthNote} List every form type with secedgar_company_search.`
@@ -491,14 +491,16 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
     const filterText = result.items_filter?.length
       ? ` | items [${result.items_filter.join(', ')}]`
       : '';
+    // SEC's entity name and filing descriptions render through escapeInline, so
+    // content[] reads back the structuredContent value as text (#221).
     const lines = [
-      `**8-K material events** — ${result.company_name} (CIK ${result.cik})${filterText}`,
+      `**8-K material events** — ${escapeInline(result.company_name)} (CIK ${result.cik})${filterText}`,
       `${result.total_matched} matching of ${result.total_8k_scanned} 8-K filings scanned; showing ${result.filings.length}`,
     ];
 
     for (const f of result.filings) {
       const reported = f.report_date ? ` (event: ${f.report_date})` : '';
-      const desc = f.description ? ` — ${f.description}` : '';
+      const desc = f.description ? ` — ${escapeInline(f.description)}` : '';
       const doc = f.primary_document ? ` — ${f.primary_document}` : '';
       lines.push('');
       lines.push(`**${f.form} ${f.filing_date}**${reported}${desc}${doc} [${f.accession_number}]`);

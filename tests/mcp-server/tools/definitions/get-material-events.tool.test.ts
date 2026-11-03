@@ -17,6 +17,7 @@ import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import type { FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
 import { blockText, wireError } from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/edgar/edgar-api-service.js')>();
@@ -62,6 +63,7 @@ function stubBridge() {
 interface FilingSpec {
   accession: string;
   date: string;
+  description?: string;
   doc?: string;
   form?: string;
   items?: string;
@@ -74,7 +76,7 @@ function block(filings: FilingSpec[]): FilingsRecent {
     filingDate: filings.map((f) => f.date),
     form: filings.map((f) => f.form ?? '8-K'),
     items: filings.map((f) => f.items ?? ''),
-    primaryDocDescription: filings.map(() => '8-K'),
+    primaryDocDescription: filings.map((f) => f.description ?? '8-K'),
     primaryDocument: filings.map((f) => f.doc ?? 'doc.htm'),
     reportDate: filings.map((f) => f.report ?? f.date),
   };
@@ -445,6 +447,33 @@ describe('getMaterialEventsTool', () => {
     expect(rendered).toContain('2.02 Results of Operations and Financial Condition [current]');
     expect(rendered).toContain('Item distribution across the scanned window: 2.02: 2, 9.01: 3');
     expect(rendered).toContain('History scanned through: 2015-06-10');
+  });
+
+  // SEC's strings are not the tool's text: content[] escapes them, so a CommonMark
+  // parse reads back each structuredContent value (#221).
+  it('reads back the company name and filing description as structuredContent carries them (#221)', async () => {
+    const name = 'ACME *Corp* _x_ [a](b) \\DE\\';
+    const description = 'PRESS RELEASE *DRAFT* `v2` &amp; <i>x</i> \\';
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [
+          { accession: '0000320193-26-000011', date: '2026-04-30', items: '2.02', description },
+        ],
+        name,
+      }),
+    );
+
+    const result = await runToolContract(getMaterialEventsTool, { company: 'AAPL' });
+
+    expect(result.isError).toBeFalsy();
+    const output = getMaterialEventsTool.output.parse(result.structuredContent);
+    expect(output.company_name).toBe(name);
+    expect(output.filings[0]?.description).toBe(description);
+    const text = readCommonMark(blockText(result.content));
+    expect(text).toContain(`⟨strong⟩8-K material events⟨/strong⟩ — ${name} (CIK 0000320193)\n`);
+    expect(text).toContain(
+      `⟨strong⟩8-K 2026-04-30⟨/strong⟩ (event: 2026-04-30) — ${description} — doc.htm [0000320193-26-000011]`,
+    );
   });
 });
 

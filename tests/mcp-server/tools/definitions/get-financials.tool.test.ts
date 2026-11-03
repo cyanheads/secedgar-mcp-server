@@ -44,6 +44,7 @@ import {
   recoveryHint,
   wireError,
 } from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 const mockConceptResponse: CompanyConceptResponse = {
   cik: 320193,
@@ -800,7 +801,7 @@ describe('getFinancialsTool', () => {
     expect(blockText(blocks)).toContain('df_ABCDE_FGHIJ');
   });
 
-  it('formats USD values in millions', () => {
+  it('formats USD values scaled by magnitude', () => {
     const output = {
       company: 'Apple Inc.',
       cik: '0000320193',
@@ -824,7 +825,7 @@ describe('getFinancialsTool', () => {
     const blocks = getFinancialsTool.format!(output);
     expect(blocks).toHaveLength(1);
     expect(blockText(blocks)).toContain('Revenue');
-    expect(blockText(blocks)).toContain('$383285.0M');
+    expect(blockText(blocks)).toContain('CY2023: $383.29B (raw 383285000000)');
   });
 
   it('formats USD/shares values with decimal', () => {
@@ -850,6 +851,114 @@ describe('getFinancialsTool', () => {
     };
     const blocks = getFinancialsTool.format!(output);
     expect(blockText(blocks)).toContain('$6.13');
+  });
+});
+
+/**
+ * Each period's figure beside its raw value (#222): a USD value scaled by its own magnitude, a
+ * per-share value and any other unit to every digit. The scale rule itself is tabled in
+ * tests/mcp-server/tools/format-usd.test.ts; these cases prove the wiring per unit.
+ */
+describe('getFinancialsTool — value rendering by unit (#222)', () => {
+  /** format() text of a one-period series in `unit` holding `value`. */
+  const render = (unit: string, value: number) =>
+    blockText(
+      getFinancialsTool.format!(
+        getFinancialsTool.output.parse({
+          company: 'VIVOS INC',
+          cik: '0001449349',
+          concept: 'Revenues',
+          label: 'Revenues',
+          unit,
+          data: [
+            {
+              period: 'CY2023',
+              value,
+              start: '2023-01-01',
+              end: '2023-12-31',
+              fiscal_year: 2024,
+              fiscal_period: 'FY',
+              form: '10-K',
+              filed: '2025-03-24',
+              accession_number: '0001449349-25-000005',
+              tag: 'Revenues',
+            },
+          ],
+        }),
+      ),
+    );
+
+  it('scales a USD value by its own magnitude, so a small one never reads as zero', () => {
+    expect(render('USD', 19500)).toContain(
+      'CY2023: $19.50K (raw 19500) | 2023-01-01 → 2023-12-31 |',
+    );
+  });
+
+  it('renders a per-share value to every digit', () => {
+    expect(render('USD/shares', 0.004)).toContain('CY2023: $0.004 (raw 0.004) |');
+  });
+
+  it('keeps every digit of any other unit', () => {
+    expect(render('pure', 0.0004)).toContain('CY2023: 0.0004 (raw 0.0004) |');
+  });
+});
+
+/**
+ * SEC strings in content[] read back under CommonMark as structuredContent carries them (#221):
+ * the label in bold, the company before its CIK, the description on its own line, and a caveat
+ * that quotes the label. The caveat is composed with the label as SEC serves it and escaped
+ * only where format() renders it, so structuredContent carries no escapes.
+ */
+describe('getFinancialsTool — SEC strings read back from content[] (#221)', () => {
+  it('renders the label, company, description, and caveats so a CommonMark parse reads each back', async () => {
+    const company = 'ACME *x* _y_ `z` [a](b) &amp; \\DE\\';
+    const label = 'Sales *Revenue* _Goods_ `Net` [x](y) &amp; (Deprecated 2018-01-31) \\';
+    const description = '1. Amount *x* _y_ `z` [a](b) &amp; \\';
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000091419', name: company, ticker: 'SJM' });
+    mockApi.tryGetCompanyConcept.mockImplementation(
+      async (_cik: string, _tax: string, tag: string): Promise<CompanyConceptResponse | null> =>
+        tag === 'SalesRevenueGoodsNet'
+          ? {
+              cik: 91419,
+              entityName: company,
+              label,
+              description,
+              tag,
+              taxonomy: 'us-gaap',
+              units: {
+                USD: [
+                  {
+                    accn: '0000091419-18-000030',
+                    end: '2018-04-30',
+                    filed: '2018-06-14',
+                    form: '10-K',
+                    fp: 'FY',
+                    frame: 'CY2017',
+                    fy: 2018,
+                    val: 7_357_100_000,
+                  },
+                ],
+              },
+            }
+          : null,
+    );
+
+    const result = await runToolContract(getFinancialsTool, { company: 'SJM', concept: 'revenue' });
+    const output = getFinancialsTool.output.parse(result.structuredContent);
+    expect([output.company, output.label, output.description]).toEqual([
+      company,
+      label,
+      description,
+    ]);
+    const caveat = at(output.caveats);
+    expect(caveat).toContain(`SEC labels it "${label}".`);
+
+    const lines = readCommonMark(blockText(result.content)).split('\n');
+    expect(lines).toContain(
+      `⟨strong⟩${output.label}⟨/strong⟩ — ${output.company} (CIK 0000091419, USD)`,
+    );
+    expect(lines).toContain(output.description);
+    expect(lines).toContain(`Caveat: ${caveat}`);
   });
 });
 
@@ -1670,7 +1779,7 @@ describe('proxy-held annual frames (#123)', () => {
       },
     ]);
     const text = blockText(result.content);
-    expect(text).toContain('CY2021: $13049.0M (raw 13049000000)');
+    expect(text).toContain('CY2021: $13.05B (raw 13049000000)');
     expect(text).toContain('10-K (FY2021 FY) filed 2022-02-25 [0000310158-22-000010]');
     expect(text).not.toContain('DEF 14A');
   });
@@ -2075,7 +2184,7 @@ describe('a tag reported under several unit keys (#146)', () => {
     expect(output.caveats).toEqual([
       'Also reported in ZAR (3 periods, CY2017–CY2025). This series holds USD values only — values in different units never share a series; pass unit: "ZAR" to read another.',
     ]);
-    expect(blockText(result.content)).toContain('CY2016: $1264.0M');
+    expect(blockText(result.content)).toContain('CY2016: $1.26B');
   });
 
   describe('when every unit has stopped', () => {
@@ -2263,7 +2372,7 @@ describe('10-Q trailing-twelve-month annual frames (#142)', () => {
       ['CY2025', 77_670_000_000, '10-K'],
     ]);
     const text = blockText(result.content);
-    expect(text).toContain('CY2025: $77670.0M');
+    expect(text).toContain('CY2025: $77.67B');
     expect(text).not.toContain('CY2026:');
   });
 
@@ -2367,7 +2476,7 @@ describe('a 10-Q-held year its own series cannot test (#148)', () => {
       ['CY2021Q1', -293_000_000],
     ]);
     const text = blockText(result.content);
-    expect(text).toContain('CY2022Q1: $16.0M');
+    expect(text).toContain('CY2022Q1: $16.00M');
     expect(text).not.toContain('CY2021: ');
     expect(text).not.toContain('CY2020: ');
     expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledTimes(1);
@@ -2598,7 +2707,7 @@ describe('companyconcept served without values (#141)', () => {
       ],
     });
     expect(mockApi.tryGetCompanyFacts).toHaveBeenCalledTimes(1);
-    expect(blockText(result.content)).toContain('CY2025: $20058.0M');
+    expect(blockText(result.content)).toContain('CY2025: $20.06B');
   });
 
   it('fails as no_concept_data when companyfacts holds nothing either', async () => {

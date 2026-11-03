@@ -49,6 +49,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import {
+  at,
   blockAt,
   blockText,
   caught,
@@ -2113,6 +2114,99 @@ describe('getInstitutionalHoldingsTool — filer_name entity decoding (#132)', (
       filer_name: 'SMITH & WESSON ADVISORS',
       reporting_period: '2025-12-31',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// content[] values: market value scale (#222) and SEC strings (#221)
+// ---------------------------------------------------------------------------
+
+/**
+ * A position's market value scaled by magnitude beside its exact amount (#222). The scale rule
+ * itself is tabled in tests/mcp-server/tools/format-usd.test.ts; these cases prove the wiring.
+ */
+describe('getInstitutionalHoldingsTool — market value rendering (#222)', () => {
+  /** format() text of a one-position page whose market value is `value`. */
+  const render = (value: number) =>
+    blockText(
+      getInstitutionalHoldingsTool.format!(
+        getInstitutionalHoldingsTool.output.parse({
+          filer_name: 'Manager LLC',
+          filer_cik: '0000102909',
+          filing_date: '2025-02-14',
+          accession_number: '0000102909-25-000001',
+          composed_accessions: ['0000102909-25-000001'],
+          total_holdings_in_filing: 1,
+          total_holdings_composed: 1,
+          offset: 0,
+          holdings: [
+            {
+              issuer_name: 'ISSUER',
+              title_of_class: 'COM',
+              cusip: '037833100',
+              market_value_usd: value,
+              shares_or_principal_amount: 100,
+              shares_or_principal_type: 'SH',
+              investment_discretion: 'SOLE',
+              source_accession_numbers: ['0000102909-25-000001'],
+            },
+          ],
+        }),
+      ),
+    );
+
+  it('scales the value by magnitude beside its exact amount', () => {
+    // Characterization: a positive position reads as it did before the shared formatter.
+    expect(render(5_000_000)).toContain('100 SH | $5.00M ($5,000,000) |');
+  });
+
+  it("puts a negative value's sign before the $ in both the scaled and the exact amount", () => {
+    expect(render(-375_000)).toContain('100 SH | -$375.00K (-$375,000) |');
+  });
+});
+
+/**
+ * SEC strings in content[] read back under CommonMark as structuredContent carries them (#221):
+ * the filer name after the bold heading, the issuer name in bold, and the title of class in
+ * parentheses.
+ */
+describe('getInstitutionalHoldingsTool — SEC strings read back from content[] (#221)', () => {
+  it('renders the filer name, issuer name, and title of class so a CommonMark parse reads each back', async () => {
+    const filer = 'ACME *x* _y_ `z` [a](b) &amp; \\DE\\';
+    const issuer = '# ISSUER *x* _y_ `z` [a](b) &amp; \\DE\\';
+    const title = 'CL _A_ *x* `w` [l](u) &amp; \\';
+    /** XML character data that decodes to `value`. */
+    const xmlText = (value: string) => value.replaceAll('&', '&amp;');
+    mockApi.tryGetFilingDocument.mockImplementation(
+      async (_cik: string, _accn: string, docName: string) => {
+        if (docName === 'primary_doc.xml') {
+          return `<edgarSubmission><formData><coverPage><reportCalendarOrQuarter>12-31-2024</reportCalendarOrQuarter><filingManager><name>${xmlText(filer)}</name></filingManager></coverPage></formData></edgarSubmission>`;
+        }
+        if (docName === 'infotable.xml') {
+          return `<informationTable xmlns="http://www.sec.gov/edgar/document/thirteenf/informationtable"><infoTable><nameOfIssuer>${xmlText(issuer)}</nameOfIssuer><titleOfClass>${xmlText(title)}</titleOfClass><cusip>037833100</cusip><value>5000000</value><shrsOrPrnAmt><sshPrnamt>26000</sshPrnamt><sshPrnamtType>SH</sshPrnamtType></shrsOrPrnAmt><investmentDiscretion>SOLE</investmentDiscretion></infoTable></informationTable>`;
+        }
+        return null;
+      },
+    );
+
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: '0000102909',
+    } as never);
+    const output = getInstitutionalHoldingsTool.output.parse(result.structuredContent);
+    const holding = at(output.holdings);
+    expect([output.filer_name, holding.issuer_name, holding.title_of_class]).toEqual([
+      filer,
+      issuer,
+      title,
+    ]);
+
+    const lines = readCommonMark(blockText(result.content)).split('\n');
+    expect(lines).toContain(
+      `⟨strong⟩13F-HR Holdings⟨/strong⟩ — ${output.filer_name} (CIK 0000102909)`,
+    );
+    expect(lines).toContain(
+      `⟨strong⟩${holding.issuer_name}⟨/strong⟩ (${holding.title_of_class}) CUSIP 037833100`,
+    );
   });
 });
 

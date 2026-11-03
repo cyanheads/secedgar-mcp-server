@@ -2,7 +2,9 @@
  * @fileoverview Tests for find-holders — the 13F reverse lookup. Covers quarter
  * defaulting and the filing window, the reporting-period filter, CUSIP vs name
  * search modes, the paging budget, both zero-hit causes, the company-identifier
- * aliases on `issuer` (#152), and the name phrase's dropped trailing qualifier (#205).
+ * aliases on `issuer` (#152), the name phrase's dropped trailing qualifier (#205),
+ * the notice naming another registrant that shares the phrase (#224), and the
+ * format() values read back under CommonMark (#221).
  * @module tests/mcp-server/tools/definitions/find-holders.tool
  */
 
@@ -16,7 +18,7 @@ import {
 } from '@/mcp-server/tools/definitions/find-holders.tool.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import type { EftsHit, EftsResponse } from '@/services/edgar/types.js';
-import { allText, blockText, wireError } from '../../../support/assertions.js';
+import { allText, bag, blockText, wireError } from '../../../support/assertions.js';
 import { codeSpansIn, readCommonMark } from '../../../support/commonmark.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
@@ -97,6 +99,7 @@ function eftsPage(hits: EftsHit[], total: number): EftsResponse {
 }
 
 const mockApi = {
+  getAllEntries: vi.fn(),
   resolveCik: vi.fn(),
   searchFilings: vi.fn(),
 };
@@ -107,6 +110,7 @@ beforeEach(() => {
   vi.setSystemTime(new Date(NOW));
   vi.mocked(getCanvasBridge).mockReturnValue(undefined as never);
   vi.mocked(getEdgarApiService).mockReturnValue(mockApi as never);
+  mockApi.getAllEntries.mockResolvedValue([]);
   mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
   mockApi.searchFilings.mockResolvedValue(
     eftsPage([hit({ accession: '0001193125-26-226661' })], 1),
@@ -680,8 +684,10 @@ describe('findHoldersTool — a trailing qualifier on the conformed name (#205)'
         search_mode: 'name',
         search_key: phrase,
       });
-      expect(blockText(result.content)).toContain(`Resolved issuer: ${name} (CIK ${cik})`);
-      expect(blockText(result.content)).toContain(`Matched by name: ${phrase}`);
+      // The registry name reads back whole, its trailing backslash included (#221).
+      const text = readCommonMark(blockText(result.content));
+      expect(text).toContain(`Resolved issuer: ${name} (CIK ${cik})`);
+      expect(text).toContain(`Matched by name: ${phrase}`);
     },
   );
 
@@ -843,5 +849,243 @@ describe('findHoldersTool — the JSON calls in content[] read back under Common
     const sc = result.structuredContent as Record<string, unknown>;
     expect(sc).toMatchObject({ fetched: 500, holders_in_quarter: 500, truncated: true });
     expect(jsonSpans(result)).toEqual([searchCall(sc, 0), searchCall(sc, 500)]);
+  });
+});
+
+/**
+ * Two registrants whose names match once the trailing qualifier is gone search the
+ * same phrase and get the same holders, so a name search says which other current
+ * registrant the phrase also names and points to cusip (#224). Rows as SEC's
+ * company_tickers.json lists them; a former name carries no ticker.
+ */
+describe('findHoldersTool — another registrant named by the searched phrase (#224)', () => {
+  const REGISTRY = [
+    { cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' },
+    { cik: '0000036104', name: 'US BANCORP \\DE\\', ticker: 'USB' },
+    { cik: '0000036104', name: 'US BANCORP \\DE\\', ticker: 'USB-PA' },
+    { cik: '0000080661', name: 'PROGRESSIVE CORP/OH/', ticker: 'PGR' },
+    { cik: '0001057706', name: 'FIRST BANCORP /PR/', ticker: 'FBP' },
+    { cik: '0000776901', name: 'INDEPENDENT BANK CORP', ticker: 'INDB' },
+    { cik: '0000811589', name: 'FIRST BANCORP /NC/', ticker: 'FBNC' },
+    { cik: '0000039311', name: 'INDEPENDENT BANK CORP /MI/', ticker: 'IBCP' },
+    // The phrase sits inside this title, which is the over-match the description states.
+    { cik: '0000765207', name: 'First Bancorp, Inc /ME/', ticker: 'FNLC' },
+    { cik: '0002107968', name: 'WISeQey Corp.', ticker: 'WQEY' },
+    { cik: '0002102907', name: 'Resolution Minerals Ltd', ticker: 'RML' },
+    { cik: '0001738699', name: 'WISeQey Corp.', ticker: 'WSKEF' },
+    { cik: '0002086869', name: 'RESOLUTION MINERALS LTD/ADR', ticker: 'RLMLF' },
+    // Former names: never current registrants, so never named.
+    { cik: '0000000901', name: 'apple inc.' },
+    { cik: '0000000902', name: 'progressive corp' },
+  ];
+  const row = (ticker: string) => {
+    const entry = REGISTRY.find((e) => e.ticker === ticker);
+    if (!entry) throw new Error(`No registry row for ${ticker}.`);
+    return entry;
+  };
+  const sentence = (phrase: string, others: string, which: string) =>
+    `${phrase} is also the name of ${others}, so these holders can include ${which}. Pass cusip to match one issuer.`;
+
+  beforeEach(() => {
+    mockApi.getAllEntries.mockResolvedValue(REGISTRY);
+  });
+
+  /** A name-mode call for `ticker`, its registry row as the resolution. */
+  async function holdersOf(ticker: string, args: Record<string, unknown> = {}) {
+    mockApi.resolveCik.mockResolvedValue(row(ticker));
+    return runToolContract(findHoldersTool, { issuer: ticker, ...args });
+  }
+
+  it.each([
+    ['FBP', '"FIRST BANCORP"', 'FBNC'],
+    ['FBNC', '"FIRST BANCORP"', 'FBP'],
+    ['IBCP', '"INDEPENDENT BANK CORP"', 'INDB'],
+    ['INDB', '"INDEPENDENT BANK CORP"', 'IBCP'],
+    ['RLMLF', '"RESOLUTION MINERALS LTD"', 'RML'],
+    ['RML', '"Resolution Minerals Ltd"', 'RLMLF'],
+    ['WQEY', '"WISeQey Corp."', 'WSKEF'],
+    ['WSKEF', '"WISeQey Corp."', 'WQEY'],
+  ])(
+    'names the other registrant searched by %s’s phrase on both surfaces',
+    async (ticker, phrase, other) => {
+      const { cik, name } = row(other);
+      const expected = sentence(phrase, `${name} (CIK ${cik}, ${other})`, "that company's");
+
+      const result = await holdersOf(ticker);
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent).toMatchObject({
+        resolved_issuer_name: row(ticker).name,
+        resolved_issuer_cik: row(ticker).cik,
+        search_mode: 'name',
+        search_key: phrase,
+        total_filings: 1,
+        holders_in_quarter: 1,
+        holders: [{ accession_number: '0001193125-26-226661' }],
+        notice: expected,
+      });
+      expect(readCommonMark(allText(result))).toContain(expected);
+      expect(mockApi.searchFilings).toHaveBeenCalledTimes(1);
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining({ query: phrase }),
+        expect.any(CallScope),
+      );
+    },
+  );
+
+  it.each([
+    ['USB', 'one CIK listed under several tickers'],
+    ['PGR', 'a former name equal to the phrase'],
+    ['AAPL', 'a former name equal to the title'],
+  ])('adds nothing for %s — %s', async (ticker) => {
+    const result = await holdersOf(ticker);
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(allText(result)).not.toContain('is also the name of');
+  });
+
+  it('lists every other registrant the phrase names, in registry order', async () => {
+    const third = { cik: '0000000003', name: 'First Bancorp /VA/', ticker: 'FBVA' };
+    mockApi.getAllEntries.mockResolvedValue([...REGISTRY, third]);
+
+    const result = await holdersOf('FBP');
+
+    const expected = sentence(
+      '"FIRST BANCORP"',
+      'FIRST BANCORP /NC/ (CIK 0000811589, FBNC) and First Bancorp /VA/ (CIK 0000000003, FBVA)',
+      "those companies'",
+    );
+    expect(bag(result.structuredContent).notice).toBe(expected);
+    expect(readCommonMark(allText(result))).toContain(expected);
+  });
+
+  it('reads a registrant name holding Markdown punctuation back under CommonMark', async () => {
+    const searched = { cik: '0000000011', name: 'A*B* `C` [D](E) CORP /DE/', ticker: 'ABDE' };
+    const other = { cik: '0000000012', name: 'a*b* `c` [d](e) corp', ticker: 'ABCO' };
+    mockApi.getAllEntries.mockResolvedValue([searched, other]);
+    mockApi.resolveCik.mockResolvedValue(searched);
+
+    const result = await runToolContract(findHoldersTool, { issuer: 'ABDE' });
+
+    expect(readCommonMark(allText(result))).toContain(
+      sentence(
+        '"A*B* `C` [D](E) CORP"',
+        'a*b* `c` [d](e) corp (CIK 0000000012, ABCO)',
+        "that company's",
+      ),
+    );
+  });
+
+  it('composes the sentence with the cap guidance and the continuation recipe', async () => {
+    mockApi.searchFilings.mockImplementation(async (params: { from: number }) =>
+      eftsPage(
+        Array.from({ length: 100 }, (_, i) =>
+          hit({ accession: `0000000000-26-${String(params.from + i).padStart(6, '0')}` }),
+        ),
+        6462,
+      ),
+    );
+
+    const result = await holdersOf('IBCP', { limit: 1 });
+
+    const sc = bag(result.structuredContent);
+    expect(sc).toMatchObject({ truncated: true, shown: 1, cap: 1, holders_in_quarter: 500 });
+    const notice = String(sc.notice);
+    expect(notice).toContain(
+      sentence(
+        '"INDEPENDENT BANK CORP"',
+        'INDEPENDENT BANK CORP (CIK 0000776901, INDB)',
+        "that company's",
+      ),
+    );
+    expect(notice).toContain('Raise limit to see more inline');
+    expect(notice).toContain('Continue with secedgar_search_filings');
+  });
+
+  it('composes the sentence with the other-quarters notice', async () => {
+    mockApi.searchFilings.mockResolvedValue(
+      eftsPage([hit({ accession: '0000000002-26-000002', periodEnding: '2025-12-31' })], 1),
+    );
+
+    const result = await holdersOf('INDB');
+
+    const notice = String(bag(result.structuredContent).notice);
+    expect(notice).toContain('amendments restating other quarters');
+    expect(notice).toContain(
+      'is also the name of INDEPENDENT BANK CORP /MI/ (CIK 0000039311, IBCP)',
+    );
+  });
+
+  it('leaves a zero-hit result with only the zero-hit notice', async () => {
+    mockApi.searchFilings.mockResolvedValue(eftsPage([], 0));
+
+    const result = await holdersOf('FBP');
+
+    const notice = String(bag(result.structuredContent).notice);
+    expect(notice).toMatch(/^No 13F-HR filings matched the phrase "FIRST BANCORP" filed /);
+    expect(notice).not.toContain('is also the name of');
+  });
+
+  it('never adds it in cusip mode, and reads no registry', async () => {
+    mockApi.resolveCik.mockResolvedValue(row('FBP'));
+
+    const result = await runToolContract(findHoldersTool, { issuer: 'FBP', cusip: '318672706' });
+
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(mockApi.getAllEntries).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Every format() value the tool did not author reads back under CommonMark as
+ * structuredContent carries it: the issuer echo in bold, the resolved name, the
+ * searched phrase, and filer names at the start of a list item (#221).
+ */
+describe('findHoldersTool — format() values read back under CommonMark (#221)', () => {
+  it('reads each interpolated value back as structuredContent carries it', async () => {
+    const name = 'A *B* _C_ `D` [E](F) &amp; \\DE\\';
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000000021', name, ticker: 'ABCD' });
+    mockApi.searchFilings.mockResolvedValue(
+      eftsPage(
+        [
+          hit({
+            accession: '0000000001-26-000001',
+            cik: '0000000031',
+            name: '1. FUND *ONE* LLC  (CIK 0000000031)',
+          }),
+          hit({
+            accession: '0000000002-26-000002',
+            cik: '0000000032',
+            name: '# HEDGE `CO` \\  (CIK 0000000032)',
+          }),
+        ],
+        2,
+      ),
+    );
+
+    const result = await runToolContract(findHoldersTool, { issuer: name });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      issuer: name,
+      resolved_issuer_name: name,
+      search_key: '"A *B* _C_ `D` [E](F) &amp;"',
+      holders: [
+        { filer_name: '1. FUND *ONE* LLC', filer_cik: '0000000031' },
+        { filer_name: '# HEDGE `CO` \\', filer_cik: '0000000032' },
+      ],
+    });
+    const text = readCommonMark(blockText(result.content));
+    expect(text).toContain(`⟨strong⟩13F holders of ${name}⟨/strong⟩ — 2026-Q1`);
+    expect(text).toContain(`Resolved issuer: ${name} (CIK 0000000021)`);
+    expect(text).toContain('Matched by name: "A *B* _C_ `D` [E](F) &amp;"');
+    expect(text).toContain(
+      '⟨list_item_open⟩\n\n1. FUND *ONE* LLC (CIK 0000000031) — 13F-HR 2026-05-15 [0000000001-26-000001]',
+    );
+    expect(text).toContain(
+      '⟨list_item_open⟩\n\n# HEDGE `CO` \\ (CIK 0000000032) — 13F-HR 2026-05-15 [0000000002-26-000002]',
+    );
+    expect(text).not.toMatch(/⟨(ordered_list_open|heading_open|em|code_inline|a )/);
   });
 });

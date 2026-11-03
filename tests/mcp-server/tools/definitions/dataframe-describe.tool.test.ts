@@ -13,7 +13,8 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
 }));
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
-import { bag, blockText, wireError } from '../../../support/assertions.js';
+import { at, bag, blockText, wireError } from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 const mockBridge = {
   describe: vi.fn(),
@@ -167,6 +168,43 @@ describe('dataframeDescribeTool', () => {
     expect(blockText(blocks)).toContain('secedgar_fetch_frames');
     expect(blockText(blocks)).toContain('3131');
     expect(blockText(blocks)).toContain('cik:VARCHAR');
+  });
+
+  it('renders each staged parameter as a code span and each column escaped, reading back as structuredContent (#221)', async () => {
+    // A register_as table: its query_params hold the caller's SQL, its columns the caller's aliases.
+    vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+    mockBridge.describe.mockResolvedValue([
+      {
+        ...sampleMeta,
+        sourceTool: 'secedgar_dataframe_query',
+        queryParams: {
+          query: '"US BANCORP"',
+          forms: ['10-K'],
+          name: 'US BANCORP \\DE\\',
+          sql: 'SELECT `a` AS "a*b*" FROM df_ABCDE_FGHIJ',
+        },
+        columnSchema: [
+          { name: 'a*b*', type: 'INTEGER', nullable: true },
+          { name: '<b>x</b>', type: 'STRUCT("[x](y)" VARCHAR)', nullable: true },
+        ],
+      },
+    ]);
+
+    const result = await runToolContract(dataframeDescribeTool, {});
+
+    expect(result.isError).toBeFalsy();
+    const df = at(dataframeDescribeTool.output.parse(result.structuredContent).dataframes);
+    expect(df.query_params.query).toBe('"US BANCORP"');
+    // The copy-back JSON of each value reads back as the code span's text.
+    const params = Object.entries(df.query_params)
+      .map(([key, value]) => `${key}=⟨code_inline:${JSON.stringify(value)}⟩`)
+      .join(', ');
+    const columns = df.column_schema
+      .map((c) => `${c.name}:${c.type} (nullable=${c.nullable})`)
+      .join(', ');
+    const parsed = readCommonMark(blockText(result.content)).split('\n\n');
+    expect(parsed).toContain(`Params: ${params}`);
+    expect(parsed).toContain(`Columns: ${columns}`);
   });
 
   it('format renders truncated indicator when truncated=true', () => {

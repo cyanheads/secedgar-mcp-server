@@ -13,7 +13,8 @@ import {
   notFound,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
-import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import { normalizeFormFilter } from '@/mcp-server/tools/form-filter.js';
 import {
   type LimitClampOptions,
@@ -329,7 +330,8 @@ function stripToken(query: string, token: string): string {
  * An unresolved `ticker:` or non-numeric `cik:` token fails with a typed
  * validation error instead of stripping the token and proceeding unscoped —
  * a silently-broadened search misleads, and a stripped token can leave EFTS
- * with a blank query it rejects (#61).
+ * with a blank query it rejects (#61). A `ticker:` token naming several companies
+ * fails the same way, listing them, rather than scoping to the first (#223).
  */
 async function resolveEntityTargeting(
   query: string,
@@ -339,6 +341,17 @@ async function resolveEntityTargeting(
   const tickerMatch = query.match(/\bticker:(\S+)/i);
   if (tickerMatch?.[1]) {
     const resolved = await getEdgarApiService().resolveCik(tickerMatch[1], scope);
+    if (Array.isArray(resolved) && resolved.length > 1) {
+      const { list, matches } = ambiguousMatches(resolved);
+      throw validationError(
+        `Entity targeting token 'ticker:${tickerMatch[1]}' matches multiple companies: ${list}. Retry with ticker: or cik: and one of these tickers or 10-digit CIKs.`,
+        {
+          reason: 'ambiguous_company',
+          ...ctx.recoveryFor('ambiguous_company'),
+          matches,
+        },
+      );
+    }
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
     if (!match?.cik) {
       throw validationError(
@@ -832,6 +845,14 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       thrownBy: 'service',
     },
     {
+      reason: 'ambiguous_company',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A ticker: targeting token in the query resolves to multiple companies and the target is ambiguous',
+      recovery:
+        'Use ticker: or cik: with a ticker symbol or 10-digit CIK from the matches list for an exact match.',
+      thrownBy: 'service',
+    },
+    {
       reason: 'invalid_cik',
       code: JsonRpcErrorCode.ValidationError,
       when: 'A cik: targeting token in the query is not a 1-10 digit number',
@@ -1261,9 +1282,9 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
           : `Served from ${archiveSource} — full-text search covers 2001-present only.${quarterNote}${scanNote}`,
         zeroHitCriteria: [
           // The notice is authored Markdown, so the caller's text inside it is escaped.
-          ...(hasFreeText ? [`"${escapeMarkdownInline(query)}"`] : []),
+          ...(hasFreeText ? [`"${escapeInline(query)}"`] : []),
           ...(entityCik ? [`CIK ${entityCik}`] : []),
-          ...(forms ? [`forms [${escapeMarkdownInline(forms.join(', '))}]`] : []),
+          ...(forms ? [`forms [${escapeInline(forms.join(', '))}]`] : []),
           `dates ${startDate} to ${endDate}`,
         ].join(', '),
         scan,
@@ -1380,9 +1401,9 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       // browse path (no query text) lead with the form/entity criteria instead of an
       // empty quoted query. The notice is authored Markdown, so the query and forms are escaped.
       const criteria: string[] = [];
-      if (query) criteria.push(`"${escapeMarkdownInline(query)}"`);
+      if (query) criteria.push(`"${escapeInline(query)}"`);
       if (entityCik) criteria.push(`entity CIK ${entityCik}`);
-      if (forms) criteria.push(`forms [${escapeMarkdownInline(forms.join(', '))}]`);
+      if (forms) criteria.push(`forms [${escapeInline(forms.join(', '))}]`);
       if (dates) criteria.push(`dates ${dates.startDate} to ${dates.endDate}`);
       const criteriaText = criteria.length > 0 ? criteria.join(', ') : 'the given criteria';
       ctx.enrich.notice(
@@ -1460,18 +1481,24 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         ? ''
         : ` — ${result.total_documents}${result.total_documents >= 10_000 ? '+' : ''} matching documents in the full-text index`;
     const lines = [`Found ${result.total} filings (${exactness})${documents}`];
+    // Names, descriptions, filenames, and locations are SEC text, escaped to read back as written.
     for (const r of result.results) {
       const period = r.period_ending ? ` (period: ${r.period_ending})` : '';
-      const desc = r.file_description ? ` — ${r.file_description}` : '';
+      const desc = r.file_description ? ` — ${escapeInline(r.file_description)}` : '';
       const matched = r.matched_documents?.length
-        ? ` | matched documents: ${r.matched_documents.map((d) => (d.type ? `${d.name} (${d.type})` : d.name)).join(', ')}`
+        ? ` | matched documents: ${r.matched_documents
+            .map((d) => {
+              const name = escapeInline(d.name);
+              return d.type ? `${name} (${escapeInline(d.type)})` : name;
+            })
+            .join(', ')}`
         : '';
       const sic = r.sic ? ` | SIC ${r.sic}` : '';
-      const loc = r.location ? ` | ${r.location}` : '';
+      const loc = r.location ? ` | ${escapeInline(r.location)}` : '';
       const src = r.source ? ` | source: ${r.source}` : '';
       const ident = r.ticker ? `${r.ticker}, CIK ${r.cik}` : `CIK ${r.cik}`;
       lines.push(
-        `- ${r.form ?? 'N/A'} ${r.filing_date}${period} — ${r.company_name} (${ident})${sic}${loc}${desc}${matched}${src} [${r.accession_number}]`,
+        `- ${r.form ?? 'N/A'} ${r.filing_date}${period} — ${escapeInline(r.company_name)} (${ident})${sic}${loc}${desc}${matched}${src} [${r.accession_number}]`,
       );
     }
     if (result.form_distribution) {

@@ -10,6 +10,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import {
   batchClamp,
   type LimitClampOptions,
@@ -104,7 +105,11 @@ interface Deferred {
   deferred_concepts?: string[];
 }
 
-/** `'a', 'b'` — inputs quoted as supplied, so surrounding whitespace stays visible. */
+/**
+ * `'a', 'b'` — inputs quoted as supplied, so surrounding whitespace stays visible.
+ * Inputs go in as given: format() passes them escaped, while {@link unreadNote}
+ * passes them raw into error messages, which the framework escapes whole (#221).
+ */
 function quoted(inputs: readonly string[]): string {
   return inputs.map((i) => `'${i}'`).join(', ');
 }
@@ -976,17 +981,23 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
   },
 
   format: (result) => {
+    // SEC's names and the caller's inputs, failure messages, and caveats render through
+    // escapeInline here, so content[] reads back the structuredContent value (#221).
     const out = [
       `**Company comparison** — ${result.companies.length} companies x ${result.concepts.length} concepts (${result.taxonomy}, ${result.period_type})`,
       `Periods: ${result.periods.join(', ')}`,
-      `Companies: ${result.companies.map((c) => `${c.name} [${c.input} → CIK ${c.cik}${c.ticker ? `, ${c.ticker}` : ''}]`).join('; ')}`,
+      `Companies: ${result.companies.map((c) => `${escapeInline(c.name)} [${escapeInline(c.input)} → CIK ${c.cik}${c.ticker ? `, ${c.ticker}` : ''}]`).join('; ')}`,
     ];
 
     for (const failure of result.failed_companies) {
-      out.push(`Excluded: ${failure.input} (${failure.reason}) — ${failure.message}`);
+      out.push(
+        `Excluded: ${escapeInline(failure.input)} (${failure.reason}) — ${escapeInline(failure.message)}`,
+      );
     }
     if (result.deferred_companies) {
-      out.push(`Deferred companies (not read): ${quoted(result.deferred_companies)}`);
+      out.push(
+        `Deferred companies (not read): ${quoted(result.deferred_companies.map(escapeInline))}`,
+      );
     }
 
     for (const concept of result.concepts) {
@@ -995,10 +1006,14 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       );
     }
     for (const unknown of result.unknown_concepts) {
-      out.push(`Unknown concept: ${unknown.concept} — not queried. ${unknownConceptHint(unknown)}`);
+      out.push(
+        `Unknown concept: ${escapeInline(unknown.concept)} — not queried. ${unknownConceptHint(unknown)}`,
+      );
     }
     if (result.deferred_concepts) {
-      out.push(`Deferred concepts (not read): ${quoted(result.deferred_concepts)}`);
+      out.push(
+        `Deferred concepts (not read): ${quoted(result.deferred_concepts.map(escapeInline))}`,
+      );
     }
 
     // Cells are rendered as a flat, sorted list rather than a lookup grid: every
@@ -1013,7 +1028,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     out.push('', '### Values');
     for (const cell of ordered) {
       out.push(
-        `- ${cell.concept} | ${cell.company} (CIK ${cell.cik}) | ${cell.period} = ${cell.value} ${cell.unit} | ${cell.taxonomy}:${cell.tag} | frame ${cell.frame} | ends ${cell.period_end} | ${cell.form} [${cell.accession_number}]`,
+        `- ${cell.concept} | ${escapeInline(cell.company)} (CIK ${cell.cik}) | ${cell.period} = ${cell.value} ${cell.unit} | ${cell.taxonomy}:${cell.tag} | frame ${cell.frame} | ends ${cell.period_end} | ${cell.form} [${cell.accession_number}]`,
       );
     }
 
@@ -1021,7 +1036,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       out.push('', `### Not reported (${result.gaps.length})`);
       for (const gap of result.gaps) {
         out.push(
-          `- ${gap.company} (CIK ${gap.cik}) reports no ${gap.concept} — tried: ${gap.tags_tried.join(', ')}`,
+          `- ${escapeInline(gap.company)} (CIK ${gap.cik}) reports no ${gap.concept} — tried: ${gap.tags_tried.join(', ')}`,
         );
       }
     }
@@ -1033,7 +1048,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       );
     }
 
-    for (const caveat of result.caveats) out.push('', `Caveat: ${caveat}`);
+    for (const caveat of result.caveats) out.push('', `Caveat: ${escapeInline(caveat)}`);
 
     return [{ type: 'text', text: out.join('\n') }];
   },

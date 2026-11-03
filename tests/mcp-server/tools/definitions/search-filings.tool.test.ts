@@ -3923,3 +3923,111 @@ describe('searchFilingsTool — relevance offsets past what EDGAR serves (#214)'
     expect(mockApi.searchFilings).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * A ticker: token that resolves to several companies fails as ambiguous_company with
+ * the candidates listed, before any search or archive read, instead of scoping the
+ * search to the first of them (#223).
+ */
+describe('searchFilingsTool — a ticker: token matching several companies (#223)', () => {
+  const FLUENT = [
+    { cik: '0001460329', name: 'Fluent, Inc.', ticker: 'FLNT' },
+    { cik: '0001758124', name: 'Fluent Corp.', ticker: 'CNTMF' },
+  ];
+
+  it.each([
+    ['on a full-text range', {}],
+    ['on a pre-2001 range', { filed_after: '1996-01-01', filed_before: '1999-12-31' }],
+  ])(
+    'fails as ambiguous_company listing both CIKs %s, sending no request',
+    async (_label, window) => {
+      mockApi.resolveCik.mockResolvedValue(FLUENT);
+
+      const result = await runToolContract(searchFilingsTool, {
+        query: 'ticker:Fluent',
+        forms: ['10-K'],
+        ...window,
+      });
+
+      const error = wireError(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.message).toBe(
+        "Entity targeting token 'ticker:Fluent' matches multiple companies: 0001460329 Fluent, Inc. (FLNT), 0001758124 Fluent Corp. (CNTMF). Retry with ticker: or cik: and one of these tickers or 10-digit CIKs.",
+      );
+      expect(error.data).toMatchObject({
+        reason: 'ambiguous_company',
+        matches: FLUENT,
+        recovery: {
+          hint: 'Use ticker: or cik: with a ticker symbol or 10-digit CIK from the matches list for an exact match.',
+        },
+      });
+      // content[] lists the candidates too, so a text-only client can retry with one.
+      expect(readCommonMark(blockText(result.content))).toContain(
+        '0001460329 Fluent, Inc. (FLNT), 0001758124 Fluent Corp. (CNTMF).',
+      );
+      expect(mockApi.resolveCik).toHaveBeenCalledWith('Fluent', expect.any(CallScope));
+      expect(mockApi.searchFilings).not.toHaveBeenCalled();
+      expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+      expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+      expect(mockApi.fetchFullIndexQuarter).not.toHaveBeenCalled();
+    },
+  );
+
+  it('declares ambiguous_company as a validation error raised below the handler', () => {
+    expect(searchFilingsTool.errors?.find((e) => e.reason === 'ambiguous_company')).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      thrownBy: 'service',
+    });
+  });
+});
+
+/**
+ * Every format() value the tool did not author reads back under CommonMark as
+ * structuredContent carries it: the filer name, location, document description,
+ * and each matched document's filename and type (#221).
+ */
+describe('searchFilingsTool — format() values read back under CommonMark (#221)', () => {
+  it('reads each interpolated value back as structuredContent carries it', async () => {
+    mockApi.searchFilings.mockResolvedValue({
+      hits: {
+        total: { value: 1, relation: 'eq' },
+        hits: [
+          {
+            _id: '0000000001-24-000001:a*b*.htm',
+            _source: {
+              adsh: '0000000001-24-000001',
+              form: '8-K',
+              file_date: '2024-01-02',
+              display_names: ['[ACME](y) *Holdings* \\DE\\  (ACM)  (CIK 0000000001)'],
+              ciks: ['0000000001'],
+              file_description: 'EX-99 *DRAFT* `v2`',
+              file_type: 'EX-99 _1_',
+              biz_locations: ['A &amp; B'],
+            },
+          },
+        ],
+      },
+      query: { from: 0, size: 100, query: 'merger' },
+    });
+
+    const result = await runToolContract(searchFilingsTool, { query: 'merger' });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      results: [
+        {
+          company_name: '[ACME](y) *Holdings* \\DE\\',
+          ticker: 'ACM',
+          file_description: 'EX-99 *DRAFT* `v2`',
+          matched_documents: [{ name: 'a*b*.htm', type: 'EX-99 _1_' }],
+          location: 'A &amp; B',
+        },
+      ],
+    });
+    const text = readCommonMark(blockText(result.content));
+    expect(text).toContain(
+      '8-K 2024-01-02 — [ACME](y) *Holdings* \\DE\\ (ACM, CIK 0000000001) | A &amp; B — EX-99 *DRAFT* `v2` | matched documents: a*b*.htm (EX-99 _1_) | source: efts [0000000001-24-000001]',
+    );
+    expect(text).not.toMatch(/⟨(em|code_inline|a )/);
+  });
+});

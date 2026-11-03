@@ -10,6 +10,8 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
+import { formatUsd } from '@/mcp-server/tools/format-usd.js';
 import {
   type LimitClampOptions,
   limitClamp,
@@ -101,14 +103,6 @@ function consolidatePositions(rows: HoldingOut[]): HoldingOut[] {
   return [...byPosition.values()].sort(
     (a, b) => (b.market_value_usd ?? 0) - (a.market_value_usd ?? 0),
   );
-}
-
-/** Render a whole-USD amount with a scaled B/M/K suffix — 13F positions span $100M–$60B+. */
-function formatUsd(value: number): string {
-  if (value >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(2)}B`;
-  if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
-  if (value >= 1_000) return `$${(value / 1_000).toFixed(2)}K`;
-  return `$${value.toFixed(2)}`;
 }
 
 /**
@@ -1077,8 +1071,10 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       result.total_positions !== undefined
         ? `Showing ${result.holdings.length} of ${result.total_positions} positions (consolidated from ${result.total_holdings_composed} info-table rows)`
         : `Showing ${result.holdings.length} of ${result.total_holdings_composed} info-table rows`;
+    // Filer and issuer names and the class title render through escapeInline, so a
+    // CommonMark parse reads back the structuredContent value (#221).
     const lines: string[] = [
-      `**13F-HR Holdings** — ${result.filer_name} (CIK ${result.filer_cik})`,
+      `**13F-HR Holdings** — ${escapeInline(result.filer_name)} (CIK ${result.filer_cik})`,
       `Filed: ${result.filing_date}${period} | Accession: ${result.accession_number}`,
       countLine,
       `Composed from: ${result.composed_accessions.join(', ')} (${result.total_holdings_composed} rows; original 13F-HR: ${result.total_holdings_in_filing})`,
@@ -1103,7 +1099,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       lines.push('');
       const valueStr =
         h.market_value_usd !== undefined
-          ? `${formatUsd(h.market_value_usd)} ($${h.market_value_usd.toLocaleString()})`
+          ? `${formatUsd(h.market_value_usd)} (${formatUsd(h.market_value_usd, 'exact')})`
           : 'value N/A';
       const sharesStr =
         h.shares_or_principal_amount !== undefined
@@ -1111,10 +1107,10 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
           : 'shares N/A';
       const putCallStr = h.put_call ? ` [${h.put_call}]` : '';
       const cusipStr = h.cusip ? ` CUSIP ${h.cusip}` : '';
-      const classStr = h.title_of_class ? ` (${h.title_of_class})` : '';
+      const classStr = h.title_of_class ? ` (${escapeInline(h.title_of_class)})` : '';
       const discStr = h.investment_discretion ? ` | discretion: ${h.investment_discretion}` : '';
 
-      lines.push(`**${h.issuer_name}**${classStr}${cusipStr}${putCallStr}`);
+      lines.push(`**${escapeInline(h.issuer_name)}**${classStr}${cusipStr}${putCallStr}`);
       lines.push(
         `${sharesStr} | ${valueStr}${discStr} | source: ${h.source_accession_numbers.join(', ')}`,
       );

@@ -2904,6 +2904,83 @@ describe('format()', () => {
   });
 });
 
+// ── SEC strings in content[] (#221) ──────────────────────────────────────────
+
+/**
+ * The company name, document descriptions, and outline headings are SEC's and the
+ * filer's, not the tool's: content[] escapes them, so a CommonMark parse reads back
+ * each structuredContent value. The filing body between the sentinels is #69's verbatim
+ * render and stays as it is.
+ */
+describe('SEC strings in content[] (#221)', () => {
+  const company = 'ACME *Holdings* _x_ `y` [a](b) &amp; \\DE\\';
+  // A trailing backslash ahead of the closing quote the render wraps a description in.
+  const primaryDescription = 'ANNUAL REPORT \\';
+  const exhibitDescription = 'EX-21 *SUBS* <b>x</b>';
+  // The second heading ends its outline line on a backslash, which would read as a hard break.
+  const headings = [
+    { heading: 'ITEM 1. *RISK* `FACTORS`', offset: 0 },
+    { heading: 'PART II _OTHER_ [a](b) &amp; \\', offset: 54 },
+  ];
+
+  beforeEach(() => {
+    mockApi.getSubmissions.mockResolvedValue({ ...mockSubmissions, name: company });
+    mockApi.tryGetFilingHeaders.mockResolvedValue({
+      documents: new Map([
+        ['aapl-20230930.htm', { type: '10-K', sequence: '1', description: primaryDescription }],
+        ['ex-21.htm', { type: 'EX-21', sequence: '2', description: exhibitDescription }],
+        ['R1.htm', { type: 'XML', sequence: '99' }],
+      ]),
+      submission: {},
+    });
+    vi.mocked(detectHeadings).mockReturnValue(headings);
+    vi.mocked(filingToExtract).mockReturnValue(SYNTHETIC_FULL_TEXT);
+    vi.mocked(windowText).mockReturnValue({
+      text: 'First page content',
+      truncated: true,
+      totalLength: SYNTHETIC_FULL_TEXT.length,
+      nextOffset: 18,
+    });
+  });
+
+  it('reads back the company name, document descriptions, and outline headings as structuredContent carries them', async () => {
+    const result = await runToolContract(getFilingTool, { accession_number: ACCN, cik: '320193' });
+
+    expect(result.isError).toBeFalsy();
+    const output = getFilingTool.output.parse(result.structuredContent);
+    expect(output.company_name).toBe(company);
+    expect(output.documents.primary.map((d) => d.description)).toEqual([primaryDescription]);
+    expect(output.documents.exhibits.map((d) => d.description)).toEqual([exhibitDescription]);
+    expect(output.outline).toEqual(headings);
+    const text = readCommonMark(blockText(result.content));
+    expect(text).toContain(`⟨strong⟩10-K⟨/strong⟩ — ${company} (CIK 0000320193)\n`);
+    expect(text).toContain(
+      `Primary (1): aapl-20230930.htm [10-K, 500000B, "${primaryDescription}"]`,
+    );
+    expect(text).toContain(`Exhibits (1): ex-21.htm [EX-21, 10000B, "${exhibitDescription}"]`);
+    expect(text).toContain(
+      `Outline:\n[0] ${headings[0]?.heading}\n[54] ${headings[1]?.heading}\nURL: https://`,
+    );
+  });
+
+  it('renders the section_not_found outline raw into the message, which reads back once escaped', async () => {
+    const result = await runToolContract(getFilingTool, {
+      accession_number: ACCN,
+      cik: '320193',
+      section: 'NO SUCH SECTION',
+    });
+
+    const error = wireError(result);
+    expect(error.data.reason).toBe('section_not_found');
+    expect(error.message).toContain(
+      `Outline:\n  [0] ${headings[0]?.heading}\n  [54] ${headings[1]?.heading}`,
+    );
+    const text = readCommonMark(blockText(result.content));
+    expect(text).toContain(`[0] ${headings[0]?.heading}\n`);
+    expect(text).toContain(`[54] ${headings[1]?.heading}`);
+  });
+});
+
 // ── Metadata for filings outside the recent window (#126) ────────────────────
 
 describe('metadata for filings outside the recent window (#126)', () => {

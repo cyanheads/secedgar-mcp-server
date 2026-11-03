@@ -6,7 +6,8 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
+import { markdown } from '@cyanheads/mcp-ts-core/utils';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import { normalizeFormFilter } from '@/mcp-server/tools/form-filter.js';
 import {
   type LimitClampOptions,
@@ -162,7 +163,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       .trim()
       .min(1, 'Query cannot be blank')
       .describe(
-        'Company ticker symbol (e.g., "AAPL", "VOO"), name (e.g., "Apple"), or CIK number (e.g., "320193"). Ticker is the fastest lookup and works for equities, ETFs, and mutual funds; a multi-class share ticker resolves in either form ("BRK-B" or "BRK.B"). Name search matches current and former names, preferring a name the query matches exactly over one it only starts or appears in; an exact or starts-with match ignores commas, periods, and apostrophes ("QXO Inc" finds "QXO, Inc."; "U.S. Bancorp" finds "US BANCORP"; "Macys" finds "Macy\'s, Inc."). The corporate suffix (Inc, Corp, Co, Ltd, PLC, LLC, LP, N.V., S.A., AG, SE) can be left off ("Apple" finds "Apple Inc."; "Rio Tinto" lists both the Ltd and the PLC) or spelled out ("Beacon Financial Corporation" finds "Beacon Financial Corp"), but a suffix you include must match — Corp, Inc, Co, and Ltd stay distinct from each other, since separate registrants differ only by which one they use.',
+        'Company ticker symbol (e.g., "AAPL", "VOO"), name (e.g., "Apple"), or CIK number (e.g., "320193"). Ticker is the fastest lookup and works for equities, ETFs, and mutual funds; a multi-class share ticker resolves in either form ("BRK-B" or "BRK.B"). Name search matches current and former names, preferring a name the query matches exactly over one it only starts or appears in, and never matching from inside a word ("SY Bancorp" does not find "Embassy Bancorp"); an exact or starts-with match ignores commas, periods, apostrophes, extra spaces, and the spaces between single initials ("QXO Inc" finds "QXO, Inc."; "U.S. Bancorp" finds "US BANCORP"; "Macys" finds "Macy\'s, Inc."; "JM Smucker" finds "J M SMUCKER Co"). The corporate suffix (Inc, Corp, Co, Ltd, PLC, LLC, LP, N.V., S.A., AG, SE) can be left off ("Apple" finds "Apple Inc."; "Rio Tinto" lists both the Ltd and the PLC) or spelled out ("Beacon Financial Corporation" finds "Beacon Financial Corp"), but a suffix you include must match — Corp, Inc, Co, and Ltd stay distinct from each other, since separate registrants differ only by which one they use.',
       ),
     include_filings: z
       .boolean()
@@ -479,7 +480,7 @@ export const companySearchTool = tool('secedgar_company_search', {
     if (input.include_filings && formTypes && totalFilings === 0) {
       // The notice is authored Markdown, so the caller's form types are escaped.
       ctx.enrich.notice(
-        `No filings matched form types [${escapeMarkdownInline(formTypes.join(', '))}] for this entity. Try different form types or remove the filter.`,
+        `No filings matched form types [${escapeInline(formTypes.join(', '))}] for this entity. Try different form types or remove the filter.`,
       );
     } else if (
       filings !== undefined &&
@@ -535,9 +536,15 @@ export const companySearchTool = tool('secedgar_company_search', {
   },
 
   format: (result) => {
-    const lines = [`**${result.name}** (${result.tickers.join(', ') || 'no ticker'})`];
+    // SEC's name, SIC title, and filing descriptions render through escapeInline,
+    // so content[] reads back the structuredContent value as text (#221).
+    const lines = [
+      `**${escapeInline(result.name)}** (${result.tickers.join(', ') || 'no ticker'})`,
+    ];
     const exchange = result.exchanges.length ? ` | Exchange: ${result.exchanges.join(', ')}` : '';
-    lines.push(`CIK: ${result.cik} | SIC: ${result.sic} (${result.sic_description})${exchange}`);
+    lines.push(
+      `CIK: ${result.cik} | SIC: ${result.sic} (${escapeInline(result.sic_description)})${exchange}`,
+    );
     if (result.fiscal_year_end) {
       lines.push(`Fiscal year end: ${result.fiscal_year_end}`);
     }
@@ -553,7 +560,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       lines.push(`\nFilings (${result.filings.length} of ${result.total_filings}):`);
       for (const f of result.filings) {
         const reportDate = f.report_date ? ` (period: ${f.report_date})` : '';
-        const desc = f.description ? ` — ${f.description}` : '';
+        const desc = f.description ? ` — ${escapeInline(f.description)}` : '';
         lines.push(
           `- ${f.form} ${f.filing_date}${reportDate}${desc} — ${f.primary_document} [${f.accession_number}]`,
         );

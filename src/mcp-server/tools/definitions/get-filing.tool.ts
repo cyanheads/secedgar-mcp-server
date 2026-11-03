@@ -5,7 +5,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import {
   type LimitClampOptions,
   limitClamp,
@@ -598,7 +598,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
         ? undefined
         : resolveSection(fullText, headings, input.section, PROXY_FORM_RE.test(form ?? ''));
       // The notices are authored Markdown, so the caller's section text is escaped.
-      const sectionText = escapeMarkdownInline(input.section);
+      const sectionText = escapeInline(input.section);
       if (landing?.source === 'line') {
         lineNotice = `No detected heading matches section '${sectionText}', so this page starts at the first document line that does.`;
       } else if (landing?.source === 'line-over-heading') {
@@ -658,7 +658,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
     // guidance. The outline is emitted only on a truncated page, so the cut
     // always has guidance to join.
     const fallbackNotice = unservedPrimary
-      ? `The filing index names ${escapeMarkdownInline(unservedPrimary)} as the primary document, but the SEC archive does not serve it, so this text is the full submission file ${escapeMarkdownInline(targetName)}.`
+      ? `The filing index names ${escapeInline(unservedPrimary)} as the primary document, but the SEC archive does not serve it, so this text is the full submission file ${escapeInline(targetName)}.`
       : undefined;
     if (truncated) {
       // section outranks offset, so a caller who keeps it reads this page again.
@@ -727,7 +727,10 @@ export const getFilingTool = tool('secedgar_get_filing', {
 
   format: (result) => {
     const formLabel = result.form ?? 'Filing';
-    const entity = result.company_name ?? 'Unknown entity';
+    // SEC's name, the filer's headings, and document descriptions render through
+    // escapeInline, so content[] reads back the structuredContent value (#221).
+    // The filing body between the sentinels stays verbatim (#69).
+    const entity = result.company_name ? escapeInline(result.company_name) : 'Unknown entity';
     const header = `**${formLabel}** — ${entity} (CIK ${result.cik})`;
 
     const filedPart = result.filing_date ? `Filed: ${result.filing_date}` : 'Filed: Unknown';
@@ -744,10 +747,11 @@ export const getFilingTool = tool('secedgar_get_filing', {
 
     const docs = formatDocumentSection(result.documents);
 
-    const outlineText =
-      result.outline && result.outline.length > 0
-        ? `\n\nOutline:\n${renderOutline(result.outline)}`
-        : '';
+    const outline = result.outline?.map((h) => ({
+      ...h,
+      heading: escapeInline(h.heading),
+    }));
+    const outlineText = outline?.length ? `\n\nOutline:\n${renderOutline(outline)}` : '';
 
     const url = `\nURL: ${result.filing_url}`;
     return [
@@ -1043,7 +1047,9 @@ function outlineCutNote(outline: FilingHeading[], detected: FilingHeading[]): st
  * Render outline entries as `  [offset] HEADING` lines. Shared by format()
  * and the section_not_found error message, so both surfaces read identically.
  * Both render a {@link selectOutline} cut, which bounds the block at
- * {@link OUTLINE_MAX_ENTRIES} entries.
+ * {@link OUTLINE_MAX_ENTRIES} entries. Headings go in as given: format() passes
+ * them escaped, while the error message takes them raw, since the framework
+ * escapes the whole message when it renders it (#221).
  */
 function renderOutline(outline: Array<{ heading: string; offset: number }>): string {
   return outline.map((h) => `  [${h.offset}] ${h.heading}`).join('\n');
@@ -1779,7 +1785,7 @@ function formatDocList(entries: DocumentEntry[]): string {
         d.type,
         d.binary ? 'binary' : null,
         d.size !== undefined ? `${d.size}B` : null,
-        d.description ? `"${d.description}"` : null,
+        d.description ? `"${escapeInline(d.description)}"` : null,
       ]
         .filter(Boolean)
         .join(', ');

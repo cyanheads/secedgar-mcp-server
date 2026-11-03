@@ -7,7 +7,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import { searchConcepts } from '@/services/edgar/concept-map.js';
 import type { ConceptGroup, ConceptTaxonomy } from '@/services/edgar/types.js';
 
@@ -154,7 +154,7 @@ export const searchConceptsTool = tool('secedgar_search_concepts', {
       const filterSuffix = filters.length ? ` with filters (${filters.join(', ')})` : '';
       // The notice is authored Markdown, so the caller's search text is escaped.
       ctx.enrich.notice(
-        `No concepts matched "${input.search === undefined ? '(all)' : escapeMarkdownInline(input.search)}"${filterSuffix}. Try a broader search term, a different group, or call with no filters to see the full catalog.`,
+        `No concepts matched "${input.search === undefined ? '(all)' : escapeInline(input.search)}"${filterSuffix}. Try a broader search term, a different group, or call with no filters to see the full catalog.`,
       );
     }
 

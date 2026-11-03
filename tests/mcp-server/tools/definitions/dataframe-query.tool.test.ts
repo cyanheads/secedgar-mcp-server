@@ -20,6 +20,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { bag, blockText, wireError } from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 const mockBridge = {
   query: vi.fn(),
@@ -28,6 +29,56 @@ const mockBridge = {
 beforeEach(() => {
   vi.clearAllMocks();
 });
+
+/**
+ * Runs a query returning a table of string cells through the tool contract,
+ * asserts structuredContent carries every cell unchanged and a CommonMark parse
+ * of the whole rendered table reads each header and cell back as its value — a
+ * line break read as the `<br>` the cell carries in its place — and returns the
+ * rendered text. A `|` or line break left live in a cell would split it or end
+ * the row, and the parse would show the extra cell or row.
+ */
+async function expectTableReadsBack(columns: string[], cells: string[][]): Promise<string> {
+  const rows = cells.map((row) => Object.fromEntries(columns.map((name, i) => [name, row[i]])));
+  vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+  mockBridge.query.mockResolvedValue({
+    result: { columns, rowCount: rows.length, rows },
+    meta: undefined,
+  });
+
+  const result = await runToolContract(dataframeQueryTool, { sql: 'SELECT * FROM df_ABCDE_FGHIJ' });
+
+  expect(result.isError).toBeFalsy();
+  const output = dataframeQueryTool.output.parse(result.structuredContent);
+  expect(output.columns).toEqual(columns);
+  expect(output.rows).toEqual(rows);
+  const cell = (tag: 'th' | 'td', value: string) => [
+    `⟨${tag}_open⟩`,
+    value.replace(/\r\n|\r|\n/g, '⟨html_inline:<br>⟩'),
+    `⟨${tag}_close⟩`,
+  ];
+  const text = blockText(result.content);
+  expect(readCommonMark(text)).toBe(
+    [
+      `⟨strong⟩${cells.length} rows⟨/strong⟩`,
+      '⟨table_open⟩',
+      '⟨thead_open⟩',
+      '⟨tr_open⟩',
+      ...columns.flatMap((name) => cell('th', name)),
+      '⟨tr_close⟩',
+      '⟨thead_close⟩',
+      '⟨tbody_open⟩',
+      ...cells.flatMap((row) => [
+        '⟨tr_open⟩',
+        ...row.flatMap((value) => cell('td', value)),
+        '⟨tr_close⟩',
+      ]),
+      '⟨tbody_close⟩',
+      '⟨table_close⟩',
+    ].join('\n\n'),
+  );
+  return text;
+}
 
 describe('dataframeQueryTool', () => {
   it('throws canvas_unavailable when no bridge is configured', async () => {
@@ -701,7 +752,8 @@ describe('dataframeQueryTool', () => {
   it('escapes backslashes before pipes, so a literal backslash survives rendering (#114)', () => {
     // Markdown consumes a backslash before ASCII punctuation as an escape, so an
     // unescaped `x\|y` renders as `x|y` and `a\*b` as `a*b`. Each literal
-    // backslash has to reach the text doubled, ahead of the pipe escape.
+    // backslash before punctuation has to reach the text doubled, and the
+    // punctuation itself escaped when it is syntax.
     const blocks = dataframeQueryTool.format!({
       columns: ['a', 'b', 'c'],
       row_count: 1,
@@ -709,8 +761,8 @@ describe('dataframeQueryTool', () => {
       rows: [{ a: 'x\\|y', b: 'a\\*b', c: { k: 'p\\|q' } }],
     });
 
-    // `x\|y` → `x\\\|y`; `a\*b` → `a\\*b`; the JSON text `{"k":"p\\|q"}` → `{"k":"p\\\\\|q"}`.
-    expect(blockText(blocks)).toContain('| x\\\\\\|y | a\\\\*b | {"k":"p\\\\\\\\\\|q"} |');
+    // `x\|y` → `x\\\|y`; `a\*b` → `a\\\*b`; the JSON text `{"k":"p\\|q"}` → `{"k":"p\\\\\|q"}`.
+    expect(blockText(blocks)).toContain('| x\\\\\\|y | a\\\\\\*b | {"k":"p\\\\\\\\\\|q"} |');
   });
 
   it('keeps structuredContent raw while content[] carries the escaped cell (#114)', async () => {
@@ -726,10 +778,11 @@ describe('dataframeQueryTool', () => {
 
     expect(result.isError).toBeFalsy();
     expect(result.structuredContent).toMatchObject({ rows: [{ a: 'x\\|y', b: 'a\\*b' }] });
-    expect(blockText(result.content)).toContain('| x\\\\\\|y | a\\\\*b |');
+    expect(blockText(result.content)).toContain('| x\\\\\\|y | a\\\\\\*b |');
   });
 
   it('escapes the header row the same way as the cells (#114)', () => {
+    // `c\d` stays as is: a backslash before a letter is no escape, so it reads back literally.
     const blocks = dataframeQueryTool.format!({
       columns: ['a|b', 'c\\d'],
       row_count: 1,
@@ -737,7 +790,7 @@ describe('dataframeQueryTool', () => {
       rows: [{ 'a|b': 1, 'c\\d': 2 }],
     });
 
-    expect(blockText(blocks)).toContain('| a\\|b | c\\\\d |\n| --- | --- |\n| 1 | 2 |');
+    expect(blockText(blocks)).toContain('| a\\|b | c\\d |\n| --- | --- |\n| 1 | 2 |');
   });
 
   it('keeps a cell holding \\n, \\r\\n, or a lone \\r on one table row (#121)', () => {
@@ -782,6 +835,42 @@ describe('dataframeQueryTool', () => {
     expect(result.isError).toBeFalsy();
     expect(result.structuredContent).toMatchObject({ rows: [{ a: 'line1\nline2', b: 'x' }] });
     expect(blockText(result.content)).toContain('| a | b |\n| --- | --- |\n| line1<br>line2 | x |');
+  });
+
+  it('reads every header and cell of the table back as its value under a CommonMark parse (#221)', async () => {
+    // Each kind of inline syntax, plus the shapes the escaper writes for edge whitespace and a line-start marker.
+    const values = [
+      'a *b* c',
+      'a_b_ _c_',
+      'x `code` y',
+      '<b>x</b>',
+      '[x](y)',
+      'AT&amp;T',
+      'x|y',
+      'US BANCORP \\DE\\',
+      'x\\|y',
+      'crlf\r\n- item',
+      'lf\n  # padded ',
+    ];
+    await expectTableReadsBack(
+      ['value', 'a*b*'],
+      values.map((value) => [value, value]),
+    );
+  });
+
+  it('escapes each line of a cell through escapeInline, so a cut cell reads back as its value (mcp-ts-core#809)', async () => {
+    // The cut itself is tested at its own seam, tests/mcp-server/tools/escape-inline.test.ts.
+    const run = ' '.repeat(40);
+    const text = await expectTableReadsBack(
+      ['v', 'w'],
+      [
+        [`a${run}# b`, 'x'],
+        [`line\nb${run}> c`, 'y'],
+      ],
+    );
+
+    expect(text).toContain(`| a${'&#32;'.repeat(40)}\\# b | x |`);
+    expect(text).toContain(`| line<br>b${'&#32;'.repeat(40)}\\> c | y |`);
   });
 
   it('formats empty results with no-rows message', () => {

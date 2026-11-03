@@ -10,6 +10,8 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
+import { formatUsd, groupedDigits } from '@/mcp-server/tools/format-usd.js';
 import {
   type LimitClampOptions,
   limitClamp,
@@ -491,8 +493,10 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
   },
 
   format: (result) => {
+    // The SEC label, filer-typed entity name, and location render through escapeInline,
+    // so a CommonMark parse reads back the structuredContent value (#221).
     const lines = [
-      `**${result.label}** [XBRL: ${result.taxonomy}:${result.concept}] — ${result.period} (${result.unit}, ${result.total_companies} companies)`,
+      `**${escapeInline(result.label)}** [XBRL: ${result.taxonomy}:${result.concept}] — ${result.period} (${result.unit}, ${result.total_companies} companies)`,
     ];
     lines.push(`Page offset: ${result.offset} (${result.data.length} shown)`);
     if (result.next_offset !== undefined) {
@@ -502,13 +506,13 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       const ticker = d.ticker ? ` (${d.ticker})` : '';
       const formatted =
         result.unit === 'USD'
-          ? `$${(d.value / 1_000_000_000).toFixed(2)}B`
+          ? formatUsd(d.value)
           : result.unit === 'USD-per-shares'
-            ? `$${d.value.toFixed(2)}`
-            : d.value.toLocaleString();
-      const location = d.location ? ` | ${d.location}` : '';
+            ? formatUsd(d.value, 'per-share')
+            : groupedDigits(d.value);
+      const location = d.location ? ` | ${escapeInline(d.location)}` : '';
       lines.push(
-        `${d.rank}. ${d.company_name}${ticker} — CIK ${d.cik}: ${formatted} (raw ${d.value}) | period end ${d.period_end}${location} [${d.accession_number}]`,
+        `${d.rank}. ${escapeInline(d.company_name)}${ticker} — CIK ${d.cik}: ${formatted} (raw ${d.value}) | period end ${d.period_end}${location} [${d.accession_number}]`,
       );
     }
     if (result.dataset) {
@@ -527,8 +531,9 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
         `Related tags (alternate definitions — not in data/df; query separately, don't blindly union): ${rel}`,
       );
     }
+    const { median, p95, max, max_to_p95_ratio } = result.value_distribution;
     lines.push(
-      `Value dispersion: median ${result.value_distribution.median.toLocaleString()}, p95 ${result.value_distribution.p95.toLocaleString()}, max ${result.value_distribution.max.toLocaleString()}, max/p95 ${result.value_distribution.max_to_p95_ratio}×`,
+      `Value dispersion: median ${groupedDigits(median)}, p95 ${groupedDigits(p95)}, max ${groupedDigits(max)}, max/p95 ${max_to_p95_ratio}×`,
     );
     lines.push(`Period ends: ${result.period_end_range.min} → ${result.period_end_range.max}`);
     for (const c of result.caveats) {

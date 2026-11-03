@@ -9,6 +9,8 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import { listConcepts, resolveConceptTarget } from '@/services/edgar/concept-map.js';
 import {
@@ -186,14 +188,11 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
       throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
     }
     if (Array.isArray(resolved) && resolved.length > 1) {
-      const shown = resolved.slice(0, 10);
-      const list = shown
-        .map((m) => `${m.cik} ${m.name ?? 'Unknown'}${m.ticker ? ` (${m.ticker})` : ''}`)
-        .join(', ');
+      const { list, matches } = ambiguousMatches(resolved);
       throw ctx.fail(
         'ambiguous_company',
         `'${input.company}' matches multiple companies: ${list}. Retry with one of these tickers or 10-digit CIKs.`,
-        { matches: shown.map((m) => ({ cik: m.cik, name: m.name, ticker: m.ticker })) },
+        { matches },
       );
     }
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
@@ -334,8 +333,12 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
   },
 
   format: (result) => {
+    // SEC's entity name, each line's label (SEC's companyfacts label when it serves one),
+    // and each caveat with the SEC label it can quote render through escapeInline
+    // here rather than where the caveat is composed, so content[] reads back the
+    // structuredContent value and structuredContent keeps the label as SEC serves it (#221).
     const out = [
-      `**Financial snapshot** — ${result.company} (CIK ${result.cik}, ${result.taxonomy}, periods: ${result.period_type})`,
+      `**Financial snapshot** — ${escapeInline(result.company)} (CIK ${result.cik}, ${result.taxonomy}, periods: ${result.period_type})`,
       `${result.concepts_resolved} of ${result.concepts_total} concepts resolved`,
     ];
 
@@ -351,7 +354,9 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
         group = line.group;
         out.push('', `### ${group}`);
       }
-      out.push(`- ${line.label} [${line.concept} → ${line.taxonomy}:${line.tag}, ${line.unit}]`);
+      out.push(
+        `- ${escapeInline(line.label)} [${line.concept} → ${line.taxonomy}:${line.tag}, ${line.unit}]`,
+      );
       if (line.annual) out.push(point('annual', line.annual, line.tag));
       if (line.quarterly) out.push(point('quarterly', line.quarterly, line.tag));
       if (line.instant) out.push(point('instant', line.instant, line.tag));
@@ -366,7 +371,7 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
       }
     }
 
-    for (const caveat of result.caveats) out.push('', `Caveat: ${caveat}`);
+    for (const caveat of result.caveats) out.push('', `Caveat: ${escapeInline(caveat)}`);
 
     return [{ type: 'text', text: out.join('\n') }];
   },

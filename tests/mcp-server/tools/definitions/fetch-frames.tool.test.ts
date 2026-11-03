@@ -1492,6 +1492,104 @@ describe('business location', () => {
   });
 });
 
+/**
+ * Each row's figure beside its raw value (#222): a USD value scaled by its own magnitude, a
+ * per-share value and any other unit to every digit. The scale rule itself is tabled in
+ * tests/mcp-server/tools/format-usd.test.ts; these cases prove the wiring per unit.
+ */
+describe('fetchFramesTool — value rendering by unit (#222)', () => {
+  /** format() text of a one-company frame in `unit` holding `value`. */
+  const render = (unit: string, value: number) =>
+    blockText(
+      fetchFramesTool.format!(
+        fetchFramesTool.output.parse({
+          concept: 'Tag',
+          taxonomy: 'us-gaap',
+          period: 'CY2023',
+          unit,
+          label: 'Label',
+          total_companies: 1,
+          offset: 0,
+          data: [
+            {
+              rank: 1,
+              company_name: 'Small Co',
+              cik: '0000000001',
+              value,
+              period_end: '2023-12-31',
+              accession_number: '0000000001-24-000001',
+            },
+          ],
+          unqueried_tags: [],
+          related_tags: [],
+          value_distribution: { median: value, p95: value, max: value, max_to_p95_ratio: 1 },
+          period_end_range: { min: '2023-12-31', max: '2023-12-31' },
+          caveats: [],
+        }),
+      ),
+    );
+
+  it('scales a USD value by its own magnitude, so a small one never reads as zero', () => {
+    expect(render('USD', 42538)).toContain('Small Co — CIK 0000000001: $42.54K (raw 42538) |');
+  });
+
+  it('renders a per-share value to every digit', () => {
+    expect(render('USD-per-shares', 0.004)).toContain('CIK 0000000001: $0.004 (raw 0.004) |');
+  });
+
+  it('keeps every digit of any other unit, in the row and the dispersion line', () => {
+    const pure = render('pure', 0.0004);
+    expect(pure).toContain('CIK 0000000001: 0.0004 (raw 0.0004) |');
+    expect(pure).toContain('Value dispersion: median 0.0004, p95 0.0004, max 0.0004, max/p95 1×');
+    // Characterization: a whole count keeps its digit grouping.
+    expect(render('shares', 15_550_061_000)).toContain(
+      'CIK 0000000001: 15,550,061,000 (raw 15550061000) |',
+    );
+  });
+});
+
+/**
+ * SEC strings in content[] read back under CommonMark as structuredContent carries them (#221):
+ * the frames label in bold, the filer-typed entity name opening a ranked list item, and the
+ * location before the accession bracket.
+ */
+describe('fetchFramesTool — SEC strings read back from content[] (#221)', () => {
+  it('renders the label, company name, and location so a CommonMark parse reads each back', async () => {
+    const label = 'Revenue *net* _gross_ `x` [l](u) &amp; \\';
+    const company = '# ACME *x* _y_ `z` [a](b) &amp; \\DE\\';
+    const location = 'US_CA_ *x* [m](n) &amp; \\';
+    mockApi.tryGetFrames.mockResolvedValue({
+      ...mockFramesResponse,
+      label,
+      pts: 1,
+      data: [
+        {
+          accn: '0000000001-24-000001',
+          cik: 1,
+          end: '2023-12-31',
+          entityName: company,
+          loc: location,
+          val: 383285000000,
+        },
+      ],
+    });
+    mockApi.cikToTicker.mockResolvedValue(undefined);
+
+    const result = await runToolContract(fetchFramesTool, { concept: 'revenue', period: 'CY2023' });
+    const output = fetchFramesTool.output.parse(result.structuredContent);
+    const row = at(output.data);
+    expect([output.label, row.company_name, row.location]).toEqual([label, company, location]);
+
+    const lines = readCommonMark(blockText(result.content)).split('\n');
+    expect(lines).toContain(
+      `⟨strong⟩${output.label}⟨/strong⟩ [XBRL: us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax] — CY2023 (USD, 1 companies)`,
+    );
+    expect(lines).toContain(
+      `${row.company_name} — CIK 0000000001: $383.29B (raw 383285000000) | period end 2023-12-31 | ${row.location} [0000000001-24-000001]`,
+    );
+  });
+});
+
 // A limit above the 100-company page is served at 100 while EDGAR_CLAMP_OVERSIZED_LIMITS
 // is on; the mechanism itself is tabled in tests/mcp-server/tools/limit-clamp.test.ts (#197).
 describe('fetchFramesTool — limit above the 100 cap (#197)', () => {

@@ -14,6 +14,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { bag, blockText, wireError } from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 const mockBridge = {
   drop: vi.fn(),
@@ -89,6 +90,23 @@ describe('dataframeDropTool', () => {
     expect(blocks).toHaveLength(1);
     expect(blockText(blocks)).toContain('not found');
     expect(blockText(blocks)).toContain('df_NOTHI_NGHERE');
+  });
+
+  it('echoes the name escaped on both branches, reading back as structuredContent (#221)', async () => {
+    // The not-found line opens with the name, so a leading `#` would start a heading there.
+    const name = '# x*y* <b>z</b> [l](u) \\';
+    vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+
+    for (const dropped of [true, false]) {
+      mockBridge.drop.mockResolvedValue(dropped);
+      const result = await runToolContract(dataframeDropTool, { name });
+
+      expect(result.isError).toBeFalsy();
+      expect(dataframeDropTool.output.parse(result.structuredContent)).toEqual({ name, dropped });
+      expect(readCommonMark(blockText(result.content))).toBe(
+        dropped ? `Dropped ${name}.` : `${name} not found.`,
+      );
+    }
   });
 
   it('calls bridge.drop with the exact name from input', async () => {

@@ -7,6 +7,8 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { markdown } from '@cyanheads/mcp-ts-core/utils';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 
 export const dataframeDescribeTool = tool('secedgar_dataframe_describe', {
@@ -113,12 +115,18 @@ export const dataframeDescribeTool = tool('secedgar_dataframe_describe', {
       lines.push(`- Source: ${df.source_tool}`);
       lines.push(`- Rows: ${df.row_count}${truncated}`);
       lines.push(`- Created: ${df.created_at} — Expires: ${df.expires_at}`);
+      /**
+       * Each value is copy-back JSON, so it renders as a code span: outside code
+       * a CommonMark client consumes the backslash of a quoted phrase's `\"`
+       * (#221). A `register_as` table's columns are the caller's SQL aliases and
+       * DuckDB types, so names and types render escaped.
+       */
       const params = Object.entries(df.query_params)
-        .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+        .map(([k, v]) => `${k}=${markdown().inlineCode(JSON.stringify(v)).build()}`)
         .join(', ');
       if (params) lines.push(`- Params: ${params}`);
       const cols = df.column_schema
-        .map((c) => `${c.name}:${c.type} (nullable=${c.nullable})`)
+        .map((c) => `${escapeInline(c.name)}:${escapeInline(c.type)} (nullable=${c.nullable})`)
         .join(', ');
       lines.push(`- Columns: ${cols}`);
       lines.push('');

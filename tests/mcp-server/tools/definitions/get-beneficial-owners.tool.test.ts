@@ -923,6 +923,18 @@ describe('getBeneficialOwnersTool — filer text (#200)', () => {
     expect(text).toContain(`⟨strong⟩${name}⟨/strong⟩ (CIK 0001111111, PN)`);
   });
 
+  it('reads back the issuer input echo as typed, a trailing backslash ahead of its closing quote included (#221)', async () => {
+    const issuer = 'US BANCORP *x* _y_ `z` [a](b) &amp; \\DE\\';
+    serve(thirteenD('Board representation.'));
+
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer });
+
+    expect(result.structuredContent).toMatchObject({ issuer, issuer_name: 'Apple Inc.' });
+    expect(rendered(result)).toContain(
+      `⟨strong⟩5%+ beneficial owners of Apple Inc.⟨/strong⟩ (CIK 0000320193) — input "${issuer}"\n`,
+    );
+  });
+
   it('stages purpose_of_transaction and notes uncut in every dataframe row', async () => {
     const bridge = stubBridge();
     vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);

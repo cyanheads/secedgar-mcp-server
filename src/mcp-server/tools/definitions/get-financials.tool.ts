@@ -6,6 +6,9 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
+import { formatUsd, groupedDigits } from '@/mcp-server/tools/format-usd.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -331,24 +334,11 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
     }
     if (Array.isArray(resolved) && resolved.length > 1) {
-      // Render the candidates into the message itself, not just structured data —
-      // clients that read only content[] otherwise get a "pick from the matches
-      // list" instruction with no list to pick from (#90). Same shape the
-      // company_search and get_institutional_holdings ambiguity paths already ship.
-      const shown = resolved.slice(0, 10);
-      const list = shown
-        .map((m) => `${m.cik} ${m.name ?? 'Unknown'}${m.ticker ? ` (${m.ticker})` : ''}`)
-        .join(', ');
+      const { list, matches } = ambiguousMatches(resolved);
       throw ctx.fail(
         'ambiguous_company',
         `'${input.company}' matches multiple companies: ${list}. Retry with one of these tickers or 10-digit CIKs.`,
-        {
-          matches: shown.map((m) => ({
-            cik: m.cik,
-            name: m.name,
-            ticker: m.ticker,
-          })),
-        },
+        { matches },
       );
     }
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
@@ -795,9 +785,17 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
   },
 
   format: (result) => {
-    const lines = [`**${result.label}** — ${result.company} (CIK ${result.cik}, ${result.unit})`];
+    /**
+     * The SEC label and description, the company name, and the caveats — which quote the SEC
+     * label as served — render through escapeInline, so a CommonMark parse reads back
+     * the structuredContent value (#221). Escaping here, not where a caveat is composed, keeps
+     * structuredContent free of escapes.
+     */
+    const lines = [
+      `**${escapeInline(result.label)}** — ${escapeInline(result.company)} (CIK ${result.cik}, ${result.unit})`,
+    ];
     lines.push(`XBRL tag: ${result.concept}`);
-    if (result.description) lines.push(result.description);
+    if (result.description) lines.push(escapeInline(result.description));
     if (result.tags_tried?.length) {
       lines.push(`Tags tried: ${result.tags_tried.join(', ')}`);
     }
@@ -805,10 +803,10 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     for (const d of result.data) {
       const formatted =
         result.unit === 'USD'
-          ? `$${(d.value / 1_000_000).toFixed(1)}M`
+          ? formatUsd(d.value)
           : result.unit === 'USD/shares'
-            ? `$${d.value.toFixed(2)}`
-            : d.value.toLocaleString();
+            ? formatUsd(d.value, 'per-share')
+            : groupedDigits(d.value);
       const fy = d.fiscal_year != null ? `FY${d.fiscal_year}` : null;
       const fp = d.fiscal_period ?? null;
       const fiscalCtx = [fy, fp].filter(Boolean).join(' ');
@@ -830,7 +828,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       );
     }
     for (const caveat of result.caveats ?? []) {
-      lines.push(`\nCaveat: ${caveat}`);
+      lines.push(`\nCaveat: ${escapeInline(caveat)}`);
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

@@ -11,7 +11,9 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import { fixedPoint } from '@/mcp-server/tools/fixed-point.js';
+import { formatUsd, groupedDigits } from '@/mcp-server/tools/format-usd.js';
 import {
   type LimitClampOptions,
   limitClamp,
@@ -214,15 +216,6 @@ function distinctSeries(
     }
   }
   return [...seen].map(([id, name]) => ({ id, name }));
-}
-
-/** Render a USD amount with a scaled T/B/M/K suffix — fund portfolios span $1M to $2T. */
-function formatUsd(value: number): string {
-  if (value >= 1e12) return `$${(value / 1e12).toFixed(2)}T`;
-  if (value >= 1e9) return `$${(value / 1e9).toFixed(2)}B`;
-  if (value >= 1e6) return `$${(value / 1e6).toFixed(2)}M`;
-  if (value >= 1e3) return `$${(value / 1e3).toFixed(2)}K`;
-  return `$${value.toFixed(2)}`;
 }
 
 /** Whole days between two YYYY-MM-DD dates. */
@@ -833,15 +826,17 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
   },
 
   format: (result) => {
-    const label = result.series_name ?? result.registrant_name;
+    // Filer-reported names and titles and the echoed fund input render through
+    // escapeInline, so a CommonMark parse reads back the structuredContent value (#221).
+    const label = escapeInline(result.series_name ?? result.registrant_name);
     const lines: string[] = [
-      `**${label} portfolio** — input "${result.fund}"`,
+      `**${label} portfolio** — input "${escapeInline(result.fund)}"`,
       `Portfolio as of ${result.report_period_date ?? 'an unstated date'}, filed ${result.filing_date}${
         result.publication_lag_days !== undefined
           ? ` (${result.publication_lag_days} days later)`
           : ''
       } | ${result.form} ${result.accession_number}`,
-      `Registrant: ${result.registrant_name} (CIK ${result.registrant_cik})${
+      `Registrant: ${escapeInline(result.registrant_name)} (CIK ${result.registrant_cik})${
         result.series_id ? ` | series ${result.series_id}` : ''
       }${result.class_ids.length > 0 ? ` | classes ${result.class_ids.join(', ')}` : ''}`,
     ];
@@ -851,7 +846,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
     }
 
     const money = (label: string, value: number) =>
-      `${label} ${formatUsd(value)} ($${value.toLocaleString('en-US')})`;
+      `${label} ${formatUsd(value)} (${formatUsd(value, 'exact')})`;
     const assets: string[] = [];
     if (result.net_assets_usd !== undefined)
       assets.push(money('net assets', result.net_assets_usd));
@@ -881,11 +876,11 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
         .filter(Boolean)
         .join(' ');
       lines.push(
-        `**${h.name}**${h.title && h.title !== h.name ? ` (${h.title})` : ''}${ids ? ` — ${ids}` : ''}`,
+        `**${escapeInline(h.name)}**${h.title && h.title !== h.name ? ` (${escapeInline(h.title)})` : ''}${ids ? ` — ${ids}` : ''}`,
       );
       const value =
         h.value_usd !== undefined
-          ? `USD ${formatUsd(h.value_usd)} ($${h.value_usd.toLocaleString('en-US')})`
+          ? `USD ${formatUsd(h.value_usd)} (${formatUsd(h.value_usd, 'exact')})`
           : 'value N/A';
       const pct =
         h.percent_of_net_assets !== undefined
@@ -893,7 +888,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
           : 'percent N/A';
       const balance =
         h.balance !== undefined
-          ? `${h.balance.toLocaleString()} ${h.units ?? 'units'}`
+          ? `${groupedDigits(h.balance)} ${h.units ?? 'units'}`
           : 'balance N/A';
       lines.push(
         `${balance}${h.currency ? ` | denomination: ${h.currency}` : ''} | ${value} | ${pct}`,

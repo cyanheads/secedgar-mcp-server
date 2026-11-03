@@ -49,12 +49,14 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import {
+  allText,
   blockAt,
   blockText,
   caught,
   recoveryHint,
   wireError,
 } from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 /** A canvas bridge stub whose registerDataframe echoes the rows + truncated flag it received. */
 function stubBridge() {
@@ -1705,5 +1707,147 @@ describe('getInsiderTransactionsTool — limit above the 100 cap (#197)', () => 
     expect(rejected.isError).toBe(true);
     expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
     expect(mockApi.resolveCik).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A company input that resolves to several companies fails as ambiguous_company with
+ * the candidates listed, before any Form 4 is read, as on get_financials and
+ * get_snapshot; one company answers as before (#223).
+ */
+describe('getInsiderTransactionsTool — a company input matching several companies (#223)', () => {
+  // The registrant that carries the name today, then the former holder of it.
+  const ENERGIZER = [
+    { cik: '0001632790', name: 'ENERGIZER HOLDINGS, INC.', ticker: 'ENR' },
+    { cik: '0001096752', name: 'energizer holdings inc' },
+  ];
+
+  it.each([
+    ['without a date window', {}],
+    ['inside a date window', { filed_after: '2014-01-01', filed_before: '2014-12-31' }],
+  ])(
+    'fails as ambiguous_company listing both CIKs %s, reading no filing',
+    async (_label, window) => {
+      mockApi.resolveCik.mockResolvedValue(ENERGIZER);
+
+      const result = await runToolContract(getInsiderTransactionsTool, {
+        company: 'Energizer Holdings Inc',
+        limit: 1,
+        ...window,
+      });
+
+      const error = wireError(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.message).toBe(
+        "'Energizer Holdings Inc' matches multiple companies: 0001632790 ENERGIZER HOLDINGS, INC. (ENR), 0001096752 energizer holdings inc. Retry with one of these tickers or 10-digit CIKs.",
+      );
+      expect(error.data).toMatchObject({
+        reason: 'ambiguous_company',
+        matches: ENERGIZER,
+        recovery: {
+          hint: 'Use a ticker symbol or 10-digit CIK from the matches list for an exact match.',
+        },
+      });
+      // content[] lists the candidates too, so a text-only client can retry with one.
+      expect(readCommonMark(allText(result))).toContain(
+        '0001632790 ENERGIZER HOLDINGS, INC. (ENR), 0001096752 energizer holdings inc.',
+      );
+      expect(mockApi.getRecentFilingsByForm).not.toHaveBeenCalled();
+      expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+      expect(mockApi.tryGetFilingDocument).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['a ticker', 'ENR', ENERGIZER[0]],
+    ['a CIK', '1632790', ENERGIZER[0]],
+    [
+      'a name naming one company',
+      'Fluent Inc',
+      { cik: '0001460329', name: 'Fluent, Inc.', ticker: 'FLNT' },
+    ],
+  ])('answers %s as before', async (_label, company, match) => {
+    mockApi.resolveCik.mockResolvedValue(match);
+    mockApi.tryGetFilingDocument.mockResolvedValue(
+      SALE_XML.replace('<issuerCik>0000320193</issuerCik>', `<issuerCik>${match?.cik}</issuerCik>`),
+    );
+
+    const result = await runToolContract(getInsiderTransactionsTool, { company });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      issuer_cik: match?.cik,
+      issuer_name: match?.name,
+      issuer_ticker: match?.ticker,
+      filings_scanned: 1,
+      transactions: [{ reporting_person: 'LEVINSON ARTHUR D' }],
+    });
+  });
+
+  it('declares ambiguous_company as get_financials does, and promises no pick', () => {
+    const defs = buildToolDefinitions({ dropEnabled: false, clampOversizedLimits: true });
+    const entry = (name: string) =>
+      defs.find((d) => d.name === name)?.errors?.find((e) => e.reason === 'ambiguous_company');
+
+    expect(entry('secedgar_get_insider_transactions')).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+    });
+    expect(entry('secedgar_get_insider_transactions')).toEqual(entry('secedgar_get_financials'));
+    const company = (z.toJSONSchema(getInsiderTransactionsTool.input, { io: 'input' }) as any)
+      .properties.company.description;
+    expect(company).not.toContain('top-ranked');
+  });
+});
+
+/**
+ * Every format() value the tool did not author reads back under CommonMark as
+ * structuredContent carries it: the issuer name, the reporting person in bold, the
+ * filer-written officer title inside the relationship, the security title, and the
+ * nature of indirect ownership (#221).
+ */
+describe('getInsiderTransactionsTool — format() values read back under CommonMark (#221)', () => {
+  it('reads each interpolated value back as structuredContent carries it', async () => {
+    const issuer = 'A `B` &amp; [C](D) _E_ Co';
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: issuer, ticker: 'ABC' });
+    mockApi.tryGetFilingDocument.mockResolvedValue(
+      SALE_XML.replace('LEVINSON ARTHUR D', 'DOE JANE \\DE\\')
+        .replace('<isDirector>true</isDirector>', '<isDirector>false</isDirector>')
+        .replace(
+          '<isOfficer>false</isOfficer>',
+          '<isOfficer>true</isOfficer><officerTitle>EVP *Interim* _Ops_</officerTitle>',
+        )
+        .replace('<value>Common Stock</value>', '<value>Common [Pref](y) *A*</value>')
+        .replace(
+          '<directOrIndirectOwnership><value>D</value></directOrIndirectOwnership>',
+          '<directOrIndirectOwnership><value>I</value></directOrIndirectOwnership><natureOfOwnership><value>By `Trust` _2_</value></natureOfOwnership>',
+        ),
+    );
+
+    const result = await runToolContract(getInsiderTransactionsTool, { company: 'ABC' });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      issuer_name: issuer,
+      transactions: [
+        {
+          reporting_person: 'DOE JANE \\DE\\',
+          relationship: 'Officer (EVP *Interim* _Ops_)',
+          security_title: 'Common [Pref](y) *A*',
+          ownership_type: 'indirect',
+          ownership_nature: 'By `Trust` _2_',
+        },
+      ],
+    });
+    const text = readCommonMark(blockText(result.content));
+    expect(text).toContain(
+      `⟨strong⟩Insider Transactions⟨/strong⟩ — ${issuer} (CIK 0000320193, ABC)`,
+    );
+    expect(text).toContain(
+      '⟨strong⟩DOE JANE \\DE\\⟨/strong⟩ (Officer (EVP *Interim* _Ops_)) — sale',
+    );
+    expect(text).toContain(
+      '2024-03-15 | Common [Pref](y) *A* | 10,000 shares disposed @ $175.50 | owns 500,000 after (indirect: By `Trust` _2_) | report period: 2024-03-15',
+    );
+    expect(text).not.toMatch(/⟨(em|code_inline|a )/);
   });
 });

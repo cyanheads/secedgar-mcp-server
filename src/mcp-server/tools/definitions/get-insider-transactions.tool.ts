@@ -6,7 +6,8 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import { fixedPoint } from '@/mcp-server/tools/fixed-point.js';
 import {
   type LimitClampOptions,
@@ -128,6 +129,12 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       recovery: 'Use secedgar_company_search to find the correct ticker or CIK.',
     },
     {
+      reason: 'ambiguous_company',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The company input resolves to multiple entities and the target is ambiguous',
+      recovery: 'Use a ticker symbol or 10-digit CIK from the matches list for an exact match.',
+    },
+    {
       reason: 'no_filings_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'A call without a date window finds no Form 4 filings in the recent submissions window',
@@ -159,7 +166,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       .string()
       .min(1)
       .describe(
-        'The issuer whose Form 4 filings to read — the company, not the reporting person. A ticker symbol (e.g., "AAPL"), a CIK with or without zero-padding (e.g., "320193" or "0000320193"), or a company name (current or former). A name matching several companies resolves to the top-ranked one — exact name first, then prefix, then substring — so pass a ticker or CIK when the issuer must be exact.',
+        'The issuer whose Form 4 filings to read — the company, not the reporting person. A ticker symbol (e.g., "AAPL"), a CIK with or without zero-padding (e.g., "320193" or "0000320193"), or a company name (current or former). A name matching several companies fails and lists them, so retry with one\'s ticker or CIK.',
       ),
     transaction_type: z
       .enum(['purchase', 'sale', 'all'])
@@ -339,10 +346,20 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     const api = getEdgarApiService();
     const scope = new CallScope(ctx.signal);
 
-    // Resolve company to CIK
+    // Resolve company to CIK. Several companies fail before any Form 4 is read: the first
+    // is often not the one meant — a tie, a looser match, or the current holder of a name
+    // whose former holder filed the window asked for (#223).
     const resolved = await api.resolveCik(input.company, scope);
+    if (Array.isArray(resolved) && resolved.length > 1) {
+      const { list, matches } = ambiguousMatches(resolved);
+      throw ctx.fail(
+        'ambiguous_company',
+        `'${input.company}' matches multiple companies: ${list}. Retry with one of these tickers or 10-digit CIKs.`,
+        { matches },
+      );
+    }
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
-    if (!match || (Array.isArray(resolved) && resolved.length === 0)) {
+    if (!match) {
       throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
     }
 
@@ -539,7 +556,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
 
     const windowText = dateWindow && describeWindow(filedAfter, filedBefore);
     // The notices are authored Markdown, so the caller's company text is escaped.
-    const companyText = escapeMarkdownInline(input.company);
+    const companyText = escapeInline(input.company);
     if (windowText && filingBatch.length === 0) {
       // The walk runs newest first, so only an earlier upper bound reaches older filings.
       const walkNote = walk?.truncated
@@ -673,8 +690,9 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       otherIssuer > 0
         ? `; ${otherIssuer} ${otherIssuer === 1 ? 'names another issuer and contributes' : 'name another issuer and contribute'} none`
         : '';
+    // Names and titles are SEC or filer text, escaped to read back as written.
     const lines: string[] = [
-      `**Insider Transactions** — ${result.issuer_name} (CIK ${result.issuer_cik}${result.issuer_ticker ? `, ${result.issuer_ticker}` : ''})`,
+      `**Insider Transactions** — ${escapeInline(result.issuer_name)} (CIK ${result.issuer_cik}${result.issuer_ticker ? `, ${result.issuer_ticker}` : ''})`,
       `${result.transactions.length} transaction(s) from ${result.filings_scanned} Form 4 filing(s) scanned${otherIssuerNote}`,
     ];
 
@@ -701,18 +719,18 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
           : '';
       const derivStr = tx.is_derivative ? ' [derivative]' : '';
       const ownershipStr = tx.ownership_nature
-        ? ` (${tx.ownership_type ?? 'indirect'}: ${tx.ownership_nature})`
+        ? ` (${tx.ownership_type ?? 'indirect'}: ${escapeInline(tx.ownership_nature)})`
         : tx.ownership_type
           ? ` (${tx.ownership_type})`
           : '';
 
       lines.push(
-        `**${tx.reporting_person}** (${tx.relationship}) — ${tx.transaction_type}${derivStr}`,
+        `**${escapeInline(tx.reporting_person)}** (${escapeInline(tx.relationship)}) — ${tx.transaction_type}${derivStr}`,
       );
       const txDate = tx.transaction_date ?? tx.filing_date;
       const periodStr = tx.period_of_report ? ` | report period: ${tx.period_of_report}` : '';
       lines.push(
-        `${txDate} | ${tx.security_title} | ${sharesStr} ${priceStr}${ownedStr}${ownershipStr}${periodStr}`,
+        `${txDate} | ${escapeInline(tx.security_title)} | ${sharesStr} ${priceStr}${ownedStr}${ownershipStr}${periodStr}`,
       );
       lines.push(
         `Code: ${tx.transaction_code} | Filed: ${tx.filing_date} [${tx.accession_number}]`,

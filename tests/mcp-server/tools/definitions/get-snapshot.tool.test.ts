@@ -17,6 +17,7 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
 
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { blockText, caught } from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 function fact(overrides: Partial<CompanyConceptUnit> & { frame: string }): CompanyConceptUnit {
   return {
@@ -789,6 +790,46 @@ describe('getSnapshotTool', () => {
     expect(text).toContain('0000320193-24-000123');
     expect(text).toContain('Not reported');
     expect(text).toContain('tried: Goodwill');
+  });
+
+  // SEC's strings are not the tool's text: content[] escapes them, so a CommonMark parse
+  // reads back each structuredContent value. The line label is SEC's companyfacts label
+  // whenever SEC serves one. A caveat quoting that label is escaped as it renders, never
+  // where it is composed, so structuredContent keeps the label as SEC serves it (#221).
+  it('reads back the company name, an SEC line label, and a caveat quoting it as structuredContent carries them (#221)', async () => {
+    const company = 'J M SMUCKER *Co* _x_ [a](b) &amp; \\DE\\';
+    // SEC's retired-tag label, ending on a backslash ahead of the quote the caveat closes it with.
+    const label = 'Sales *Revenue*, `Goods` <b>Net</b> _x_ [a](b) (Deprecated 2018-01-31) \\';
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000091419', name: company });
+    mockApi.tryGetCompanyFacts.mockResolvedValue({
+      cik: 91419,
+      entityName: company,
+      facts: {
+        'us-gaap': {
+          SalesRevenueGoodsNet: {
+            label,
+            units: { USD: [fact({ frame: 'CY2017', end: '2018-04-30', val: 7_357_100_000 })] },
+          },
+        },
+      },
+    } satisfies CompanyFactsResponse);
+
+    const result = await runToolContract(getSnapshotTool, { company: 'SJM' });
+
+    expect(result.isError).toBeFalsy();
+    const output = getSnapshotTool.output.parse(result.structuredContent);
+    expect(output.company).toBe(company);
+    const line = output.lines.find((l) => l.concept === 'revenue');
+    expect(line?.label).toBe(label);
+    expect(output.caveats.find((c) => c.startsWith('revenue: '))).toContain(`"${label}"`);
+    const text = readCommonMark(blockText(result.content));
+    expect(text).toContain(
+      `⟨strong⟩Financial snapshot⟨/strong⟩ — ${company} (CIK 0000091419, us-gaap, periods: both)\n`,
+    );
+    expect(text).toContain(
+      `⟨list_item_open⟩\n\n${line?.label} [revenue → us-gaap:SalesRevenueGoodsNet, USD]\n`,
+    );
+    for (const caveat of output.caveats) expect(text.split('\n\n')).toContain(`Caveat: ${caveat}`);
   });
 });
 

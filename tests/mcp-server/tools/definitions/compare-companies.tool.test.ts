@@ -37,6 +37,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { allText, at, bag, blockText, records, wireError } from '../../../support/assertions.js';
+import { readCommonMark } from '../../../support/commonmark.js';
 
 function fact(overrides: Partial<CompanyConceptUnit> & { frame: string }): CompanyConceptUnit {
   return {
@@ -1811,7 +1812,9 @@ describe('lists past their caps (#201)', () => {
     const output = compareCompaniesTool.output.parse(result.structuredContent);
     expect(output.deferred_companies).toEqual([' x11 ']);
     expect(output.deferred_concepts).toEqual([' debt ']);
-    expect(blockText(result.content)).toContain("Deferred companies (not read): ' x11 '");
+    const text = readCommonMark(blockText(result.content));
+    expect(text).toContain("Deferred companies (not read): ' x11 '");
+    expect(text).toContain("Deferred concepts (not read): ' debt '");
   });
 
   it('reports an unrecognized name past the eighth concept as unknown, not deferred', async () => {
@@ -3086,5 +3089,97 @@ describe('annual alignment of point-in-time concepts (#171)', () => {
       ['CY2023', '2024-05-31'],
       ['CY2022', '2023-05-31'],
     ]);
+  });
+});
+
+/**
+ * Company names, the caller's company and concept inputs, and failure messages are
+ * not the tool's text: content[] escapes them as it renders, caveats included, so a
+ * CommonMark parse reads back each structuredContent value. An error message carries
+ * them raw, since the framework escapes the whole message (#221).
+ */
+describe('caller and SEC strings in content[] (#221)', () => {
+  // A trailing backslash ahead of the quote, colon, or space the render puts after a name.
+  const USB = 'US BANCORP \\DE\\';
+  const JPM = 'JPMORGAN *CHASE* & CO _x_ `y` <b>z</b> &amp;';
+  const UNRESOLVED = '[x](y) *nope* \\';
+  const DEFERRED = '*later* \\';
+  const UNKNOWN = 'eps *x*';
+  const FILLER = ['N1', 'N2', 'N3', 'N4', 'N5', 'N6'];
+  /** JPM reports revenue alone, so its assets pair is a gap. */
+  const jpmFacts: CompanyFactsResponse = {
+    cik: 19617,
+    entityName: JPM,
+    facts: {
+      'us-gaap': {
+        Revenues: {
+          label: 'Revenues',
+          units: { USD: [2024, 2025].map((year) => calendarYear10K('jpm', year, year * 100)) },
+        },
+      },
+    },
+  };
+
+  beforeEach(() => {
+    vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+    mockApi.resolveCik.mockImplementation(async (q: string) =>
+      q === USB || q === 'usb'
+        ? { cik: '0000036104', name: USB, ticker: 'USB' }
+        : q === 'JPM'
+          ? { cik: '0000019617', name: JPM, ticker: 'JPM' }
+          : [],
+    );
+    mockApi.tryGetCompanyFacts.mockImplementation((cik: string) =>
+      cik === '0000036104' ? calendarFiler : jpmFacts,
+    );
+  });
+
+  it('reads back names, inputs, failure messages, and caveats as structuredContent carries them', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: [USB, 'usb', UNRESOLVED, 'JPM', ...FILLER, DEFERRED],
+      concepts: ['revenue', 'assets', UNKNOWN],
+      periods: 1,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    expect(output.companies.map((c) => [c.input, c.name])).toEqual([
+      [USB, USB],
+      ['JPM', JPM],
+    ]);
+    expect(output.deferred_companies).toEqual([DEFERRED]);
+    expect(output.unknown_concepts.map((u) => u.concept)).toEqual([UNKNOWN]);
+    const failure = output.failed_companies.find((f) => f.input === UNRESOLVED);
+    expect(failure?.message).toContain(`'${UNRESOLVED}'`);
+    expect(output.caveats).toContain(
+      `'usb' names the same company as '${USB}', so the comparison reads it once, under '${USB}'.`,
+    );
+    const text = readCommonMark(blockText(result.content));
+    expect(text).toContain(
+      `Companies: ${USB} [${USB} → CIK 0000036104, USB]; ${JPM} [JPM → CIK 0000019617, JPM]\n`,
+    );
+    expect(text).toContain(`Excluded: ${UNRESOLVED} (not_found) — ${failure?.message}\n`);
+    expect(text).toContain(`Deferred companies (not read): '${DEFERRED}'\n`);
+    expect(text).toContain(`Unknown concept: ${UNKNOWN} — not queried.`);
+    expect(text).toContain(`revenue | ${USB} (CIK 0000036104) | CY2025 = `);
+    expect(text).toContain(`revenue | ${JPM} (CIK 0000019617) | CY2025 = `);
+    expect(text).toContain(`${JPM} (CIK 0000019617) reports no assets — tried: Assets`);
+    for (const caveat of output.caveats) expect(text.split('\n\n')).toContain(`Caveat: ${caveat}`);
+  });
+
+  it('names a deferred input raw in an error message, which reads back once the framework escapes it', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: [UNRESOLVED, ...FILLER, 'N7', 'N8', 'N9', DEFERRED],
+      concepts: ['revenue'],
+    });
+
+    const error = wireError(result);
+    expect(error.data.reason).toBe('no_companies_resolved');
+    expect(error.message).toBe(
+      `None of the first 10 supplied companies resolved to a CIK. Inputs past the first 10 companies were not read — deferred_companies: '${DEFERRED}'.`,
+    );
+    expect(readCommonMark(blockText(result.content))).toContain(
+      `deferred_companies: '${DEFERRED}'.`,
+    );
   });
 });

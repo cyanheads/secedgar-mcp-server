@@ -7,6 +7,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 
 export const dataframeDropTool = tool('secedgar_dataframe_drop', {
@@ -45,10 +46,9 @@ export const dataframeDropTool = tool('secedgar_dataframe_drop', {
     return { name: input.name, dropped };
   },
 
-  format: (result) => [
-    {
-      type: 'text',
-      text: result.dropped ? `Dropped ${result.name}.` : `${result.name} not found.`,
-    },
-  ],
+  format: (result) => {
+    // The name echoes caller input, which the schema bounds only by length (#221).
+    const name = escapeInline(result.name);
+    return [{ type: 'text', text: result.dropped ? `Dropped ${name}.` : `${name} not found.` }];
+  },
 });

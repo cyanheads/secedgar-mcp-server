@@ -9,6 +9,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import {
   type LimitClampOptions,
   limitClamp,
@@ -17,19 +18,18 @@ import {
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 
 /**
- * Escape text for one Markdown table cell. Backslashes go first: a cell is
- * inline Markdown, where a backslash before ASCII punctuation is consumed as an
- * escape, so escaping only the pipe drops a literal backslash that precedes
- * punctuation from the rendered text (`x\|y` would render as `x|y`) (#114).
- * Line breaks become `<br>`: `\n`, `\r\n`, and a lone `\r` are each a CommonMark
- * line ending, which would end the table row mid-cell (#121). `\r\n` is matched
- * first so it yields one break, not two.
+ * Encode text for one Markdown table cell so it reads back as itself (#221).
+ * Each line is escaped (`escapeInline`), which escapes every `|` and any
+ * backslash before punctuation (#114), along with emphasis, code, links, raw
+ * HTML, and entities. The lines join with `<br>`: `\n`, `\r\n`, and a lone
+ * `\r` each end a CommonMark line, and so a table row, mid-cell (#121) —
+ * `\r\n` is matched first so it yields one break, not two.
  */
 function escapeTableCell(text: string): string {
   return text
-    .replace(/\\/g, '\\\\')
-    .replace(/\|/g, '\\|')
-    .replace(/\r\n|\r|\n/g, '<br>');
+    .split(/\r\n|\r|\n/)
+    .map(escapeInline)
+    .join('<br>');
 }
 
 /** Most rows one query returns; `preview` and `row_limit` above it are served at it (#197). */
