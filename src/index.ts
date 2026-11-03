@@ -38,7 +38,8 @@ resetConfig();
  * to expose it. When off it is registered disabled rather than dropped from the
  * list: uncallable, but still discoverable with its enable hint (#103).
  * EDGAR_CLAMP_OVERSIZED_LIMITS (default on) serves an over-cap count or size
- * input at its cap; off, each cap is the advertised maximum (#197).
+ * input at its cap and answers an over-cap ID list up to its cap, naming the
+ * rest; off, each cap is the advertised maximum (#197, #201).
  */
 const { dataframeDropEnabled: dropEnabled, clampOversizedLimits } = readToolGates();
 

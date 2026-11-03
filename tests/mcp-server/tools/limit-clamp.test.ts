@@ -1,7 +1,8 @@
 /**
- * @fileoverview The over-cap clamp every clamped numeric input is built from (#197): the
- *   schema bounds in both switch states, the applied value, and the log line and counter a
- *   clamp emits. Tool suites prove only their wiring; the behavior table lives here.
+ * @fileoverview The over-cap clamp every clamped numeric input (#197) and list input (#201)
+ *   is built from: the schema bounds in both switch states, the applied value, and the log
+ *   line and counter a clamp or deferral emits. Tool suites prove only their wiring; the
+ *   behavior table lives here.
  * @module tests/mcp-server/tools/limit-clamp
  */
 
@@ -155,6 +156,88 @@ describe('limitClamp — apply', () => {
   });
 });
 
+describe('batchClamp (#201)', () => {
+  const batchSpec = {
+    tool: 'secedgar_example',
+    field: 'ids',
+    item: z.string().min(1).describe('One ID.'),
+    min: 2,
+    cap: 10,
+    bound: 100,
+    description: 'IDs to read.',
+    overCap: 'A longer list returns the rest in deferred_ids.',
+  };
+  const ids = (n: number) => Array.from({ length: n }, (_, i) => `id${i}`);
+
+  it.each([
+    [true, 100, 'IDs to read. A longer list returns the rest in deferred_ids.'],
+    [false, 10, 'IDs to read. At most 10.'],
+  ])('switch %s advertises maxItems %i and its own sentence', (clamp, maxItems, description) => {
+    const schema = mod.batchClamp(batchSpec).schema(clamp);
+    expect(advertised(schema)).toMatchObject({
+      type: 'array',
+      minItems: 2,
+      maxItems,
+      description,
+      items: { type: 'string', minLength: 1, description: 'One ID.' },
+    });
+  });
+
+  it.each([
+    // [switch, items, accepted]
+    [true, 1, false],
+    [true, 2, true],
+    [true, 10, true],
+    [true, 11, true],
+    [true, 100, true],
+    [true, 101, false],
+    [false, 10, true],
+    [false, 11, false],
+    [false, 101, false],
+  ])('switch %s: %i items accepted is %s', (clamp, n, accepted) => {
+    expect(mod.batchClamp(batchSpec).schema(clamp).safeParse(ids(n)).success).toBe(accepted);
+  });
+
+  it('records nothing for an empty deferral', () => {
+    const ctx = createMockContext();
+    const info = vi.spyOn(ctx.log, 'info');
+    mod.batchClamp(batchSpec).defer([], ctx);
+
+    expect(info).not.toHaveBeenCalled();
+    expect(createCounter).not.toHaveBeenCalled();
+    expect(counterAdd).not.toHaveBeenCalled();
+  });
+
+  it('writes one log line and adds 1 to the shared counter, tagged with tool and field', () => {
+    const ctx = createMockContext();
+    const info = vi.spyOn(ctx.log, 'info');
+    mod.batchClamp(batchSpec).defer(['id10', 'id11', 'id12'], ctx);
+
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info).toHaveBeenCalledWith(
+      'List above its cap answered up to the cap, the rest deferred',
+      { tool: 'secedgar_example', field: 'ids', cap: 10, deferred: 3 },
+    );
+    expect(counterAdd).toHaveBeenCalledTimes(1);
+    expect(counterAdd).toHaveBeenCalledWith(1, {
+      'mcp.tool.name': 'secedgar_example',
+      'secedgar.input.field': 'ids',
+    });
+  });
+
+  it('shares the one counter with numeric clamps', () => {
+    const ctx = createMockContext();
+    mod.limitClamp(spec).apply(101, ctx);
+    mod.batchClamp(batchSpec).defer(['id10'], ctx);
+
+    expect(createCounter).toHaveBeenCalledTimes(1);
+    expect(counterAdd.mock.calls.map(([, attrs]) => attrs)).toEqual([
+      { 'mcp.tool.name': 'secedgar_example', 'secedgar.input.field': 'limit' },
+      { 'mcp.tool.name': 'secedgar_example', 'secedgar.input.field': 'ids' },
+    ]);
+  });
+});
+
 describe('withLimitClamps', () => {
   const build = () => {
     const limit = mod.limitClamp(spec);
@@ -198,5 +281,37 @@ describe('withLimitClamps', () => {
     expect(off.name).toBe(definition.name);
     expect(off.description).toBe(definition.description);
     expect(off.output).toBe(definition.output);
+  });
+
+  it('switched off, rebuilds a list field at its cap beside a numeric one (#201)', () => {
+    const limit = mod.limitClamp(spec);
+    const ids = mod.batchClamp({
+      tool: 'secedgar_example',
+      field: 'ids',
+      item: z.string().min(1).describe('One ID.'),
+      min: 1,
+      cap: 10,
+      bound: 100,
+      description: 'IDs to read.',
+      overCap: 'A longer list returns the rest in deferred_ids.',
+    });
+    const definition = tool('secedgar_example', {
+      description: 'Example tool for the list clamp wiring.',
+      input: z.object({ ids: ids.schema(true), limit: limit.schema(true) }),
+      output: z.object({ count: z.number().describe('IDs the handler read.') }),
+      handler: (input) => ({ count: input.ids.length }),
+    });
+    const off = mod.withLimitClamps(definition, [ids, limit], { clampOversizedLimits: false });
+
+    const json = advertised(off.input) as { properties: Record<string, Record<string, unknown>> };
+    expect(Object.keys(json.properties)).toEqual(['ids', 'limit']);
+    expect(json.properties.ids).toMatchObject({
+      maxItems: 10,
+      description: 'IDs to read. At most 10.',
+    });
+    expect(json.properties.limit).toMatchObject({ maximum: 100 });
+    const elevenIds = Array.from({ length: 11 }, (_, i) => `id${i}`);
+    expect(off.input.safeParse({ ids: elevenIds, limit: 1 }).success).toBe(false);
+    expect(definition.input.safeParse({ ids: elevenIds, limit: 1 }).success).toBe(true);
   });
 });

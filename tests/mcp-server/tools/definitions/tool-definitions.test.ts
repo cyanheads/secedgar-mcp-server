@@ -121,6 +121,30 @@ describe('buildToolDefinitions', () => {
       expect(maximum(false, name, field)).toBe(cap);
       expect(maximum(true, name, field)).toBe(bound);
     });
+
+    // List inputs answered up to their cap, the rest deferred (#201).
+    const listRows = [
+      ['secedgar_compare_companies', 'companies', 10, 100],
+      ['secedgar_compare_companies', 'concepts', 8, 100],
+    ] as const;
+
+    const maxItems = (clampOversizedLimits: boolean, name: string, field: string) => {
+      const def = buildToolDefinitions({ dropEnabled: false, clampOversizedLimits }).find(
+        (d) => d.name === name,
+      );
+      const schema = z.toJSONSchema(def!.input, { io: 'input' }) as {
+        properties: Record<string, { maxItems?: number }>;
+      };
+      return schema.properties[field]?.maxItems;
+    };
+
+    it.each(listRows)(
+      '%s %s advertises maxItems at its cap off and its bound on',
+      (name, field, cap, bound) => {
+        expect(maxItems(false, name, field)).toBe(cap);
+        expect(maxItems(true, name, field)).toBe(bound);
+      },
+    );
   });
 
   describe('with EDGAR_DATAFRAME_DROP_ENABLED on', () => {

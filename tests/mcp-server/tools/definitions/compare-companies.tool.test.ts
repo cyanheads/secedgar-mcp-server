@@ -7,7 +7,12 @@
 
 import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createMockContext,
+  getEnrichment,
+  type MockContextLogger,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   compareCompaniesTool,
@@ -31,7 +36,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import { at, bag, blockText, records, wireError } from '../../../support/assertions.js';
+import { allText, at, bag, blockText, records, wireError } from '../../../support/assertions.js';
 
 function fact(overrides: Partial<CompanyConceptUnit> & { frame: string }): CompanyConceptUnit {
   return {
@@ -881,22 +886,42 @@ describe('compareCompaniesTool', () => {
     });
   });
 
-  it('bounds companies and concepts', () => {
-    expect(() =>
-      compareCompaniesTool.input.parse({ companies: ['CAL'], concepts: ['revenue'] }),
-    ).toThrow();
-    expect(() =>
-      compareCompaniesTool.input.parse({
-        companies: Array.from({ length: 11 }, (_, i) => `T${i}`),
-        concepts: ['revenue'],
-      }),
-    ).toThrow();
-    expect(() =>
-      compareCompaniesTool.input.parse({
-        companies: ['CAL', 'JUN'],
-        concepts: Array.from({ length: 9 }, (_, i) => `c${i}`),
-      }),
-    ).toThrow();
+  // A list past its cap is answered up to the cap while EDGAR_CLAMP_OVERSIZED_LIMITS is
+  // on; switched off, the cap is the list's maximum, as before (#201).
+  it.each([
+    // [switch, companies, concepts, accepted]
+    [true, 1, 1, false],
+    [true, 2, 0, false],
+    [true, 11, 9, true],
+    [true, 100, 100, true],
+    [true, 101, 1, false],
+    [true, 2, 101, false],
+    [false, 10, 8, true],
+    [false, 11, 1, false],
+    [false, 2, 9, false],
+    [false, 101, 1, false],
+  ])(
+    'switch %s: %i companies and %i concepts accepted is %s',
+    (clampOversizedLimits, companies, concepts, accepted) => {
+      const input = {
+        companies: Array.from({ length: companies }, (_, i) => `T${i}`),
+        concepts: Array.from({ length: concepts }, (_, i) => `C${i}`),
+      };
+      expect(
+        createCompareCompaniesTool({ clampOversizedLimits }).input.safeParse(input).success,
+      ).toBe(accepted);
+    },
+  );
+
+  it('switched off, rejects an 11th company before resolving any', async () => {
+    const off = createCompareCompaniesTool({ clampOversizedLimits: false });
+    const rejected = await runToolContract(off, {
+      companies: Array.from({ length: 11 }, (_, i) => `T${i}`),
+      concepts: ['revenue'],
+    });
+
+    expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
   });
 
   it('proceeds with the resolvable companies and reports the rest per company', async () => {
@@ -1359,6 +1384,685 @@ describe('concept inputs that resolve to the same concept (#145)', () => {
     // JUNE CO reports no assets at all.
     expect(output.gaps.map((g) => [g.company, g.concept])).toEqual([['JUNE CO', 'assets']]);
     expect(blockText(result.content).match(/reports no assets/g)).toHaveLength(1);
+  });
+});
+
+/** Eight distinct catalog concepts: the most one call compares. */
+const EIGHT_CONCEPTS = [
+  'revenue',
+  'assets',
+  'net_income',
+  'goodwill',
+  'cogs',
+  'eps_diluted',
+  'liabilities',
+  'cash',
+];
+
+/** CAL and JUN resolve; any other input resolves to nothing. */
+function wireTwoFilersAmongUnresolved() {
+  mockApi.resolveCik.mockImplementation(async (q: string) =>
+    q === 'CAL'
+      ? { cik: '0000789019', name: 'CALENDAR CO', ticker: 'CAL' }
+      : q === 'JUN'
+        ? { cik: '0000320193', name: 'JUNE CO', ticker: 'JUN' }
+        : [],
+  );
+}
+
+/**
+ * Characterization: a call at both caps — ten company inputs (an unresolved one
+ * keeps its place) and eight distinct concepts — pinned on both surfaces as it
+ * answered before an over-cap list was accepted (#201).
+ */
+describe('lists at their caps', () => {
+  const atCaps = {
+    companies: ['CAL', 'JUN', 'N1', 'N2', 'N3', 'N4', 'N5', 'N6', 'N7', 'N8'],
+    concepts: EIGHT_CONCEPTS,
+    periods: 1,
+  };
+
+  beforeEach(() => {
+    wireTwoFilersAmongUnresolved();
+  });
+
+  it('answers on both surfaces as before, with no deferred field', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+    const result = await runToolContract(compareCompaniesTool, atCaps);
+
+    expect(result.isError).toBeFalsy();
+    expect(Object.keys(bag(result.structuredContent)).sort()).toEqual([
+      'cap',
+      'caveats',
+      'cells',
+      'companies',
+      'concepts',
+      'dataset',
+      'failed_companies',
+      'gaps',
+      'notice',
+      'period_type',
+      'periods',
+      'shown',
+      'taxonomy',
+      'truncated',
+      'unknown_concepts',
+    ]);
+    const excluded = atCaps.companies
+      .slice(2)
+      .map(
+        (q) =>
+          `Excluded: ${q} (not_found) — '${q}' did not resolve to a CIK. Use a ticker symbol or 10-digit CIK.`,
+      );
+    const notReported = (company: string, cik: string, concepts: string[][]) =>
+      concepts.map(
+        ([concept, tags]) => `- ${company} (CIK ${cik}) reports no ${concept} — tried: ${tags}`,
+      );
+    const unreported = [
+      ['net_income', 'NetIncomeLoss'],
+      ['goodwill', 'Goodwill'],
+      ['cogs', 'CostOfGoodsAndServicesSold, CostOfRevenue, CostOfGoodsSold'],
+      ['eps_diluted', 'EarningsPerShareDiluted'],
+      ['liabilities', 'Liabilities'],
+      ['cash', 'CashAndCashEquivalentsAtCarryingValue'],
+    ];
+    expect(result.content.map((b) => (b.type === 'text' ? b.text : b.type))).toEqual([
+      [
+        '**Company comparison** — 2 companies x 8 concepts (us-gaap, annual)',
+        'Periods: CY2025',
+        'Companies: CALENDAR CO [CAL → CIK 0000789019, CAL]; JUNE CO [JUN → CIK 0000320193, JUN]',
+        ...excluded,
+        'Concept: Revenue [revenue] — units: USD',
+        'Concept: Total Assets [assets] — units: USD',
+        'Concept: Net Income (Loss) [net_income] — units: none',
+        'Concept: Goodwill [goodwill] — units: none',
+        'Concept: Cost of Goods Sold [cogs] — units: none',
+        'Concept: Earnings Per Share (Diluted) [eps_diluted] — units: none',
+        'Concept: Total Liabilities [liabilities] — units: none',
+        'Concept: Cash and Cash Equivalents [cash] — units: none',
+        '',
+        '### Values',
+        '- revenue | CALENDAR CO (CIK 0000789019) | CY2025 = 202500 USD | us-gaap:Revenues | frame CY2025 | ends 2025-12-31 | 10-K [cal-2025]',
+        '- revenue | JUNE CO (CIK 0000320193) | CY2025 = 405000 USD | us-gaap:Revenues | frame CY2025 | ends 2025-06-30 | 10-K [acc-1]',
+        '',
+        '### Not reported (13)',
+        ...notReported('CALENDAR CO', '0000789019', unreported),
+        ...notReported('JUNE CO', '0000320193', [['assets', 'Assets'], ...unreported]),
+        '',
+        'Caveat: Period ends differ inside CY2025 — CALENDAR CO ends 2025-12-31, JUNE CO ends 2025-06-30. Each company’s fiscal year sits under the calendar year SEC frames it as, and fiscal years ending months apart share that column, so the comparison is approximate; each cell carries its own period_end.',
+        '',
+        'Caveat: assets: no value inside the inline periods (CY2025) for CALENDAR CO (newest CY2024). It reports assets for earlier periods only; raise periods to bring those values inline.',
+      ].join('\n'),
+      '\n\n**truncated:** true\n**shown:** 1\n**cap:** 1\n> Showing the 1 most-recent of 5 aligned periods. Raise periods (up to 12) to fit more periods inline.',
+    ]);
+  });
+
+  it('stages every concept input and each resolved company in the dataframe parameters', async () => {
+    const registerDataframe = vi.fn().mockResolvedValue({
+      name: 'df_ATCAP_PARAM',
+      rowCount: 9,
+      expiresAt: '2026-11-01T00:00:00.000Z',
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as never);
+    vi.mocked(toDatasetField).mockReturnValue({
+      name: 'df_ATCAP_PARAM',
+      row_count: 9,
+      expires_at: '2026-11-01T00:00:00.000Z',
+    });
+    const result = await runToolContract(compareCompaniesTool, {
+      ...atCaps,
+      concepts: ['revenue', 'Revenue', ...EIGHT_CONCEPTS.slice(1, 7)],
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(at(registerDataframe.mock.calls)[1].queryParams).toEqual({
+      companies: ['0000789019', '0000320193'],
+      concepts: ['revenue', 'Revenue', ...EIGHT_CONCEPTS.slice(1, 7)],
+      taxonomy: 'us-gaap',
+      period_type: 'annual',
+    });
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      'Showing the 1 most-recent of 5 aligned periods. Full set staged as df_ATCAP_PARAM (9 rows) — use secedgar_dataframe_describe to inspect its columns, then secedgar_dataframe_query to analyze it with SQL.',
+    );
+  });
+
+  it('writes no clamp log line', async () => {
+    vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+    const ctx = createMockContext({ errors: compareCompaniesTool.errors });
+    await compareCompaniesTool.handler(compareCompaniesTool.input.parse(atCaps), ctx);
+
+    expect((ctx.log as MockContextLogger).calls.map((c) => c.msg)).toEqual(['Comparison built']);
+  });
+
+  it('counts the supplied companies when none of the ten resolves', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+    const result = await runToolContract(compareCompaniesTool, atCaps);
+
+    const error = wireError(result);
+    expect(error.data.reason).toBe('no_companies_resolved');
+    expect(error.message).toBe('None of the 10 supplied companies resolved to a CIK.');
+    expect(Object.keys(error.data).sort()).toEqual(['failed_companies', 'reason', 'recovery']);
+  });
+});
+
+/**
+ * Two inputs naming one company (a ticker beside its CIK, or the same ticker
+ * twice) read its companyfacts once and enter the comparison once, under the
+ * first input, the way spellings of one concept do (#217).
+ */
+describe('a company named twice (#217)', () => {
+  const CAL_CIK = '0000789019';
+
+  beforeEach(() => {
+    vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+    // Every input but JUN resolves to CALENDAR CO, as a ticker and its CIK both do.
+    mockApi.resolveCik.mockImplementation(async (q: string) =>
+      q === 'JUN'
+        ? { cik: '0000320193', name: 'JUNE CO', ticker: 'JUN' }
+        : { cik: CAL_CIK, name: 'CALENDAR CO', ticker: 'CAL' },
+    );
+  });
+
+  const calReads = () => mockApi.tryGetCompanyFacts.mock.calls.filter(([cik]) => cik === CAL_CIK);
+
+  it('reads a ticker and its CIK once, under the first input, on both surfaces', async () => {
+    const registerDataframe = vi.fn().mockResolvedValue({
+      name: 'df_TWICE_NAMED',
+      rowCount: 10,
+      expiresAt: '2026-11-01T00:00:00.000Z',
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as never);
+    vi.mocked(toDatasetField).mockReturnValue({
+      name: 'df_TWICE_NAMED',
+      row_count: 10,
+      expires_at: '2026-11-01T00:00:00.000Z',
+    });
+
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['CAL', CAL_CIK, 'JUN'],
+      concepts: ['revenue', 'assets'],
+      periods: 2,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    expect(output.companies.map((c) => [c.input, c.cik])).toEqual([
+      ['CAL', CAL_CIK],
+      ['JUN', '0000320193'],
+    ]);
+    expect(output.failed_companies).toEqual([]);
+    expect(calReads()).toHaveLength(1);
+    // Revenue for CY2025 and CY2024 plus the CY2024 balance — once each.
+    expect(
+      output.cells.filter((c) => c.cik === CAL_CIK).map((c) => `${c.concept}|${c.period}`),
+    ).toEqual(['revenue|CY2025', 'revenue|CY2024', 'assets|CY2024']);
+    expect(output.gaps.map((g) => [g.company, g.concept])).toEqual([['JUNE CO', 'assets']]);
+
+    const note =
+      "'0000789019' names the same company as 'CAL', so the comparison reads it once, under 'CAL'.";
+    expect(output.caveats.filter((c) => c.includes('same company as'))).toEqual([note]);
+    const text = blockText(result.content);
+    expect(text).toContain(`Caveat: ${note}`);
+    expect(text.match(/CALENDAR CO \[/g)).toHaveLength(1);
+    expect(text.match(/- revenue \| CALENDAR CO/g)).toHaveLength(2);
+
+    const staged = at(registerDataframe.mock.calls)[1];
+    expect(staged.queryParams.companies).toEqual([CAL_CIK, '0000320193']);
+    // Five revenue years and two balances for CALENDAR CO, three revenue years for JUNE CO.
+    expect(staged.rows.filter((r: { cik: string }) => r.cik === CAL_CIK)).toHaveLength(7);
+    expect(staged.rows).toHaveLength(10);
+  });
+
+  it('answers the same ticker twice exactly as once', async () => {
+    const twice = await runToolContract(compareCompaniesTool, {
+      companies: ['CAL', 'CAL', 'JUN'],
+      concepts: ['revenue', 'assets'],
+    });
+    expect(calReads()).toHaveLength(1);
+
+    const once = await runToolContract(compareCompaniesTool, {
+      companies: ['CAL', 'JUN'],
+      concepts: ['revenue', 'assets'],
+    });
+    expect(twice).toEqual(once);
+  });
+
+  it('names every later input in one caveat', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['CAL', '789019', CAL_CIK, 'JUN'],
+      concepts: ['revenue'],
+    });
+
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    expect(output.companies.map((c) => c.input)).toEqual(['CAL', 'JUN']);
+    expect(output.caveats.filter((c) => c.includes('same company as'))).toEqual([
+      "'789019' and '0000789019' name the same company as 'CAL', so the comparison reads them once, under 'CAL'.",
+    ]);
+    expect(calReads()).toHaveLength(1);
+  });
+});
+
+/** The log line one deferred list writes, by field. */
+const clampLines = (ctx: ReturnType<typeof createMockContext>) =>
+  (ctx.log as MockContextLogger).calls
+    .filter((c) => c.msg === 'List above its cap answered up to the cap, the rest deferred')
+    .map((c) => c.data);
+
+/**
+ * A `companies` list past 10 or a `concepts` list past 8 distinct concepts
+ * answers up to the cap and returns the rest, as supplied, for a re-call
+ * (#201). The mechanism (schema bounds, log line, counter) is tabled in
+ * tests/mcp-server/tools/limit-clamp.test.ts; this proves the wiring.
+ */
+describe('lists past their caps (#201)', () => {
+  const TEN = ['CAL', 'JUN', 'N1', 'N2', 'N3', 'N4', 'N5', 'N6', 'N7', 'N8'];
+  const ONE_COMPANY_DEFERRED =
+    'This call takes the first 10 of 11 companies; deferred_companies lists the rest. Re-call with deferred_companies as companies and the same other inputs to compare them. Add a company from this call beside the lone deferred one, since companies takes at least two.';
+  const CONCEPTS_DEFERRED =
+    'This call takes the first 8 distinct concepts; deferred_concepts lists the rest. Re-call with deferred_concepts as concepts and the same other inputs to compare them.';
+
+  beforeEach(() => {
+    vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+    wireTwoFilersAmongUnresolved();
+  });
+
+  /** Stage the comparison as a dataframe, returning the registration spy. */
+  function stage() {
+    const registerDataframe = vi.fn().mockResolvedValue({
+      name: 'df_PAST_CAPS1',
+      rowCount: 8,
+      expiresAt: '2026-11-01T00:00:00.000Z',
+    });
+    vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as never);
+    vi.mocked(toDatasetField).mockReturnValue({
+      name: 'df_PAST_CAPS1',
+      row_count: 8,
+      expires_at: '2026-11-01T00:00:00.000Z',
+    });
+    return registerDataframe;
+  }
+
+  it('answers the first 10 companies and lists the 11th, never resolving it, on both surfaces', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: [...TEN, 'X11'],
+      concepts: ['revenue'],
+      periods: 1,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    expect(output.deferred_companies).toEqual(['X11']);
+    expect(output.failed_companies.map((f) => f.input)).toEqual(TEN.slice(2));
+    expect(mockApi.resolveCik.mock.calls.map(([q]) => q)).toEqual(TEN);
+    expect(blockText(result.content)).toContain("Deferred companies (not read): 'X11'");
+    const notice = (result.structuredContent as { notice?: string }).notice;
+    expect(notice).toBe(
+      `${ONE_COMPANY_DEFERRED} Showing the 1 most-recent of 5 aligned periods. Raise periods (up to 12) to fit more periods inline.`,
+    );
+    expect(allText(result)).toContain(`> ${notice}`);
+  });
+
+  it('answers exactly what the call with only the first 10 answers, dataframe included', async () => {
+    const registerDataframe = stage();
+    const over = await runToolContract(compareCompaniesTool, {
+      companies: [...TEN, 'X11', 'X12'],
+      concepts: ['revenue', 'assets'],
+      periods: 1,
+    });
+    const atCap = await runToolContract(compareCompaniesTool, {
+      companies: TEN,
+      concepts: ['revenue', 'assets'],
+      periods: 1,
+    });
+
+    const { deferred_companies, notice, ...answered } = bag(over.structuredContent);
+    const { notice: atCapNotice, ...atCapAnswered } = bag(atCap.structuredContent);
+    expect(deferred_companies).toEqual(['X11', 'X12']);
+    expect(answered).toEqual(atCapAnswered);
+    expect(notice).toBe(
+      `This call takes the first 10 of 12 companies; deferred_companies lists the rest. Re-call with deferred_companies as companies and the same other inputs to compare them. ${atCapNotice}`,
+    );
+    expect(
+      blockText(over.content).replace("\nDeferred companies (not read): 'X11', 'X12'", ''),
+    ).toBe(blockText(atCap.content));
+    expect(registerDataframe).toHaveBeenCalledTimes(2);
+    expect(at(registerDataframe.mock.calls, 0)[1]).toEqual(at(registerDataframe.mock.calls, 1)[1]);
+  });
+
+  it('counts a company named twice in its place, so the 11th input is still deferred', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['CAL', 'CAL', ...TEN.slice(2), 'JUN'],
+      concepts: ['revenue'],
+    });
+
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    expect(output.deferred_companies).toEqual(['JUN']);
+    expect(output.companies.map((c) => c.input)).toEqual(['CAL']);
+    expect(mockApi.resolveCik.mock.calls.map(([q]) => q)).not.toContain('JUN');
+  });
+
+  it('answers the first 8 distinct concepts and lists the inputs after them', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['CAL', 'JUN'],
+      concepts: [...EIGHT_CONCEPTS, 'debt', 'capex'],
+      periods: 1,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    expect(output.deferred_concepts).toEqual(['debt', 'capex']);
+    expect(output.concepts.map((c) => c.concept)).toEqual(EIGHT_CONCEPTS);
+    expect(output.gaps.some((g) => g.concept === 'debt' || g.concept === 'capex')).toBe(false);
+    const text = blockText(result.content);
+    expect(text).toContain("Deferred concepts (not read): 'debt', 'capex'");
+    expect(text).not.toContain('reports no debt');
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      `${CONCEPTS_DEFERRED} Showing the 1 most-recent of 5 aligned periods. Raise periods (up to 12) to fit more periods inline.`,
+    );
+  });
+
+  it('defers nothing when the ninth input is another spelling of an earlier concept', async () => {
+    const ctx = createMockContext({ errors: compareCompaniesTool.errors });
+    const result = await compareCompaniesTool.handler(
+      compareCompaniesTool.input.parse({
+        companies: ['CAL', 'JUN'],
+        concepts: [...EIGHT_CONCEPTS, 'Revenue'],
+      }),
+      ctx,
+    );
+
+    expect(result).not.toHaveProperty('deferred_concepts');
+    expect(result.concepts.map((c) => c.concept)).toEqual(EIGHT_CONCEPTS);
+    expect(result.caveats).toContain(
+      "'Revenue' resolves to the same concept as 'revenue', so the comparison reads it once, under 'revenue'.",
+    );
+    expect(clampLines(ctx)).toEqual([]);
+  });
+
+  it('counts an unrecognized name as no concept and merges a later spelling of an answered one', async () => {
+    const registerDataframe = stage();
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['CAL', 'JUN'],
+      concepts: ['revenue', 'fcf', ...EIGHT_CONCEPTS.slice(1), 'debt', 'Revenue', 'DEBT'],
+    });
+
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    expect(output.unknown_concepts.map((u) => u.concept)).toEqual(['fcf']);
+    expect(output.concepts.map((c) => c.concept)).toEqual(EIGHT_CONCEPTS);
+    // A spelling of a deferred concept is deferred with it, as supplied.
+    expect(output.deferred_concepts).toEqual(['debt', 'DEBT']);
+    expect(output.caveats).toContain(
+      "'Revenue' resolves to the same concept as 'revenue', so the comparison reads it once, under 'revenue'.",
+    );
+    expect(at(registerDataframe.mock.calls)[1].queryParams.concepts).toEqual([
+      'revenue',
+      'fcf',
+      ...EIGHT_CONCEPTS.slice(1),
+      'Revenue',
+    ]);
+  });
+
+  it('returns deferred inputs exactly as supplied, surrounding spaces included', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: [...TEN, ' x11 '],
+      concepts: [...EIGHT_CONCEPTS, ' debt '],
+    });
+
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    expect(output.deferred_companies).toEqual([' x11 ']);
+    expect(output.deferred_concepts).toEqual([' debt ']);
+    expect(blockText(result.content)).toContain("Deferred companies (not read): ' x11 '");
+  });
+
+  it('reports an unrecognized name past the eighth concept as unknown, not deferred', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['CAL', 'JUN'],
+      concepts: [...EIGHT_CONCEPTS, 'debt', 'fcf'],
+    });
+
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    expect(output.deferred_concepts).toEqual(['debt']);
+    expect(output.unknown_concepts.map((u) => u.concept)).toEqual(['fcf']);
+  });
+
+  it('composes both deferrals into one notice ahead of the dataframe pointer', async () => {
+    stage();
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: [...TEN, 'X11', 'X12'],
+      concepts: [...EIGHT_CONCEPTS, 'debt'],
+      periods: 12,
+    });
+
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    expect(output.deferred_companies).toEqual(['X11', 'X12']);
+    expect(output.deferred_concepts).toEqual(['debt']);
+    expect((result.structuredContent as { notice?: string }).notice).toBe(
+      'This call takes the first 10 of 12 companies and the first 8 distinct concepts; deferred_companies and deferred_concepts list the rest. To compare them, re-call three times with the same other inputs: (1) deferred_companies as companies with those 8 concepts, (2) those 10 companies with deferred_concepts as concepts, and (3) deferred_companies as companies with deferred_concepts as concepts. Full set staged as df_PAST_CAPS1 (8 rows) — use secedgar_dataframe_describe to inspect its columns, then secedgar_dataframe_query to analyze it with SQL.',
+    );
+  });
+
+  it('carries the deferral alone when nothing else needs a notice', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['CAL', 'JUN'],
+      concepts: [...EIGHT_CONCEPTS, 'debt'],
+      periods: 12,
+    });
+
+    const structured = result.structuredContent as { notice?: string; truncated?: boolean };
+    expect(structured.truncated).toBeUndefined();
+    expect(structured.notice).toBe(CONCEPTS_DEFERRED);
+  });
+
+  it('writes one clamp log line per deferred list', async () => {
+    const ctx = createMockContext({ errors: compareCompaniesTool.errors });
+    await compareCompaniesTool.handler(
+      compareCompaniesTool.input.parse({
+        companies: [...TEN, 'X11', 'X12'],
+        concepts: [...EIGHT_CONCEPTS, 'debt'],
+      }),
+      ctx,
+    );
+
+    expect(clampLines(ctx)).toEqual([
+      { tool: 'secedgar_compare_companies', field: 'companies', cap: 10, deferred: 2 },
+      { tool: 'secedgar_compare_companies', field: 'concepts', cap: 8, deferred: 1 },
+    ]);
+  });
+
+  it('records no deferral when every concept is unknown and nothing is read', async () => {
+    const ctx = createMockContext({ errors: compareCompaniesTool.errors });
+    const input = compareCompaniesTool.input.parse({
+      companies: [...TEN, 'X11'],
+      concepts: ['fcf'],
+    });
+
+    await expect(compareCompaniesTool.handler(input, ctx)).rejects.toMatchObject({
+      data: { reason: 'unknown_concept' },
+    });
+    expect(clampLines(ctx)).toEqual([]);
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
+  });
+
+  it('names the deferred companies on a no_companies_resolved failure, in message and data', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: [...TEN.slice(2), 'N9', 'N10', 'CAL'],
+      concepts: ['revenue'],
+    });
+
+    const error = wireError(result);
+    expect(error.data.reason).toBe('no_companies_resolved');
+    expect(error.message).toBe(
+      "None of the first 10 supplied companies resolved to a CIK. Inputs past the first 10 companies were not read — deferred_companies: 'CAL'.",
+    );
+    expect(error.data.deferred_companies).toEqual(['CAL']);
+    expect(error.data).not.toHaveProperty('deferred_concepts');
+    expect(mockApi.resolveCik.mock.calls.map(([q]) => q)).not.toContain('CAL');
+    expect(blockText(result.content)).toContain("deferred_companies: 'CAL'");
+  });
+
+  it('names the deferred concepts on a no_comparable_data failure, in message and data', async () => {
+    const unreported = [
+      'goodwill',
+      'net_income',
+      'cogs',
+      'eps_diluted',
+      'liabilities',
+      'cash',
+      'debt',
+      'capex',
+    ];
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: [...TEN, 'X11'],
+      concepts: [...unreported, 'revenue'],
+    });
+
+    const error = wireError(result);
+    expect(error.data.reason).toBe('no_comparable_data');
+    expect(error.message).toBe(
+      "None of the 2 resolved companies report any of the requested concepts for annual periods. Inputs past the first 10 companies and the first 8 distinct concepts were not read — deferred_companies: 'X11'; deferred_concepts: 'revenue'.",
+    );
+    expect(error.data.deferred_companies).toEqual(['X11']);
+    expect(error.data.deferred_concepts).toEqual(['revenue']);
+    expect(blockText(result.content)).toContain("deferred_concepts: 'revenue'");
+  });
+
+  it('says in the error contract that a failure names the deferred lists', () => {
+    const when = (reason: string) =>
+      compareCompaniesTool.errors?.find((e) => e.reason === reason)?.when;
+    for (const reason of ['no_companies_resolved', 'no_comparable_data']) {
+      expect(when(reason)).toContain('deferred_companies and deferred_concepts');
+    }
+  });
+});
+
+/**
+ * When both lists defer, the cells the call left unread are three sets: the
+ * deferred companies under the compared concepts, the compared companies under
+ * the deferred concepts, and the two deferred lists together. Each test builds
+ * the re-calls the notice names from the first call's output, runs them, and
+ * proves they read each of those cells once, every re-call within both caps
+ * (#201).
+ */
+describe('re-calls a two-list deferral names (#201)', () => {
+  /** Nine raw tags: every company reports each one for CY2024. */
+  const NINE_TAGS = Array.from({ length: 9 }, (_, i) => `Metric${String.fromCharCode(65 + i)}`);
+  const companies = (count: number) => Array.from({ length: count }, (_, i) => `C${i + 1}`);
+
+  beforeEach(() => {
+    vi.mocked(getCanvasBridge).mockReturnValue(undefined);
+    mockApi.resolveCik.mockImplementation(async (q: string) => ({
+      cik: `000000${q.slice(1).padStart(4, '0')}`,
+      name: `CO ${q}`,
+      ticker: q,
+    }));
+    mockApi.tryGetCompanyFacts.mockImplementation(async (cik: string) => ({
+      cik: Number(cik),
+      entityName: `CIK ${cik}`,
+      facts: {
+        'us-gaap': Object.fromEntries(
+          NINE_TAGS.map((tag) => [
+            tag,
+            { label: tag, units: { USD: [calendarYear10K(cik, 2024, 1)] } },
+          ]),
+        ),
+      },
+    }));
+  });
+
+  /** One call: its output, its notice, and the company|concept cells it read. */
+  async function compare(companyInputs: string[], conceptInputs: string[]) {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: companyInputs,
+      concepts: conceptInputs,
+      periods: 1,
+    });
+    expect(result.isError).toBeFalsy();
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    const notice = (result.structuredContent as { notice?: string }).notice;
+    return {
+      output,
+      notice,
+      text: allText(result),
+      cells: output.cells.map((c) => `${c.company.slice(3)}|${c.concept}`),
+    };
+  }
+
+  /** Every company|concept pair of two lists. */
+  const pairs = (companyList: string[], conceptList: string[]) =>
+    companyList.flatMap((company) => conceptList.map((concept) => `${company}|${concept}`));
+
+  /** Run each re-call, asserting it defers nothing, and return every cell read, repeats kept. */
+  async function follow(recalls: Array<{ companies: string[]; concepts: string[] }>) {
+    const read: string[] = [];
+    for (const recall of recalls) {
+      const { output, cells } = await compare(recall.companies, recall.concepts);
+      expect(output).not.toHaveProperty('deferred_companies');
+      expect(output).not.toHaveProperty('deferred_concepts');
+      read.push(...cells);
+    }
+    return read;
+  }
+
+  it('reads each unread cell once across three re-calls, each within both caps', async () => {
+    const supplied = companies(12);
+    const first = await compare(supplied, NINE_TAGS);
+
+    expect(first.output.deferred_companies).toEqual(['C11', 'C12']);
+    expect(first.output.deferred_concepts).toEqual(['MetricI']);
+    expect(first.notice).toBe(
+      'This call takes the first 10 of 12 companies and the first 8 distinct concepts; deferred_companies and deferred_concepts list the rest. To compare them, re-call three times with the same other inputs: (1) deferred_companies as companies with those 8 concepts, (2) those 10 companies with deferred_concepts as concepts, and (3) deferred_companies as companies with deferred_concepts as concepts.',
+    );
+    expect(first.text).toContain(`> ${first.notice}`);
+
+    const deferredCompanies = first.output.deferred_companies ?? [];
+    const deferredConcepts = first.output.deferred_concepts ?? [];
+    const comparedConcepts = first.output.concepts.map((c) => c.concept);
+    const thoseTen = supplied.slice(0, 10);
+    const read = await follow([
+      { companies: deferredCompanies, concepts: comparedConcepts },
+      { companies: thoseTen, concepts: deferredConcepts },
+      { companies: deferredCompanies, concepts: deferredConcepts },
+    ]);
+
+    const unread = [
+      ...pairs(deferredCompanies, comparedConcepts),
+      ...pairs(thoseTen, deferredConcepts),
+      ...pairs(deferredCompanies, deferredConcepts),
+    ];
+    expect(first.cells).toEqual(pairs(thoseTen, comparedConcepts));
+    expect(read.sort()).toEqual(unread.sort());
+    expect(new Set(read).size).toBe(read.length);
+  });
+
+  it('reads each unread cell once when one company is deferred, pairing it in calls 1 and 3', async () => {
+    const supplied = companies(11);
+    const first = await compare(supplied, NINE_TAGS);
+
+    expect(first.output.deferred_companies).toEqual(['C11']);
+    expect(first.notice).toBe(
+      'This call takes the first 10 of 11 companies and the first 8 distinct concepts; deferred_companies and deferred_concepts list the rest. To compare them, re-call three times with the same other inputs: (1) deferred_companies as companies with those 8 concepts, (2) those 10 companies with deferred_concepts as concepts, and (3) deferred_companies as companies with deferred_concepts as concepts. Since companies takes at least two, add one of those 10 beside the lone deferred company in calls 1 and 3, and leave it out of call 2.',
+    );
+
+    const deferredConcepts = first.output.deferred_concepts ?? [];
+    const comparedConcepts = first.output.concepts.map((c) => c.concept);
+    const thoseTen = supplied.slice(0, 10);
+    const [beside = '', ...otherNine] = thoseTen;
+    const lonePair = [...(first.output.deferred_companies ?? []), beside];
+    const read = await follow([
+      { companies: lonePair, concepts: comparedConcepts },
+      { companies: otherNine, concepts: deferredConcepts },
+      { companies: lonePair, concepts: deferredConcepts },
+    ]);
+
+    const unread = [
+      ...pairs(['C11'], comparedConcepts),
+      ...pairs(thoseTen, deferredConcepts),
+      ...pairs(['C11'], deferredConcepts),
+    ];
+    // Call 1 re-reads its added company's compared cells: companies takes at least two.
+    const reread = pairs([beside], comparedConcepts);
+    expect(read.sort()).toEqual([...unread, ...reread].sort());
+    expect(new Set(read).size).toBe(read.length);
   });
 });
 

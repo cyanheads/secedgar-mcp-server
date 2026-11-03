@@ -1,24 +1,27 @@
 /**
- * @fileoverview Serving an over-cap numeric input at its cap (#197). A count or
- * size input above the cap its handler applies returns exactly what the call at
- * the cap returns, so rejecting it only costs the caller a retry.
+ * @fileoverview Serving an over-cap input at its cap. A count or size input
+ * above the cap its handler applies returns exactly what the call at the cap
+ * returns (#197), and an ID batch longer than its cap answers up to the cap and
+ * names the rest (#201), so rejecting either only costs the caller a retry.
  *
  * One switch, `EDGAR_CLAMP_OVERSIZED_LIMITS` (default on), governs every field
  * built here:
  *
- * | Switch | Value | Schema | Handler reads | Log line + counter |
- * |:-------|:------|:-------|:--------------|:-------------------|
- * | on | at most `cap` | accepted | the value | none |
- * | on | above `cap`, at most `bound` | accepted | `cap` | one each |
+ * | Switch | Value or list | Schema | Handler reads | Log line + counter |
+ * |:-------|:--------------|:-------|:--------------|:-------------------|
+ * | on | at most `cap` | accepted | all of it | none |
+ * | on | above `cap`, at most `bound` | accepted | `cap` (a list: up to `cap`, the rest deferred) | one each |
  * | on | above `bound` | rejected | — | — |
- * | off | at most `cap` | accepted | the value | none |
- * | off | above `cap` | rejected (`maximum` is `cap`) | — | — |
+ * | off | at most `cap` | accepted | all of it | none |
+ * | off | above `cap` | rejected (`maximum` / `maxItems` is `cap`) | — | — |
  *
  * The handler is the same in both modes: switched off, the schema rejects every
- * value `apply()` would cut, so only the advertised and validated bound changes.
- * A clamped call carries no notice of its own — the result must equal the call
- * at the cap — and reports the applied value wherever the tool already reports
- * its cap (`cap`, the page it returns, its continuation).
+ * value `apply()` would cut and every list that would defer anything, so only
+ * the advertised and validated bound changes. A clamped number carries no notice
+ * of its own — the result must equal the call at the cap — and reports the
+ * applied value wherever the tool already reports its cap (`cap`, the page it
+ * returns, its continuation). A deferred list is the exception: its tool returns
+ * the deferred items as supplied and says how to re-call with them.
  *
  * @module mcp-server/tools/limit-clamp
  */
@@ -37,17 +40,41 @@ export interface LimitClampOptions {
  */
 let clampedCalls: ReturnType<typeof createCounter> | undefined;
 
+/** Add 1 to `secedgar.input.clamped`, tagged with tool and field. */
+function countClamp(toolName: string, field: string): void {
+  clampedCalls ??= createCounter(
+    'secedgar.input.clamped',
+    'Calls whose numeric input exceeded its cap and was served at the cap, or whose list exceeded its cap and was answered up to it, counted once per field',
+    '{calls}',
+  );
+  clampedCalls.add(1, { [ATTR_MCP_TOOL_NAME]: toolName, 'secedgar.input.field': field });
+}
+
+/** An input whose advertised bound the switch picks; {@link withLimitClamps} rebuilds it. */
+export interface ClampedField<S extends z.ZodType = z.ZodType> {
+  readonly field: string;
+  /** The field's schema: its maximum is `bound` when clamping, else `cap`. */
+  schema(clampOversizedLimits: boolean): S;
+}
+
 /** One numeric input served at its cap. */
-export interface LimitClamp<S extends z.ZodType> {
+export interface LimitClamp<S extends z.ZodType> extends ClampedField<S> {
   /**
    * The value every handler read uses: `min(value, cap)`. A clamp writes one
    * `ctx.log` line and adds 1 to `secedgar.input.clamped`, tagged with tool and
    * field. An omitted optional value passes through.
    */
   apply<V extends number | undefined>(value: V, ctx: Context): V;
-  readonly field: string;
-  /** The field's schema: `maximum` is `bound` when clamping, else `cap`. */
-  schema(clampOversizedLimits: boolean): S;
+}
+
+/** One list input answered up to its cap, the rest returned unread (#201). */
+export interface BatchClamp extends ClampedField<z.ZodArray<z.ZodString>> {
+  /**
+   * Record the items the handler left past the cap. When there are any, writes
+   * one `ctx.log` line and adds 1 to `secedgar.input.clamped`, tagged with tool
+   * and field; an empty list records nothing.
+   */
+  defer(deferred: readonly string[], ctx: Context): void;
 }
 
 /**
@@ -87,13 +114,49 @@ export function limitClamp<S extends z.ZodType>(spec: {
         requested: value,
         applied: cap,
       });
-      clampedCalls ??= createCounter(
-        'secedgar.input.clamped',
-        'Calls whose numeric input exceeded its cap and was served at the cap',
-        '{calls}',
-      );
-      clampedCalls.add(1, { [ATTR_MCP_TOOL_NAME]: toolName, 'secedgar.input.field': field });
+      countClamp(toolName, field);
       return cap as V;
+    },
+  };
+}
+
+/**
+ * Define a list input answered up to its cap. Which items fill the cap is the
+ * handler's call (the first `cap` as given, or the first `cap` distinct), so it
+ * passes the rest to `defer()`. `description` is the field's own text; switched
+ * on, `overCap` follows it to say what a longer list returns, and switched off,
+ * the cap sentence does.
+ */
+export function batchClamp(spec: {
+  tool: string;
+  field: string;
+  item: z.ZodString;
+  min: number;
+  cap: number;
+  bound: number;
+  description: string;
+  overCap: string;
+}): BatchClamp {
+  const { tool: toolName, field, item, min, cap, bound, description, overCap } = spec;
+  return {
+    field,
+    schema: (clampOversizedLimits) =>
+      z
+        .array(item)
+        .min(min)
+        .max(clampOversizedLimits ? bound : cap)
+        .describe(
+          clampOversizedLimits ? `${description} ${overCap}` : `${description} At most ${cap}.`,
+        ),
+    defer(deferred: readonly string[], ctx: Context): void {
+      if (deferred.length === 0) return;
+      ctx.log.info('List above its cap answered up to the cap, the rest deferred', {
+        tool: toolName,
+        field,
+        cap,
+        deferred: deferred.length,
+      });
+      countClamp(toolName, field);
     },
   };
 }
@@ -105,7 +168,7 @@ export function limitClamp<S extends z.ZodType>(spec: {
  */
 export function withLimitClamps<D extends { name: string; input: z.ZodObject }>(
   definition: D,
-  clamps: readonly LimitClamp<z.ZodType>[],
+  clamps: readonly ClampedField[],
   { clampOversizedLimits }: LimitClampOptions,
 ): D {
   if (clampOversizedLimits) return definition;

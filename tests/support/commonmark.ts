@@ -46,3 +46,15 @@ export function readCommonMark(markdown: string): string {
   }
   return parts.join('\n\n');
 }
+
+/**
+ * The content of every inline code span a CommonMark parse of `markdown` reads,
+ * in document order — what a rendering client shows between the backticks.
+ */
+export function codeSpansIn(markdown: string): string[] {
+  return parser
+    .parse(markdown, {})
+    .flatMap((token) => token.children ?? [])
+    .filter((token) => token.type === 'code_inline')
+    .map((token) => token.content);
+}

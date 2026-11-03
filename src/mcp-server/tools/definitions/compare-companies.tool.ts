@@ -11,6 +11,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import {
+  batchClamp,
   type LimitClampOptions,
   limitClamp,
   withLimitClamps,
@@ -48,16 +49,105 @@ const QUARTER_FRAME = /^CY(\d{4}Q[1-4])$/;
 const INSTANT_FRAME = /^CY(\d{4})(Q[1-4])I$/;
 
 /**
- * Ceiling on inline matrix cells. The bounds multiply out to 10 companies x 8
- * concepts x 12 periods, a payload no caller can read in one response, so the
- * inline window drops older periods until it fits. The dataframe still carries
- * the full aligned series, and the drop is disclosed through the truncation
- * enrichment.
+ * Ceiling on inline matrix cells. The caps multiply out to 10 companies x 8
+ * concepts x 12 periods (a longer list is answered only up to them), a payload
+ * no caller can read in one response, so the inline window drops older periods
+ * until it fits. The dataframe still carries the full aligned series, and the
+ * drop is disclosed through the truncation enrichment.
  */
 const MAX_INLINE_CELLS = 120;
 
 /** Most recent periods the inline matrix can be asked for (`periods`). */
 const MAX_PERIODS = 12;
+
+/** Company inputs one call reads, in input order (`companies`). */
+const MAX_COMPANIES = 10;
+
+/** Distinct concepts one call compares (`concepts`). */
+const MAX_CONCEPTS = 8;
+
+/**
+ * Longest `companies` or `concepts` list accepted. Past the cap a list is only
+ * echoed back, and a screen wider than this is `secedgar_fetch_frames`' job (#201).
+ */
+const LIST_BOUND = 100;
+
+/** `companies`: inputs past the first {@link MAX_COMPANIES} are returned unread (#201). */
+const companiesBatch = batchClamp({
+  tool: 'secedgar_compare_companies',
+  field: 'companies',
+  item: z.string().min(1).describe('Ticker symbol or CIK number.'),
+  min: 2,
+  cap: MAX_COMPANIES,
+  bound: LIST_BOUND,
+  description:
+    'Companies to compare, as ticker symbols (preferred) or CIK numbers. A company that does not resolve is reported in failed_companies and the rest of the comparison still runs.',
+  overCap: `The first ${MAX_COMPANIES} inputs are read; a longer list, up to ${LIST_BOUND}, returns the rest unread in deferred_companies.`,
+});
+
+/** `concepts`: inputs past the first {@link MAX_CONCEPTS} distinct concepts are returned unread (#201). */
+const conceptsBatch = batchClamp({
+  tool: 'secedgar_compare_companies',
+  field: 'concepts',
+  item: z.string().min(1).describe('Friendly concept name or raw XBRL tag.'),
+  min: 1,
+  cap: MAX_CONCEPTS,
+  bound: LIST_BOUND,
+  description:
+    'Concepts to compare — friendly names like "revenue" or "net_income" (discover them with secedgar_search_concepts) or raw XBRL tags.',
+  overCap: `The first ${MAX_CONCEPTS} distinct concepts are compared, spellings of one concept counting once and an unrecognized name not at all; a longer list, up to ${LIST_BOUND}, returns each input naming a further concept unread in deferred_concepts.`,
+});
+
+/** The inputs a call left past its caps, each list present only when non-empty (#201). */
+interface Deferred {
+  deferred_companies?: string[];
+  deferred_concepts?: string[];
+}
+
+/** `'a', 'b'` — inputs quoted as supplied, so surrounding whitespace stays visible. */
+function quoted(inputs: readonly string[]): string {
+  return inputs.map((i) => `'${i}'`).join(', ');
+}
+
+/**
+ * The notice a deferral adds: what this call took, where the rest is, and the
+ * re-calls that compare it. With both lists deferred the unread cells are three
+ * sets — deferred companies x compared concepts, compared companies x deferred
+ * concepts, deferred x deferred — so three re-calls each read one; a re-call
+ * pairing a deferred list with the other full input list would pass the other
+ * cap and repeat what another re-call reads. `companies` needs two entries, so a
+ * lone deferred company is re-called beside one this call took, which then
+ * leaves the compared-companies re-call.
+ */
+function deferralNotice(suppliedCompanies: number, deferred: Deferred): string | undefined {
+  const { deferred_companies: companies, deferred_concepts: concepts } = deferred;
+  const lone = companies?.length === 1;
+  if (companies && concepts) {
+    return `This call takes the first ${MAX_COMPANIES} of ${suppliedCompanies} companies and the first ${MAX_CONCEPTS} distinct concepts; deferred_companies and deferred_concepts list the rest. To compare them, re-call three times with the same other inputs: (1) deferred_companies as companies with those ${MAX_CONCEPTS} concepts, (2) those ${MAX_COMPANIES} companies with deferred_concepts as concepts, and (3) deferred_companies as companies with deferred_concepts as concepts.${lone ? ` Since companies takes at least two, add one of those ${MAX_COMPANIES} beside the lone deferred company in calls 1 and 3, and leave it out of call 2.` : ''}`;
+  }
+  if (companies) {
+    return `This call takes the first ${MAX_COMPANIES} of ${suppliedCompanies} companies; deferred_companies lists the rest. Re-call with deferred_companies as companies and the same other inputs to compare them.${lone ? ' Add a company from this call beside the lone deferred one, since companies takes at least two.' : ''}`;
+  }
+  if (!concepts) return;
+  return `This call takes the first ${MAX_CONCEPTS} distinct concepts; deferred_concepts lists the rest. Re-call with deferred_concepts as concepts and the same other inputs to compare them.`;
+}
+
+/** What an error raised after the split appends: the inputs it never read (#201). */
+function unreadNote(deferred: Deferred): string {
+  const past: string[] = [];
+  const lists: string[] = [];
+  if (deferred.deferred_companies) {
+    past.push(`the first ${MAX_COMPANIES} companies`);
+    lists.push(`deferred_companies: ${quoted(deferred.deferred_companies)}`);
+  }
+  if (deferred.deferred_concepts) {
+    past.push(`the first ${MAX_CONCEPTS} distinct concepts`);
+    lists.push(`deferred_concepts: ${quoted(deferred.deferred_concepts)}`);
+  }
+  return past.length === 0
+    ? ''
+    : ` Inputs past ${past.join(' and ')} were not read — ${lists.join('; ')}.`;
+}
 
 /** `periods`: a larger value is served at {@link MAX_PERIODS} (#197). */
 const periodsLimit = limitClamp({
@@ -163,7 +253,7 @@ interface Cell {
 
 export const compareCompaniesTool = tool('secedgar_compare_companies', {
   description:
-    'Compare 2-10 named companies across 1-8 XBRL concepts, aligned on fiscal years (annual) or calendar quarters (quarterly). This is the middle shape between secedgar_get_financials (one company, one concept, full history) and secedgar_fetch_frames (one concept, one period, every reporting company) — reach for it when the question names the companies. One companyfacts read per company, resolved through the same frame dedup and tag priority as secedgar_get_financials so the numbers agree. Balance-sheet and entity-info concepts are filed as point-in-time values: an annual matrix takes each company’s fiscal-year-end snapshot and places it in the period of the fiscal year it closes, beside that year’s income-statement lines (interim and cover-date snapshots stay out), and a quarterly matrix aligns each snapshot on the calendar quarter it falls in. The inline matrix covers the most recent periods up to `periods`, trimmed further when companies x concepts x periods is too large to return in one response; the full aligned series is materialized as df_<id> for growth rates and spreads — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query. A company that fails to resolve is reported in failed_companies and the comparison proceeds with the rest, and a company that does not report a concept is reported in gaps with the tags that were tried — never interpolated or zero-filled. A company that reports a concept only for periods older than the inline window is named in caveats with its newest period. A concept that is neither a friendly name nor an XBRL tag is reported once in unknown_concepts with the closest supported names, and fails the call only when every concept is one. Off-calendar filers and unit mismatches are surfaced in caveats rather than silently mixed.',
+    'Compare 2-10 named companies across 1-8 XBRL concepts, aligned on fiscal years (annual) or calendar quarters (quarterly). This is the middle shape between secedgar_get_financials (one company, one concept, full history) and secedgar_fetch_frames (one concept, one period, every reporting company) — reach for it when the question names the companies. One companyfacts read per company, resolved through the same frame dedup and tag priority as secedgar_get_financials so the numbers agree. Balance-sheet and entity-info concepts are filed as point-in-time values: an annual matrix takes each company’s fiscal-year-end snapshot and places it in the period of the fiscal year it closes, beside that year’s income-statement lines (interim and cover-date snapshots stay out), and a quarterly matrix aligns each snapshot on the calendar quarter it falls in. The inline matrix covers the most recent periods up to `periods`, trimmed further when companies x concepts x periods is too large to return in one response; the full aligned series is materialized as df_<id> for growth rates and spreads — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query. A company that fails to resolve is reported in failed_companies and the comparison proceeds with the rest, and a company that does not report a concept is reported in gaps with the tags that were tried — never interpolated or zero-filled. A company named twice (a ticker and its CIK) is read once, under the first input. Where the schema accepts a longer list, companies past the first 10 and concepts past the first 8 distinct are not read; they come back in deferred_companies and deferred_concepts to re-call with. A company that reports a concept only for periods older than the inline window is named in caveats with its newest period. A concept that is neither a friendly name nor an XBRL tag is reported once in unknown_concepts with the closest supported names, and fails the call only when every concept is one. Off-calendar filers and unit mismatches are surfaced in caveats rather than silently mixed.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   enrichment: {
@@ -175,7 +265,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       .string()
       .optional()
       .describe(
-        'Guidance when the inline matrix dropped periods, or the full series is staged as a dataframe.',
+        'Guidance on deferred inputs, periods the inline matrix dropped, or the staged dataframe.',
       ),
     truncated: z
       .boolean()
@@ -189,13 +279,13 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     {
       reason: 'no_companies_resolved',
       code: JsonRpcErrorCode.NotFound,
-      when: 'None of the supplied company inputs resolved to a CIK',
+      when: 'None of the company inputs read resolved to a CIK; inputs past the caps were not read and are named in deferred_companies and deferred_concepts',
       recovery: 'Use ticker symbols or 10-digit CIK numbers for exact matches.',
     },
     {
       reason: 'no_comparable_data',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Companies resolved but not one of them reports any of the requested concepts for the requested period type',
+      when: 'Companies resolved but not one of them reports any of the requested concepts for the requested period type; any company or concept inputs past the caps are named, unread, in deferred_companies and deferred_concepts',
       recovery:
         'Switch period_type, or discover reported concept names with secedgar_search_concepts.',
     },
@@ -226,20 +316,8 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
   ],
 
   input: z.object({
-    companies: z
-      .array(z.string().min(1).describe('Ticker symbol or CIK number.'))
-      .min(2)
-      .max(10)
-      .describe(
-        'Companies to compare, as ticker symbols (preferred) or CIK numbers. A company that does not resolve is reported in failed_companies and the rest of the comparison still runs.',
-      ),
-    concepts: z
-      .array(z.string().min(1).describe('Friendly concept name or raw XBRL tag.'))
-      .min(1)
-      .max(8)
-      .describe(
-        'Concepts to compare — friendly names like "revenue" or "net_income" (discover them with secedgar_search_concepts) or raw XBRL tags.',
-      ),
+    companies: companiesBatch.schema(true),
+    concepts: conceptsBatch.schema(true),
     taxonomy: z
       .enum(['us-gaap', 'ifrs-full'])
       .default('us-gaap')
@@ -261,7 +339,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     periods: z
       .array(z.string())
       .describe(
-        'Period keys in the inline matrix, newest first; shorter than requested when the cell count shrank it (see notice).',
+        'Inline period keys, newest first; fewer than requested when the cell count shrank the window (see notice).',
       ),
     companies: z
       .array(
@@ -290,6 +368,10 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
           .describe('One company that could not be included.'),
       )
       .describe('Companies excluded from the matrix; the rest still compare.'),
+    deferred_companies: z
+      .array(z.string())
+      .optional()
+      .describe('Company inputs past the first 10, unread, as supplied.'),
     concepts: z
       .array(
         z
@@ -305,7 +387,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
           .describe('One requested concept and the units it resolved to.'),
       )
       .describe(
-        'Concepts covered, in input order; inputs naming the same concept appear once, under the first spelling.',
+        'Concepts covered, in input order; spellings of one concept appear once, under the first.',
       ),
     cells: z
       .array(
@@ -331,7 +413,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
             period_end: z
               .string()
               .describe(
-                'Period end date (YYYY-MM-DD). Differs across off-calendar filers within one aligned period.',
+                'Period end date (YYYY-MM-DD); differs across off-calendar filers in one aligned period.',
               ),
             form: z.string().describe('Source filing type (10-K, 10-Q, 20-F).'),
             accession_number: z
@@ -355,7 +437,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
           .describe('One company-concept pair with no reported value.'),
       )
       .describe(
-        'Company-concept pairs with no value in any period (never zero-filled). A pair with values only before the inline window appears in caveats instead.',
+        'Company-concept pairs with no value in any period, never zero-filled; a pair with values only before the inline window is in caveats instead.',
       ),
     unknown_concepts: z
       .array(
@@ -366,7 +448,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
               .string()
               .optional()
               .describe(
-                'How to build it from supported concepts, when it is a standard combination (e.g., "operating_cash_flow − capex").',
+                'Formula over supported concepts, when it is a standard combination (e.g., "operating_cash_flow − capex").',
               ),
             suggestions: z
               .array(z.string())
@@ -374,15 +456,19 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
                 'Up to three closest supported friendly names. Empty when a derivation applies or no name is close.',
               ),
           })
-          .describe('One requested concept that was not queried for any company.'),
+          .describe('One concept not queried for any company.'),
       )
       .describe(
-        'Concepts that are neither a supported name nor an XBRL tag, reported once instead of as per-company gaps; secedgar_search_concepts lists supported names. Empty when all resolved.',
+        'Concepts neither a supported name nor an XBRL tag, reported once rather than as per-company gaps; secedgar_search_concepts lists the supported names.',
       ),
+    deferred_concepts: z
+      .array(z.string())
+      .optional()
+      .describe('Inputs naming a concept past the first 8 distinct, unread, as supplied.'),
     caveats: z
       .array(z.string())
       .describe(
-        "Comparability warnings (company ones prefixed with the name), else empty: missing quarters; a concept 2+ years behind the company's other lines; an instant with no fiscal-year-end value (annual); differing period ends or units; values only before the inline window; merged inputs.",
+        "Comparability warnings (company ones prefixed with the name): missing quarters; a concept 2+ years behind the company's other lines; an instant with no fiscal-year-end value (annual); differing period ends or units; values only before the inline window; merged inputs.",
       ),
     dataset: z
       .object({
@@ -403,6 +489,13 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
   async handler(input, ctx) {
     const periods = periodsLimit.apply(input.periods, ctx);
     /**
+     * The cap counts company inputs as given — one that fails to resolve, or
+     * names a company an earlier input already did, still takes its place — so
+     * no input past it is ever resolved (#201, #217).
+     */
+    const companyInputs = input.companies.slice(0, MAX_COMPANIES);
+    const deferredCompanies = input.companies.slice(MAX_COMPANIES);
+    /**
      * A name that is neither a catalog entry nor tag-shaped is reported once,
      * apart from the per-company gaps it would otherwise fill with "reports no
      * X" rows. Only a call whose every concept is unknown fails, and it fails
@@ -420,20 +513,34 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       ConceptMapping | string,
       { concept: string; merged: string[] }
     >();
+    /**
+     * The cap counts distinct known concepts, so a later spelling of one already
+     * compared merges into it and an unknown name takes no place; an input that
+     * would open a concept past the cap is returned as supplied (#201).
+     */
+    const conceptInputs: string[] = [];
+    const deferredConcepts: string[] = [];
     for (const concept of input.concepts) {
       const unknown = findUnknownConcept(concept);
       if (unknown) {
         if (!unknownConcepts.some((u) => u.concept === unknown.concept)) {
           unknownConcepts.push(unknown);
         }
+        conceptInputs.push(concept);
         continue;
       }
       const identity = resolveConcept(concept) ?? concept.trim();
       const known = knownByIdentity.get(identity);
-      if (!known) knownByIdentity.set(identity, { concept, merged: [] });
-      else if (concept !== known.concept && !known.merged.includes(concept)) {
+      if (!known) {
+        if (knownByIdentity.size === MAX_CONCEPTS) {
+          deferredConcepts.push(concept);
+          continue;
+        }
+        knownByIdentity.set(identity, { concept, merged: [] });
+      } else if (concept !== known.concept && !known.merged.includes(concept)) {
         known.merged.push(concept);
       }
+      conceptInputs.push(concept);
     }
     const knownConcepts = [...knownByIdentity.values()];
     if (knownConcepts.length === 0) {
@@ -443,18 +550,25 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
         unknown_concepts: unknownConcepts,
       });
     }
+    companiesBatch.defer(deferredCompanies, ctx);
+    conceptsBatch.defer(deferredConcepts, ctx);
+    const deferred: Deferred = {
+      ...(deferredCompanies.length > 0 ? { deferred_companies: deferredCompanies } : {}),
+      ...(deferredConcepts.length > 0 ? { deferred_concepts: deferredConcepts } : {}),
+    };
 
     const api = getEdgarApiService();
     const scope = new CallScope(ctx.signal);
 
-    const resolvedCompanies: Array<CikMatch & { input: string }> = [];
+    /** `merged` holds later inputs naming the same company, read under this one (#217). */
+    const resolvedCompanies: Array<CikMatch & { input: string; merged: string[] }> = [];
     const failed: Array<{
       input: string;
       reason: 'not_found' | 'ambiguous' | 'no_company_facts';
       message: string;
     }> = [];
 
-    for (const supplied of input.companies) {
+    for (const supplied of companyInputs) {
       const resolved = await api.resolveCik(supplied, scope);
       if (Array.isArray(resolved) && resolved.length === 0) {
         failed.push({
@@ -477,14 +591,19 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
         continue;
       }
       const match = Array.isArray(resolved) ? resolved[0] : resolved;
-      if (match) resolvedCompanies.push({ ...match, input: supplied });
+      if (!match) continue;
+      const earlier = resolvedCompanies.find((c) => c.cik === match.cik);
+      if (!earlier) resolvedCompanies.push({ ...match, input: supplied, merged: [] });
+      else if (supplied !== earlier.input && !earlier.merged.includes(supplied)) {
+        earlier.merged.push(supplied);
+      }
     }
 
     if (resolvedCompanies.length === 0) {
       throw ctx.fail(
         'no_companies_resolved',
-        `None of the ${input.companies.length} supplied companies resolved to a CIK.`,
-        { failed_companies: failed },
+        `None of the ${deferredCompanies.length > 0 ? 'first ' : ''}${companyInputs.length} supplied companies resolved to a CIK.${unreadNote(deferred)}`,
+        { failed_companies: failed, ...deferred },
       );
     }
 
@@ -501,6 +620,13 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     const caveatSet = new Set<string>();
     /** Company-concept pairs an annual matrix left empty for holding only off-year-end snapshots. */
     const offYearEndPairs: string[] = [];
+    for (const { input: first, merged } of resolvedCompanies) {
+      if (merged.length === 0) continue;
+      const one = merged.length === 1;
+      caveatSet.add(
+        `${merged.map((m) => `'${m}'`).join(' and ')} ${one ? 'names' : 'name'} the same company as '${first}', so the comparison reads ${one ? 'it' : 'them'} once, under '${first}'.`,
+      );
+    }
     for (const { concept, merged } of knownConcepts) {
       if (merged.length === 0) continue;
       const one = merged.length === 1;
@@ -658,9 +784,10 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
         offYearEndPairs.length > 0
           ? `None of the ${included.length} resolved companies has a value an annual matrix can hold. Every value found is a point-in-time snapshot dated off its company’s fiscal-year ends — a cover-page or interim date, which an annual matrix cannot pair with fiscal-year-end income lines: ${offYearEndPairs.join('; ')}.`
           : `None of the ${included.length} resolved companies report any of the requested concepts for ${input.period_type} periods.`;
-      throw ctx.fail('no_comparable_data', `${message}${unknownNote}`, {
+      throw ctx.fail('no_comparable_data', `${message}${unknownNote}${unreadNote(deferred)}`, {
         gaps,
         ...(unknownConcepts.length > 0 ? { unknown_concepts: unknownConcepts } : {}),
+        ...deferred,
         ...(offYearEndPairs.length > 0
           ? {
               recovery: {
@@ -756,7 +883,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
         sourceTool: 'secedgar_compare_companies',
         queryParams: {
           companies: included.map((c) => c.cik),
-          concepts: input.concepts,
+          concepts: conceptInputs,
           taxonomy: input.taxonomy,
           period_type: input.period_type,
         },
@@ -795,12 +922,17 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       );
     }
 
-    // Emitted after registration so the pointer names a table that exists (#104).
+    /**
+     * Emitted after registration so the pointer names a table that exists (#104).
+     * `notice` is last-wins, so a deferral leads whichever single call fires (#201).
+     */
+    const deferral = deferralNotice(input.companies.length, deferred);
+    const lead = deferral ? `${deferral} ` : '';
     if (allPeriods.length > inlinePeriods.length) {
       ctx.enrich.truncated({
         shown: inlinePeriods.length,
         cap: periods,
-        guidance: `Showing the ${inlinePeriods.length} most-recent of ${allPeriods.length} aligned periods. ${
+        guidance: `${lead}Showing the ${inlinePeriods.length} most-recent of ${allPeriods.length} aligned periods. ${
           dataset
             ? dataframeGuidance(dataset)
             : widen === 'raise periods'
@@ -811,7 +943,9 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
         }`,
       });
     } else if (dataset) {
-      ctx.enrich.notice(dataframeGuidance(dataset));
+      ctx.enrich.notice(`${lead}${dataframeGuidance(dataset)}`);
+    } else if (deferral) {
+      ctx.enrich.notice(deferral);
     }
 
     ctx.log.info('Comparison built', {
@@ -835,6 +969,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       cells: inlineCells,
       gaps,
       unknown_concepts: unknownConcepts,
+      ...deferred,
       caveats: [...caveatSet],
       dataset,
     };
@@ -850,6 +985,9 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     for (const failure of result.failed_companies) {
       out.push(`Excluded: ${failure.input} (${failure.reason}) — ${failure.message}`);
     }
+    if (result.deferred_companies) {
+      out.push(`Deferred companies (not read): ${quoted(result.deferred_companies)}`);
+    }
 
     for (const concept of result.concepts) {
       out.push(
@@ -858,6 +996,9 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     }
     for (const unknown of result.unknown_concepts) {
       out.push(`Unknown concept: ${unknown.concept} — not queried. ${unknownConceptHint(unknown)}`);
+    }
+    if (result.deferred_concepts) {
+      out.push(`Deferred concepts (not read): ${quoted(result.deferred_concepts)}`);
     }
 
     // Cells are rendered as a flat, sorted list rather than a lookup grid: every
@@ -900,5 +1041,9 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
 
 /** `secedgar_compare_companies` as this deployment's `EDGAR_CLAMP_OVERSIZED_LIMITS` builds it. */
 export function createCompareCompaniesTool(options: LimitClampOptions) {
-  return withLimitClamps(compareCompaniesTool, [periodsLimit], options);
+  return withLimitClamps(
+    compareCompaniesTool,
+    [companiesBatch, conceptsBatch, periodsLimit],
+    options,
+  );
 }

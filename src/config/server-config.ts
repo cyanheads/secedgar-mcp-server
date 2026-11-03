@@ -122,7 +122,7 @@ const ServerConfigSchema = z.object({
     .stringbool()
     .default(true)
     .describe(
-      'Serve a count or size input above the cap its tool applies (a limit, content_limit, periods, preview, or row_limit) at that cap, up to each field\'s rejection bound, instead of rejecting it. Default true. Set "false" to advertise each cap as the maximum and reject anything larger.',
+      'Serve a count or size input above the cap its tool applies (a limit, content_limit, periods, preview, or row_limit) at that cap, and answer an ID list longer than its cap (compare_companies\' companies or concepts) up to the cap with the rest returned unread, each up to the field\'s rejection bound, instead of rejecting it. Default true. Set "false" to advertise each cap as the maximum and reject anything larger.',
     ),
 });
 

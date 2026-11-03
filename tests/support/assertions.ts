@@ -42,6 +42,11 @@ export function blockText(blocks: readonly ContentBlock[], index = 0): string {
   return block.text;
 }
 
+/** Every text block of a result's `content[]`, joined by newlines; other block types add nothing. */
+export function allText(result: { content: readonly ContentBlock[] }): string {
+  return result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+}
+
 /**
  * Runs a handler expected to throw and returns the `McpError` it threw, with
  * `data` narrowed to a present bag. Resolving instead of throwing fails the
