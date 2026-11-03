@@ -3904,6 +3904,36 @@ describe('filingToExtract — the XBRL renderer files of a full submission stay 
   });
 });
 
+/**
+ * SEC's XSL rendering of a structured form prints filer-written text in
+ * `div.largetext`, styled `white-space: pre-wrap`, so its whitespace is the
+ * filer's: the 13D and 13G stylesheets carry it, the Form 4, 144, and D ones no
+ * pre-wrap rule at all (#216).
+ */
+describe('filingToExtract — filer text in an SEC rendering keeps its breaks (#216)', () => {
+  const FILER_TEXT = 'as follows:\n\nOn October 28, 2026,  the Company agreed.\nSecond line. ';
+  const page = (div: string) =>
+    `<html><body><div class="text">Item 4.</div>${div}<div class="text">Item 5.</div></body></html>`;
+
+  it.each([
+    ['as the Item text prints it', '<div class="largetext">'],
+    [
+      'carrying a style attribute, as a cover-page note does',
+      '<div class="largetext" style="text-align:justify">',
+    ],
+  ])('keeps the line breaks and spaces of a largetext div %s', (_label, open) => {
+    expect(filingToExtract(page(`${open}${FILER_TEXT}</div>`))).toBe(
+      `Item 4.\n${FILER_TEXT}\nItem 5.`,
+    );
+  });
+
+  it('collapses the whitespace of any other div, as before', () => {
+    expect(filingToExtract(page(`<div class="text">${FILER_TEXT}</div>`))).toBe(
+      'Item 4.\nas follows: On October 28, 2026, the Company agreed. Second line.\nItem 5.',
+    );
+  });
+});
+
 describe('filingToExtract — <TEXT> body scan worst cases stay linear (#136, #159, #160)', () => {
   it.each([
     ['repeated opener, no closer', (n: number) => fill('<TEXT>', n)],

@@ -1,3 +1,11 @@
 {
-  "extends": ["@cyanheads/mcp-ts-core/biome"]
+  "extends": ["@cyanheads/mcp-ts-core/biome"],
+  "overrides": [
+    {
+      "includes": ["tests/fixtures/**/*.html"],
+      "linter": { "enabled": false },
+      "formatter": { "enabled": false },
+      "assist": { "enabled": false }
+    }
+  ]
 }

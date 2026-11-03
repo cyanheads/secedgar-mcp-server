@@ -5,8 +5,10 @@
  * and `content[]` — with the same reason whether SEC answered the 429 or the
  * server refused the call without sending it. The same tools declare
  * `sec_unreachable`, the failure once the last attempt gets no complete, readable
- * response (#173, #181), or a submissions body lacks its shape (#186). Driven through `runToolContract` over the real `EdgarApiService` with
- * `globalThis.fetch` stubbed.
+ * response (#173, #181), or a submissions body lacks its shape (#186). Every tool that
+ * fails on EDGAR full-text search declares `efts_degraded_response`, the failure once its
+ * search backend fails every attempt or refuses the request (#206). Driven through
+ * `runToolContract` over the real `EdgarApiService` with `globalThis.fetch` stubbed.
  * @module tests/mcp-server/tools/rate-limit-contract
  */
 
@@ -29,7 +31,9 @@ vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => undef
 
 import { companySearchTool } from '@/mcp-server/tools/definitions/company-search.tool.js';
 import { getFinancialsTool } from '@/mcp-server/tools/definitions/get-financials.tool.js';
+import { getInstitutionalHoldingsTool } from '@/mcp-server/tools/definitions/get-institutional-holdings.tool.js';
 import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
+import { searchFilingsTool } from '@/mcp-server/tools/definitions/search-filings.tool.js';
 import { initEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { blockText } from '../../support/assertions.js';
 import { readCommonMark } from '../../support/commonmark.js';
@@ -98,6 +102,183 @@ describe('sec_unreachable on the tool contracts (#173)', () => {
       new Set([
         "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
       ]),
+    );
+  });
+});
+
+describe('efts_degraded_response on the tool contracts (#206)', () => {
+  it('is declared by exactly the tools that surface an EDGAR full-text search failure, in one string on every tool', () => {
+    const entries = buildToolDefinitions({ dropEnabled: true, clampOversizedLimits: true }).flatMap(
+      (def) =>
+        def.errors
+          ?.filter((e) => e.reason === 'efts_degraded_response')
+          .map((e) => ({ ...e, tool: def.name })) ?? [],
+    );
+
+    // search_filings and find_holders search; get_institutional_holdings resolves a name
+    // outside the ticker file through EDGAR's entity search on the same endpoint.
+    // get_filing's filer lookup searches too, but a failed lookup falls back to the
+    // accession-prefix CIK rather than failing the call (#215).
+    expect(entries.map((e) => e.tool).sort()).toEqual([
+      'secedgar_find_holders',
+      'secedgar_get_institutional_holdings',
+      'secedgar_search_filings',
+    ]);
+    for (const entry of entries) {
+      expect(entry, entry.tool).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        retryable: true,
+        thrownBy: 'service',
+      });
+    }
+    expect(new Set(entries.map((e) => e.when)).size).toBe(1);
+    expect(new Set(entries.map((e) => e.recovery)).size).toBe(1);
+  });
+});
+
+describe('a call whose full-text search backend fails (#206)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('unmocked fetch')));
+    initEdgarApiService();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  const LAMBDA_REQUEST_ID = '3f0c9d52-7d1e-4b0e-9a3c-2b5f8e4a1c77';
+  const backendErrorBody = (errorType: string, errorMessage: string) => ({
+    errorType,
+    errorMessage,
+    trace: [
+      `${errorType}: ${errorMessage}`,
+      '    at onBody (/opt/nodejs/node_modules/@opensearch-project/opensearch/lib/Transport.js:425:23)',
+    ],
+    requestId: LAMBDA_REQUEST_ID,
+  });
+  const CONNECTION_MESSAGE =
+    'getaddrinfo EBUSY vpc-efts-prod-opensearchservice.us-east-1.es.amazonaws.com';
+  const TRANSIENT_MESSAGE =
+    'EDGAR full-text search (efts.sec.gov) answered the last of 3 attempts with a failure of its search backend instead of results.';
+  const TRANSIENT_HINT =
+    "EDGAR full-text search (efts.sec.gov) answered, but its search backend could not run the search — a temporary failure on SEC's side, not a problem with the request. Retry the same call in a minute.";
+
+  /** Serve the empty-enough ticker files a cold name lookup reads, and `efts` for every full-text search request. */
+  function stubSec(efts: () => Response) {
+    const requests: string[] = [];
+    const fetchMock = vi.fn(async (input: string) => {
+      requests.push(input);
+      const url = new URL(input);
+      if (url.hostname === 'efts.sec.gov') return efts();
+      if (url.hostname === 'www.sec.gov' && url.pathname === '/files/company_tickers.json') {
+        return Response.json({ 0: { cik_str: 320193, ticker: 'AAPL', title: 'Apple Inc.' } });
+      }
+      if (url.hostname === 'www.sec.gov' && url.pathname === '/files/company_tickers_mf.json') {
+        return Response.json({ fields: ['cik', 'seriesId', 'classId', 'symbol'], data: [] });
+      }
+      throw new Error(`unrouted fetch: ${input}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return { requests };
+  }
+
+  const eftsRequests = (requests: string[]) =>
+    requests.filter((input) => new URL(input).hostname === 'efts.sec.gov');
+
+  it('fails search_filings on both surfaces after three attempts, retryable, with the backend error typed and its trace and request id left out', async () => {
+    const { requests } = stubSec(() =>
+      Response.json(backendErrorBody('ConnectionError', CONNECTION_MESSAGE)),
+    );
+
+    const pending = runToolContract(searchFilingsTool, { query: 'revenue' });
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await pending;
+
+    expect(eftsRequests(requests)).toHaveLength(3);
+    expect(result.isError).toBe(true);
+    expect(envelope(result)).toEqual({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: TRANSIENT_MESSAGE,
+      data: {
+        reason: 'efts_degraded_response',
+        retryable: true,
+        upstreamErrorType: 'ConnectionError',
+        upstreamErrorMessage: CONNECTION_MESSAGE,
+        recovery: { hint: TRANSIENT_HINT },
+      },
+    });
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: `Error: ${TRANSIENT_MESSAGE}\n\nRecovery: ${TRANSIENT_HINT}\n\n(reason efts_degraded_response · retryable)`,
+      },
+    ]);
+    const wire = JSON.stringify(result);
+    expect(wire).not.toContain('/opt/nodejs');
+    expect(wire).not.toContain(LAMBDA_REQUEST_ID);
+  });
+
+  it('fails search_filings on a refused search in one request, not retryable and never called an outage', async () => {
+    const refusal =
+      'search_phase_execution_exception: [illegal_argument_exception] Reason: Result window is too large, from + size must be less than or equal to: [10000] but was [10001]. See the scroll api for a more efficient way to request large data sets. This limit can be set by changing the [index.max_result_window] index level setting.';
+    const { requests } = stubSec(() => Response.json(backendErrorBody('ResponseError', refusal)));
+
+    const pending = runToolContract(searchFilingsTool, { query: 'revenue' });
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await pending;
+
+    expect(eftsRequests(requests)).toHaveLength(1);
+    const message =
+      'EDGAR full-text search (efts.sec.gov) answered with an error from its search backend instead of results.';
+    const hint =
+      'EDGAR full-text search (efts.sec.gov) refused to run this search, and resending it unchanged fails the same way — upstreamErrorMessage gives the reason to change.';
+    expect(envelope(result)).toEqual({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message,
+      data: {
+        reason: 'efts_degraded_response',
+        retryable: false,
+        upstreamErrorType: 'ResponseError',
+        upstreamErrorMessage: refusal,
+        recovery: { hint },
+      },
+    });
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: `Error: ${message}\n\nRecovery: ${hint}\n\n(reason efts_degraded_response · not retryable)`,
+      },
+    ]);
+    expect(JSON.stringify(result)).not.toMatch(/in a few minutes|temporary|degraded\./);
+  });
+
+  it('fails get_institutional_holdings’ entity-search fallback as efts_degraded_response, not company_not_found', async () => {
+    const { requests } = stubSec(() =>
+      Response.json(backendErrorBody('ConnectionError', CONNECTION_MESSAGE)),
+    );
+
+    const pending = runToolContract(getInstitutionalHoldingsTool, {
+      company: 'Qzxv Capital Advisors',
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await pending;
+
+    expect(eftsRequests(requests)).toHaveLength(3);
+    expect(envelope(result)).toEqual({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: TRANSIENT_MESSAGE,
+      data: {
+        reason: 'efts_degraded_response',
+        retryable: true,
+        upstreamErrorType: 'ConnectionError',
+        upstreamErrorMessage: CONNECTION_MESSAGE,
+        recovery: { hint: TRANSIENT_HINT },
+      },
+    });
+    expect(blockText(result.content).trimEnd()).toMatch(
+      /\(reason efts_degraded_response · retryable\)$/,
     );
   });
 });

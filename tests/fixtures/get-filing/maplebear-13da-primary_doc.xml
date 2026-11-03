@@ -1,0 +1,348 @@
+<?xml version="1.0" encoding="UTF-8"?><edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13D" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <schemaVersion>X0202</schemaVersion>
+<headerData>
+    <submissionType>SCHEDULE 13D/A</submissionType>
+    <filerInfo>
+      <filer>
+        <filerCredentials>
+          <cik>0001607841</cik>
+          <ccc>XXXXXXXX</ccc>
+        </filerCredentials>
+      </filer>
+      <liveTestFlag>LIVE</liveTestFlag>
+
+
+
+    </filerInfo>
+  </headerData>
+  <formData>
+    <coverPageHeader>
+      <amendmentNo>10</amendmentNo>
+      <securitiesClassTitle>Common Stock, par value $0.0001 per share</securitiesClassTitle>
+      <dateOfEvent>10/28/2026</dateOfEvent>
+      <previouslyFiledFlag>false</previouslyFiledFlag>
+      <issuerInfo>
+        <issuerCIK>0001579091</issuerCIK>
+        <issuerCusips>
+          <issuerCusipNumber>565394103</issuerCusipNumber>
+        </issuerCusips>
+        <issuerName>Maplebear Inc.</issuerName>
+        <address>
+          <street1 xmlns="http://www.sec.gov/edgar/common">50 Beale Street</street1>
+          <street2 xmlns="http://www.sec.gov/edgar/common">Suite 600</street2>
+          <city xmlns="http://www.sec.gov/edgar/common">San Francisco</city>
+          <stateOrCountry xmlns="http://www.sec.gov/edgar/common">CA</stateOrCountry>
+          <zipCode xmlns="http://www.sec.gov/edgar/common">94105</zipCode>
+        </address>
+      </issuerInfo>
+      <authorizedPersons>
+        <notificationInfo>
+          <personName>Jung Yeon Son</personName>
+          <personPhoneNum>(650) 854-3927</personPhoneNum>
+          <personAddress>
+            <street1 xmlns="http://www.sec.gov/edgar/common">2800 Sand Hill Road</street1>
+            <street2 xmlns="http://www.sec.gov/edgar/common">Suite 101</street2>
+            <city xmlns="http://www.sec.gov/edgar/common">Menlo Park</city>
+            <stateOrCountry xmlns="http://www.sec.gov/edgar/common">CA</stateOrCountry>
+            <zipCode xmlns="http://www.sec.gov/edgar/common">94025</zipCode>
+          </personAddress>
+        </notificationInfo>
+      </authorizedPersons>
+    </coverPageHeader>
+    <reportingPersons>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001740907</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>SEQUOIA CAPITAL GLOBAL GROWTH FUND III - ENDURANCE PARTNERS, L.P. ("SC GGF III")</reportingPersonName>
+        <fundType>OO</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>E9</citizenshipOrOrganization>
+        <soleVotingPower>0</soleVotingPower>
+        <sharedVotingPower>351374</sharedVotingPower>
+        <soleDispositivePower>0</soleDispositivePower>
+        <sharedDispositivePower>351374</sharedDispositivePower>
+        <aggregateAmountOwned>351374</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>0.1</percentOfClass>
+        <typeOfReportingPerson>PN</typeOfReportingPerson>
+        <commentContent>Row 13. Based on a total of 236,498,351 shares of common stock as of October 23, 2026, as reported in Exhibit 2.1 to the Issuer's Current Report on Form 8-K filed with the Securities and Exchange Commission on October 29, 2026.</commentContent>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001920675</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>SEQUOIA CAPITAL US/E EXPANSION FUND I, L.P. ("SC US/E EXPANSION FUND I")</reportingPersonName>
+        <fundType>OO</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>E9</citizenshipOrOrganization>
+        <soleVotingPower>0</soleVotingPower>
+        <sharedVotingPower>1000000</sharedVotingPower>
+        <soleDispositivePower>0</soleDispositivePower>
+        <sharedDispositivePower>1000000</sharedDispositivePower>
+        <aggregateAmountOwned>1000000</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>0.4</percentOfClass>
+        <typeOfReportingPerson>PN</typeOfReportingPerson>
+        <commentContent>Row 13. Based on a total of 236,498,351 shares of common stock as of October 23, 2026, as reported in Exhibit 2.1 to the Issuer's Current Report on Form 8-K filed with the Securities and Exchange Commission on October 29, 2026.</commentContent>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001920709</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>SEQUOIA CAPITAL US/E EXPANSION FUND I MANAGEMENT, L.P. ("SC US/E EXPANSION FUND I MGMT")</reportingPersonName>
+        <fundType>OO</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>E9</citizenshipOrOrganization>
+        <soleVotingPower>0</soleVotingPower>
+        <sharedVotingPower>3150331</sharedVotingPower>
+        <soleDispositivePower>0</soleDispositivePower>
+        <sharedDispositivePower>3150331</sharedDispositivePower>
+        <aggregateAmountOwned>3150331</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>1.3</percentOfClass>
+        <typeOfReportingPerson>PN</typeOfReportingPerson>
+        <commentContent>Row 8, 10 and 11. Includes 2,150,331 shares directly owned by SC US/E EXPANSION FUND I MGMT and 1,000,000 shares directly owned by SC US/E EXPANSION FUND I. The general partner of SC US/E EXPANSION FUND I is SC US/E EXPANSION FUND I MGMT.
+
+Row 13. Based on a total of 236,498,351 shares of common stock as of October 23, 2026, as reported in Exhibit 2.1 to the Issuer's Current Report on Form 8-K filed with the Securities and Exchange Commission on October 29, 2026.</commentContent>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001836399</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>SCGGF III - U.S./INDIA MANAGEMENT, L.P. ("SCGGF III - U.S./INDIA MANAGEMENT")</reportingPersonName>
+        <fundType>OO</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>E9</citizenshipOrOrganization>
+        <soleVotingPower>0</soleVotingPower>
+        <sharedVotingPower>1217532</sharedVotingPower>
+        <soleDispositivePower>0</soleDispositivePower>
+        <sharedDispositivePower>1217532</sharedDispositivePower>
+        <aggregateAmountOwned>1217532</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>0.5</percentOfClass>
+        <typeOfReportingPerson>PN</typeOfReportingPerson>
+        <commentContent>Row 13. Based on a total of 236,498,351 shares of common stock as of October 23, 2026, as reported in Exhibit 2.1 to the Issuer's Current Report on Form 8-K filed with the Securities and Exchange Commission on October 29, 2026.</commentContent>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001767303</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>SEQUOIA CAPITAL GLOBAL GROWTH FUND III - ENDURANCE PARTNERS MANAGEMENT, L.P. ("SC GGF III MGMT")</reportingPersonName>
+        <fundType>OO</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>E9</citizenshipOrOrganization>
+        <soleVotingPower>0</soleVotingPower>
+        <sharedVotingPower>351374</sharedVotingPower>
+        <soleDispositivePower>0</soleDispositivePower>
+        <sharedDispositivePower>351374</sharedDispositivePower>
+        <aggregateAmountOwned>351374</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>0.1</percentOfClass>
+        <typeOfReportingPerson>PN</typeOfReportingPerson>
+        <commentContent>Row 8, 10 and 11. Includes 351,374 shares directly owned by SC GGF III. The general partner of SC GGF III is SC GGF III MGMT.
+
+Row 13. Based on a total of 236,498,351 shares of common stock as of October 23, 2026, as reported in Exhibit 2.1 to the Issuer's Current Report on Form 8-K filed with the Securities and Exchange Commission on October 29, 2026.</commentContent>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001918157</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>SEQUOIA CAPITAL FUND PARALLEL, LLC ("SCFP")</reportingPersonName>
+        <fundType>OO</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>DE</citizenshipOrOrganization>
+        <soleVotingPower>0</soleVotingPower>
+        <sharedVotingPower>1763497</sharedVotingPower>
+        <soleDispositivePower>0</soleDispositivePower>
+        <sharedDispositivePower>1763497</sharedDispositivePower>
+        <aggregateAmountOwned>1763497</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>0.7</percentOfClass>
+        <typeOfReportingPerson>OO</typeOfReportingPerson>
+        <commentContent>Row 13. Based on a total of 236,498,351 shares of common stock as of October 23, 2026, as reported in Exhibit 2.1 to the Issuer's Current Report on Form 8-K filed with the Securities and Exchange Commission on October 29, 2026.</commentContent>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001906948</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>SEQUOIA CAPITAL FUND, L.P. ("SCF")</reportingPersonName>
+        <fundType>OO</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>E9</citizenshipOrOrganization>
+        <soleVotingPower>0</soleVotingPower>
+        <sharedVotingPower>12114227</sharedVotingPower>
+        <soleDispositivePower>0</soleDispositivePower>
+        <sharedDispositivePower>12114227</sharedDispositivePower>
+        <aggregateAmountOwned>12114227</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>5.1</percentOfClass>
+        <typeOfReportingPerson>PN</typeOfReportingPerson>
+        <commentContent>Row 13. Based on a total of 236,498,351 shares of common stock as of October 23, 2026, as reported in Exhibit 2.1 to the Issuer's Current Report on Form 8-K filed with the Securities and Exchange Commission on October 29, 2026.</commentContent>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001913045</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>SEQUOIA CAPITAL FUND MANAGEMENT, L.P. ("SEQUOIA CAPITAL FUND MANAGEMENT")</reportingPersonName>
+        <fundType>OO</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>E9</citizenshipOrOrganization>
+        <soleVotingPower>0</soleVotingPower>
+        <sharedVotingPower>13877724</sharedVotingPower>
+        <soleDispositivePower>0</soleDispositivePower>
+        <sharedDispositivePower>13877724</sharedDispositivePower>
+        <aggregateAmountOwned>13877724</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>5.9</percentOfClass>
+        <typeOfReportingPerson>PN</typeOfReportingPerson>
+        <commentContent>Row 8, 10 and 11. Includes 1,763,497 shares directly owned by SCFP and 12,114,227 shares directly owned by SCF. SEQUOIA CAPITAL FUND MANAGEMENT is the general partner of SCF and the manager of SCFP.
+
+Row 13. Based on a total of 236,498,351 shares of common stock as of October 23, 2026, as reported in Exhibit 2.1 to the Issuer's Current Report on Form 8-K filed with the Securities and Exchange Commission on October 29, 2026.</commentContent>
+      </reportingPersonInfo>
+      <reportingPersonInfo>
+        <reportingPersonCIK>0001607841</reportingPersonCIK>
+        <reportingPersonNoCIK>N</reportingPersonNoCIK>
+        <reportingPersonName>SC US (TTGP), LTD. ("SC US (TTGP)")</reportingPersonName>
+        <fundType>OO</fundType>
+        <legalProceedings>N</legalProceedings>
+        <citizenshipOrOrganization>E9</citizenshipOrOrganization>
+        <soleVotingPower>0</soleVotingPower>
+        <sharedVotingPower>18596961</sharedVotingPower>
+        <soleDispositivePower>0</soleDispositivePower>
+        <sharedDispositivePower>18596961</sharedDispositivePower>
+        <aggregateAmountOwned>18596961</aggregateAmountOwned>
+        <isAggregateExcludeShares>N</isAggregateExcludeShares>
+        <percentOfClass>7.9</percentOfClass>
+        <typeOfReportingPerson>OO</typeOfReportingPerson>
+        <commentContent>Row 8, 10 and 11. Includes 1,217,532 shares directly owned by SCGGF III - U.S./INDIA MANAGEMENT, 351,374 shares directly owned by SC GGF III, 1,000,000 shares directly owned by SC US/E EXPANSION FUND I, 2,150,331 shares directly owned by SC US/E EXPANSION FUND I MGMT, 1,763,497 shares directly owned by SCFP and 12,114,227 shares directly owned by SCF. The general partner of SC GGF III is SC GGF III MGMT. The general partner of SC US/E EXPANSION FUND I is SC US/E EXPANSION FUND I MGMT. The general partner of SCF and the manager of SCFP is SEQUOIA CAPITAL FUND MANAGEMENT. SC US (TTGP) is the general partner of SCGGF III- U.S./INDIA MANAGEMENT, SC GGF III MGMT, SC US/E EXPANSION FUND I MGMT and SEQUOIA CAPITAL FUND MANAGEMENT.
+
+Row 13. Based on a total of 236,498,351 shares of common stock as of October 23, 2026, as reported in Exhibit 2.1 to the Issuer's Current Report on Form 8-K filed with the Securities and Exchange Commission on October 29, 2026.</commentContent>
+      </reportingPersonInfo>
+    </reportingPersons>
+    <items1To7>
+      <item1>
+        <securityTitle>Common Stock, par value $0.0001 per share</securityTitle>
+        <issuerName>Maplebear Inc.</issuerName>
+        <issuerPrincipalAddress>
+          <street1 xmlns="http://www.sec.gov/edgar/common">50 Beale Street</street1>
+          <street2 xmlns="http://www.sec.gov/edgar/common">Suite 600</street2>
+          <city xmlns="http://www.sec.gov/edgar/common">San Francisco</city>
+          <stateOrCountry xmlns="http://www.sec.gov/edgar/common">CA</stateOrCountry>
+          <zipCode xmlns="http://www.sec.gov/edgar/common">94105</zipCode>
+        </issuerPrincipalAddress>
+        <commentText>EXPLANATORY NOTE
+
+Except as set forth in this Amendment No. 10 ("Amendment No. 10"), the initial Schedule 13D that was filed on February 27, 2024, as amended by Amendment No. 1 thereto on August 13, 2024 ("Amendment No. 1"), Amendment No. 2 thereto on August 28, 2024 ("Amendment No. 2"), Amendment No. 3 thereto on September 4, 2024 ("Amendment No. 3"), Amendment No. 4 thereto on September 9, 2024 ("Amendment No. 4"), Amendment No. 5 thereto on November 21, 2024 ("Amendment No. 5"), Amendment No. 6 thereto on June 3, 2025 ("Amendment No. 6"), Amendment No. 7 thereto on May 11, 2026 ("Amendment No. 7"), Amendment No. 8 thereto on August 12, 2026 ("Amendment No. 8") and Amendment No. 9 thereto on August 17, 2026 ("Amendment No. 9," and collectively, with the initial Schedule 13D, Amendment No. 1, Amendment No. 2, Amendment No. 3, Amendment No. 4, Amendment No. 5, Amendment No. 6, Amendment No. 7 and Amendment No. 8, the "Original 13D") remains in effect, and capitalized terms used herein but not defined herein have such respective meanings, as defined in such Original 13D. The information set forth in response to the Items below shall be deemed to be a response to all Items where such information is relevant. The information set forth in the Exhibits to the Original 13D is expressly incorporated herein by reference and the response to each Item of this Statement is qualified in its entirety by the provisions of such Exhibits.</commentText>
+      </item1>
+      <item4>
+        <transactionPurpose>Item 4 of the Original 13D is hereby amended and supplemented as follows:
+
+On October 28, 2026, the Company entered into an Agreement and Plan of Merger (the "Merger Agreement") with DoorDash, Inc., a Nevada corporation ("Parent"), and Ibiza Merger Sub, Inc., a Delaware corporation and a wholly owned subsidiary of Parent ("Merger Sub"). Pursuant to the Merger Agreement, and upon the terms and subject to the conditions described therein, Merger Sub will merge with and into the Company (the "Merger"), with the Company continuing as the surviving corporation in the Merger and a wholly owned subsidiary of Parent.
+
+Concurrently with the execution of the Merger Agreement, SC GGF III, SC US/E Expansion Fund I, SC US/E Expansion Fund I MGMT, SCGGF III - U.S./India Management, SCFP and SCF entered into a voting agreement (the "Voting and Support Agreement") with Parent pursuant to which, among other things, they agreed to vote all of the shares of Common Stock beneficially owned by them in favor of the adoption of the Merger Agreement and with respect to certain other matters set forth in the Voting and Support Agreement.   In addition, the Reporting Persons that entered into the Voting and Support Agreement agreed that until the earlier of the adoption of the Merger Agreement by the Company's stockholders or termination of the Voting and Support Agreement, they will not transfer or enter into certain other transactions with respect to shares of Common Stock, subject to certain exceptions as set forth in the Voting and Support Agreement.</transactionPurpose>
+      </item4>
+      <item5>
+        <percentageOfClassSecurities>Paragraphs (a) and (c) of Item 5 of the Original 13D are hereby amended and restated in their entirety as follows:
+
+The aggregate number of shares of Common Stock and the percentage of total outstanding Common Stock beneficially owned by the Reporting Persons is set forth below. References to percentage ownerships of Common Stock in this Statement are based upon the 236,498,351 shares of Common Stock stated to be outstanding as of October 23, 2026, as reported in the Merger Agreement included as Exhibit 2.1 to the Issuer's Current Report on Form 8-K filed with the Securities and Exchange Commission on October 29, 2026.  The Reporting Persons may be deemed to beneficially own an aggregate of 18,596,961 shares of Common Stock, which constitutes approximately 7.9% of the Company's Common Stock, calculated in accordance with Rule 13d-3 under the Act. The filing of this Statement shall not be construed as an admission that a Reporting Person beneficially owns those shares held by any other Reporting Person.
+
+SC GGF III beneficially owns 351,374 shares of Common Stock, which represents approximately 0.1% of the outstanding Common Stock calculated in accordance with the requirements of Rule 13d-3 under the Act.
+
+SC US/E Expansion Fund I beneficially owns 1,000,000 shares of Common Stock, which represents approximately 0.4% of the outstanding Common Stock calculated in accordance with the requirements of Rule 13d-3 under the Act.
+
+SC US/E Expansion Fund I MGMT, as the general partner of SC US/E Expansion Fund I, may be deemed to beneficially own an aggregate of 3,150,331 shares of Common Stock, comprised of 2,150,331 shares of Common Stock directly owned by SC US/E Expansion Fund I MGMT and 1,000,000 shares of Common Stock directly owned by SC US/E Expansion Fund I, which represents approximately 1.3% of the outstanding Common Stock calculated in accordance with the requirements of Rule 13d-3 under the Act.
+
+SCGGF III - U.S./India Management beneficially owns 1,217,532 shares of Common Stock, which represents approximately 0.5% of the outstanding Common Stock calculated in accordance with the requirements of Rule 13d-3 under the Act.
+
+SC GGF III MGMT, as the general partner of SC GGF III, may be deemed to beneficially own an aggregate of 351,374 shares of Common Stock, which represents approximately 0.1% of the outstanding Common Stock calculated in accordance with the requirements of Rule 13d-3 under the Act.
+
+SCFP beneficially owns 1,763,497 shares of Common Stock, which represents approximately 0.7% of the outstanding Common Stock calculated in accordance with the requirements of Rule 13d-3 under the Act.
+
+SCF beneficially owns 12,114,227 shares of Common Stock, which represents approximately 5.1% of the outstanding Common Stock calculated in accordance with the requirements of Rule 13d-3 under the Act.
+
+Sequoia Capital Fund Management, as the general partner of SCF and manager of SCFP, may be deemed to beneficially own an aggregate of 13,877,724 shares of Common Stock, which represents approximately 5.9% of the outstanding Common Stock calculated in accordance with the requirements of Rule 13d-3 under the Act.
+
+SC US (TTGP), as the general partner of SCGGF III - U.S./India Management, SC GGF III MGMT, SC US/E Expansion Fund I MGMT and Sequoia Capital Fund Management, may be deemed to beneficially own an aggregate of 18,596,961 shares of Common Stock, which represents approximately 7.9% of the outstanding Common Stock calculated in accordance with the requirements of Rule 13d-3 under the Act.
+
+By virtue of the relationship described herein, the Reporting Persons may be deemed to constitute a "group" for purposes of Section 13(d)(3) of the Act. Each Reporting Person expressly disclaims beneficial ownership of any securities reported herein except to the extent such Reporting Person actually exercises voting or dispositive power with respect to such securities.
+</percentageOfClassSecurities>
+        <transactionDesc>The Reporting Persons have not effected any transactions in the Common Stock during the past 60 days. </transactionDesc>
+      </item5>
+      <item6>
+        <contractDescription>The information included in Item 4 of this Amendment No. 10 is incorporated by reference herein.</contractDescription>
+      </item6>
+      <item7>
+        <filedExhibits>Item 7 is hereby amended and supplemented by adding the following:
+
+Exhibit 99.3 Form of Voting and Support Agreement (incorporated by reference to Exhibit 10.1 to the Current Report on Form 8-K filed by the Company with the Securities and Exchange Commission on October 29, 2026). </filedExhibits>
+      </item7>
+    </items1To7>
+    <signatureInfo>
+      <signaturePerson>
+        <signatureReportingPerson>SEQUOIA CAPITAL GLOBAL GROWTH FUND III - ENDURANCE PARTNERS, L.P. ("SC GGF III")</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Jung Yeon Son</signature>
+          <title>Jung Yeon Son, Authorized Signatory</title>
+          <date>10/30/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>SEQUOIA CAPITAL US/E EXPANSION FUND I, L.P. ("SC US/E EXPANSION FUND I")</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Jung Yeon Son</signature>
+          <title>Jung Yeon Son, Authorized Signatory</title>
+          <date>10/30/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>SEQUOIA CAPITAL US/E EXPANSION FUND I MANAGEMENT, L.P. ("SC US/E EXPANSION FUND I MGMT")</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Jung Yeon Son</signature>
+          <title>Jung Yeon Son, Authorized Signatory</title>
+          <date>10/30/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>SCGGF III - U.S./INDIA MANAGEMENT, L.P. ("SCGGF III - U.S./INDIA MANAGEMENT")</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Jung Yeon Son</signature>
+          <title>Jung Yeon Son, Authorized Signatory</title>
+          <date>10/30/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>SEQUOIA CAPITAL GLOBAL GROWTH FUND III - ENDURANCE PARTNERS MANAGEMENT, L.P. ("SC GGF III MGMT")</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Jung Yeon Son</signature>
+          <title>Jung Yeon Son, Authorized Signatory</title>
+          <date>10/30/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>SEQUOIA CAPITAL FUND PARALLEL, LLC ("SCFP")</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Jung Yeon Son</signature>
+          <title>Jung Yeon Son, Authorized Signatory</title>
+          <date>10/30/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>SEQUOIA CAPITAL FUND, L.P. ("SCF")</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Jung Yeon Son</signature>
+          <title>Jung Yeon Son, Authorized Signatory</title>
+          <date>10/30/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>SEQUOIA CAPITAL FUND MANAGEMENT, L.P. ("SEQUOIA CAPITAL FUND MANAGEMENT")</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Jung Yeon Son</signature>
+          <title>Jung Yeon Son, Authorized Signatory</title>
+          <date>10/30/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+      <signaturePerson>
+        <signatureReportingPerson>SC US (TTGP), LTD. ("SC US (TTGP)")</signatureReportingPerson>
+        <signatureDetails>
+          <signature>/s/ Jung Yeon Son</signature>
+          <title>Jung Yeon Son, Authorized Signatory</title>
+          <date>10/30/2026</date>
+        </signatureDetails>
+      </signaturePerson>
+    </signatureInfo>
+  </formData>
+</edgarSubmission>

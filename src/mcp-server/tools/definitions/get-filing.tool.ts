@@ -4,7 +4,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import {
   type LimitClampOptions,
@@ -53,6 +53,12 @@ const FILING_CONTENT_BEGIN =
 const FILING_CONTENT_END = '--- END SEC FILING CONTENT ---';
 /** Sentinel key suffix when no specific document is requested (primary document path). */
 const PRIMARY_SENTINEL = '\x00primary';
+
+/** What an archive miss asks the caller to pass, after a verb (#203). */
+const FILER_CIK = "the filer's CIK as cik (resolve it with secedgar_company_search)";
+/** Leads an archive miss's hint when SEC could not answer a lookup of the filing's filers (#215). */
+const FILER_LOOKUP_UNAVAILABLE =
+  'The filer lookup for this accession number was unavailable, so some directories that may hold the filing were not searched.';
 
 type FilingIndexItem = FilingIndex['directory']['item'][number];
 
@@ -118,12 +124,15 @@ type ResolveOutcome =
       notServed: boolean;
       /** Filing documents grouped by category, typed as on the success path. */
       documents: CategorizedDocuments;
+      /** True when SEC was unavailable for a lookup of the filing's filers (#215). */
+      filerLookupFailed: boolean;
     }
   | {
       ok: false;
       kind: 'no_documents';
       /** Filing documents grouped by category, typed as on the success path. */
       documents: CategorizedDocuments;
+      filerLookupFailed: boolean;
     }
   | {
       ok: false;
@@ -134,7 +143,12 @@ type ResolveOutcome =
       /** Filing documents grouped by category, typed as on the success path. */
       documents: CategorizedDocuments;
     }
-  | { ok: false; kind: 'filing_not_found'; providedCik: string | undefined };
+  | {
+      ok: false;
+      kind: 'filing_not_found';
+      providedCik: string | undefined;
+      filerLookupFailed: boolean;
+    };
 
 const documentEntrySchema = z
   .object({
@@ -196,13 +210,15 @@ export const getFilingTool = tool('secedgar_get_filing', {
       reason: 'document_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'A specific document was requested but not present in the filing archive',
-      recovery: 'Pick a filename from the categorized document list in the error message.',
+      recovery:
+        "Pick a filename from the categorized document list in the error message; when the archive does not serve the one requested, pass the filer's CIK as cik.",
     },
     {
       reason: 'no_documents',
       code: JsonRpcErrorCode.NotFound,
       when: 'Filing index lists items but no fetchable primary document was found',
-      recovery: 'Set document to one of the filenames listed in the error message.',
+      recovery:
+        "Pass the filer's CIK as cik (resolve it with secedgar_company_search), or set document to another filename listed in the error message.",
     },
     {
       reason: 'binary_document',
@@ -264,14 +280,14 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .regex(/^\d{1,10}$/, 'Expected a CIK of 1-10 digits')
       .optional()
       .describe(
-        'Company CIK, digits only (resolve via secedgar_company_search if you have a ticker or name). Optional but recommended — speeds up archive lookup. If omitted, likely filing CIKs are inferred from SEC search metadata and archive paths.',
+        "Filer CIK, digits only (resolve via secedgar_company_search if you have a ticker or name). Optional but recommended — speeds up archive lookup. If omitted, the filer is looked up from the accession number through EDGAR full-text search (2001 onward) and the accession number's own prefix, which for many filings is a filing agent's CIK, and when none of those directories serves the filing, through the filers its index page names.",
       ),
     content_limit: contentLimit.schema(true),
     document: z
       .string()
       .optional()
       .describe(
-        'Specific document filename within the filing (e.g., "ex-21.htm" for subsidiaries list). Default: the primary document. Available documents are listed in the response metadata under documents; entries marked binary hold no text and are rejected.',
+        'Specific document filename within the filing (e.g., "ex-21.htm" for subsidiaries list). Omitted or blank: the primary document. Available documents are listed in the response metadata under documents, and a primary_document value is accepted too; entries marked binary hold no text and are rejected.',
       ),
     include_xbrl: z
       .boolean()
@@ -324,7 +340,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
     primary_document: z
       .string()
       .describe(
-        'Filename of the primary document. When the archive does not serve the one the index names (common in 2000–2001), this is the full submission file <accession>.txt instead; the notice names both.',
+        "Primary document as read: an XML form's SEC rendering (xsl…/form4.xml) up to 600 KB raw; a 2000–2001 name SEC does not serve, as <accession>-<name>, else the full submission <accession>.txt.",
       ),
     requested_document: z
       .string()
@@ -388,7 +404,10 @@ export const getFilingTool = tool('secedgar_get_filing', {
     const pageLimit = contentLimit.apply(input.content_limit, ctx);
 
     const accn = normalizeAccessionNumber(input.accession_number);
-    const documentKey = input.document ?? PRIMARY_SENTINEL;
+    // A blank `document` reads as omitted (#203): no archive file has a blank name,
+    // and requesting one fetches SEC's directory listing page instead.
+    const document = input.document?.trim() ? input.document : undefined;
+    const documentKey = document ?? PRIMARY_SENTINEL;
     const cacheKey = `${accn}:${documentKey}`;
 
     // If we have a cache hit, skip the document fetch entirely.
@@ -404,8 +423,14 @@ export const getFilingTool = tool('secedgar_get_filing', {
 
     if (cached === undefined) {
       // Cache miss — fetch, convert, and cache.
-      const resolved = await resolveFilingArchive(api, scope, accn, input.cik, input.document);
+      const resolved = await resolveFilingArchive(api, scope, accn, input.cik, document);
       if (!resolved.ok) {
+        // Each miss below comes after every directory the filer lookups found was
+        // tried, so the filer's own CIK is the way out an archive miss offers (#203).
+        const lookupNote =
+          resolved.kind !== 'binary_document' && resolved.filerLookupFailed
+            ? `${FILER_LOOKUP_UNAVAILABLE} `
+            : '';
         if (resolved.kind === 'document_not_found') {
           // Render candidates into the message itself — clients reliably see only
           // message + recovery hint, not error data (#88), so a content-only client
@@ -413,15 +438,20 @@ export const getFilingTool = tool('secedgar_get_filing', {
           // section_not_found already uses for its outline, bounded per category.
           const catalogBlock = renderDocumentCatalog(resolved.documents);
           const primaryName = resolved.documents.primary[0]?.name;
-          // A document the index lists but the archive does not serve (the
-          // sequence-numbered names in many 2000–2001 indexes) is readable only
-          // through the full submission file (#158).
+          const submission = `${accn}.txt`;
+          // A document the index lists but the archive serves under neither its
+          // name nor, for a 2000–2001 sequence-numbered one, its accession-prefixed
+          // spelling (#213) is readable only through the full submission file
+          // (#158) — unless that is the document that just failed, when only the
+          // filer's CIK is left (#203).
           // Otherwise: a non-empty primary bucket is exactly the condition under
           // which the no-document call succeeds — the loop only reaches this
           // branch past findPrimaryDocument. Without one, that call fails the
           // same way, so don't advertise a route that dead-ends.
           const hint = resolved.notServed
-            ? `Use document="${accn}.txt", the full submission file, which the archive serves for this filing.`
+            ? resolved.requestedDocument === submission
+              ? `${lookupNote}The SEC archive does not serve the full submission file under the CIKs tried; pass ${FILER_CIK}.`
+              : `${lookupNote}Use document="${submission}", the full submission file, which holds every document of this filing, or pass ${FILER_CIK}.`
             : primaryName
               ? `Use document="${primaryName}" (the primary), or pick another filename from the list above. Call secedgar_get_filing again with the same accession_number and no document argument for the complete catalog.`
               : catalogBlock
@@ -459,6 +489,16 @@ export const getFilingTool = tool('secedgar_get_filing', {
         }
         if (resolved.kind === 'no_documents') {
           const catalogBlock = renderDocumentCatalog(resolved.documents);
+          // A primary always stands in when the index lists anything, and this
+          // branch is reached only with a listing (filing_not_found otherwise).
+          const primaryName = resolved.documents.primary[0]?.name ?? '';
+          // No `document` was requested here — that is what this branch means — so
+          // omitting it is the call that just failed and is not a route out. Neither
+          // is the primary that just failed, nor the full submission tried in its
+          // place (#158); another listed document may be served.
+          const another = listsAnotherReadable(resolved.documents, [primaryName, `${accn}.txt`])
+            ? ' Or set document to another filename listed above.'
+            : '';
           throw ctx.fail(
             'no_documents',
             `No primary document found in filing ${accn}.${catalogBlock}`,
@@ -466,13 +506,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
               accession_number: accn,
               documents: resolved.documents,
               recovery: {
-                // No `document` was requested here — that is what this branch means —
-                // so omitting it is the call that just failed and is not a route out.
-                // Naming a fetchable document is, and a successful response carries
-                // the complete catalog.
-                hint: catalogBlock
-                  ? 'Set the document input to one of the filenames listed above; a successful response lists the complete document catalog.'
-                  : 'Specify the document input using a filename from documents.primary in error data.',
+                hint: `${lookupNote}Pass ${FILER_CIK}: the SEC archive does not serve the primary document, ${primaryName}, under the CIKs tried.${another}`,
               },
             },
           );
@@ -481,8 +515,10 @@ export const getFilingTool = tool('secedgar_get_filing', {
           ? ` (CIK ${resolved.providedCik.padStart(10, '0')})`
           : '';
         const recoveryHint = resolved.providedCik
-          ? 'Verify the accession number and CIK are correct.'
-          : 'Verify the accession number and pass the company CIK explicitly.';
+          ? `${lookupNote}Verify the accession number and CIK are correct.`
+          : resolved.filerLookupFailed
+            ? `${lookupNote}Pass ${FILER_CIK}, or retry in a minute.`
+            : 'Verify the accession number and pass the company CIK explicitly.';
         throw ctx.fail('filing_not_found', `Filing '${accn}' not found${cikSuffix}.`, {
           accession_number: accn,
           cik: resolved.providedCik,
@@ -505,7 +541,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       // archive served the cached text (no candidate search, no document body fetch).
       // A resolution failure here is a real failure (EDGAR index unavailable or the
       // filing gone): fail honestly rather than fabricating placeholder metadata.
-      const metaResolved = await resolveFilingMeta(api, scope, accn, cached.cik, input.document);
+      const metaResolved = await resolveFilingMeta(api, scope, accn, cached.cik, document);
       if (!metaResolved.ok) {
         throw ctx.fail('filing_not_found', `Filing '${accn}' could not be resolved.`, {
           accession_number: accn,
@@ -520,7 +556,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       filingPrimaryName = metaResolved.filingPrimaryName;
       // A primary read cached from the full submission keeps reporting it (#158).
       if (
-        !input.document &&
+        !document &&
         cached.document === `${accn}.txt` &&
         cached.document !== metaResolved.filingPrimaryName
       ) {
@@ -659,8 +695,16 @@ export const getFilingTool = tool('secedgar_get_filing', {
       unservedPrimary,
     });
 
-    const requestedDocument =
-      input.document && input.document !== filingPrimaryName ? input.document : undefined;
+    const requestedDocument = document && document !== filingPrimaryName ? document : undefined;
+    // A primary read under a name the index does not list — its accession-prefixed
+    // spelling (#213) or SEC's rendering (#216) — is reported by that name, as
+    // filing_url is; documents keeps the index's names.
+    const primaryDocument =
+      !document &&
+      (targetName === renderingOf(filingPrimaryName, accn, records) ||
+        archiveSpellings(filingPrimaryName, accn).includes(targetName))
+        ? targetName
+        : filingPrimaryName;
 
     return {
       accession_number: accn,
@@ -669,7 +713,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       company_name: submissions.name || undefined,
       cik: resolvedCik,
       period_ending: periodEnding || undefined,
-      primary_document: filingPrimaryName,
+      primary_document: primaryDocument,
       requested_document: requestedDocument,
       documents,
       content: text,
@@ -1043,6 +1087,13 @@ function renderDocumentCatalog(documents: CategorizedDocuments): string {
   return `\n\nAvailable documents (up to ${MAX_DOCUMENTS_IN_ERROR} shown per category):\n${sections.join('\n')}`;
 }
 
+/** True when the catalog lists a readable filing document other than `excluded` and SEC's index pages. */
+function listsAnotherReadable(documents: CategorizedDocuments, excluded: string[]): boolean {
+  return [...documents.primary, ...documents.exhibits, ...documents.auxiliary].some(
+    (entry) => !entry.binary && isNonIndexFile(entry.name) && !excluded.includes(entry.name),
+  );
+}
+
 /**
  * Normalize a schema-validated accession number to dash format (0000320193-23-000106).
  * Input shape is guaranteed by the input schema regex: dash format or 18-digit no-dash.
@@ -1053,8 +1104,37 @@ function normalizeAccessionNumber(input: string): string {
 }
 
 /**
+ * At most this many parties the filing's index page names are tried past the
+ * candidate CIKs (#203). A filing lives under every party's directory, so the
+ * first untried one almost always serves it; a group filing can name dozens.
+ */
+const INDEX_PAGE_PARTY_CAP = 3;
+
+/** What an archive search has learned so far, across the candidate CIKs and the index page's parties. */
+interface ArchiveSearch {
+  /** The last archive path whose index exists, with its records, for the error catalog. */
+  lastIndexed?: { items: FilingIndexItem[]; records: FilingRecords } | undefined;
+  /** True once a directory listed the primary and the archive served neither it nor the full submission. */
+  primaryNotServed: boolean;
+  /** True once a directory listed the requested document and the archive answered 404 for it. */
+  requestedNotServed: boolean;
+  /** CIKs whose directory has been asked for the filing's index, padded to 10 digits. */
+  tried: Set<string>;
+}
+
+/**
  * Resolve filing archive: fetch index + primary document HTML.
  * Used on cache misses to get both the document content and index metadata.
+ *
+ * When no candidate directory serves the filing, the filing's index page names its
+ * parties, and up to {@link INDEX_PAGE_PARTY_CAP} of them not yet tried are
+ * searched the same way (#203). A pre-2001 accession filed through an agent needs
+ * it: full-text search has no record before 2001, and the agent's directory, the
+ * only other candidate, holds no copy the archive serves. The page costs one
+ * request, sent only after every candidate failed, and only when a directory's
+ * listing named the target but the archive did not serve it, or no directory
+ * answered at all — a document no listing names is missing from every party's
+ * directory alike.
  */
 async function resolveFilingArchive(
   api: ReturnType<typeof getEdgarApiService>,
@@ -1063,24 +1143,106 @@ async function resolveFilingArchive(
   providedCik: string | undefined,
   requestedDocument: string | undefined,
 ): Promise<ResolveOutcome> {
-  const candidateCiks = await resolveCandidateCiks(api, scope, accessionNumber, providedCik);
-  /** The last archive path whose index exists, with its records, for the error catalog. */
-  let lastIndexed: { items: FilingIndexItem[]; records: FilingRecords } | undefined;
+  const candidates = await resolveCandidateCiks(api, scope, accessionNumber, providedCik);
+  let filerLookupFailed = candidates.filerLookupFailed;
+  const search: ArchiveSearch = {
+    tried: new Set(),
+    requestedNotServed: false,
+    primaryNotServed: false,
+  };
+
+  const found = await searchArchive(
+    api,
+    scope,
+    accessionNumber,
+    candidates.ciks,
+    requestedDocument,
+    search,
+  );
+  if (found) return found;
+
+  if (!search.lastIndexed?.items.length || search.requestedNotServed || search.primaryNotServed) {
+    const parties = await readFilingParties(api, scope, accessionNumber);
+    filerLookupFailed ||= parties === undefined;
+    const untried = (parties ?? [])
+      .filter((cik) => !search.tried.has(cik))
+      .slice(0, INDEX_PAGE_PARTY_CAP);
+    if (untried.length > 0) {
+      const refound = await searchArchive(
+        api,
+        scope,
+        accessionNumber,
+        untried,
+        requestedDocument,
+        search,
+      );
+      if (refound) return refound;
+    }
+  }
+
+  const { lastIndexed } = search;
+  if (!lastIndexed?.items.length) {
+    return { ok: false, kind: 'filing_not_found', providedCik, filerLookupFailed };
+  }
+
+  // Categorize as the success path does: the same primary, the header page's types.
+  const errorPrimaryName =
+    findPrimaryDocument(lastIndexed.items, accessionNumber, lastIndexed.records) ?? '';
+  const documents = categorizeDocuments(
+    lastIndexed.items,
+    errorPrimaryName,
+    lastIndexed.records.headers?.documents ?? null,
+    false,
+  );
+
+  if (requestedDocument) {
+    return {
+      ok: false,
+      kind: 'document_not_found',
+      requestedDocument,
+      notServed: search.requestedNotServed,
+      documents,
+      filerLookupFailed,
+    };
+  }
+  return { ok: false, kind: 'no_documents', documents, filerLookupFailed };
+}
+
+/**
+ * Search the archive directories of `ciks` in order for the filing, recording what
+ * each taught in `search`: the filing's outcome once a directory serves its target
+ * or holds it as a binary entry, else `undefined`. Each directory reads the target
+ * under every name SEC may serve it by before the next is tried: a sequence-numbered
+ * name, then its accession-prefixed spelling (#213); for an XML form's primary, SEC's
+ * rendering, then the raw file (#216). A primary none of these directories serves is
+ * then read from the full submission (#158).
+ */
+async function searchArchive(
+  api: ReturnType<typeof getEdgarApiService>,
+  scope: CallScope,
+  accessionNumber: string,
+  ciks: string[],
+  requestedDocument: string | undefined,
+  search: ArchiveSearch,
+): Promise<ResolveOutcome | undefined> {
   /** First archive path whose index named a primary the archive answered 404 for. */
   let unserved:
     | { cik: string; index: FilingIndex; primary: string; records: FilingRecords }
     | undefined;
-  let requestedNotServed = false;
 
-  for (const cik of candidateCiks) {
+  for (const cik of ciks) {
+    search.tried.add(cik);
     const index = await api.tryGetFilingIndex(cik, accessionNumber, scope);
     if (!index) continue;
 
     // Records name the primary every outcome below reports, error catalogs included.
     const items = index.directory.item;
     const records = await readFilingRecords(api, scope, cik, accessionNumber);
-    lastIndexed = { items, records };
-    if (requestedDocument && !items.some((item) => item.name === requestedDocument)) continue;
+    search.lastIndexed = { items, records };
+    const requestedNames = requestedDocument
+      ? requestedReadNames(requestedDocument, accessionNumber, items, records)
+      : undefined;
+    if (requestedDocument && !requestedNames) continue;
 
     const filingPrimaryName = findPrimaryDocument(items, accessionNumber, records);
     if (!filingPrimaryName) continue;
@@ -1107,61 +1269,57 @@ async function resolveFilingArchive(
       };
     }
 
-    const html = await api.tryGetFilingDocument(cik, accessionNumber, targetName, scope);
-    if (html) return { ok: true, cik, html, index, targetName, filingPrimaryName, records };
-    if (requestedDocument) requestedNotServed = true;
+    const rendering = requestedDocument
+      ? undefined
+      : renderingToRead(filingPrimaryName, accessionNumber, items, records);
+    const names =
+      requestedNames ??
+      (rendering
+        ? [rendering, filingPrimaryName]
+        : archiveSpellings(filingPrimaryName, accessionNumber));
+    for (const name of names) {
+      const read = () => api.tryGetFilingDocument(cik, accessionNumber, name, scope);
+      /**
+       * A primary read under a name the index does not list — SEC's rendering, or
+       * the accession-prefixed spelling — gives way, when SEC cannot serve it, to
+       * the raw file or the full submission (#158), the way an unavailable index
+       * page leaves the outcome the candidates reached (#203). A document the
+       * caller named is never optional.
+       */
+      const optional = !requestedDocument && name !== filingPrimaryName;
+      const html = optional ? await unlessSecUnavailable(scope, read) : await read();
+      if (html) {
+        return { ok: true, cik, html, index, targetName: name, filingPrimaryName, records };
+      }
+    }
+    if (requestedDocument) search.requestedNotServed = true;
     else unserved ??= { cik, index, primary: targetName, records };
   }
 
   /**
    * Many 2000–2001 indexes list sequence-numbered documents (`0001.htm`,
-   * `0001.txt`) the archive answers 404 for, while the full submission
-   * `<accession>.txt` is served (#158). A primary no candidate CIK serves is read
-   * from it instead — after the loop, so a CIK that serves the primary still
-   * wins, and only for the primary: a document the caller named fails with a
-   * hint pointing at the submission.
+   * `0001.txt`) the archive answers 404 for, and serves under their
+   * accession-prefixed spelling (#213); for a filing that serves neither, the full
+   * submission `<accession>.txt` is read instead (#158) — after the loop, so a CIK
+   * that serves the primary still wins, and only for the primary: a document the
+   * caller named fails with a hint pointing at the submission.
    */
+  if (!unserved) return;
+  search.primaryNotServed = true;
   const submission = `${accessionNumber}.txt`;
-  if (unserved && unserved.primary !== submission) {
-    const html = await api.tryGetFilingDocument(unserved.cik, accessionNumber, submission, scope);
-    if (html) {
-      return {
-        ok: true,
-        cik: unserved.cik,
-        html,
-        index: unserved.index,
-        targetName: submission,
-        filingPrimaryName: submission,
-        unservedPrimary: unserved.primary,
-        records: unserved.records,
-      };
-    }
-  }
-
-  if (!lastIndexed?.items.length) {
-    return { ok: false, kind: 'filing_not_found', providedCik };
-  }
-
-  // Categorize as the success path does: the same primary, the header page's types.
-  const errorPrimaryName =
-    findPrimaryDocument(lastIndexed.items, accessionNumber, lastIndexed.records) ?? '';
-  const documents = categorizeDocuments(
-    lastIndexed.items,
-    errorPrimaryName,
-    lastIndexed.records.headers?.documents ?? null,
-    false,
-  );
-
-  if (requestedDocument) {
-    return {
-      ok: false,
-      kind: 'document_not_found',
-      requestedDocument,
-      notServed: requestedNotServed,
-      documents,
-    };
-  }
-  return { ok: false, kind: 'no_documents', documents };
+  if (unserved.primary === submission) return;
+  const html = await api.tryGetFilingDocument(unserved.cik, accessionNumber, submission, scope);
+  if (!html) return;
+  return {
+    ok: true,
+    cik: unserved.cik,
+    html,
+    index: unserved.index,
+    targetName: submission,
+    filingPrimaryName: submission,
+    unservedPrimary: unserved.primary,
+    records: unserved.records,
+  };
 }
 
 type MetaOutcome =
@@ -1189,11 +1347,14 @@ async function resolveFilingMeta(
   if (!index) return { ok: false };
 
   const items = index.directory.item;
-  if (requestedDocument && !items.some((item) => item.name === requestedDocument)) {
+  const records = await readFilingRecords(api, scope, cik, accessionNumber);
+  if (
+    requestedDocument &&
+    !requestedReadNames(requestedDocument, accessionNumber, items, records)
+  ) {
     return { ok: false };
   }
 
-  const records = await readFilingRecords(api, scope, cik, accessionNumber);
   const filingPrimaryName = findPrimaryDocument(items, accessionNumber, records);
   if (!filingPrimaryName) return { ok: false };
 
@@ -1218,21 +1379,75 @@ async function readFilingRecords(
   return { headers, submissions };
 }
 
+/**
+ * The CIKs whose archive directories are searched first, in order: the caller's
+ * `cik` alone, or the filers EDGAR full-text search records for the accession, then
+ * the CIK the accession number opens with — the filer's own, or a filing agent's.
+ * When SEC cannot answer the search (#215), the prefix alone is searched and
+ * `filerLookupFailed` says so; the caller's cancellation and a rate-limit refusal
+ * still end the call.
+ */
 async function resolveCandidateCiks(
   api: ReturnType<typeof getEdgarApiService>,
   scope: CallScope,
   accessionNumber: string,
   providedCik: string | undefined,
-): Promise<string[]> {
-  if (providedCik) return [providedCik.padStart(10, '0')];
+): Promise<{ ciks: string[]; filerLookupFailed: boolean }> {
+  if (providedCik) return { ciks: [providedCik.padStart(10, '0')], filerLookupFailed: false };
 
-  const ciks = await api.findFilingCiks(accessionNumber, scope);
-  const prefixCik = (accessionNumber.split('-')[0] ?? accessionNumber.slice(0, 10)).padStart(
-    10,
-    '0',
+  const searched = await unlessSecUnavailable(scope, () =>
+    api.findFilingCiks(accessionNumber, scope),
   );
+  return {
+    ciks: [...new Set([...(searched ?? []), accessionPrefixCik(accessionNumber)])],
+    filerLookupFailed: searched === undefined,
+  };
+}
 
-  return [...new Set([...ciks, prefixCik])];
+/**
+ * The parties the filing's index page names, read under the accession number's
+ * own prefix CIK: SEC serves the page there for any filing that exists, a filing
+ * agent's prefix included, even when that directory holds no `index.json` (#203).
+ * `null` when the page is missing; `undefined` when SEC could not serve it.
+ */
+function readFilingParties(
+  api: ReturnType<typeof getEdgarApiService>,
+  scope: CallScope,
+  accessionNumber: string,
+): Promise<string[] | null | undefined> {
+  return unlessSecUnavailable(scope, () =>
+    api.tryGetFilingPartyCiks(accessionPrefixCik(accessionNumber), accessionNumber, scope),
+  );
+}
+
+/** The CIK an accession number opens with, padded to 10 digits: the submitter's, filer or agent. */
+function accessionPrefixCik(accessionNumber: string): string {
+  return accessionNumber.slice(0, 10);
+}
+
+/**
+ * Run an optional SEC lookup, answering `undefined` when SEC is unavailable for it:
+ * no response or an unreadable body (`sec_unreachable`), a 5xx, or a full-text
+ * search backend failure or refusal (`efts_degraded_response`), all
+ * `ServiceUnavailable`, or a 504, which maps to `Timeout`. Everything else is
+ * rethrown untouched — the caller's cancellation, a rate-limit refusal (SEC's block
+ * covers every request the call would send next), and any other failure that says
+ * the request itself is wrong.
+ */
+async function unlessSecUnavailable<T>(
+  scope: CallScope,
+  lookup: () => Promise<T>,
+): Promise<T | undefined> {
+  try {
+    return await lookup();
+  } catch (error) {
+    const unavailable =
+      error instanceof McpError &&
+      (error.code === JsonRpcErrorCode.ServiceUnavailable ||
+        error.code === JsonRpcErrorCode.Timeout);
+    if (!unavailable || scope.signal.aborted) throw error;
+    return;
+  }
 }
 
 /** SEC's XBRL viewer pages (`R1.htm`, `R2.htm`, …), which can outweigh a filing's own documents. */
@@ -1286,13 +1501,106 @@ function recordedPrimaryNames(
   accessionNumber: string,
   { headers, submissions }: FilingRecords,
 ): Array<string | undefined> {
-  const recent = submissions.filings.recent;
-  const row = recent.accessionNumber.indexOf(accessionNumber);
-  const fromFeed = row >= 0 ? recent.primaryDocument[row]?.split('/').pop() : undefined;
+  const fromFeed = feedPrimaryDocument(accessionNumber, submissions)?.split('/').pop();
   const form = headers?.submission.form;
   const typed =
     headers && form ? [...headers.documents].find(([, doc]) => doc.type === form)?.[0] : undefined;
   return [fromFeed, typed];
+}
+
+/** The `primaryDocument` the submissions feed records for the accession, when it sits in the recent window. */
+function feedPrimaryDocument(
+  accessionNumber: string,
+  submissions: SubmissionsResponse,
+): string | undefined {
+  const recent = submissions.filings.recent;
+  const row = recent.accessionNumber.indexOf(accessionNumber);
+  return row >= 0 ? recent.primaryDocument[row] : undefined;
+}
+
+/**
+ * A 2000–2001 sequence-numbered document name (`0001.htm`, `0002.txt`). Anchored,
+ * one quantified class after a fixed prefix: linear in a caller-named document.
+ */
+const SEQUENCE_NUMBERED_NAME = /^\d{4}\.\w+$/;
+
+/** A stylesheet path the submissions feed records an XML form through (`xslF345X06/form4.xml`). */
+const RENDERING_PATH = /^xsl[^/]+\/[^/]+$/;
+
+/**
+ * The largest raw XML file whose SEC rendering is read in its place (#216). A
+ * holdings report's rendering runs to about 20 times its raw file — an NPORT-P
+ * listing 505 positions is 500,525 bytes raw and 9,777,862 rendered — and the
+ * HTML converter silently cuts input past 16,777,216 characters, 28 times this
+ * bound, so a raw file past it is read as filed. A 13D or Form 4 is far below it.
+ */
+const MAX_RENDERED_RAW_BYTES = 600_000;
+
+/**
+ * `name`, then — for a 2000–2001 sequence-numbered name the archive may not serve
+ * as listed — its accession-prefixed spelling (`<accession>-0001.htm`), under
+ * which SEC serves the same document (#213).
+ */
+function archiveSpellings(name: string, accessionNumber: string): string[] {
+  return SEQUENCE_NUMBERED_NAME.test(name) ? [name, `${accessionNumber}-${name}`] : [name];
+}
+
+/**
+ * The stylesheet path the submissions feed records the filing's primary through
+ * when `file` is that primary (`xslSCHEDULE_13D_X02/primary_doc.xml` for
+ * `primary_doc.xml`): SEC serves its rendering of the form there (#216).
+ */
+function renderingOf(
+  file: string,
+  accessionNumber: string,
+  { submissions }: FilingRecords,
+): string | undefined {
+  const recorded = feedPrimaryDocument(accessionNumber, submissions);
+  return recorded !== undefined && RENDERING_PATH.test(recorded) && recorded.endsWith(`/${file}`)
+    ? recorded
+    : undefined;
+}
+
+/**
+ * The rendering read in place of the primary `file` when no document is named
+ * (#216): the one {@link renderingOf} finds, while the index lists the raw file at
+ * most {@link MAX_RENDERED_RAW_BYTES}. A raw file listed with no size reads as filed.
+ */
+function renderingToRead(
+  file: string,
+  accessionNumber: string,
+  items: FilingIndexItem[],
+  records: FilingRecords,
+): string | undefined {
+  const rendering = renderingOf(file, accessionNumber, records);
+  const size = Number.parseInt(items.find((item) => item.name === file)?.size ?? '', 10);
+  return rendering !== undefined && size <= MAX_RENDERED_RAW_BYTES ? rendering : undefined;
+}
+
+/**
+ * The names a caller-named document is read under, in order, or `undefined` when
+ * the filing holds no such document: a listed name, then its accession-prefixed
+ * spelling (see {@link archiveSpellings}); the prefixed spelling of a listed
+ * sequence-numbered name, then that name (#213); or the stylesheet path the
+ * submissions feed records for a listed file, read as SEC renders it (#216).
+ */
+function requestedReadNames(
+  requested: string,
+  accessionNumber: string,
+  items: FilingIndexItem[],
+  records: FilingRecords,
+): string[] | undefined {
+  const listed = (name: string) => items.some((item) => item.name === name);
+  if (listed(requested)) return archiveSpellings(requested, accessionNumber);
+  const prefix = `${accessionNumber}-`;
+  if (requested.startsWith(prefix)) {
+    const name = requested.slice(prefix.length);
+    if (SEQUENCE_NUMBERED_NAME.test(name) && listed(name)) return [requested, name];
+  }
+  const file = requested.slice(requested.lastIndexOf('/') + 1);
+  return listed(file) && renderingOf(file, accessionNumber, records) === requested
+    ? [requested]
+    : undefined;
 }
 
 function getLargestDocument(items: FilingIndexItem[]): FilingIndexItem | undefined {

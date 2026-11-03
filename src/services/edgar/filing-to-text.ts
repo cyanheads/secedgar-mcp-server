@@ -18,6 +18,13 @@ import { CURRENT_EIGHT_K_ITEMS } from './eight-k-items.js';
  * and a legacy text document under 100 once its `<PAGE>` markers are neutralized
  * (see {@link neutralizePageMarkers}). `limits` deep-merges with the library's
  * defaults, so its 16,777,216-character `maxInputLength` still applies.
+ *
+ * SEC's XSL rendering of a structured form (#216) prints filer-written text — a
+ * 13D's Items, a reporting person's cover-page note — in `div.largetext`, styled
+ * `white-space: pre-wrap`, so its line breaks are the filer's paragraphs. The
+ * parser ignores CSS, so that div takes the `pre` formatter, which keeps the
+ * text's whitespace as the stylesheet shows it, with a plain div's single line
+ * break before and after.
  */
 const CONVERT_OPTIONS: HtmlToTextOptions = {
   wordwrap: false,
@@ -25,6 +32,11 @@ const CONVERT_OPTIONS: HtmlToTextOptions = {
     { selector: 'a', options: { ignoreHref: true } },
     { selector: 'img', format: 'skip' },
     { selector: 'table', options: { uppercaseHeaderCells: false } },
+    {
+      selector: 'div.largetext',
+      format: 'pre',
+      options: { leadingLineBreaks: 1, trailingLineBreaks: 1 },
+    },
   ],
   limits: { maxDepth: 512, ellipsis: '[…]' },
 };
@@ -185,9 +197,10 @@ function preservePlainTextBodies(sgml: string): string {
 export interface CachedExtract {
   /**
    * The document the text came from. Under a primary-document key this can
-   * differ from the index's primary — `get_filing` reads the full submission
-   * when the archive does not serve the primary (#158) — so a cache hit reports
-   * the same document the miss did.
+   * differ from the index's primary — `get_filing` reads an XML form's SEC
+   * rendering (#216), a 2000–2001 primary under its accession-prefixed name
+   * (#213), or the full submission when the archive serves neither spelling
+   * (#158) — so a cache hit reports the same document the miss did.
    */
   document: string;
   text: string;
