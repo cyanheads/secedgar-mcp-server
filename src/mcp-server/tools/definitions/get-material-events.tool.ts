@@ -162,7 +162,8 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       ),
     limit: eventsLimit.schema(true),
   }),
-  // Other spellings of the company and filing-date parameters in use across tools (#115).
+  // Other spellings of the company and filing-date parameters in use across tools (#115),
+  // and company_search's name for its filing count (#212).
   inputAliases: {
     ticker: 'company',
     cik: 'company',
@@ -171,6 +172,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
     date_from: 'filed_after',
     end_date: 'filed_before',
     date_to: 'filed_before',
+    filing_limit: 'limit',
   },
 
   output: z.object({

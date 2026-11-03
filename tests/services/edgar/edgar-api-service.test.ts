@@ -1,6 +1,7 @@
 /**
  * @fileoverview Tests for EdgarApiService helpers — `pickPreferredTicker` (CIK
  * tie-breaker), `normalizeCompanySuffix` (corporate-suffix comparison form),
+ * `foldNamePunctuation` (the comma, period, and apostrophe fold),
  * `trigramSimilarity`/`suggestCompanies` (near-match suggestions),
  * `buildTickerCache` MF-ticker merge behaviour via the private indexing logic, and
  * `parseSeriesFilingFeed` (fund series → its own filings).
@@ -9,6 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  foldNamePunctuation,
   normalizeCompanySuffix,
   parseSeriesFilingFeed,
   pickPreferredTicker,
@@ -137,6 +139,36 @@ describe('normalizeCompanySuffix', () => {
     expect(normalizeCompanySuffix('brookfield lp')).toBe('brookfield lp');
     expect(normalizeCompanySuffix('brookfield llc')).toBe('brookfield llc');
     expect(normalizeCompanySuffix('brookfield plc')).toBe('brookfield plc');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// foldNamePunctuation (#210)
+// ---------------------------------------------------------------------------
+
+describe('foldNamePunctuation', () => {
+  it.each([
+    ['qxo, inc.', 'qxo inc'],
+    ['u.s. bancorp', 'us bancorp'],
+    ["jeffs' brands ltd", 'jeffs brands ltd'],
+    ['macy’s, inc.', 'macys inc'],
+  ])('deletes the commas, periods, and apostrophes in %s', (input, expected) => {
+    expect(foldNamePunctuation(input)).toBe(expected);
+  });
+
+  it('leaves every other character in place, whitespace runs included', () => {
+    expect(foldNamePunctuation('h&r block inc')).toBe('h&r block inc');
+    expect(foldNamePunctuation('us bancorp \\de\\')).toBe('us bancorp \\de\\');
+    expect(foldNamePunctuation('coca-cola co / ltd')).toBe('coca-cola co / ltd');
+    expect(foldNamePunctuation('ceva  inc')).toBe('ceva  inc');
+    expect(foldNamePunctuation('j m smucker co')).toBe('j m smucker co');
+  });
+
+  it('keeps the four suffix buckets apart once folded', () => {
+    const bucket = (name: string) => normalizeCompanySuffix(foldNamePunctuation(name));
+    expect(bucket('toro co')).toBe('toro company');
+    expect(bucket('toro corp.')).toBe('toro corporation');
+    expect(bucket('fluent, inc.')).not.toBe(bucket('fluent corp.'));
   });
 });
 

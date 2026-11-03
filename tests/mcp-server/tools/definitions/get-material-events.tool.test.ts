@@ -825,6 +825,16 @@ describe('getMaterialEventsTool parameter names (#115)', () => {
     expect(blockText(result.content)).toContain('bogus');
     expect(mockApi.resolveCik).not.toHaveBeenCalled();
   });
+
+  // company_search's name for its filing count (#212).
+  it('accepts filing_limit as an alias of limit', async () => {
+    const viaLimit = await call({ company: 'AAPL', limit: 2 });
+    const viaAlias = await call({ company: 'AAPL', filing_limit: 2 });
+
+    expect(viaAlias.isError).toBeFalsy();
+    expect(viaAlias).toEqual(viaLimit);
+    expect(viaAlias.structuredContent).toMatchObject({ shown: 2, cap: 2 });
+  });
 });
 
 // Wiring only: the archive walk's entry and stop tests, the staging test, and the page

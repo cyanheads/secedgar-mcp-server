@@ -450,6 +450,15 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       retryable: true,
       thrownBy: 'service',
     },
+    {
+      reason: 'efts_degraded_response',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'EDGAR full-text search answered without results — its search backend failed to run the search on every attempt made (a connection or timeout failure, retried like a request SEC never answered), refused the request (upstreamErrorType and upstreamErrorMessage carry its error, and the request is not retried), or sent a payload with no hit list',
+      recovery:
+        'Retry the same call in a minute unless the error is marked not retryable; then change the request as upstreamErrorMessage indicates.',
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
 
   input: z.object({

@@ -91,6 +91,14 @@ describe('EdgarApiService — request URL shape (#156)', () => {
       expect(fetchMock).toHaveBeenCalledOnce();
     });
 
+    it('tryGetFilingPartyCiks', async () => {
+      const fetchMock = serveOnly(`${FILING_DIR}/${ACCESSION}-index.html`, '<html></html>');
+      await expect(
+        getEdgarApiService().tryGetFilingPartyCiks(cik, ACCESSION, scope()),
+      ).resolves.toEqual([]);
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
     it('getFilingDocument', async () => {
       const fetchMock = serveOnly(`${FILING_DIR}/aapl-20250927.htm`, '<html>10-K</html>');
       await expect(

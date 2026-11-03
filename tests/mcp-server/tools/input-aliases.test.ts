@@ -5,9 +5,10 @@
  * accepts the same set of other spellings as aliases, so a caller carrying a
  * parameter name from one tool to the next is never rejected for it. A tool whose
  * only company input carries another name (`query`, `issuer`) accepts the
- * company-identifier spellings on it too (#152). The per-tool test files drive
- * each alias through the argument parser; this file pins that the declarations
- * agree across tools.
+ * company-identifier spellings on it too (#152), and a tool whose one count input
+ * counts filings accepts `company_search`'s name for that count (#212). The
+ * per-tool test files drive each alias through the argument parser; this file pins
+ * that the declarations agree across tools.
  * @module tests/mcp-server/tools/input-aliases
  */
 
@@ -39,6 +40,13 @@ const COMPANY_INPUT_UNDER_ANOTHER_NAME: Record<string, { key: string; spellings:
     spellings: ['company', 'ticker', 'cik', 'ticker_or_cik'],
   },
 };
+
+/** Tools whose `limit` counts filings, so `filing_limit` maps onto it (#212). */
+const FILING_COUNT_TOOLS = [
+  'secedgar_get_beneficial_owners',
+  'secedgar_get_material_events',
+  'secedgar_search_filings',
+];
 
 const tools = buildToolDefinitions({ dropEnabled: true, clampOversizedLimits: true }).map(
   (def) => ({
@@ -112,6 +120,23 @@ describe('parameter names across tools (#115)', () => {
       for (const target of Object.values(tool.aliases)) {
         expect(tool.keys, `${tool.name} aliases to ${target}`).toContain(target);
       }
+    }
+  });
+
+  it('maps filing_limit onto limit exactly where limit counts filings (#212)', () => {
+    const aliased = tools.filter((tool) => 'filing_limit' in tool.aliases);
+    expect(aliased.map((tool) => tool.name).sort()).toEqual(FILING_COUNT_TOOLS);
+    for (const tool of aliased) expect(tool.aliases.filing_limit, tool.name).toBe('limit');
+    // On a company search, `limit` would read as a count of companies.
+    const companySearch = tools.find((tool) => tool.name === 'secedgar_company_search');
+    expect(companySearch?.aliases).not.toHaveProperty('limit');
+  });
+
+  it('keeps every alias with the limit clamps switched off', () => {
+    const off = buildToolDefinitions({ dropEnabled: true, clampOversizedLimits: false });
+    for (const tool of tools) {
+      const def = off.find((d) => d.name === tool.name);
+      expect(def?.inputAliases ?? {}, tool.name).toEqual(tool.aliases);
     }
   });
 });

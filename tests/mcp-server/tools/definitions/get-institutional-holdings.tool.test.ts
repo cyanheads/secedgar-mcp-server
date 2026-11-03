@@ -7,13 +7,26 @@ import { readFileSync } from 'node:fs';
 import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createGetInstitutionalHoldingsTool,
   getInstitutionalHoldingsTool,
 } from '@/mcp-server/tools/definitions/get-institutional-holdings.tool.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import type { FilingIndex, FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
+
+// The index-listing wiring case runs the real service's index.json read over a
+// stubbed `fetch`; these are the config fields its constructor and requests read.
+vi.mock('@/config/server-config.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/config/server-config.js')>()),
+  getServerConfig: () => ({
+    userAgent: 'test test@example.com',
+    rateLimitRps: 10,
+    rateLimitCooldownSeconds: 600,
+    tickerCacheTtl: 3600,
+    mirrorFallbackLive: true,
+  }),
+}));
 
 vi.mock('@/services/edgar/edgar-api-service.js', () => ({
   getEdgarApiService: vi.fn(),
@@ -1017,6 +1030,70 @@ describe('getInstitutionalHoldingsTool', () => {
     expect(() =>
       getInstitutionalHoldingsTool.input.parse({ company: '0000102909', limit: 1001 }),
     ).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// available_documents through the service's index.json read (#203)
+// ---------------------------------------------------------------------------
+
+describe('getInstitutionalHoldingsTool — available_documents leaves out nameless index entries (#203)', () => {
+  const DIR = '/Archives/edgar/data/102909/000010290924000001';
+  let dispose: () => void = () => {};
+
+  beforeEach(async () => {
+    const actual = await vi.importActual<typeof import('@/services/edgar/edgar-api-service.js')>(
+      '@/services/edgar/edgar-api-service.js',
+    );
+    actual.initEdgarApiService();
+    const real = actual.getEdgarApiService();
+    dispose = () => real.dispose();
+    // The listing comes through the service's own index.json read; every other read stays mocked.
+    mockApi.tryGetFilingIndex.mockImplementation((cik: string, accn: string, scope: CallScope) =>
+      real.tryGetFilingIndex(cik, accn, scope),
+    );
+    vi.stubGlobal('fetch', async (input: string) => {
+      const url = new URL(input);
+      if (url.hostname === 'www.sec.gov' && url.pathname === `${DIR}/index.json`) {
+        return Response.json({
+          directory: {
+            item: [
+              {
+                'last-modified': '2024-02-15',
+                name: '0000102909-24-000001-index.html',
+                type: 'text.gif',
+                size: '',
+              },
+              {
+                'last-modified': '2024-02-15',
+                name: '0000102909-24-000001.txt',
+                type: 'text.gif',
+                size: '',
+              },
+              { 'last-modified': '2024-02-15', name: '', type: '', size: '73605' },
+            ],
+            name: DIR,
+          },
+        });
+      }
+      throw new Error(`unrouted fetch: ${input}`);
+    });
+  });
+
+  afterEach(() => {
+    dispose();
+    vi.unstubAllGlobals();
+  });
+
+  it('names only the listed files when the filing has no information table', async () => {
+    const result = await runToolContract(getInstitutionalHoldingsTool, { company: '0000102909' });
+
+    const error = wireError(result);
+    expect(error.data.reason).toBe('no_info_table');
+    expect(error.data.available_documents).toEqual([
+      '0000102909-24-000001-index.html',
+      '0000102909-24-000001.txt',
+    ]);
   });
 });
 

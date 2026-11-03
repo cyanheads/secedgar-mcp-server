@@ -2708,6 +2708,27 @@ describe('searchFilingsTool — one row per filing (#124)', () => {
   });
 });
 
+// The service escapes caller text before it reaches full-text search, once, for every
+// tool (tabled in edgar-api-service.efts.test.ts); the tool hands the query over as typed (#205).
+describe('searchFilingsTool — a query holding backslashes (#205)', () => {
+  it('accepts the query and passes it to the service as typed', async () => {
+    const result = await runToolContract(searchFilingsTool, {
+      query: '"US BANCORP \\DE\\"',
+      forms: ['13F-HR'],
+      filed_after: '2026-07-01',
+      filed_before: '2026-09-30',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.searchFilings).toHaveBeenCalledOnce();
+    expect(mockApi.searchFilings).toHaveBeenCalledWith(
+      expect.objectContaining({ query: '"US BANCORP \\DE\\"', forms: ['13F-HR'] }),
+      expect.any(CallScope),
+    );
+    expect(result.structuredContent).toMatchObject({ total: 2 });
+  });
+});
+
 // Through the real argument-parsing path, where `inputAliases` is applied (#115).
 describe('searchFilingsTool parameter names (#115)', () => {
   const call = (args: Record<string, unknown>) => runToolContract(searchFilingsTool, args as never);
@@ -2773,6 +2794,68 @@ describe('searchFilingsTool parameter names (#115)', () => {
       expect(bag(result.structuredContent).effectiveQuery).toBe(
         `material weakness (filed ${window.startDate} to ${window.endDate})`,
       );
+    });
+  });
+
+  // company_search names its filing count filing_limit; here the count is limit (#212). The
+  // alias is rewritten before validation, so it meets limit's own cap and bound.
+  describe('filing_limit as an alias of limit (#212)', () => {
+    /** `n` one-document filings, one a day from 2026-09-30, in a window of 500 matches. */
+    const window = (n: number) =>
+      eftsWindow(
+        Array.from({ length: n }, (_, i) =>
+          documentHit(
+            `0001318605-26-${String(i).padStart(6, '0')}:doc${i}.htm`,
+            '8-K',
+            '8-K',
+            null,
+            new Date(Date.UTC(2026, 8, 30 - i)).toISOString().slice(0, 10),
+          ),
+        ),
+        500,
+      );
+
+    it('returns what the same value under limit returns', async () => {
+      const viaLimit = await call({ query: 'material weakness', limit: 1 });
+      const viaAlias = await call({ query: 'material weakness', filing_limit: 1 });
+
+      expect(viaAlias.isError).toBeFalsy();
+      expect(viaAlias).toEqual(viaLimit);
+      expect((viaAlias.structuredContent as SearchContent).results).toHaveLength(1);
+      expect(blockText(viaAlias.content)).toContain('[0000320193-23-000106]');
+    });
+
+    it('serves a value above the cap at the cap, as limit does', async () => {
+      mockApi.searchFilings.mockResolvedValue(window(150));
+
+      const atCap = await call({ query: '"going concern"', limit: 100 });
+      const viaAlias = await call({ query: '"going concern"', filing_limit: 101 });
+
+      expect(viaAlias).toEqual(atCap);
+      expect(viaAlias.structuredContent).toMatchObject({ cap: 100, shown: 100 });
+    });
+
+    it('rejects a value above the bound as limit does, naming the alias', async () => {
+      const result = await call({ query: 'material weakness', filing_limit: 1001 });
+
+      const error = wireError(result);
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+      expect(error.data.input).toEqual({
+        aliased: [{ alias: 'filing_limit', target: 'limit' }],
+        ignored: [],
+      });
+      expect(blockText(result.content)).toContain(
+        'limit: Too big: expected number to be <=1000. Validated filing_limit as limit.',
+      );
+      expect(mockApi.searchFilings).not.toHaveBeenCalled();
+    });
+
+    it('rejects filing_limit beside limit, naming it as an alias of limit', async () => {
+      const result = await call({ query: 'material weakness', limit: 10, filing_limit: 10 });
+
+      expect(result.isError).toBe(true);
+      expect(blockText(result.content)).toContain('filing_limit is an alias of limit');
+      expect(mockApi.searchFilings).not.toHaveBeenCalled();
     });
   });
 
@@ -3659,5 +3742,184 @@ describe('searchFilingsTool — limit above the 100 cap (#197)', () => {
     const rejected = await runToolContract(off, { query: '"going concern"', limit: 101 });
     expect(rejected.isError).toBe(true);
     expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
+  });
+});
+
+// EDGAR full-text search answers 100 documents from `from` and refuses any `from` past
+// 9900. Only a relevance search without entity scope sends `offset` as `from`; every other
+// path fetches from 0, or reads the archives, and pages the rows it assembled (#214).
+describe('searchFilingsTool — relevance offsets past what EDGAR serves (#214)', () => {
+  const call = (args: Record<string, unknown>) => runToolContract(searchFilingsTool, args as never);
+
+  /** `n` one-document 2001-onward filings, all filed 2026-09-30. */
+  const window = (n: number) =>
+    eftsWindow(
+      Array.from({ length: n }, (_, i) =>
+        documentHit(
+          `0001318605-26-${String(i).padStart(6, '0')}:doc${i}.htm`,
+          '10-K',
+          '10-K',
+          null,
+          '2026-09-30',
+        ),
+      ),
+      10_000,
+      'gte',
+    );
+
+  /** `n` full-index 10-K rows, one per filer, all filed on `date`. */
+  const fullIndex = (n: number, date: string) =>
+    Array.from({ length: n }, (_, i) => ({
+      cik: String(100_000 + i),
+      companyName: `FILER ${i} INC`,
+      form: '10-K',
+      filingDate: date,
+      accessionNumber: `00${100_000 + i}-${date.slice(2, 4)}-000001`,
+    }));
+
+  describe('offsets that answer', () => {
+    it('sends offset 9900 as EDGAR from on a relevance search and lists that page', async () => {
+      mockApi.searchFilings.mockResolvedValue(window(100));
+
+      const result = await call({ query: 'revenue', sort: 'relevance', offset: 9900, limit: 50 });
+
+      expect(mockApi.searchFilings).toHaveBeenCalledTimes(1);
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining({ from: 9900, size: 50 }),
+        expect.any(CallScope),
+      );
+      expect(result.isError).toBeFalsy();
+      expect((result.structuredContent as SearchContent).results).toHaveLength(50);
+      expect(blockText(result.content)).toContain('[0001318605-26-000000]');
+    });
+
+    it('fetches from 0 and pages the window itself under a date sort at offset 9950', async () => {
+      mockApi.searchFilings.mockResolvedValue(window(100));
+
+      const result = await call({ query: 'revenue', offset: 9950, limit: 50 });
+
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining({ from: 0, size: 100 }),
+        expect.any(CallScope),
+      );
+      expect(result.isError).toBeFalsy();
+      expect((result.structuredContent as SearchContent).notice).toContain(
+        'Offset (9950) exceeds the 100 filings in the fetched window',
+      );
+    });
+
+    it('fetches from 0 for an entity-scoped relevance search at offset 9950', async () => {
+      mockApi.searchFilings.mockResolvedValue(window(100));
+
+      const result = await call({
+        query: 'revenue cik:1318605',
+        sort: 'relevance',
+        offset: 9950,
+        limit: 50,
+      });
+
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining({ from: 0, size: 100, ciks: ['0001318605'] }),
+        expect.any(CallScope),
+      );
+      expect(result.isError).toBeFalsy();
+    });
+
+    it('pages a pre-2001 browse past 9,900 rows under sort=relevance', async () => {
+      mockApi.fetchFullIndexQuarter.mockResolvedValue(fullIndex(10_000, '1996-11-01'));
+
+      const result = await call({
+        forms: ['10-K'],
+        filed_after: '1996-11-01',
+        filed_before: '1996-11-30',
+        sort: 'relevance',
+        offset: 9950,
+        limit: 50,
+      });
+
+      expect(mockApi.searchFilings).not.toHaveBeenCalled();
+      expect(result.isError).toBeFalsy();
+      const out = result.structuredContent as SearchContent;
+      expect(out.total).toBe(10_000);
+      expect(out.results).toHaveLength(50);
+    });
+
+    it('pages a range crossing 2001 past 9,900 assembled rows under sort=relevance', async () => {
+      mockApi.fetchFullIndexQuarter.mockResolvedValue(fullIndex(10_000, '2000-11-01'));
+      mockApi.searchFilings.mockResolvedValue(window(2));
+
+      const result = await call({
+        forms: ['10-K'],
+        filed_after: '2000-10-01',
+        filed_before: '2026-12-31',
+        sort: 'relevance',
+        offset: 9950,
+        limit: 50,
+      });
+
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining({ from: 0, size: 100 }),
+        expect.any(CallScope),
+      );
+      expect(result.isError).toBeFalsy();
+      expect((result.structuredContent as SearchContent).results).toHaveLength(50);
+    });
+  });
+
+  describe('offsets EDGAR refuses', () => {
+    const HINT =
+      "Use an offset of 9900 or less — a page there with limit 100 reaches EDGAR's 10,000-document cap — or narrow the search with a shorter filed_after/filed_before window, a forms filter, or more specific terms so fewer documents match.";
+    const message = (offset: number) =>
+      `Offset ${offset} is past the deepest sort=relevance page EDGAR full-text search serves, offset 9900.`;
+
+    it.each([9901, 9999])('fails offset %i as caller input, sending nothing', async (offset) => {
+      const result = await call({ query: 'revenue', sort: 'relevance', offset, limit: 50 });
+
+      expect(mockApi.searchFilings).not.toHaveBeenCalled();
+      expect(wireError(result)).toEqual({
+        code: JsonRpcErrorCode.ValidationError,
+        message: message(offset),
+        data: {
+          reason: 'offset_out_of_range',
+          retryable: false,
+          offset,
+          max_offset: 9900,
+          recovery: { hint: HINT },
+        },
+      });
+      expect(result.content).toEqual([
+        {
+          type: 'text',
+          text: `Error: ${message(offset)}\n\nRecovery: ${HINT}\n\n(reason offset_out_of_range · not retryable)`,
+        },
+      ]);
+    });
+
+    it('fails a forms-only relevance browse at offset 9901, sending nothing', async () => {
+      const result = await call({ forms: ['10-K'], sort: 'relevance', offset: 9901 });
+
+      expect(mockApi.searchFilings).not.toHaveBeenCalled();
+      expect(wireError(result).data).toMatchObject({ reason: 'offset_out_of_range', offset: 9901 });
+      expect(blockText(result.content)).toContain(message(9901));
+    });
+  });
+
+  it('names 9900 as the deepest relevance offset in the offset description', () => {
+    const description = searchFilingsTool.input.shape.offset.description ?? '';
+    expect(description).toContain('EDGAR serves offsets up to 9900 there');
+    expect(description).toContain('a deeper offset is rejected');
+  });
+
+  // The schema keeps its 9999 bound for every path; 9900 binds only where offset is sent as from (#214).
+  it('rejects offset 10000 at the schema on a date sort, sending nothing', async () => {
+    mockApi.searchFilings.mockResolvedValue(window(100));
+
+    const result = await call({ query: 'revenue', offset: 10_000, limit: 50 });
+
+    const error = wireError(result);
+    expect(error.code).toBe(JsonRpcErrorCode.InvalidParams);
+    expect(error.data.reason).toBe('invalid_arguments');
+    expect(blockText(result.content)).toContain('offset: Too big: expected number to be <=9999');
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
   });
 });

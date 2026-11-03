@@ -11,7 +11,9 @@
  * the call's 40 s failure budget and ends at once on the caller's cancel (#179), the
  * error body's bounded diagnostic capture included (#202); a body the ladder has no
  * use for is cancelled unread (#188), and a submissions or archive-page body without
- * the shape its readers index fails like one that is not JSON (#186). A
+ * the shape its readers index fails like one that is not JSON (#186). A 200 whose
+ * JSON names a backend error is returned as read unless the request opts in to
+ * retrying it, as only EDGAR full-text search's readers do (#206). A
  * User-Agent that `fetch` refuses before sending is a configuration error at
  * startup instead, never a no-response attempt. No request ever reaches sec.gov:
  * a real 429 would block this IP for ten minutes.
@@ -1530,6 +1532,21 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       await vi.advanceTimersByTimeAsync(1_000);
 
       await expect(text).resolves.toBe('<html>page</html>');
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+  });
+
+  // --- A 200 relaying a backend failure is a failed attempt only where the request opts in (#206) ---
+
+  describe('a 200 whose JSON names a backend errorType, read by a request that does not opt in (#206)', () => {
+    it('returns the body on its one request, unclassified', async () => {
+      const body = { errorType: 'ConnectionError', errorMessage: 'getaddrinfo EBUSY' };
+      const { fetchMock } = stubSequence(() => Response.json(body));
+
+      const json = getEdgarApiService().fetchJson(DOCUMENT_URL, scope());
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      await expect(json).resolves.toEqual(body);
       expect(fetchMock).toHaveBeenCalledOnce();
     });
   });

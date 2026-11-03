@@ -144,6 +144,42 @@ interface HeadCutoff {
 }
 
 /**
+ * A failure EDGAR full-text search relays in a 200 body in place of its payload (#206):
+ * `errorType` is the class of the error its OpenSearch client threw, `errorMessage`
+ * that error's message, when the body carries one as a string.
+ */
+interface EftsBackendError {
+  readonly errorMessage: string | undefined;
+  readonly errorType: string;
+}
+
+/**
+ * An attempt whose 200 body read whole but relays a transient failure of the search
+ * backend behind it (#206). `waitedMs` is the body read's own time, charged with the
+ * wait for the attempt's headers.
+ */
+interface BackendFailedAttempt {
+  readonly error: EftsBackendError;
+  readonly kind: 'backend_failed';
+  readonly waitedMs: number;
+}
+
+/** An attempt the ladder may retry, or the last one, whose failure decides the error. */
+type FailedAttempt = Attempt | BodyFailedAttempt | BackendFailedAttempt;
+
+/** How one request reads its answer. */
+interface ReadOptions {
+  /**
+   * The transient backend failure a whole 2xx body relays, which fails the attempt
+   * like a 5xx — or `undefined` for a body to return. Opt-in per request: only EDGAR
+   * full-text search answers its backend's failures this way (#206).
+   */
+  readonly backendFailure?: (text: string, url: string) => EftsBackendError | undefined;
+  /** Read only the body's head (`tryGetFilingDocumentHead`). */
+  readonly cutoff?: HeadCutoff;
+}
+
+/**
  * Every way SEC gives no complete, readable answer — each ends as `sec_unreachable`,
  * including a request the call's spent failure budget kept from being sent (#179),
  * and a 200 body that is not the JSON the request reads: not JSON at all (#181), or
@@ -400,9 +436,25 @@ function stripCompanySuffix(name: string): string | undefined {
   return name.slice(0, cut).replace(/,$/, '').trimEnd();
 }
 
-/** Name-search tiers, strongest first: exact, prefix, substring. */
-type NameTier = 0 | 1 | 2;
-const NAME_TIERS: readonly NameTier[] = [0, 1, 2];
+/**
+ * Delete every comma, period, and apostrophe (`'` and `’`) from a company name, the
+ * comparison form the name passes' folded tiers read, so `QXO Inc` meets `QXO, Inc.`,
+ * `U.S. Bancorp` meets `US BANCORP`, and `Macys` meets `Macy's, Inc.` (#210). A period
+ * is deleted, never turned into a space, so a dotted initialism meets its undotted
+ * spelling. Nothing else changes — whitespace runs, `&`, `-`, `/`, and `\` stay — and the
+ * result is for comparison only: a returned name is never folded.
+ */
+export function foldNamePunctuation(name: string): string {
+  return name.replace(/[,.'’]/g, '');
+}
+
+/**
+ * Name-search tiers, strongest first: exact as written (`normalizeCompanySuffix` and
+ * `stripCompanySuffix` included), exact once folded (`foldNamePunctuation` on both
+ * sides, then the same two), prefix once folded, substring as written (#210).
+ */
+type NameTier = 0 | 1 | 2 | 3;
+const NAME_TIERS: readonly NameTier[] = [0, 1, 2, 3];
 
 // ---------------------------------------------------------------------------
 // Near-match company suggestions
@@ -488,9 +540,16 @@ class EdgarApiService {
     this.pacer.dispose();
   }
 
-  /** Fetch and parse JSON, throwing on non-OK responses and on a body that is not JSON. */
-  async fetchJson<T>(url: string, scope: CallScope): Promise<T> {
-    const text = await this.rawFetch(url, true, scope);
+  /**
+   * Fetch and parse JSON, throwing on non-OK responses and on a body that is not JSON.
+   * `backendFailure` names the 200 bodies that fail an attempt (#206).
+   */
+  async fetchJson<T>(
+    url: string,
+    scope: CallScope,
+    options?: Pick<ReadOptions, 'backendFailure'>,
+  ): Promise<T> {
+    const text = await this.rawFetch(url, true, scope, options);
     if (text === null) {
       throw notFound(`SEC EDGAR API returned 404 for ${url}`, { url, status: 404 });
     }
@@ -523,8 +582,9 @@ class EdgarApiService {
    * Resolve a query (ticker, name, or CIK) to company match(es).
    * - Numeric input → direct CIK lookup
    * - 1-5 uppercase letters → ticker lookup (O(1))
-   * - Otherwise → name search (exact, prefix, substring — resolved within the best
-   *   tier a current name reaches), then the catch-all ticker lookup
+   * - Otherwise → name search (exact as written, exact once commas, periods, and
+   *   apostrophes are folded out, prefix once folded, substring as written — resolved
+   *   within the best tier a current name reaches), then the catch-all ticker lookup
    * Returns a single match, an array of multiple matches, or an empty array (no match).
    * On no-result name search, the returned empty array carries `suggestions` on
    * the thrown error at the handler layer — call `suggestCompanies` there.
@@ -550,17 +610,29 @@ class EdgarApiService {
       if (match) return match;
     }
 
-    // Name search, tiered exact → prefix → substring. The exact tier also accepts a
-    // suffix-normalized equality (#107) and the registry name minus its terminal suffix,
-    // so `Apple` names `Apple Inc.` exactly (#155); the query's own suffix is never
-    // dropped, so `Toro Co` never meets `TORO CORP.`.
+    // Name search, tiered exact → exact once folded → prefix once folded → substring. Both
+    // exact tiers also accept a suffix-normalized equality (#107) and the registry name
+    // minus its terminal suffix, so `Apple` names `Apple Inc.` exactly (#155); the query's
+    // own suffix is never dropped, so `Toro Co` never meets `TORO CORP.`. The folded tiers
+    // compare with commas, periods, and apostrophes deleted from both sides (#210). Exact
+    // as written ranks first, so `McGraw Hill, Inc.` never ties a former name that equals
+    // it only once folded, and substring stays as written, since `S.Y. Bancorp Inc` folded
+    // sits inside a folded `Embassy Bancorp, Inc.`.
     const lower = trimmed.toLowerCase();
     const lowerNormalized = normalizeCompanySuffix(lower);
-    // A suffix-dropped name is a prefix of the full one, so the strip runs on prefix hits only.
+    const folded = foldNamePunctuation(lower);
+    const foldedNormalized = normalizeCompanySuffix(folded);
+    // A suffix-dropped name is a prefix of the full one, so the strip runs on prefix hits
+    // only. A prefix as written is a prefix once folded, so the folded tiers rank it.
     const tierOf = (name: string): NameTier | undefined => {
       if (name === lower || normalizeCompanySuffix(name) === lowerNormalized) return 0;
-      if (name.startsWith(lower)) return stripCompanySuffix(name) === lower ? 0 : 1;
-      return name.includes(lower) ? 2 : undefined;
+      if (name.startsWith(lower) && stripCompanySuffix(name) === lower) return 0;
+      const foldedName = foldNamePunctuation(name);
+      if (foldedName === folded || normalizeCompanySuffix(foldedName) === foldedNormalized) {
+        return 1;
+      }
+      if (foldedName.startsWith(folded)) return stripCompanySuffix(foldedName) === folded ? 1 : 2;
+      return name.includes(lower) ? 3 : undefined;
     };
 
     // Current names are registry rows, which carry a ticker; former names (the committed
@@ -569,8 +641,8 @@ class EdgarApiService {
     // name joins at that tier or better but never outranks a current name, so a company
     // is never silently swapped for a former holder of its name; former names decide
     // alone only when no current name matches (#155).
-    const current: Record<NameTier, CikMatch[]> = { 0: [], 1: [], 2: [] };
-    const former: Record<NameTier, CikMatch[]> = { 0: [], 1: [], 2: [] };
+    const current: Record<NameTier, CikMatch[]> = { 0: [], 1: [], 2: [], 3: [] };
+    const former: Record<NameTier, CikMatch[]> = { 0: [], 1: [], 2: [], 3: [] };
     for (const entry of cache.allEntries) {
       if (!entry.name) continue;
       const tier = tierOf(entry.name.toLowerCase());
@@ -621,12 +693,18 @@ class EdgarApiService {
    * a legal name under different CIKs (e.g. "VANGUARD GROUP INC" = a transfer agent and
    * the 13F filer), so callers must disambiguate rather than auto-pick the top hit (#73).
    * Distinct from `searchFilings`: same URL path, different query param (`keysTyped`)
-   * and response shape (`_source.entity`, not the filing-document `_source`).
+   * and response shape (`_source.entity`, not the filing-document `_source`). A
+   * failure of the search backend throws `efts_degraded_response` like a search's,
+   * never reads as no match (#206). The name is escaped like a search's `q` (#205).
    */
   async resolveEntityByName(name: string, scope: CallScope): Promise<EntityNameMatch[]> {
     const url = new URL('https://efts.sec.gov/LATEST/search-index');
-    url.searchParams.set('keysTyped', name);
-    const response = await this.fetchJson<EftsEntityAutocompleteResponse>(url.toString(), scope);
+    url.searchParams.set('keysTyped', escapeEftsText(name));
+    const response = await this.fetchJson<EftsEntityAutocompleteResponse>(url.toString(), scope, {
+      backendFailure: transientEftsError,
+    });
+    const backendError = eftsBackendError(response);
+    if (backendError) throw eftsBackendFailure(url.toString(), backendError);
 
     const hits = response?.hits?.hits;
     if (!Array.isArray(hits)) return [];
@@ -792,8 +870,10 @@ class EdgarApiService {
   ): Promise<EftsResponse> {
     const url = new URL('https://efts.sec.gov/LATEST/search-index');
     // `q` is optional — EFTS honors `ciks` for pure entity scope with no
-    // full-text query, so a bare cik:/ticker: search sends no `q`.
-    if (params.query) url.searchParams.set('q', params.query);
+    // full-text query, so a bare cik:/ticker: search sends no `q`. Escaped here, at
+    // the one place a query is sent, so a caller re-sending a phrase another tool
+    // searched (find_holders' `search_key`) runs the same search (#205).
+    if (params.query) url.searchParams.set('q', escapeEftsText(params.query));
     if (params.forms?.length) url.searchParams.set('forms', params.forms.join(','));
     // Server-side entity scope by CIK, independent of the document's name text —
     // includes filings made under a former company name sharing the same CIK.
@@ -806,7 +886,13 @@ class EdgarApiService {
     url.searchParams.set('from', String(params.from ?? 0));
     url.searchParams.set('size', String(params.size ?? 20));
 
-    const response = await this.fetchJson<EftsResponse>(url.toString(), scope);
+    // A transport failure of the search backend retries on the ladder; any other
+    // backend error fails on its one request (#206).
+    const response = await this.fetchJson<EftsResponse>(url.toString(), scope, {
+      backendFailure: transientEftsError,
+    });
+    const backendError = eftsBackendError(response);
+    if (backendError) throw eftsBackendFailure(url.toString(), backendError);
 
     // Shape guard: EFTS can return a 2xx whose body omits `hits.total` (degraded
     // payload, or a rejected request echoed as `{ error: ... }` with 200). A genuine
@@ -818,7 +904,7 @@ class EdgarApiService {
       throw serviceUnavailable(
         'SEC EDGAR full-text search returned an unexpected response without hits — the service may be degraded.',
         {
-          reason: 'efts_degraded_response',
+          reason: EFTS_DEGRADED_REASON,
           ...(typeof upstreamError === 'string' && { upstreamError }),
           recovery: {
             hint: 'Retry the search in a few minutes — EDGAR full-text search returned an incomplete response.',
@@ -854,16 +940,24 @@ class EdgarApiService {
     return [...ciks];
   }
 
-  /** Fetch a filing's document index. Returns `null` if the filing does not exist. */
-  tryGetFilingIndex(
+  /**
+   * Fetch a filing's document index. Returns `null` if the filing does not exist.
+   * Entries listed with no filename are dropped: SEC lists each document of a
+   * pre-2001 SGML submission that way, with only its size, and such a document
+   * exists only inside the full submission `<accession>.txt` (#203).
+   */
+  async tryGetFilingIndex(
     cik: string,
     accessionNumber: string,
     scope: CallScope,
   ): Promise<FilingIndex | null> {
-    return this.tryFetchJson<FilingIndex>(
+    const index = await this.tryFetchJson<FilingIndex>(
       filingArchiveUrl(cik, accessionNumber, 'index.json'),
       scope,
     );
+    if (index === null) return null;
+    const named = index.directory.item.filter((item) => item.name.trim() !== '');
+    return { ...index, directory: { ...index.directory, item: named } };
   }
 
   /**
@@ -882,6 +976,27 @@ class EdgarApiService {
       scope,
     );
     return text ? parseFilingHeaders(text) : null;
+  }
+
+  /**
+   * Fetch a filing's index page (`<accession>-index.html`) and return the CIKs of the
+   * parties it names — filer, subject company, filed-by, reporting owner, issuer — in
+   * page order, without repeats (see {@link filingPartyCiks}). Returns `null` if the
+   * page is absent. SEC serves the page under the accession number's own prefix CIK
+   * for any filing that exists, including a filing agent's prefix whose directory has
+   * no `index.json`, so it names the filers of an accession full-text search does not
+   * cover (before 2001) (#203).
+   */
+  async tryGetFilingPartyCiks(
+    cik: string,
+    accessionNumber: string,
+    scope: CallScope,
+  ): Promise<string[] | null> {
+    const html = await this.tryFetchText(
+      filingArchiveUrl(cik, accessionNumber, `${accessionNumber}-index.html`),
+      scope,
+    );
+    return html === null ? null : filingPartyCiks(html);
   }
 
   /**
@@ -948,7 +1063,9 @@ class EdgarApiService {
     options: HeadCutoff,
     scope: CallScope,
   ): Promise<string | null> {
-    return this.rawFetch(filingArchiveUrl(cik, accessionNumber, document), false, scope, options);
+    return this.rawFetch(filingArchiveUrl(cik, accessionNumber, document), false, scope, {
+      cutoff: options,
+    });
   }
 
   /**
@@ -1113,10 +1230,12 @@ class EdgarApiService {
    * 404's, a retried 5xx's, a 429's, one that lands as the caller cancels — is
    * cancelled unread (#188); an error the last attempt earns carries a bounded head
    * of its body, read like any other (#202). The body is read inside the ladder
-   * (#181): a 5xx, an attempt that got no HTTP response, and a 2xx whose body
-   * failed to read all retry up to `MAX_RETRIES` attempts, and
-   * then the last attempt decides — a 5xx throws its status-classified `McpError`,
-   * the other two `sec_unreachable`. Other non-OK statuses throw at once, as does
+   * (#181): a 5xx, an attempt that got no HTTP response, a 2xx whose body failed to
+   * read, and — for a request that opts in with `backendFailure` — a 2xx whose whole
+   * body relays a transient failure of the search backend (#206) all retry up to
+   * `MAX_RETRIES` attempts, and then the last attempt decides — a 5xx throws its
+   * status-classified `McpError`, a backend failure `efts_degraded_response`, the
+   * other two `sec_unreachable`. Other non-OK statuses throw at once, as does
    * the local refusal while SEC's rate-limit block is active, and the pacer's
    * `RequestCancelled` — those are `McpError`s from `send()`, never retried.
    *
@@ -1130,14 +1249,14 @@ class EdgarApiService {
     url: string,
     acceptJson: boolean,
     scope: CallScope,
-    cutoff?: HeadCutoff,
+    options: ReadOptions = {},
   ): Promise<string | null> {
     scope.signal.throwIfAborted();
     const headers: Record<string, string> = { 'User-Agent': getServerConfig().userAgent };
     if (acceptJson) headers.Accept = 'application/json';
 
     /** The previous attempt's failure, which a request the budget stops before its next attempt ends with. */
-    let failed: Attempt | BodyFailedAttempt | undefined;
+    let failed: FailedAttempt | undefined;
     for (let attempt = 1; ; attempt++) {
       const outcome = scope.remainingMs > 0 ? await this.send(url, headers, scope) : BUDGET_SPENT;
       if (scope.signal.aborted) {
@@ -1158,7 +1277,7 @@ class EdgarApiService {
         );
       }
 
-      let last: Attempt | BodyFailedAttempt = outcome;
+      let last: FailedAttempt = outcome;
       if (outcome.kind === 'answered') {
         const { response } = outcome;
         if (response.status === 404) {
@@ -1166,9 +1285,15 @@ class EdgarApiService {
           return null;
         }
         if (response.ok) {
-          const body = await readBody(response, scope, cutoff);
-          if (body.kind === 'read') return body.text;
-          last = body;
+          const readFrom = Date.now();
+          const body = await readBody(response, scope, options.cutoff);
+          if (body.kind === 'read') {
+            const error = options.backendFailure?.(body.text, url);
+            if (error === undefined) return body.text;
+            last = { kind: 'backend_failed', error, waitedMs: Date.now() - readFrom };
+          } else {
+            last = body;
+          }
         }
       }
 
@@ -1177,7 +1302,10 @@ class EdgarApiService {
         throw await this.ladderFailure(url, last, { attempt, budgetStopped: false }, scope);
       }
 
-      scope.charge(outcome.waitedMs + (last.kind === 'body_failed' ? last.waitedMs : 0));
+      // A failed body read adds its own wait to the wait for the headers.
+      const readWaitMs =
+        last.kind === 'body_failed' || last.kind === 'backend_failed' ? last.waitedMs : 0;
+      scope.charge(outcome.waitedMs + readWaitMs);
       const backoffMs = BASE_BACKOFF_MS * 2 ** (attempt - 1);
       if (attempt < MAX_RETRIES && scope.remainingMs > backoffMs) {
         if (last.kind === 'answered') await discardBody(last.response);
@@ -1197,7 +1325,8 @@ class EdgarApiService {
 
   /**
    * The error a request's last attempt earned: `sec_unreachable` for no response or
-   * an unreadable body; for an HTTP answer, its status-classified `McpError`, with
+   * an unreadable body; `efts_degraded_response` for a body relaying a failure of the
+   * search backend (#206); for an HTTP answer, its status-classified `McpError`, with
    * the 403 and 429 hints. A 5xx ladder the failure budget stopped keeps its status
    * mapping and `data`, and its message says the budget stopped it (#179).
    *
@@ -1208,10 +1337,11 @@ class EdgarApiService {
    */
   private async ladderFailure(
     url: string,
-    last: Attempt | BodyFailedAttempt,
+    last: FailedAttempt,
     end: LadderEnd,
     scope: CallScope | null,
   ): Promise<McpError> {
+    if (last.kind === 'backend_failed') return eftsBackendFailure(url, last.error, end);
     if (last.kind !== 'answered') return secUnreachable(url, last, end);
 
     const { response } = last;
@@ -1710,6 +1840,49 @@ export function parseSeriesFilingFeed(xml: string): SeriesFilingFeed {
   };
 }
 
+/** The query start of the company-browse links an index page gives each party. */
+const BROWSE_EDGAR_QUERY = 'browse-edgar?';
+const CIK_PARAM = 'CIK=';
+const TEN_DIGITS = /^\d{10}$/;
+
+/** True for a character that ends an `href` value: whitespace or a control character, a quote, `<`, or `>`. */
+function endsHref(code: number): boolean {
+  return code <= 0x20 || code === 0x22 || code === 0x27 || code === 0x3c || code === 0x3e;
+}
+
+/**
+ * The 10-digit CIKs a filing index page (`<accession>-index.html`) names, in page
+ * order without repeats: every party block links its company as
+ * `browse-edgar?CIK=<10 digits>&amp;action=getcompany`, while the page's other
+ * `browse-edgar` links (latest filings, file number, SIC code) carry no `CIK`
+ * parameter (#203). One forward pass: each link's query ends at the first character
+ * that ends an `href`, the next link is searched for from there, and the `CIK`
+ * parameter is looked for inside that query alone, so no character is scanned more
+ * than twice whatever the markup. Exported for direct unit testing.
+ */
+export function filingPartyCiks(html: string): string[] {
+  const ciks = new Set<string>();
+  let link = html.indexOf(BROWSE_EDGAR_QUERY);
+  while (link >= 0) {
+    const start = link + BROWSE_EDGAR_QUERY.length;
+    let end = start;
+    while (end < html.length && !endsHref(html.charCodeAt(end))) end++;
+    const query = html.slice(start, end);
+    for (let at = query.indexOf(CIK_PARAM); at >= 0; at = query.indexOf(CIK_PARAM, at + 1)) {
+      const opensParam = at === 0 || query[at - 1] === '&' || query[at - 1] === ';';
+      const valueEnd = at + CIK_PARAM.length + 10;
+      const value = query.slice(at + CIK_PARAM.length, valueEnd);
+      const nextCode = query.charCodeAt(valueEnd);
+      if (opensParam && TEN_DIGITS.test(value) && !(nextCode >= 0x30 && nextCode <= 0x39)) {
+        ciks.add(value);
+        break;
+      }
+    }
+    link = html.indexOf(BROWSE_EDGAR_QUERY, end);
+  }
+  return [...ciks];
+}
+
 /**
  * Name of the raw XML document inside a filing's archive directory. The submissions feed
  * points at the human-readable rendering (`xslSCHEDULE_13D_X02/primary_doc.xml`,
@@ -1964,16 +2137,25 @@ async function errorBodyHead(response: Response, scope: CallScope): Promise<stri
   // mistaken for a whole one.
   const read = await readBody(response, scope, { maxBytes: ERROR_BODY_LIMIT_BYTES + 4 });
   if (read.kind === 'body_failed') scope.charge(read.waitedMs);
-  const bytes = utf8.encode(read.text);
-  if (bytes.byteLength > ERROR_BODY_LIMIT_BYTES) {
-    // A streaming decode holds back the code point the cut splits instead of emitting U+FFFD.
-    const head = new TextDecoder().decode(bytes.subarray(0, ERROR_BODY_LIMIT_BYTES), {
-      stream: true,
-    });
-    return `${head}…`;
-  }
+  const cut = cutToErrorLimit(read.text);
+  if (cut !== undefined) return cut;
   if (read.kind === 'read') return read.text;
   return read.text === '' ? undefined : `${read.text}…`;
+}
+
+/**
+ * `text`'s first {@link ERROR_BODY_LIMIT_BYTES} bytes — never a partial code point —
+ * and `…`, or `undefined` when the whole of it fits: the bound on every upstream
+ * text an error carries (#202, #206).
+ */
+function cutToErrorLimit(text: string): string | undefined {
+  const bytes = utf8.encode(text);
+  if (bytes.byteLength <= ERROR_BODY_LIMIT_BYTES) return;
+  // A streaming decode holds back the code point the cut splits instead of emitting U+FFFD.
+  const head = new TextDecoder().decode(bytes.subarray(0, ERROR_BODY_LIMIT_BYTES), {
+    stream: true,
+  });
+  return `${head}…`;
 }
 
 /**
@@ -2018,9 +2200,10 @@ async function nextChunk(
  * True when the failure budget cut the attempt's last wait short of its own cap —
  * headers or body bytes that might still have come (#179).
  */
-function cutByBudget(last: Attempt | BodyFailedAttempt): boolean {
+function cutByBudget(last: FailedAttempt): boolean {
   switch (last.kind) {
     case 'answered':
+    case 'backend_failed':
       return false;
     case 'unanswered':
       return last.timedOut && last.capMs < ATTEMPT_HEADERS_TIMEOUT_MS;
@@ -2130,10 +2313,7 @@ function unreadableText(
 ): { hint: string; message: string } {
   const transportEnding = (rejection: unknown) =>
     `ended with ${transportCode(rejection) ?? 'a network error that carried no code'}`;
-  const onAttempt = end?.budgetStopped
-    ? `attempt ${end.attempt} of ${MAX_RETRIES}`
-    : `the last of ${MAX_RETRIES} attempts`;
-  const close = end?.budgetStopped ? `; ${BUDGET_STOP_TEXT}.` : '.';
+  const { close, onAttempt } = ladderEndText(end);
   switch (last.kind) {
     case 'unanswered':
       return {
@@ -2160,6 +2340,111 @@ function unreadableText(
       return unhandled;
     }
   }
+}
+
+/**
+ * Where a ladder's failure says it ended: on the last of its attempts, or — when the
+ * call's failure budget ended it — on the attempt it reached, naming the budget (#179).
+ */
+function ladderEndText(end: LadderEnd | undefined): { close: string; onAttempt: string } {
+  return end?.budgetStopped
+    ? { onAttempt: `attempt ${end.attempt} of ${MAX_RETRIES}`, close: `; ${BUDGET_STOP_TEXT}.` }
+    : { onAttempt: `the last of ${MAX_RETRIES} attempts`, close: '.' };
+}
+
+/**
+ * Caller text as it is sent to EDGAR full-text search, the one encoding every `q` and
+ * `keysTyped` value goes through: each backslash doubled and each control character
+ * (Unicode category Cc) written as `\uXXXX`, so a term holding either is searched as
+ * typed. Quotes, operators, and wildcards pass unchanged and keep their search syntax
+ * (#205).
+ */
+function escapeEftsText(text: string): string {
+  return text.replace(/[\\\p{Cc}]/gu, (char) =>
+    char === '\\' ? '\\\\' : `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`,
+  );
+}
+
+/** `data.reason` when EDGAR full-text search answers a 200 without its results (#61, #206). */
+const EFTS_DEGRADED_REASON = 'efts_degraded_response';
+
+/**
+ * The `errorType` values naming a failure to reach EDGAR full-text search's OpenSearch
+ * cluster at all — its client's transport errors, which a resend can get past, so a
+ * body naming one fails its attempt on the ladder. Every other class fails on its one
+ * request: a `ResponseError` is the cluster answering with an error, such as the
+ * result window that a `from` past 9,900 overruns (#206).
+ */
+const TRANSIENT_EFTS_ERRORS = new Set([
+  'ConnectionError',
+  'TimeoutError',
+  'NoLivingConnectionsError',
+]);
+
+/** The backend error a parsed EDGAR full-text search body relays in place of its results, if it relays one (#206). */
+function eftsBackendError(body: unknown): EftsBackendError | undefined {
+  if (!isRecord(body) || typeof body.errorType !== 'string') return;
+  return {
+    errorType: body.errorType,
+    errorMessage: typeof body.errorMessage === 'string' ? body.errorMessage : undefined,
+  };
+}
+
+/**
+ * The ladder's check on an EDGAR full-text search body read whole: the transient
+ * backend error it relays, else `undefined` (#206). Only a body holding the key is
+ * parsed here, so a page of hits is not parsed twice; one that does not parse fails
+ * on its one request, as the caller's own parse would fail it (#181).
+ */
+function transientEftsError(text: string, url: string): EftsBackendError | undefined {
+  if (!text.includes('"errorType"')) return;
+  const error = eftsBackendError(parseJson<unknown>(url, text));
+  return error && TRANSIENT_EFTS_ERRORS.has(error.errorType) ? error : undefined;
+}
+
+/**
+ * The failure for a 200 relaying a backend error in place of EDGAR full-text search's
+ * results (#206). With `end`, a transient one the ladder retried until it ended:
+ * `retryable: true`, the message naming the attempt it ended on. Without, any other
+ * error, failed on its one request: `retryable: false`, since resending the request
+ * unchanged draws the same error. The error's class and message ride typed fields,
+ * bounded like an error body and kept out of the message; the body's `trace` (the
+ * backend's stack frames) and `requestId` go nowhere — the framework writes its own
+ * `data.requestId`.
+ */
+function eftsBackendFailure(url: string, error: EftsBackendError, end?: LadderEnd): McpError {
+  const host = new URL(url).hostname;
+  const upstream = {
+    upstreamErrorType: cutToErrorLimit(error.errorType) ?? error.errorType,
+    ...(error.errorMessage !== undefined && {
+      upstreamErrorMessage: cutToErrorLimit(error.errorMessage) ?? error.errorMessage,
+    }),
+  };
+  if (end === undefined) {
+    return serviceUnavailable(
+      `EDGAR full-text search (${host}) answered with an error from its search backend instead of results.`,
+      {
+        reason: EFTS_DEGRADED_REASON,
+        retryable: false,
+        ...upstream,
+        recovery: {
+          hint: `EDGAR full-text search (${host}) refused to run this search, and resending it unchanged fails the same way — upstreamErrorMessage gives the reason to change.`,
+        },
+      },
+    );
+  }
+  const { close, onAttempt } = ladderEndText(end);
+  return serviceUnavailable(
+    `EDGAR full-text search (${host}) answered ${onAttempt} with a failure of its search backend instead of results${close}`,
+    {
+      reason: EFTS_DEGRADED_REASON,
+      retryable: true,
+      ...upstream,
+      recovery: {
+        hint: `EDGAR full-text search (${host}) answered, but its search backend could not run the search — a temporary failure on SEC's side, not a problem with the request. Retry the same call in a minute.`,
+      },
+    },
+  );
 }
 
 /** An identifier-shaped transport code: `ECONNRESET`, `EAI_AGAIN`, `UND_ERR_CONNECT_TIMEOUT`. */

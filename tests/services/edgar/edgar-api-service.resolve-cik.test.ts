@@ -3,8 +3,9 @@
  * `globalThis.fetch` stubbed, rather than mocked away at a tool-test call site. Covers
  * the name passes (exact → prefix → substring, including corporate-suffix normalization,
  * #107), resolution within the best tier — a suffix-dropped exact match, and former names
- * that tie current ones but never outrank them (#155) — and the catch-all ticker fallback
- * (including the dotted share-class retry, #110). The registry fixture mirrors live
+ * that tie current ones but never outrank them (#155) — the comma, period, and apostrophe
+ * fold (#210), and the catch-all ticker fallback (including the dotted share-class retry,
+ * #110). The registry fixture mirrors live
  * `company_tickers.json` rows verbatim, and the former names are the committed asset —
  * the suffix and share-class shapes these behaviors turn on only exist in real titles.
  * @module tests/services/edgar/edgar-api-service.resolve-cik
@@ -80,6 +81,20 @@ const REGISTRY: Array<{ cik_str: number; ticker: string; title: string }> = [
   { cik_str: 2089661, ticker: 'SUNC', title: 'SunocoCorp LLC' },
   { cik_str: 887028, ticker: 'RTNTF', title: 'RIO TINTO LTD' },
   { cik_str: 863064, ticker: 'RIO', title: 'RIO TINTO PLC' },
+  // Commas, periods, and apostrophes a query may leave out (#210), beside the registrants a
+  // weaker tier reaches when it does.
+  { cik_str: 1236275, ticker: 'QXO', title: 'QXO, Inc.' },
+  { cik_str: 36104, ticker: 'USB', title: 'US BANCORP \\DE\\' },
+  { cik_str: 1951070, ticker: 'MH', title: 'McGraw Hill, Inc.' },
+  { cik_str: 1632790, ticker: 'ENR', title: 'ENERGIZER HOLDINGS, INC.' },
+  { cik_str: 2012383, ticker: 'BLK', title: 'BlackRock, Inc.' },
+  { cik_str: 832327, ticker: 'BKT', title: 'BLACKROCK INCOME TRUST, INC.' },
+  { cik_str: 1512673, ticker: 'XYZ', title: 'Block, Inc.' },
+  { cik_str: 12659, ticker: 'HRB', title: 'H&R BLOCK INC' },
+  { cik_str: 794367, ticker: 'M', title: "Macy's, Inc." },
+  { cik_str: 1449794, ticker: 'EMYB', title: 'Embassy Bancorp, Inc.' },
+  { cik_str: 27093, ticker: 'USAU', title: 'U.S. GOLD CORP.' },
+  { cik_str: 1947244, ticker: 'USGO', title: 'U.S. GoldMining Inc.' },
 ];
 
 const jsonResponse = (body: unknown) =>
@@ -271,4 +286,75 @@ describe('EdgarApiService.resolveCik', () => {
     // A name containing a literal '.' still resolves by name, not by substitution.
     expect(await resolveCiks('Fluent, Inc.')).toEqual(['0001460329']);
   });
+
+  // --- Commas, periods, and apostrophes (#210) ---
+
+  it.each([
+    ['QXO Inc', '0001236275'],
+    ['U.S. Bancorp', '0000036104'],
+    // A former name of 0001885408, `jeffs' brands ltd`: the fold reaches former names too.
+    ['Jeffs Brands', '0001885408'],
+    ['Jeffs’ Brands', '0001885408'],
+    ['Macys', '0000794367'],
+    ['Macy’s', '0000794367'],
+    ['Fluent Inc', '0001460329'],
+  ])(
+    'resolves %s once commas, periods, and apostrophes leave both sides (#210)',
+    async (query, cik) => {
+      expect(await resolveCiks(query)).toEqual([cik]);
+    },
+  );
+
+  it('resolves a title equal once folded ahead of another registrant matching as written (#210)', async () => {
+    // As written, BLACKROCK INCOME TRUST, INC. starts with 'blackrock inc' and H&R BLOCK INC
+    // contains 'block inc'; BlackRock, Inc. and Block, Inc. equal each query once folded.
+    expect(await resolveCiks('BlackRock Inc')).toEqual(['0002012383']);
+    expect(await resolveCiks('Block Inc')).toEqual(['0001512673']);
+  });
+
+  it('ranks a match exact as written ahead of one exact only once folded (#210)', async () => {
+    // S&P Global's former name 'mcgraw hill inc' (0000064040) equals the title once folded.
+    expect(await resolveCiks('McGraw Hill, Inc.')).toEqual(['0001951070']);
+  });
+
+  it('lists a current registrant first when it now ties a former name (#210)', async () => {
+    // Each query equals a former name as written and the current title once folded; a
+    // former name never outranks a current one (#155), so both list, current first.
+    expect(await resolveCiks('McGraw Hill Inc')).toEqual(['0001951070', '0000064040']);
+    expect(await resolveCiks('energizer holdings inc')).toEqual(['0001632790', '0001096752']);
+  });
+
+  it('accepts a spelled-out suffix once folded (#210)', async () => {
+    // 'meta platforms inc' and 'qxo inc' read as 'incorporated' once their suffix expands.
+    expect(await resolveCiks('Meta Platforms Incorporated')).toEqual(['0001326801']);
+    expect(await resolveCiks('QXO Incorporated')).toEqual(['0001236275']);
+  });
+
+  it('resolves a folded title minus its suffix ahead of a folded prefix hit (#210)', async () => {
+    // 'us gold' is U.S. GOLD CORP. once folded and its suffix drops; U.S. GoldMining Inc.
+    // only starts with it.
+    expect(await resolveCiks('US Gold')).toEqual(['0000027093']);
+  });
+
+  it('keeps the substring tier as written (#210)', async () => {
+    // Embassy Bancorp, Inc. contains 'sy bancorp inc' once folded, not 's.y. bancorp inc'.
+    expect(await resolveCiks('S.Y. Bancorp Inc')).toEqual([]);
+  });
+
+  it.each([
+    ['QXO, Inc.', '0001236275'],
+    ['US BANCORP \\DE\\', '0000036104'],
+    ['ENERGIZER HOLDINGS, INC.', '0001632790'],
+    ['BLACKROCK INCOME TRUST, INC.', '0000832327'],
+    ['H&R BLOCK INC', '0000012659'],
+    ['Block, Inc.', '0001512673'],
+    ["Macy's, Inc.", '0000794367'],
+    ['Embassy Bancorp, Inc.', '0001449794'],
+    ['Toro Corp.', '0001941131'],
+  ])(
+    'resolves %s, typed as the registry lists it, to its own CIK alone (#210)',
+    async (query, cik) => {
+      expect(await resolveCiks(query)).toEqual([cik]);
+    },
+  );
 });

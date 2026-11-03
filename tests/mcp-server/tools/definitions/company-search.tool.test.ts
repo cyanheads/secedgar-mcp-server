@@ -45,6 +45,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService, suggestCompanies } from '@/services/edgar/edgar-api-service.js';
 import {
+  allText,
   at,
   bag,
   blockAt,
@@ -53,7 +54,7 @@ import {
   recoveryHint,
   wireError,
 } from '../../../support/assertions.js';
-import { readCommonMark } from '../../../support/commonmark.js';
+import { codeSpansIn, readCommonMark } from '../../../support/commonmark.js';
 
 const mockSubmissions: SubmissionsResponse = {
   cik: '0000320193',
@@ -1020,9 +1021,9 @@ describe('companySearchTool — filing_limit above the inline cap (#168)', () =>
     },
   };
 
-  /** The `secedgar_search_filings` arguments the notice spells out, parsed back. */
+  /** The `secedgar_search_filings` arguments the notice spells out in a code span, parsed back. */
   const recipe = (notice: unknown) => {
-    const json = String(notice).match(/secedgar_search_filings with (\{.*?\}) —/)?.[1];
+    const json = String(notice).match(/secedgar_search_filings with (`+)(\{.*?\})\1 —/)?.[2];
     expect(json).toBeDefined();
     return JSON.parse(json as string) as Record<string, unknown>;
   };
@@ -1141,7 +1142,7 @@ describe('companySearchTool — filing_limit above the inline cap (#168)', () =>
     // The caller's lower bound and the oldest filing shown as the upper one; no
     // forms filter was given, so there is no amendment matching to disclose.
     expect(enrichment.notice).toBe(
-      'Showing 50 of 86 matching filings. The inline list holds at most 50. Call secedgar_search_filings with {"query":"cik:0001045810","filed_after":"2026-07-01","filed_before":"2026-08-06","limit":100} — it also returns the filings shown here from 2026-08-06. Each call returns up to 100 filings; for older ones, repeat it with filed_before moved to the oldest filing_date it returns.',
+      'Showing 50 of 86 matching filings. The inline list holds at most 50. Call secedgar_search_filings with `{"query":"cik:0001045810","filed_after":"2026-07-01","filed_before":"2026-08-06","limit":100}` — it also returns the filings shown here from 2026-08-06. Each call returns up to 100 filings; for older ones, repeat it with filed_before moved to the oldest filing_date it returns.',
     );
     expect(String(companySearchTool.enrichment?.notice?.description)).not.toContain(
       'returns the rest',
@@ -1239,8 +1240,32 @@ describe('companySearchTool — filing_limit above the inline cap (#168)', () =>
     const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
     expect(text).toContain('Filings (50 of 86)');
     expect(text).toContain(
-      'secedgar_search_filings with {"query":"cik:0001045810","filed_after":"2026-07-01","filed_before":"2026-08-06","limit":100}',
+      'secedgar_search_filings with `{"query":"cik:0001045810","filed_after":"2026-07-01","filed_before":"2026-08-06","limit":100}`',
     );
+  });
+
+  it('reads the recipe back under CommonMark as the exact JSON, caller form types and all', async () => {
+    mockApi.getSubmissions.mockResolvedValue(recentOnly);
+    // `4` matches the Form 4s; the other names nothing and still rides into the recipe.
+    const odd = 'a"b\\c*d`e_[f](g)';
+    const result = await runToolContract(companySearchTool, {
+      query: 'NVDA',
+      forms: ['4', odd],
+      filed_after: '2026-07-01',
+      filed_before: '2026-09-24',
+      filing_limit: 100,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const call = JSON.stringify({
+      query: 'cik:0001045810',
+      forms: ['4', odd.toUpperCase()],
+      filed_after: '2026-07-01',
+      filed_before: '2026-08-06',
+      limit: 100,
+    });
+    expect(String((result.structuredContent as { notice?: string }).notice)).toContain(call);
+    expect(codeSpansIn(allText(result))).toEqual([call]);
   });
 
   // Wiring only: the clamp above now runs under EDGAR_CLAMP_OVERSIZED_LIMITS; the

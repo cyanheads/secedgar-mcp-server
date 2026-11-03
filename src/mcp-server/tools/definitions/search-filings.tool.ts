@@ -50,6 +50,14 @@ const ARCHIVE_ERA_END = '2000-12-31';
 const EDGAR_ARCHIVE_START = '1993-01-01';
 
 /**
+ * The deepest `from` EDGAR full-text search answers. It returns 100 documents from
+ * `from` whatever `size` asks, within a 10,000-document result window, and refuses
+ * any `from` past this with a `ResponseError` body, with or without query terms
+ * (#214). `find_holders`' continuation recipe names the same bound.
+ */
+export const MAX_RELEVANCE_OFFSET = 9_900;
+
+/**
  * The inclusive filing-date window a call searches, or `undefined` when no bound
  * was given (`""` counts as absent). EFTS honors a custom range only with both
  * ends — `startdt` or `enddt` alone returns the same hits as no dates — so a lone
@@ -854,6 +862,13 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         'Add ticker: or cik: entity scope to the query, drop the text terms and browse by form type (forms: ["10-K"]) and date, or, for a range that reaches 2001, start the range at 2001-01-01.',
     },
     {
+      reason: 'offset_out_of_range',
+      code: JsonRpcErrorCode.ValidationError,
+      when: `A sort=relevance search with no ticker:/cik: scope and no date range reaching before 2001 asks for an offset above ${MAX_RELEVANCE_OFFSET}, past the deepest page EDGAR full-text search serves`,
+      recovery: `Use an offset of ${MAX_RELEVANCE_OFFSET} or less — a page there with limit 100 reaches EDGAR's 10,000-document cap — or narrow the search with a shorter filed_after/filed_before window, a forms filter, or more specific terms so fewer documents match.`,
+      retryable: false,
+    },
+    {
       reason: 'rate_limited',
       code: JsonRpcErrorCode.RateLimited,
       when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
@@ -868,6 +883,15 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
       recovery:
         'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
+      retryable: true,
+      thrownBy: 'service',
+    },
+    {
+      reason: 'efts_degraded_response',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'EDGAR full-text search answered without results — its search backend failed to run the search on every attempt made (a connection or timeout failure, retried like a request SEC never answered), refused the request (upstreamErrorType and upstreamErrorMessage carry its error, and the request is not retried), or sent a payload with no hit list',
+      recovery:
+        'Retry the same call in a minute unless the error is marked not retryable; then change the request as upstreamErrorMessage indicates.',
       retryable: true,
       thrownBy: 'service',
     },
@@ -927,7 +951,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .max(9999)
       .default(0)
       .describe(
-        'Pagination offset. For sort=relevance on a 2001-onward search, EDGAR pages server-side up to its 10,000-result cap, and the offset counts matching documents, not filings — EDGAR indexes each document of a filing separately — so a page lists the filings among its limit documents, which can be fewer than limit, and a filing whose matching documents straddle a page edge can recur on the next page; stepping by limit never skips one. Everywhere else the offset indexes the filings this call assembled and sorted: the filings of a single 100-document window for date sorts and entity targeting, the full matched set on a pre-2001 archive path, or both together on a range that crosses 2001-01-01. Offsets at or past those rows return nothing even when more filings match (a total above the rows fetched, or total_is_exact false) — switch to sort=relevance for deep pagination on a 2001-onward search, narrow the search (forms, dates, entity targeting), or query the dataframe. On a crossing range the two sides are assembled unevenly — the archive side contributes every row it matched, the full-text side the filings of one document window — so once the window runs out the rows jump to the pre-2001 era with the remaining full-text matches absent from the middle; search the 2001-onward era on its own to page through those.',
+        `Pagination offset. For sort=relevance on a 2001-onward search, EDGAR pages server-side, and the offset counts matching documents, not filings — EDGAR indexes each document of a filing separately — so a page lists the filings among its limit documents, which can be fewer than limit, and a filing whose matching documents straddle a page edge can recur on the next page; stepping by limit never skips one. EDGAR serves offsets up to ${MAX_RELEVANCE_OFFSET} there, where a page of limit 100 reaches its 10,000-document cap, and a deeper offset is rejected. Everywhere else the offset indexes the filings this call assembled and sorted: the filings of a single 100-document window for date sorts and entity targeting, the full matched set on a pre-2001 archive path, or both together on a range that crosses 2001-01-01. Offsets at or past those rows return nothing even when more filings match (a total above the rows fetched, or total_is_exact false) — switch to sort=relevance for deep pagination on a 2001-onward search, narrow the search (forms, dates, entity targeting), or query the dataframe. On a crossing range the two sides are assembled unevenly — the archive side contributes every row it matched, the full-text side the filings of one document window — so once the window runs out the rows jump to the pre-2001 era with the remaining full-text matches absent from the middle; search the 2001-onward era on its own to page through those.`,
       ),
     sort: z
       .enum(['filing_date_desc', 'filing_date_asc', 'relevance'])
@@ -936,13 +960,15 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
         'Result ordering. "filing_date_desc" (default) returns most recent first. "filing_date_asc" returns oldest first. "relevance" returns SEC\'s native search-score order, which weights term match strength over recency. Date sorts re-order the top 100 hits returned by the search index — for broad queries with more than 100 matches and no entity targeting, date-newest filings may sit outside that window. Entity targeting (ticker:/cik:) or a narrower query keeps matches inside the window when absolute recency matters. On the no-query browse path (forms/entity only), EFTS has no relevance signal — every hit scores null — and returns filings in natural date-descending order, so all sort modes effectively yield newest-first. Pre-2001 archive results carry no relevance score either, so relevance collapses to date-descending there.',
       ),
   }),
-  // This tool's former date spellings, and other spellings in use across tools (#115).
+  // This tool's former date spellings, and other spellings in use across tools (#115):
+  // company_search names its filing count filing_limit (#212).
   inputAliases: {
     start_date: 'filed_after',
     date_from: 'filed_after',
     end_date: 'filed_before',
     date_to: 'filed_before',
     form_types: 'forms',
+    filing_limit: 'limit',
   },
 
   output: z.object({
@@ -1251,6 +1277,16 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     const wideFetch = entityCik !== undefined || input.sort !== 'relevance';
     const fetchFrom = wideFetch ? 0 : input.offset;
     const fetchSize = wideFetch ? 100 : limit;
+
+    // The one path that sends `offset` to EDGAR as `from`, which it refuses past
+    // MAX_RELEVANCE_OFFSET whatever the query — so a deeper page fails here, unsent (#214).
+    if (fetchFrom > MAX_RELEVANCE_OFFSET) {
+      throw ctx.fail(
+        'offset_out_of_range',
+        `Offset ${input.offset} is past the deepest sort=relevance page EDGAR full-text search serves, offset ${MAX_RELEVANCE_OFFSET}.`,
+        { offset: input.offset, max_offset: MAX_RELEVANCE_OFFSET },
+      );
+    }
 
     const response = await api.searchFilings(
       {

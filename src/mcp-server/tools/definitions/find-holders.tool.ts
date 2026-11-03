@@ -8,7 +8,8 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
+import { MAX_RELEVANCE_OFFSET } from '@/mcp-server/tools/definitions/search-filings.tool.js';
 import {
   type LimitClampOptions,
   limitClamp,
@@ -48,6 +49,14 @@ const INLINE_HOLDER_CAP = 100;
 const FILING_DEADLINE_DAYS = 45;
 
 const QUARTER_END_SUFFIX = ['03-31', '06-30', '09-30', '12-31'] as const;
+
+/**
+ * One trailing qualifier on an EDGAR-conformed name: a `\` or `/`, one to six letters,
+ * and an optional closing `\` or `/` (`US BANCORP \DE\`, `PROGRESSIVE CORP/OH/`).
+ * 13F information tables print the issuer without it, so the name phrase leaves it
+ * out; a slash inside the name (`CULLEN/FROST BANKERS, INC.`) stays (#205).
+ */
+const TRAILING_QUALIFIER = /[\\/][A-Za-z]{1,6}[\\/]?$/;
 
 /** One filer row as returned inline and materialized on the canvas. */
 interface HolderRow {
@@ -90,6 +99,16 @@ function latestClosedQuarter(today: string): string {
   // Suffixes ascend, so the last one at or before the cutoff is the newest closed quarter.
   const quarter = QUARTER_END_SUFFIX.findLastIndex((suffix) => `${year}-${suffix}` <= cutoff) + 1;
   return quarter > 0 ? `${year}-Q${quarter}` : `${year - 1}-Q4`;
+}
+
+/**
+ * A `secedgar_search_filings` call as a code span. The notice is authored Markdown,
+ * and outside code a CommonMark client consumes the backslashes that escape the
+ * name phrase's quotes, leaving invalid JSON; the span is fenced past any backtick
+ * run a registrant name carries (#220).
+ */
+function searchFilingsCall(args: Record<string, unknown>): string {
+  return markdown().inlineCode(JSON.stringify(args)).build();
 }
 
 function hitToHolder(hit: EftsHit): HolderRow {
@@ -155,6 +174,15 @@ export const findHoldersTool = tool('secedgar_find_holders', {
       retryable: true,
       thrownBy: 'service',
     },
+    {
+      reason: 'efts_degraded_response',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'EDGAR full-text search answered without results — its search backend failed to run the search on every attempt made (a connection or timeout failure, retried like a request SEC never answered), refused the request (upstreamErrorType and upstreamErrorMessage carry its error, and the request is not retried), or sent a payload with no hit list',
+      recovery:
+        'Retry the same call in a minute unless the error is marked not retryable; then change the request as upstreamErrorMessage indicates.',
+      retryable: true,
+      thrownBy: 'service',
+    },
   ],
 
   input: z.object({
@@ -163,7 +191,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
       .trim()
       .min(1, 'Issuer cannot be blank')
       .describe(
-        'The portfolio company whose holders you want — a ticker ("AAPL"), a 10-digit CIK ("0000320193"), or a company name. Without cusip, this resolves to the company\'s EDGAR-conformed name and that name is phrase-matched against 13F information tables, so it must identify one company. With cusip supplied, it is used only to label the result.',
+        'The portfolio company whose holders you want — a ticker ("AAPL"), a 10-digit CIK ("0000320193"), or a company name. Without cusip, this resolves to the company\'s EDGAR-conformed name, and that name, minus a trailing qualifier such as \\DE\\ or /OH/, is phrase-matched against 13F information tables, so it must identify one company. With cusip supplied, it is used only to label the result.',
       ),
     cusip: z
       .union([
@@ -200,9 +228,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
     resolved_issuer_name: z
       .string()
       .optional()
-      .describe(
-        'EDGAR-conformed name the issuer resolved to, also the phrase searched. Absent when cusip was supplied.',
-      ),
+      .describe('EDGAR-conformed name the issuer resolved to. Absent when cusip was supplied.'),
     resolved_issuer_cik: z
       .string()
       .optional()
@@ -214,7 +240,11 @@ export const findHoldersTool = tool('secedgar_find_holders', {
       .describe(
         '"cusip" matches the information table\'s identifier; "name" phrase-matches filing text, looser both ways.',
       ),
-    search_key: z.string().describe('The exact term searched — the CUSIP, or the quoted phrase.'),
+    search_key: z
+      .string()
+      .describe(
+        'The exact term searched — the CUSIP, or the quoted name minus any trailing qualifier.',
+      ),
     quarter: z
       .string()
       .describe('Reporting quarter searched, "YYYY-QN": the requested one or the default.'),
@@ -338,7 +368,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
     const filedFrom = addDays(quarterEnd, 1);
     const filedTo = nextQuarterEndDate(quarter);
 
-    const searchKey = cusip ?? `"${resolvedName}"`;
+    const searchKey = cusip ?? `"${resolvedName?.replace(TRAILING_QUALIFIER, '').trimEnd()}"`;
     const searchMode = cusip ? ('cusip' as const) : ('name' as const);
 
     // EFTS answers with a full page regardless of the requested size, so the
@@ -471,14 +501,14 @@ export const findHoldersTool = tool('secedgar_find_holders', {
           ? 'Raise limit to see more inline, or narrow to a single share class with cusip.'
           : searchMode === 'name'
             ? 'Narrow to a single share class with cusip.'
-            : `Page the remaining managers with secedgar_search_filings ${JSON.stringify({ query: searchKey, forms: ['13F-HR'], filed_after: filedFrom, filed_before: filedTo, sort: 'relevance', offset: 0, limit: EFTS_PAGE_SIZE })}, keeping period_ending="${quarterEnd}" and deduplicating by CIK.`;
+            : `Page the remaining managers with secedgar_search_filings ${searchFilingsCall({ query: searchKey, forms: ['13F-HR'], filed_after: filedFrom, filed_before: filedTo, sort: 'relevance', offset: 0, limit: EFTS_PAGE_SIZE })}, keeping period_ending="${quarterEnd}" and deduplicating by CIK.`;
       notices.push(guidance);
     }
     if (truncated) {
       const reachable = Math.min(total, 10_000);
       const recipe =
         hitsFetched < reachable
-          ? ` Continue with secedgar_search_filings ${JSON.stringify({ query: searchKey, forms: ['13F-HR'], filed_after: filedFrom, filed_before: filedTo, sort: 'relevance', offset: hitsFetched, limit: Math.min(EFTS_PAGE_SIZE, 10_000 - hitsFetched) })}. Offset counts documents; a filing may recur across pages. Advance offset by 100 documents per full page, stopping before offset + limit exceeds 10000. forms=["13F-HR"] includes amendments. Filter results by period_ending="${quarterEnd}"; deduplicate across the original sample and subsequent pages by CIK (sample.filer_cik, results.cik), keeping the latest filing_date.`
+          ? ` Continue with secedgar_search_filings ${searchFilingsCall({ query: searchKey, forms: ['13F-HR'], filed_after: filedFrom, filed_before: filedTo, sort: 'relevance', offset: hitsFetched, limit: Math.min(EFTS_PAGE_SIZE, 10_000 - hitsFetched) })}. Offset counts documents; a filing may recur across pages. Advance offset by 100 documents per full page, up to offset ${MAX_RELEVANCE_OFFSET}, the deepest page EDGAR full-text search serves. forms=["13F-HR"] includes amendments. Filter results by period_ending="${quarterEnd}"; deduplicate across the original sample and subsequent pages by CIK (sample.filer_cik, results.cik), keeping the latest filing_date.`
           : '';
       notices.push(
         `${totalIsExact ? `${total} matching documents` : `At least ${total} matching documents (lower bound)`}; ${reachable} reported documents are reachable within EDGAR's 10000-document paging ceiling.${!totalIsExact || total > 10_000 ? ' Documents beyond that window are unreachable by paging.' : ''}${recipe}`,

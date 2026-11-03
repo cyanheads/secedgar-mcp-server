@@ -6,7 +6,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
 import { normalizeFormFilter } from '@/mcp-server/tools/form-filter.js';
 import {
   type LimitClampOptions,
@@ -42,7 +42,9 @@ const INLINE_FILING_CAP = 50;
  * shown filings repeat and none is skipped). That tool requires both date bounds and has
  * no `company` key, so the call carries `cik:` scope and a lower bound even when the
  * caller gave none. One call serves one window of up to 100 filings, so the notice says
- * how to page on (#168).
+ * how to page on (#168). The call is a code span: the notice is authored Markdown, and
+ * a caller's form types ride into it as typed, so outside code a CommonMark client
+ * would consume their backslashes and Markdown punctuation (#220).
  */
 function searchFilingsRecipe(args: {
   cik: string;
@@ -58,7 +60,7 @@ function searchFilingsRecipe(args: {
     limit: 100,
   };
   const amendments = args.forms ? ', and its forms filter also matches amendments' : '';
-  return `The inline list holds at most ${INLINE_FILING_CAP}. Call secedgar_search_filings with ${JSON.stringify(call)} — it also returns the filings shown here from ${args.filedBefore}${amendments}. Each call returns up to ${call.limit} filings; for older ones, repeat it with filed_before moved to the oldest filing_date it returns.`;
+  return `The inline list holds at most ${INLINE_FILING_CAP}. Call secedgar_search_filings with ${markdown().inlineCode(JSON.stringify(call)).build()} — it also returns the filings shown here from ${args.filedBefore}${amendments}. Each call returns up to ${call.limit} filings; for older ones, repeat it with filed_before moved to the oldest filing_date it returns.`;
 }
 
 /** Format SEC's MMDD fiscal year end string as MM-DD (e.g., "0926" → "09-26"). */
@@ -160,7 +162,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       .trim()
       .min(1, 'Query cannot be blank')
       .describe(
-        'Company ticker symbol (e.g., "AAPL", "VOO"), name (e.g., "Apple"), or CIK number (e.g., "320193"). Ticker is the fastest lookup and works for equities, ETFs, and mutual funds; a multi-class share ticker resolves in either form ("BRK-B" or "BRK.B"). Name search matches current and former names, preferring a name the query matches exactly over one it only starts or appears in. The corporate suffix (Inc, Corp, Co, Ltd, PLC, LLC, LP, N.V., S.A., AG, SE) can be left off ("Apple" finds "Apple Inc."; "Rio Tinto" lists both the Ltd and the PLC) or spelled out ("Beacon Financial Corporation" finds "Beacon Financial Corp"), but a suffix you include must match — Corp, Inc, Co, and Ltd stay distinct from each other, since separate registrants differ only by which one they use.',
+        'Company ticker symbol (e.g., "AAPL", "VOO"), name (e.g., "Apple"), or CIK number (e.g., "320193"). Ticker is the fastest lookup and works for equities, ETFs, and mutual funds; a multi-class share ticker resolves in either form ("BRK-B" or "BRK.B"). Name search matches current and former names, preferring a name the query matches exactly over one it only starts or appears in; an exact or starts-with match ignores commas, periods, and apostrophes ("QXO Inc" finds "QXO, Inc."; "U.S. Bancorp" finds "US BANCORP"; "Macys" finds "Macy\'s, Inc."). The corporate suffix (Inc, Corp, Co, Ltd, PLC, LLC, LP, N.V., S.A., AG, SE) can be left off ("Apple" finds "Apple Inc."; "Rio Tinto" lists both the Ltd and the PLC) or spelled out ("Beacon Financial Corporation" finds "Beacon Financial Corp"), but a suffix you include must match — Corp, Inc, Co, and Ltd stay distinct from each other, since separate registrants differ only by which one they use.',
       ),
     include_filings: z
       .boolean()

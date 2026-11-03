@@ -1,8 +1,8 @@
 /**
  * @fileoverview Tests for find-holders — the 13F reverse lookup. Covers quarter
  * defaulting and the filing window, the reporting-period filter, CUSIP vs name
- * search modes, the paging budget, both zero-hit causes, and the company-identifier
- * aliases on `issuer` (#152).
+ * search modes, the paging budget, both zero-hit causes, the company-identifier
+ * aliases on `issuer` (#152), and the name phrase's dropped trailing qualifier (#205).
  * @module tests/mcp-server/tools/definitions/find-holders.tool
  */
 
@@ -16,8 +16,8 @@ import {
 } from '@/mcp-server/tools/definitions/find-holders.tool.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import type { EftsHit, EftsResponse } from '@/services/edgar/types.js';
-import { blockText, wireError } from '../../../support/assertions.js';
-import { readCommonMark } from '../../../support/commonmark.js';
+import { allText, blockText, wireError } from '../../../support/assertions.js';
+import { codeSpansIn, readCommonMark } from '../../../support/commonmark.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', async (importActual) => {
   const actual = await importActual<typeof import('@/services/edgar/edgar-api-service.js')>();
@@ -146,7 +146,11 @@ describe('findHoldersTool', () => {
     expect(text).toContain('10000-document paging ceiling');
     expect(text).toContain('10000 reported documents');
     expect(text).toContain('unreachable by paging');
-    expect(text).toContain('offset + limit exceeds 10000');
+    // The deepest offset search_filings sends to EDGAR, not offset + limit (#214).
+    expect(text).toContain(
+      'Advance offset by 100 documents per full page, up to offset 9900, the deepest page EDGAR full-text search serves.',
+    );
+    expect(text).not.toContain('offset + limit exceeds');
     if (relation === 'gte') expect(text).toContain('lower bound');
   });
 
@@ -541,7 +545,7 @@ describe('findHoldersTool', () => {
       expect(notice).not.toContain('Raise limit');
       expect(notice).not.toContain('with cusip');
       expect(notice).toContain(
-        'Page the remaining managers with secedgar_search_filings {"query":"037833100","forms":["13F-HR"],"filed_after":"2026-04-01","filed_before":"2026-06-30","sort":"relevance","offset":0,"limit":100}',
+        'Page the remaining managers with secedgar_search_filings `{"query":"037833100","forms":["13F-HR"],"filed_after":"2026-04-01","filed_before":"2026-06-30","sort":"relevance","offset":0,"limit":100}`,',
       );
       expect(notice).toContain('period_ending="2026-03-31"');
     });
@@ -645,6 +649,64 @@ describe('findHoldersTool parameter names (#152)', () => {
   });
 });
 
+// The name phrase leaves out one trailing qualifier on the conformed name — `\DE\`,
+// `/OH/`, `\new` — which 13F information tables do not print (#205).
+describe('findHoldersTool — a trailing qualifier on the conformed name (#205)', () => {
+  it.each([
+    ['US BANCORP \\DE\\', '0000036104', 'USB', '"US BANCORP"'],
+    ['PROGRESSIVE CORP/OH/', '0000080661', 'PGR', '"PROGRESSIVE CORP"'],
+    ['KVH INDUSTRIES INC \\DE\\', '0001007587', 'KVHI', '"KVH INDUSTRIES INC"'],
+    ['Viridian Therapeutics, Inc.\\DE', '0001590750', 'VRDN', '"Viridian Therapeutics, Inc."'],
+    ['Protagenic Therapeutics, Inc.\\new', '0001022899', 'PTIX', '"Protagenic Therapeutics, Inc."'],
+    // Six letters, the longest qualifier dropped.
+    ['Blue Acquisition Corp/Cayman', '0002059654', 'BACC', '"Blue Acquisition Corp"'],
+    // One qualifier only: the `/S` of the company form before it stays.
+    ['Zealand Pharma A/S/ADR', '0002068427', 'ZLDPF', '"Zealand Pharma A/S"'],
+  ])(
+    'searches %s without the qualifier and keeps the registry name',
+    async (name, cik, ticker, phrase) => {
+      mockApi.resolveCik.mockResolvedValue({ cik, name, ticker });
+
+      const result = await runToolContract(findHoldersTool, { issuer: ticker });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining({ query: phrase, forms: ['13F-HR'] }),
+        expect.any(CallScope),
+      );
+      expect(result.structuredContent).toMatchObject({
+        resolved_issuer_name: name,
+        resolved_issuer_cik: cik,
+        search_mode: 'name',
+        search_key: phrase,
+      });
+      expect(blockText(result.content)).toContain(`Resolved issuer: ${name} (CIK ${cik})`);
+      expect(blockText(result.content)).toContain(`Matched by name: ${phrase}`);
+    },
+  );
+
+  it.each([
+    ['Apple Inc.', '0000320193'],
+    ['UNIVERSAL DISPLAY CORP PA', '0001005284'],
+    ['CULLEN/FROST BANKERS, INC.', '0000039263'],
+    ['M/I HOMES, INC.', '0000799292'],
+  ])('quotes %s unchanged, having no delimited trailing qualifier', async (name, cik) => {
+    mockApi.resolveCik.mockResolvedValue({ cik, name });
+
+    const result = await runToolContract(findHoldersTool, { issuer: name });
+
+    expect(mockApi.searchFilings).toHaveBeenCalledWith(
+      expect.objectContaining({ query: `"${name}"` }),
+      expect.any(CallScope),
+    );
+    expect(result.structuredContent).toMatchObject({
+      resolved_issuer_name: name,
+      search_key: `"${name}"`,
+    });
+    expect(blockText(result.content)).toContain(`Matched by name: "${name}"`);
+  });
+});
+
 // A limit above the 100-filer inline cap is served at 100 while EDGAR_CLAMP_OVERSIZED_LIMITS
 // is on; the mechanism itself is tabled in tests/mcp-server/tools/limit-clamp.test.ts (#197).
 describe('findHoldersTool — limit above the 100 cap (#197)', () => {
@@ -706,5 +768,80 @@ describe('findHoldersTool — limit above the 100 cap (#197)', () => {
     const rejected = await runToolContract(off, { ...args, limit: 101 });
     expect(rejected.isError).toBe(true);
     expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
+  });
+});
+
+/**
+ * The notice names each secedgar_search_filings call as JSON. A client renders
+ * content[] as Markdown, so each call sits in a code span a CommonMark parse reads
+ * back as the exact JSON structuredContent carries — the quoted name phrase's
+ * backslashes included (#220).
+ */
+describe('findHoldersTool — the JSON calls in content[] read back under CommonMark (#220)', () => {
+  /** Five full pages of distinct in-quarter managers out of `total` matching documents. */
+  function fullBudget(total: number) {
+    mockApi.searchFilings.mockImplementation(async (params: { from: number }) =>
+      eftsPage(
+        Array.from({ length: 100 }, (_, i) =>
+          hit({ accession: `0000000000-26-${String(params.from + i).padStart(6, '0')}` }),
+        ),
+        total,
+      ),
+    );
+  }
+
+  /** The call the notice names, built from the result's own fields. */
+  const searchCall = (sc: Record<string, unknown>, offset: number) =>
+    JSON.stringify({
+      query: sc.search_key,
+      forms: ['13F-HR'],
+      filed_after: sc.filed_from,
+      filed_before: sc.filed_to,
+      sort: 'relevance',
+      offset,
+      limit: 100,
+    });
+
+  /** The JSON objects content[] shows as code — the trailer also spans `ordering`, which is prose. */
+  const jsonSpans = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    codeSpansIn(allText(result)).filter((span) => span.startsWith('{'));
+
+  it.each([
+    ['a quoted phrase', 'US BANCORP \\DE\\', '"US BANCORP"'],
+    [
+      'backticks and Markdown punctuation',
+      'A``B `C` *D* _E_ [F](G) \\H I CORP',
+      '"A``B `C` *D* _E_ [F](G) \\H I CORP"',
+    ],
+  ])(
+    'reads the continuation call back exactly for a name holding %s',
+    async (_label, name, phrase) => {
+      mockApi.resolveCik.mockResolvedValue({ cik: '0000036104', name });
+      fullBudget(2315);
+
+      const result = await runToolContract(findHoldersTool, { issuer: 'USB' });
+
+      expect(result.isError).toBeFalsy();
+      const sc = result.structuredContent as Record<string, unknown>;
+      expect(sc.search_key).toBe(phrase);
+      const call = searchCall(sc, 500);
+      expect(String(sc.notice)).toContain(call);
+      expect(jsonSpans(result)).toEqual([call]);
+      expect(JSON.parse(call).query).toBe(phrase);
+    },
+  );
+
+  it('reads the first-page and continuation calls of one notice back exactly, in order', async () => {
+    fullBudget(6462);
+
+    const result = await runToolContract(findHoldersTool, {
+      issuer: 'AAPL',
+      cusip: '037833100',
+      limit: 100,
+    });
+
+    const sc = result.structuredContent as Record<string, unknown>;
+    expect(sc).toMatchObject({ fetched: 500, holders_in_quarter: 500, truncated: true });
+    expect(jsonSpans(result)).toEqual([searchCall(sc, 0), searchCall(sc, 500)]);
   });
 });
