@@ -1,9 +1,9 @@
 /**
  * @fileoverview Tests for get-beneficial-owners — filing selection off the issuer's own
  * submissions feed, the form_kind and amendment filters, the December 2024 coverage
- * boundary the legacy form names sit behind, per-person canvas rows, and the free-text
- * clipping that keeps one filing's Item 4 from crowding out every other filing, and the
- * company-identifier aliases on `issuer` (#152).
+ * boundary the legacy form names sit behind, per-person canvas rows, the filer text kept with
+ * its line breaks, bounded and flagged per field, and quoted as data in `content[]` (#200), and
+ * the company-identifier aliases on `issuer` (#152).
  * @module tests/mcp-server/tools/definitions/get-beneficial-owners.tool
  */
 
@@ -86,7 +86,24 @@ function thirteenG(name: string, percent: number, opts: { comment?: string } = {
 </edgarSubmission>`;
 }
 
-function thirteenD(purpose: string): string {
+/** `text` as XML character data, a carriage return written as the `&#13;` reference filers use. */
+function xmlText(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\r/g, '&#13;');
+}
+
+interface ThirteenDOptions {
+  /** Cover-page footnote of the first reporting person (Activist LP); the second has none. */
+  comment?: string;
+  /** Name of the first reporting person, in place of Activist LP. */
+  name?: string;
+  securityClass?: string;
+}
+
+function thirteenD(purpose: string, opts: ThirteenDOptions = {}): string {
   return `<?xml version="1.0"?>
 <edgarSubmission xmlns="http://www.sec.gov/edgar/schedule13D">
   <headerData><submissionType>SCHEDULE 13D</submissionType></headerData>
@@ -94,14 +111,16 @@ function thirteenD(purpose: string): string {
     <coverPageHeader>
       <issuerInfo><issuerCIK>0000320193</issuerCIK><issuerName>Apple Inc.</issuerName></issuerInfo>
       <issuerCusips><issuerCusipNumber>037833100</issuerCusipNumber></issuerCusips>
+      ${opts.securityClass ? `<securitiesClassTitle>${xmlText(opts.securityClass)}</securitiesClassTitle>` : ''}
       <dateOfEvent>03/13/2026</dateOfEvent>
     </coverPageHeader>
     <reportingPersons>
       <reportingPersonInfo>
         <reportingPersonCIK>0001111111</reportingPersonCIK>
-        <reportingPersonName>Activist LP</reportingPersonName>
+        <reportingPersonName>${xmlText(opts.name ?? 'Activist LP')}</reportingPersonName>
         <percentOfClass>6.2</percentOfClass>
         <typeOfReportingPerson>PN</typeOfReportingPerson>
+        ${opts.comment === undefined ? '' : `<commentContent>${xmlText(opts.comment)}</commentContent>`}
       </reportingPersonInfo>
       <reportingPersonInfo>
         <reportingPersonCIK>0002222222</reportingPersonCIK>
@@ -110,7 +129,7 @@ function thirteenD(purpose: string): string {
         <typeOfReportingPerson>OO</typeOfReportingPerson>
       </reportingPersonInfo>
     </reportingPersons>
-    <items1To7><item4><transactionPurpose>${purpose}</transactionPurpose></item4></items1To7>
+    <items1To7><item4><transactionPurpose>${xmlText(purpose)}</transactionPurpose></item4></items1To7>
   </formData>
 </edgarSubmission>`;
 }
@@ -532,40 +551,6 @@ describe('getBeneficialOwnersTool', () => {
     expect(persons.map((p) => p.percent_of_class)).toEqual([6.2, 6.2]);
   });
 
-  it('clips a multi-page purpose and says it clipped it', async () => {
-    mockApi.getSubmissions.mockResolvedValue({
-      name: 'Apple Inc.',
-      filings: {
-        recent: recent([
-          {
-            form: 'SCHEDULE 13D',
-            accessionNumber: '0000000005-26-000005',
-            filingDate: '2026-05-01',
-          },
-        ]),
-      },
-    });
-    mockApi.tryGetFilingDocument.mockResolvedValue(thirteenD('x'.repeat(4000)));
-
-    const ctx = createMockContext({ errors: getBeneficialOwnersTool.errors });
-    const input = getBeneficialOwnersTool.input.parse({ issuer: 'AAPL' });
-    const result = await getBeneficialOwnersTool.handler(input, ctx);
-
-    expect(result.filings[0]?.purpose_truncated).toBe(true);
-    expect(result.filings[0]?.purpose_of_transaction?.length).toBeLessThan(1300);
-  });
-
-  it('collapses filer whitespace in a clipped cover-page note', async () => {
-    mockApi.tryGetFilingDocument.mockResolvedValue(
-      thirteenG('The Vanguard Group', 7.48, { comment: 'line one\n\n   line two' }),
-    );
-    const ctx = createMockContext({ errors: getBeneficialOwnersTool.errors });
-    const input = getBeneficialOwnersTool.input.parse({ issuer: 'AAPL', limit: 1 });
-    const result = await getBeneficialOwnersTool.handler(input, ctx);
-
-    expect(result.filings[0]?.reporting_persons[0]?.notes).toBe('line one line two');
-  });
-
   it('drops a filing whose document does not parse rather than failing the call', async () => {
     mockApi.tryGetFilingDocument
       .mockResolvedValueOnce('<ownershipDocument/>')
@@ -747,7 +732,12 @@ describe('getBeneficialOwnersTool', () => {
           cusips: ['037833100'],
           purpose_truncated: false,
           reporting_persons: [
-            { name: 'The Vanguard Group', person_types: ['IA'], percent_of_class: 7.48 },
+            {
+              name: 'The Vanguard Group',
+              person_types: ['IA'],
+              percent_of_class: 7.48,
+              notes_truncated: false,
+            },
           ],
         },
       ],
@@ -757,6 +747,333 @@ describe('getBeneficialOwnersTool', () => {
     expect(rendered).toContain('13G is the passive form and has no purpose item');
     expect(rendered).toContain('7.48% of class');
     expect(rendered).toContain('23 legacy SC 13D/SC 13G filings');
+  });
+});
+
+/**
+ * Filer-written Item 4 and cover-page footnote text: kept with its line breaks, bounded and
+ * flagged per field on both surfaces, quoted as data in `content[]`, and staged uncut in the
+ * dataframe (#200).
+ */
+describe('getBeneficialOwnersTool — filer text (#200)', () => {
+  const D_ACCESSION = '0000000005-26-000005';
+  const G_ACCESSION = '0000000001-26-000001';
+  const PURPOSE_MARKER = '(Item 4 cut after its first 5,000 characters.)';
+  const NOTE_MARKER = '(Note cut after its first 2,000 characters.)';
+
+  /** A SCHEDULE 13D (newest) and a SCHEDULE 13G in the issuer's feed, serving these documents. */
+  function serve(
+    thirteenDXml: string,
+    opts: { issuerName?: string; thirteenGXml?: string } = {},
+  ): void {
+    mockApi.getSubmissions.mockResolvedValue({
+      name: opts.issuerName ?? 'Apple Inc.',
+      filings: {
+        recent: recent([
+          { form: 'SCHEDULE 13D', accessionNumber: D_ACCESSION, filingDate: '2026-05-01' },
+          { form: 'SCHEDULE 13G', accessionNumber: G_ACCESSION, filingDate: '2026-04-29' },
+        ]),
+      },
+    });
+    const thirteenGXml = opts.thirteenGXml ?? thirteenG('The Vanguard Group', 7.48);
+    mockApi.tryGetFilingDocument.mockImplementation(async (_cik: string, accession: string) =>
+      accession === D_ACCESSION ? thirteenDXml : thirteenGXml,
+    );
+  }
+
+  /** What a CommonMark parse reads from the `format()` block of `content[]`. */
+  const rendered = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+    readCommonMark(blockText(result.content));
+
+  /** A blockquote holding exactly `value` as one paragraph, CR and CRLF read as LF. */
+  const quoted = (value: string) =>
+    `⟨blockquote_open⟩\n\n${value.replace(/\r\n?/g, '\n')}\n\n⟨blockquote_close⟩`;
+
+  it('keeps filer line breaks as filed and quotes them so content[] reads back the same text', async () => {
+    const purpose = `${[
+      'The Reporting Persons acquired the Shares for investment.',
+      '> a line that opens like a quote',
+      '>> and a deeper one',
+      '```',
+      'inside a backtick fence',
+      '```',
+      '~~~',
+      'inside a tilde fence',
+      '~~~',
+      '# not a heading',
+      '- not a list',
+      '1. not ordered',
+      'Emphasis *x* _y_ <b>html</b> [link](https://example.com) &amp; AT&T',
+      '',
+      '',
+      '    indented four spaces',
+    ].join('\n')}\r\nAfter a CRLF.\rAfter a bare CR.`;
+    const note = '(1) Held by *Fund A*.\r\n(2) Held by `Fund B`.\r> not a quote\n- not a list';
+    serve(thirteenD(purpose, { comment: note }));
+
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL' });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      filings: [
+        {
+          purpose_of_transaction: purpose,
+          purpose_truncated: false,
+          reporting_persons: [
+            { notes: note, notes_truncated: false },
+            { name: 'Activist GP', notes_truncated: false },
+          ],
+        },
+        {
+          schedule: '13G',
+          purpose_truncated: false,
+          reporting_persons: [{ notes_truncated: false }],
+        },
+      ],
+    });
+    const text = rendered(result);
+    expect(text).toContain(quoted(purpose));
+    expect(text).toContain(quoted(note));
+    // The filer's text opens no structure of its own: the two quotes are the tool's, and no fence or ordered list.
+    expect(text.match(/⟨blockquote_open⟩/g)).toHaveLength(2);
+    expect(text).not.toMatch(/⟨(fence|code_block|ordered_list_open)/);
+    expect(text).not.toContain(PURPOSE_MARKER);
+    expect(text).not.toContain(NOTE_MARKER);
+  });
+
+  it.each([
+    ['at its bound', 5000, 2000, false],
+    ['one character over it', 5001, 2001, true],
+  ] as const)(
+    'bounds purpose at 5,000 and notes at 2,000 characters — %s',
+    async (_label, purposeLength, noteLength, cut) => {
+      // Line breaks count toward the bound; a cut keeps the first characters and appends nothing.
+      const purpose = `${'ab\r\n'.repeat(2000).slice(0, purposeLength - 2)}YZ`;
+      const note = `${'n\n'.repeat(1500).slice(0, noteLength - 2)}YZ`;
+      const keptPurpose = cut ? `${purpose.slice(0, 4999)}Y` : purpose;
+      const keptNote = cut ? `${note.slice(0, 1999)}Y` : note;
+      serve(thirteenD(purpose, { comment: note }));
+
+      const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL' });
+
+      expect(result.isError).toBeFalsy();
+      expect(keptPurpose).toHaveLength(5000);
+      expect(keptNote).toHaveLength(2000);
+      expect(result.structuredContent).toMatchObject({
+        filings: [
+          {
+            purpose_of_transaction: keptPurpose,
+            purpose_truncated: cut,
+            reporting_persons: [
+              { notes: keptNote, notes_truncated: cut },
+              { name: 'Activist GP', notes_truncated: false },
+            ],
+          },
+          {
+            schedule: '13G',
+            purpose_truncated: false,
+            reporting_persons: [{ notes_truncated: false }],
+          },
+        ],
+      });
+      // content[] quotes the same kept text and carries each flag as a marker after its quote.
+      const text = rendered(result);
+      expect(text).toContain(quoted(keptPurpose));
+      expect(text).toContain(quoted(keptNote));
+      expect(text.includes(`${quoted(keptPurpose)}\n\n${PURPOSE_MARKER}`)).toBe(cut);
+      expect(text.includes(`${quoted(keptNote)}\n\n${NOTE_MARKER}`)).toBe(cut);
+      // Canvas off and nothing else to report: a notice exists only to disclose the cuts.
+      expect(bag(result.structuredContent).notice === undefined).toBe(!cut);
+    },
+  );
+
+  it('reads a cut landing between CR and LF back as a final line break', async () => {
+    serve(thirteenD(`${'x'.repeat(4999)}\r\nSecond line.`));
+
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL' });
+
+    const kept = `${'x'.repeat(4999)}\r`;
+    expect(result.structuredContent).toMatchObject({
+      filings: [{ purpose_of_transaction: kept, purpose_truncated: true }, { schedule: '13G' }],
+    });
+    expect(rendered(result)).toContain(`${quoted(kept)}\n\n${PURPOSE_MARKER}`);
+  });
+
+  it('renders names, security_class, and issuer_name holding Markdown punctuation as literal text', async () => {
+    const name = 'Activist *LP* [site](https://example.com) <i>x</i> _y_ `z`';
+    const securityClass = 'Class *A* | <u>Common</u> ~~old~~';
+    const issuerName = 'Apple *Inc* <b>x</b> [l](u)';
+    serve(thirteenD('Board representation.', { name, securityClass }), { issuerName });
+
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL' });
+
+    expect(result.structuredContent).toMatchObject({
+      issuer_name: issuerName,
+      filings: [
+        {
+          security_class: securityClass,
+          reporting_persons: [{ name }, { name: 'Activist GP' }],
+        },
+        { schedule: '13G' },
+      ],
+    });
+    const text = rendered(result);
+    expect(text).toContain(`⟨strong⟩5%+ beneficial owners of ${issuerName}⟨/strong⟩`);
+    expect(text).toContain(`Schedule 13D | event 2026-03-13 | ${securityClass} | CUSIP 037833100`);
+    expect(text).toContain(`⟨strong⟩${name}⟨/strong⟩ (CIK 0001111111, PN)`);
+  });
+
+  it('stages purpose_of_transaction and notes uncut in every dataframe row', async () => {
+    const bridge = stubBridge();
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge as never);
+    const purpose = `${'Item 4 prose.\r\n'.repeat(500)}End.`;
+    const note = `${'(1) Footnote.\n'.repeat(200)}End.`;
+    serve(thirteenD(purpose, { comment: note }), {
+      thirteenGXml: thirteenG('The Vanguard Group', 7.48, { comment: 'Passive note.' }),
+    });
+
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL' });
+
+    expect(result.structuredContent).toMatchObject({
+      filings: [
+        {
+          purpose_truncated: true,
+          reporting_persons: [{ notes_truncated: true }, { notes_truncated: false }],
+        },
+        { purpose_truncated: false, reporting_persons: [{ notes_truncated: false }] },
+      ],
+    });
+    expect(bridge.registerDataframe.mock.calls[0]?.[1].rows).toEqual([
+      expect.objectContaining({
+        reporting_person: 'Activist LP',
+        purpose_of_transaction: purpose,
+        notes: note,
+      }),
+      expect.objectContaining({
+        reporting_person: 'Activist GP',
+        purpose_of_transaction: purpose,
+        notes: null,
+      }),
+      expect.objectContaining({
+        reporting_person: 'The Vanguard Group',
+        purpose_of_transaction: null,
+        notes: 'Passive note.',
+      }),
+    ]);
+  });
+
+  it.each([
+    ['staged', true],
+    ['unavailable', false],
+  ])(
+    'counts the cuts and points at the whole text in the one notice — canvas %s',
+    async (_label, canvas) => {
+      if (canvas) vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+      serve(thirteenD('p'.repeat(5001), { comment: 'n'.repeat(2001) }));
+
+      const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL' });
+
+      const notice = String(bag(result.structuredContent).notice);
+      expect(bag(result.structuredContent).truncated).toBeUndefined();
+      expect(notice).toContain(
+        'purpose_of_transaction in 1 filing (first 5,000 characters, purpose_truncated) and notes of 1 reporting person (first 2,000 characters, notes_truncated)',
+      );
+      expect(notice).toContain('secedgar_get_filing on its accession_number');
+      expect(notice.includes("the dataframe's purpose_of_transaction and notes columns")).toBe(
+        canvas,
+      );
+      expect(notice.includes('secedgar_dataframe_describe')).toBe(canvas);
+      // One pointer to the staged table, not two.
+      expect(notice.match(/df_TEST0_TEST1/g)?.length ?? 0).toBe(canvas ? 1 : 0);
+      // The enrichment trailer carries the same notice into content[].
+      expect(
+        result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n'),
+      ).toContain('first 2,000 characters, notes_truncated');
+    },
+  );
+
+  it('composes the cuts into the truncation guidance when filings also remain unexamined', async () => {
+    serve(thirteenD('p'.repeat(5001), { comment: 'n'.repeat(2001) }));
+
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL', limit: 1 });
+
+    expect(result.structuredContent).toMatchObject({ truncated: true, cap: 1, filings_parsed: 1 });
+    const notice = String(bag(result.structuredContent).notice);
+    expect(notice).toContain('Raise limit to reach further back');
+    expect(notice).toContain('purpose_of_transaction in 1 filing (first 5,000 characters');
+    expect(notice).toContain('notes of 1 reporting person (first 2,000 characters');
+  });
+
+  it('closes a note quote inside its person, before the purpose line that follows', async () => {
+    const note = 'Held by Fund A.\nShares per Item 5.';
+    serve(thirteenD('Board representation.'), {
+      thirteenGXml: thirteenG('The Vanguard Group', 7.48, { comment: note }),
+    });
+
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL' });
+
+    // The 13G's one person ends with its note: the quote sits in that person's list item,
+    // and the purpose line below is its own paragraph, never a continuation of the quote.
+    expect(rendered(result)).toContain(
+      `Note:\n\n${quoted(note)}\n\n⟨list_item_close⟩\n\n⟨bullet_list_close⟩\n\n⟨strong⟩Purpose of transaction:⟨/strong⟩ not applicable`,
+    );
+    // Read as plain text, every line of the filer's note carries the quote marker.
+    const raw = blockText(result.content).split('\n');
+    const start = raw.indexOf('  Note:');
+    const quoteLines = raw.slice(start + 1, raw.indexOf('', start));
+    expect(quoteLines).toHaveLength(2);
+    for (const line of quoteLines) expect(line).toMatch(/^ {2}> /);
+  });
+
+  it.each([
+    [
+      'a purpose alone, canvas staged',
+      true,
+      'p'.repeat(5001),
+      'Short note.',
+      "Filer text cut to its bound: purpose_of_transaction in 1 filing (first 5,000 characters, purpose_truncated). The whole text is in the dataframe's purpose_of_transaction column, and in each filing through secedgar_get_filing on its accession_number.",
+    ],
+    [
+      'a note alone, canvas unavailable',
+      false,
+      'Short purpose.',
+      'n'.repeat(2001),
+      'Filer text cut to its bound: notes of 1 reporting person (first 2,000 characters, notes_truncated). The whole text is in each filing through secedgar_get_filing on its accession_number.',
+    ],
+  ])('discloses %s', async (_label, canvas, purpose, note, sentence) => {
+    if (canvas) vi.mocked(getCanvasBridge).mockReturnValue(stubBridge() as never);
+    serve(thirteenD(purpose, { comment: note }));
+
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL' });
+
+    expect(String(bag(result.structuredContent).notice)).toContain(sentence);
+  });
+
+  it('counts every cut value across filings and reporting persons', async () => {
+    const accessions = ['0000000007-26-000007', '0000000006-26-000006', '0000000005-26-000005'];
+    mockApi.getSubmissions.mockResolvedValue({
+      name: 'Apple Inc.',
+      filings: {
+        recent: recent(
+          accessions.map((accessionNumber, i) => ({
+            form: 'SCHEDULE 13D',
+            accessionNumber,
+            filingDate: `2026-05-0${3 - i}`,
+          })),
+        ),
+      },
+    });
+    const long = thirteenD('p'.repeat(5001), { comment: 'n'.repeat(2001) });
+    const short = thirteenD('Short purpose.', { comment: 'Short note.' });
+    mockApi.tryGetFilingDocument.mockImplementation(async (_cik: string, accession: string) =>
+      accession === accessions[2] ? short : long,
+    );
+
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'AAPL' });
+
+    expect(String(bag(result.structuredContent).notice)).toContain(
+      'Filer text cut to its bound: purpose_of_transaction in 2 filings (first 5,000 characters, purpose_truncated) and notes of 2 reporting persons (first 2,000 characters, notes_truncated).',
+    );
   });
 });
 
@@ -789,6 +1106,16 @@ describe('getBeneficialOwnersTool parameter names (#152)', () => {
     expect(wireError(result).data.reason).toBe('invalid_arguments');
     expect(blockText(result.content)).toContain('"company"');
     expect(mockApi.resolveCik).not.toHaveBeenCalled();
+  });
+
+  // company_search's name for its filing count (#212).
+  it('accepts filing_limit as an alias of limit', async () => {
+    const viaLimit = await call({ issuer: 'AAPL', limit: 1 });
+    const viaAlias = await call({ issuer: 'AAPL', filing_limit: 1 });
+
+    expect(viaAlias.isError).toBeFalsy();
+    expect(viaAlias).toEqual(viaLimit);
+    expect(viaAlias.structuredContent).toMatchObject({ filings_parsed: 1, cap: 1 });
   });
 });
 

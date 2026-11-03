@@ -11,6 +11,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import {
   type LimitClampOptions,
   limitClamp,
@@ -49,22 +50,42 @@ const FILING_RESULT_CAP = 20;
 const LEGACY_FORMS = ['SC 13D', 'SC 13D/A', 'SC 13G', 'SC 13G/A'];
 
 /**
- * Character ceiling on the Item 4 purpose-of-transaction prose. It is free text and runs to
- * several pages on a control filing, which would put one filing's narrative ahead of every
- * other filing's ownership data in the caller's context. The full text stays one
- * secedgar_get_filing call away on the accession number each row carries.
+ * Character bound on the Item 4 purpose-of-transaction prose, line breaks counted. Item 4 is
+ * the substantive 13D field, so the bound sits just above the 90th percentile of 48 sampled
+ * 13D Item 4s (4,916 characters): 44 fit whole, where a 1,200 bound would cut 34. The longest
+ * ran 14,465 characters; uncut, a few of those put one filing's narrative ahead of every other
+ * filing's ownership data. The dataframe carries every purpose uncut.
  */
-const PURPOSE_MAX_CHARS = 1200;
+const PURPOSE_MAX_CHARS = 5000;
 
-/** Character ceiling on a reporting person's cover-page footnote — same reasoning, per person. */
-const NOTES_MAX_CHARS = 240;
+/**
+ * Character bound on one reporting person's cover-page footnote, above the longest of 77
+ * sampled (1,852). A bound stays because a filing's reporting persons are unbounded.
+ */
+const NOTES_MAX_CHARS = 2000;
 
-/** Trim free text to a ceiling, reporting whether anything was cut. */
+/** A bound as the caller reads it, e.g. "5,000". */
+const charCount = (n: number) => n.toLocaleString('en-US');
+
+/**
+ * Filer text cut to its first `max` characters, line breaks and all, with nothing appended:
+ * the flag carries the cut, so the kept text stays the filer's own.
+ */
 function clip(text: string | undefined, max: number): { text: string | undefined; cut: boolean } {
-  if (text === undefined) return { text: undefined, cut: false };
-  const collapsed = text.replace(/\s+/g, ' ').trim();
-  if (collapsed.length <= max) return { text: collapsed, cut: false };
-  return { text: `${collapsed.slice(0, max)}…`, cut: true };
+  if (text === undefined || text.length <= max) return { text, cut: false };
+  return { text: text.slice(0, max), cut: true };
+}
+
+/**
+ * Filer-written text as the lines of a Markdown blockquote that a CommonMark parse reads back
+ * as `text` (CR and CRLF as LF): escaped, then every line of the escaped value prefixed `> `
+ * under `indent`. The escape writes each line break as a hard break, so the quote stays one
+ * paragraph. The caller follows the quote with a blank line before anything else it writes.
+ */
+function quote(text: string, indent = ''): string[] {
+  return escapeMarkdownInline(text)
+    .split('\n')
+    .map((line) => `${indent}> ${line}`);
 }
 
 /** One blockholder filing selected from the issuer's submissions feed. */
@@ -159,7 +180,13 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
   }),
   // The company-identifier keys other tools take. `issuer` is this tool's only company
   // input, so each maps one-to-one (#152).
-  inputAliases: { company: 'issuer', ticker: 'issuer', cik: 'issuer', ticker_or_cik: 'issuer' },
+  inputAliases: {
+    company: 'issuer',
+    ticker: 'issuer',
+    cik: 'issuer',
+    ticker_or_cik: 'issuer',
+    filing_limit: 'limit',
+  },
 
   output: z.object({
     issuer: z.string().describe('The issuer input, echoed.'),
@@ -199,12 +226,12 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     structured_coverage_from: z
       .string()
       .describe(
-        'First date SEC required this XML format (YYYY-MM-DD); earlier blockholder filings cannot be parsed here.',
+        'First date SEC required this XML format (YYYY-MM-DD); earlier filings cannot be parsed here.',
       ),
     legacy_filings_before_coverage: z
       .number()
       .describe(
-        'Legacy SC 13D / SC 13G filings (pre-2024-12-18) in the recent submissions window, which this tool cannot parse; find them with secedgar_search_filings. A floor: the window holds the last year or 1,000 filings.',
+        'Legacy SC 13D / SC 13G filings (pre-2024-12-18) in the recent submissions window; find them with secedgar_search_filings. A floor: the window holds the last year or 1,000 filings.',
       ),
     filings: z
       .array(
@@ -242,12 +269,12 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
               .string()
               .optional()
               .describe(
-                'Item 4 purpose of transaction, 13D only. Absent on 13G and on an amendment that restates none.',
+                'Item 4 purpose of transaction as filed; 13D only. Absent on 13G and on an amendment that restates none.',
               ),
             purpose_truncated: z
               .boolean()
               .describe(
-                'True when purpose_of_transaction was clipped; read the full item with secedgar_get_filing.',
+                `True when purpose_of_transaction holds only its first ${charCount(PURPOSE_MAX_CHARS)} characters; secedgar_get_filing has it whole.`,
               ),
             reporting_persons: z
               .array(
@@ -311,13 +338,18 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
                       .string()
                       .optional()
                       .describe(
-                        "The filer's cover-page footnote, often the share count behind the percentage. Clipped when long.",
+                        "The filer's cover-page footnote as filed, often the share count behind the percentage.",
+                      ),
+                    notes_truncated: z
+                      .boolean()
+                      .describe(
+                        `True when notes holds only its first ${charCount(NOTES_MAX_CHARS)} characters; secedgar_get_filing has it whole.`,
                       ),
                   })
                   .describe('One reporting person from the schedule cover page.'),
               )
               .describe(
-                'Every reporting person; a joint filing lists a fund, its adviser, and its principal separately, each reporting the same shares.',
+                'Every reporting person; a joint filing lists each fund, adviser, and principal separately.',
               ),
           })
           .describe('One SCHEDULE 13D or 13G filing made about this issuer.'),
@@ -332,11 +364,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
           ),
         row_count: z.number().describe('Rows materialized in the dataframe.'),
         expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
-        truncated: z
-          .boolean()
-          .describe(
-            'True when indexed schedules remain unexamined after the result limit or scan ceiling.',
-          ),
+        truncated: z.boolean().describe('True when indexed schedules remain unexamined.'),
       })
       .optional()
       .describe(
@@ -348,7 +376,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     notice: z
       .string()
       .optional()
-      .describe('Exclusions, document recovery, scan bounds, and dataframe guidance.'),
+      .describe('Exclusions, document recovery, scan bounds, cut text, and dataframe guidance.'),
     truncated: z
       .boolean()
       .optional()
@@ -448,8 +476,12 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       cusips: string[];
       purpose_of_transaction: string | undefined;
       purpose_truncated: boolean;
-      reporting_persons: BeneficialOwner[];
+      reporting_persons: Array<BeneficialOwner & { notes_truncated: boolean }>;
     }> = [];
+    // One row per reporting person — the grain the ownership question is asked at, and the
+    // grain that joins to the insider dataframes on issuer_cik and the 13F and NPORT-P ones on
+    // cusip. Rows take the filer text from the parse, uncut, where the inline result is bounded.
+    const rows: Record<string, unknown>[] = [];
 
     for (const ref of selected) {
       if (filings.length >= limit) break;
@@ -478,7 +510,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
         continue;
       }
       const purpose = clip(parsed.purpose_of_transaction, PURPOSE_MAX_CHARS);
-      filings.push({
+      const filing = {
         form: ref.form,
         schedule: ref.schedule,
         is_amendment: ref.form.endsWith('/A'),
@@ -490,57 +522,62 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
         cusips: parsed.issuer_cusips,
         purpose_of_transaction: purpose.text,
         purpose_truncated: purpose.cut,
-        reporting_persons: parsed.owners.map((o) => ({
-          name: o.name,
-          cik: o.cik,
-          citizenship: o.citizenship,
-          percent_of_class: o.percent_of_class,
-          aggregate_amount_owned: o.aggregate_amount_owned,
-          sole_voting_power: o.sole_voting_power,
-          shared_voting_power: o.shared_voting_power,
-          sole_dispositive_power: o.sole_dispositive_power,
-          shared_dispositive_power: o.shared_dispositive_power,
-          person_types: o.person_types,
-          excludes_certain_shares: o.excludes_certain_shares,
-          notes: clip(o.notes, NOTES_MAX_CHARS).text,
-        })),
-      });
+        reporting_persons: parsed.owners.map((o) => {
+          const notes = clip(o.notes, NOTES_MAX_CHARS);
+          return {
+            name: o.name,
+            cik: o.cik,
+            citizenship: o.citizenship,
+            percent_of_class: o.percent_of_class,
+            aggregate_amount_owned: o.aggregate_amount_owned,
+            sole_voting_power: o.sole_voting_power,
+            shared_voting_power: o.shared_voting_power,
+            sole_dispositive_power: o.sole_dispositive_power,
+            shared_dispositive_power: o.shared_dispositive_power,
+            person_types: o.person_types,
+            excludes_certain_shares: o.excludes_certain_shares,
+            notes: notes.text,
+            notes_truncated: notes.cut,
+          };
+        }),
+      };
+      filings.push(filing);
+      for (const o of parsed.owners) {
+        rows.push({
+          issuer_cik: match.cik,
+          issuer_name: submissions.name,
+          form: filing.form,
+          schedule: filing.schedule,
+          is_amendment: filing.is_amendment,
+          accession_number: filing.accession_number,
+          filing_date: filing.filing_date,
+          event_date: filing.event_date ?? null,
+          security_class: filing.security_class ?? null,
+          cusip: filing.cusips[0] ?? null,
+          reporting_person: o.name,
+          reporting_person_cik: o.cik ?? null,
+          citizenship: o.citizenship ?? null,
+          percent_of_class: o.percent_of_class ?? null,
+          aggregate_amount_owned: o.aggregate_amount_owned ?? null,
+          sole_voting_power: o.sole_voting_power ?? null,
+          shared_voting_power: o.shared_voting_power ?? null,
+          sole_dispositive_power: o.sole_dispositive_power ?? null,
+          shared_dispositive_power: o.shared_dispositive_power ?? null,
+          person_types: o.person_types.join(',') || null,
+          has_stated_purpose: parsed.purpose_of_transaction !== undefined,
+          notes: o.notes ?? null,
+          purpose_of_transaction: parsed.purpose_of_transaction ?? null,
+        });
+      }
     }
 
     const notExamined = totalMatching - examined;
     const truncated = notExamined > 0;
 
-    // One row per reporting person — the grain the ownership question is asked at, and the
-    // grain that joins to the insider dataframes on issuer_cik and the 13F and NPORT-P ones on cusip.
     let dataset:
       | { name: string; row_count: number; expires_at: string; truncated: boolean }
       | undefined;
     const bridge = getCanvasBridge();
-    const rows = filings.flatMap((f) =>
-      f.reporting_persons.map((p) => ({
-        issuer_cik: match.cik,
-        issuer_name: submissions.name,
-        form: f.form,
-        schedule: f.schedule,
-        is_amendment: f.is_amendment,
-        accession_number: f.accession_number,
-        filing_date: f.filing_date,
-        event_date: f.event_date ?? null,
-        security_class: f.security_class ?? null,
-        cusip: f.cusips[0] ?? null,
-        reporting_person: p.name,
-        reporting_person_cik: p.cik ?? null,
-        citizenship: p.citizenship ?? null,
-        percent_of_class: p.percent_of_class ?? null,
-        aggregate_amount_owned: p.aggregate_amount_owned ?? null,
-        sole_voting_power: p.sole_voting_power ?? null,
-        shared_voting_power: p.shared_voting_power ?? null,
-        sole_dispositive_power: p.sole_dispositive_power ?? null,
-        shared_dispositive_power: p.shared_dispositive_power ?? null,
-        person_types: p.person_types.join(',') || null,
-        has_stated_purpose: f.purpose_of_transaction !== undefined,
-      })),
-    );
     if (bridge && rows.length > 0) {
       const registered = await bridge.registerDataframe(ctx, {
         rows,
@@ -574,6 +611,33 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       );
     }
     if (dataset) guidance.push(dataframeGuidance(dataset));
+    const purposesCut = filings.filter((f) => f.purpose_truncated).length;
+    const notesCut = filings
+      .flatMap((f) => f.reporting_persons)
+      .filter((p) => p.notes_truncated).length;
+    if (purposesCut > 0 || notesCut > 0) {
+      const cuts: string[] = [];
+      const columns: string[] = [];
+      if (purposesCut > 0) {
+        cuts.push(
+          `purpose_of_transaction in ${purposesCut} ${purposesCut === 1 ? 'filing' : 'filings'} (first ${charCount(PURPOSE_MAX_CHARS)} characters, purpose_truncated)`,
+        );
+        columns.push('purpose_of_transaction');
+      }
+      if (notesCut > 0) {
+        cuts.push(
+          `notes of ${notesCut} reporting ${notesCut === 1 ? 'person' : 'persons'} (first ${charCount(NOTES_MAX_CHARS)} characters, notes_truncated)`,
+        );
+        columns.push('notes');
+      }
+      const filingPointer = 'each filing through secedgar_get_filing on its accession_number';
+      const whole = dataset
+        ? `the dataframe's ${columns.join(' and ')} ${columns.length === 1 ? 'column' : 'columns'}, and in ${filingPointer}`
+        : filingPointer;
+      guidance.push(
+        `Filer text cut to its bound: ${cuts.join(' and ')}. The whole text is in ${whole}.`,
+      );
+    }
     if (truncated) {
       ctx.enrich.truncated({
         shown: filings.length,
@@ -613,8 +677,10 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
   },
 
   format: (result) => {
+    // Filer-written strings and the issuer's EDGAR name render through escapeMarkdownInline, the
+    // free text as a blockquote, so content[] reads back the structuredContent value as text.
     const lines: string[] = [
-      `**5%+ beneficial owners of ${result.issuer_name}** (CIK ${result.issuer_cik}) — input "${result.issuer}"`,
+      `**5%+ beneficial owners of ${escapeMarkdownInline(result.issuer_name)}** (CIK ${result.issuer_cik}) — input "${result.issuer}"`,
       `Schedule filter: ${result.form_kind} | ${result.filings_parsed} of ${result.total_structured_filings} structured filings parsed`,
       `${result.filings_examined} examined | ${result.filings_excluded_other_issuer} excluded for another issuer | ${result.filings_failed.length} failed | ${result.filings_not_examined} not examined | partial: ${result.partial}`,
       `Structured coverage starts ${result.structured_coverage_from}; ${result.legacy_filings_before_coverage} legacy SC 13D/SC 13G filings sit before it in the submissions window (read those with secedgar_get_filing).`,
@@ -627,13 +693,13 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     for (const f of result.filings) {
       lines.push('');
       const amendment = f.is_amendment
-        ? ` (amendment${f.amendment_number ? ` no. ${f.amendment_number}` : ''})`
+        ? ` (amendment${f.amendment_number ? ` no. ${escapeMarkdownInline(f.amendment_number)}` : ''})`
         : '';
       lines.push(`## ${f.form}${amendment} — filed ${f.filing_date} [${f.accession_number}]`);
       const bits = [`Schedule ${f.schedule}`];
       if (f.event_date) bits.push(`event ${f.event_date}`);
-      if (f.security_class) bits.push(f.security_class);
-      if (f.cusips.length > 0) bits.push(`CUSIP ${f.cusips.join(', ')}`);
+      if (f.security_class) bits.push(escapeMarkdownInline(f.security_class));
+      if (f.cusips.length > 0) bits.push(`CUSIP ${escapeMarkdownInline(f.cusips.join(', '))}`);
       lines.push(bits.join(' | '));
 
       for (const p of f.reporting_persons) {
@@ -644,10 +710,12 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
             ? `${p.aggregate_amount_owned.toLocaleString()} shares`
             : 'amount N/A';
         const idBits: string[] = [];
-        if (p.cik) idBits.push(`CIK ${p.cik}`);
-        if (p.citizenship) idBits.push(p.citizenship);
-        if (p.person_types.length > 0) idBits.push(p.person_types.join('/'));
-        lines.push(`- **${p.name}**${idBits.length > 0 ? ` (${idBits.join(', ')})` : ''}`);
+        if (p.cik) idBits.push(`CIK ${escapeMarkdownInline(p.cik)}`);
+        if (p.citizenship) idBits.push(escapeMarkdownInline(p.citizenship));
+        if (p.person_types.length > 0) idBits.push(escapeMarkdownInline(p.person_types.join('/')));
+        lines.push(
+          `- **${escapeMarkdownInline(p.name)}**${idBits.length > 0 ? ` (${idBits.join(', ')})` : ''}`,
+        );
         lines.push(`  ${owned} | ${pct}`);
         lines.push(
           `  voting sole/shared: ${p.sole_voting_power ?? 'N/A'} / ${p.shared_voting_power ?? 'N/A'} | dispositive sole/shared: ${p.sole_dispositive_power ?? 'N/A'} / ${p.shared_dispositive_power ?? 'N/A'}`,
@@ -655,13 +723,28 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
         if (p.excludes_certain_shares !== undefined) {
           lines.push(`  Excludes disclaimed shares: ${p.excludes_certain_shares ? 'yes' : 'no'}`);
         }
-        if (p.notes) lines.push(`  Note: ${p.notes}`);
+        if (p.notes) {
+          lines.push('  Note:', ...quote(p.notes, '  '));
+          // The blank line ends the quote; without it the marker would continue its paragraph.
+          if (p.notes_truncated) {
+            lines.push(
+              '',
+              `  (Note cut after its first ${charCount(NOTES_MAX_CHARS)} characters.)`,
+            );
+          }
+        }
       }
 
+      // The blank line closes the person list, so nothing below continues its last quote.
+      lines.push('');
       if (f.purpose_of_transaction) {
-        lines.push(
-          `**Purpose of transaction:** ${f.purpose_of_transaction}${f.purpose_truncated ? ' (clipped — read the full Item 4 with secedgar_get_filing)' : ''}`,
-        );
+        lines.push('**Purpose of transaction:**', ...quote(f.purpose_of_transaction));
+        if (f.purpose_truncated) {
+          lines.push(
+            '',
+            `(Item 4 cut after its first ${charCount(PURPOSE_MAX_CHARS)} characters.)`,
+          );
+        }
       } else {
         lines.push(
           f.schedule === '13G'
