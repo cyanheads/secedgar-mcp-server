@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-11-03 04:15:36
+Generated on: 2026-11-03 08:14:39
 
 ```text
 secedgar-mcp-server/
@@ -33,6 +33,7 @@ secedgar-mcp-server/
 │   ├── 0.15.x/
 │   ├── 0.16.x/
 │   ├── 0.17.x/
+│   ├── 0.18.x/
 │   ├── 0.2.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
@@ -192,8 +193,11 @@ secedgar-mcp-server/
 │   │       │   ├── index.ts
 │   │       │   ├── search-concepts.tool.ts
 │   │       │   └── search-filings.tool.ts
+│   │       ├── ambiguous-matches.ts
+│   │       ├── escape-inline.ts
 │   │       ├── fixed-point.ts
 │   │       ├── form-filter.ts
+│   │       ├── format-usd.ts
 │   │       └── limit-clamp.ts
 │   ├── services/
 │   │   ├── canvas-bridge/
@@ -270,8 +274,10 @@ secedgar-mcp-server/
 │   │       │   └── tool-definitions.test.ts
 │   │       ├── amendment-disclosure.test.ts
 │   │       ├── dataframe-pointers.test.ts
+│   │       ├── escape-inline.test.ts
 │   │       ├── fixed-point.test.ts
 │   │       ├── form-filter.test.ts
+│   │       ├── format-usd.test.ts
 │   │       ├── fund-ticker-resolution.test.ts
 │   │       ├── input-aliases.test.ts
 │   │       ├── limit-clamp.test.ts

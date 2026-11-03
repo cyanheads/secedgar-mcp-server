@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.18.0](changelog/0.18.x/0.18.0.md) — 2026-11-03 · ⚠️ Breaking
+
+Company names match from a word start, never from inside a word; a name matching several companies fails as ambiguous_company on get_insider_transactions and search_filings' ticker: token; SEC and caller text in content[] is escaped; USD amounts scale by magnitude.
+
 ## [0.17.1](changelog/0.17.x/0.17.1.md) — 2026-11-02
 
 Fixes EDGAR full-text search retries, escaping, and offset limits; matches company names across punctuation; answers over-cap compare_companies lists up to the cap; keeps beneficial-owner line breaks; reads agent-filed, 2000–2001, and structured XML filings in get_filing.
