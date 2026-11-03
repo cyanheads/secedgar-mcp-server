@@ -130,7 +130,7 @@ The skill ships in `skills/secedgar-guide/SKILL.md`. Plugin hosts load it from t
 
 ### `secedgar_get_insider_transactions` <sub>tool</sub>
 
-- `company` is the issuer; `transaction_type` `purchase` (code P), `sale` (code S), or `all` (default); `limit` 1–1,000, served at 100 (default 20); does not cover Forms 3 or 5
+- `company` is the issuer, as a ticker, CIK, or current or former name; a name matching several companies fails as `ambiguous_company`, listing each CIK, name, and ticker to retry with; `transaction_type` `purchase` (code P), `sale` (code S), or `all` (default); `limit` 1–1,000, served at 100 (default 20); does not cover Forms 3 or 5
 - Without a date window it scans up to 100 of the newest Form 4 / 4-A filings; `filed_after` / `filed_before` (inclusive, either alone) read any period since mid-2003, up to 100 filings; `history_scanned_through` names the oldest filing parsed
 - Each transaction carries the reporting person, relationship, `transaction_code` and `transaction_type`, `is_derivative`, unsigned `shares_traded` with `direction` (`acquire` / `dispose`), price per share, and shares owned after; `dataset.truncated` flags filings beyond those parsed, and `filings_other_issuer` counts Form 4s the company filed as a reporting owner of another issuer, which add no rows. Price text preserves the numeric digits in fixed-point notation, with at least two decimal places.
 
@@ -149,6 +149,7 @@ The skill ships in `skills/secedgar-guide/SKILL.md`. Plugin hosts load it from t
 ### `secedgar_find_holders` <sub>tool</sub>
 
 - `issuer` as a ticker, CIK, or name, plus an optional 9-character `cusip`, the precise match key (a name phrase-match both over- and under-matches); `quarter` as `YYYY-QN`, defaulting to the newest quarter past its 45-day filing deadline; `limit` 1–100 (default 20; up to 1,000 is served at 100) from up to 500 fetched filings
+- Without `cusip`, the phrase is the issuer's registry name minus a trailing qualifier such as `\DE\` or `/OH/`; when another registrant's name reduces to the same phrase (`FIRST BANCORP /PR/` and `/NC/`), the holders can include that company's, and the notice names it with CIK and ticker and points to `cusip`
 - Rows carry `filer_cik`, `accession_number`, and `form`, while `search_mode` (`cusip` / `name`), `total_filings`, `fetched`, and `holders_in_quarter` size the result; the list is unranked, so pass a `filer_cik` to `secedgar_get_institutional_holdings` to read the position
 - When matching documents exceed the fetch budget, the notice gives an exact `secedgar_search_filings` continuation with the query, dates and document offset. Filter `results.period_ending` to the quarter end, then deduplicate across the sample's `filer_cik` and search results' `cik`, keeping the latest `filing_date`. Advance by 100 documents per full page up to offset 9,900, whose page ends at EDGAR's 10,000-document paging ceiling; lower-bound totals may hide more beyond it
 
