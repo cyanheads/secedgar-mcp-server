@@ -32,7 +32,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import { at, blockText, wireError } from '../../../support/assertions.js';
+import { at, bag, blockText, wireError } from '../../../support/assertions.js';
 import { readCommonMark } from '../../../support/commonmark.js';
 
 const mockFramesResponse: FramesResponse = {
@@ -169,7 +169,7 @@ describe('fetchFramesTool', () => {
     });
     const text = readCommonMark(blockText(result.content));
     expect(text).toContain('Check duration vs. instant period');
-    expect(text).toContain('period exists (data starts ~CY2009)');
+    expect(text).toContain('A tag has a frame only for the periods filers reported it in');
   });
 
   it('sorts ascending when requested', async () => {
@@ -1258,6 +1258,111 @@ describe('taxonomy selects the frames namespace (#143)', () => {
     const text = blockText(result.content);
     expect(text).toContain("'revenue' maps to us-gaap tags");
     expect(text).toContain('omit taxonomy');
+  });
+});
+
+/**
+ * One call reads one tag, and a tag has frames only for the periods its filers
+ * reported it in — `revenue`'s ASC 606 tag has no annual frame before CY2014,
+ * while `Revenues` reaches back past CY2009. So a `no_data` names the tag it
+ * read and the mapped tags it left unqueried, the same `tags.slice(1)` a
+ * success reports, on both surfaces (#207).
+ */
+describe('no_data names the tag it read and the tags it left unqueried (#207)', () => {
+  const revenueAlternates = [
+    'Revenues',
+    'RevenueFromContractWithCustomerIncludingAssessedTax',
+    'SalesRevenueNet',
+    'SalesRevenueGoodsNet',
+  ];
+
+  const hintOf = (data: Record<string, unknown>): string => {
+    const hint = bag(data.recovery).hint;
+    if (typeof hint !== 'string') throw new Error('Expected data.recovery.hint to be a string.');
+    return hint;
+  };
+
+  beforeEach(() => {
+    mockApi.tryGetFrames.mockResolvedValue(null);
+  });
+
+  it('lists every other revenue tag on both surfaces, after one frames request', async () => {
+    const result = await runToolContract(fetchFramesTool, { concept: 'revenue', period: 'CY2012' });
+
+    const error = wireError(result);
+    expect(error.data).toMatchObject({
+      reason: 'no_data',
+      concept: 'RevenueFromContractWithCustomerExcludingAssessedTax',
+      taxonomy: 'us-gaap',
+      unqueried_tags: revenueAlternates,
+    });
+    expect(error.message).toBe(
+      "No data for RevenueFromContractWithCustomerExcludingAssessedTax/USD/CY2012 in the us-gaap frames. One call reads one tag, so these other tags 'revenue' maps to were not queried: Revenues, RevenueFromContractWithCustomerIncludingAssessedTax, SalesRevenueNet, SalesRevenueGoodsNet.",
+    );
+    expect(hintOf(error.data)).toContain(
+      'Query each unqueried tag as concept, with the same period and unit.',
+    );
+    expect(mockApi.tryGetFrames).toHaveBeenCalledTimes(1);
+
+    const text = readCommonMark(blockText(result.content));
+    for (const tag of [
+      'RevenueFromContractWithCustomerExcludingAssessedTax',
+      ...revenueAlternates,
+    ]) {
+      expect(text).toContain(tag);
+    }
+    expect(text).toContain('Query each unqueried tag as concept');
+  });
+
+  it.each([
+    [
+      'AccountsPayableCurrent',
+      'No data for AccountsPayableCurrent/USD/CY2023Q4I in the us-gaap frames.',
+      'AccountsPayableCurrent',
+    ],
+    [
+      'cash',
+      'No data for CashAndCashEquivalentsAtCarryingValue/USD/CY2023Q4I in the us-gaap frames.',
+      'CashAndCashEquivalentsAtCarryingValue',
+    ],
+  ])('names only the tag %s read, with unqueried_tags empty', async (concept, message, tag) => {
+    const result = await runToolContract(fetchFramesTool, { concept, period: 'CY2023Q4I' });
+
+    const error = wireError(result);
+    expect(error.data).toMatchObject({ reason: 'no_data', concept: tag, unqueried_tags: [] });
+    expect(error.message).toBe(message);
+    expect(hintOf(error.data)).not.toContain('unqueried');
+    expect(mockApi.tryGetFrames).toHaveBeenCalledTimes(1);
+  });
+
+  it('points a catalog name read outside its taxonomy home before naming its other tags', async () => {
+    const result = await runToolContract(fetchFramesTool, {
+      concept: 'revenue',
+      period: 'CY2012',
+      taxonomy: 'dei',
+    });
+
+    const error = wireError(result);
+    expect(error.data).toMatchObject({ taxonomy: 'dei', unqueried_tags: revenueAlternates });
+    const hint = hintOf(error.data);
+    expect(hint).toContain('omit taxonomy');
+    // Those tags 404 under dei too, so querying them there is no next step.
+    expect(hint).not.toContain('Query each unqueried tag');
+  });
+
+  it.each([
+    ['revenue', 'CY2012'],
+    ['AccountsPayableCurrent', 'CY2005Q4I'],
+  ])('never names a year frames start in the %s hint', async (concept, period) => {
+    const result = await runToolContract(fetchFramesTool, { concept, period });
+
+    expect(hintOf(wireError(result).data)).not.toMatch(/\d{4}/);
+  });
+
+  it('names no start year in the declared no_data recovery', () => {
+    const { recovery } = at((fetchFramesTool.errors ?? []).filter((e) => e.reason === 'no_data'));
+    expect(recovery).toContain('unqueried_tags');
+    expect(recovery).not.toMatch(/\d{4}/);
   });
 });
 

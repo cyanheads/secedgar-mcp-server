@@ -75,8 +75,9 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     {
       reason: 'no_data',
       code: JsonRpcErrorCode.NotFound,
-      when: 'Concept resolves but no companies report this metric for the requested period and unit',
-      recovery: 'Check duration vs instant period, unit, and that the period exists post-CY2009.',
+      when: 'Concept resolves but no companies report the tag this call read for the requested period and unit',
+      recovery:
+        'Check duration vs. instant period and the unit, then query each tag the error lists in unqueried_tags — a tag has frames only for the periods filers reported it in, so another tag the concept maps to can cover a period this one lacks.',
     },
     {
       reason: 'rate_limited',
@@ -271,28 +272,47 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     const tag = target.tags[0] ?? concept;
     const { label, taxonomy } = target;
     const unit = (target.unit ?? input.unit).replace('/', '-per-');
+    /** One call reads one tag; the rest of a friendly name's tags are reported either way. */
+    const unqueriedTags = target.tags.slice(1);
 
     const framesResponse = await api.tryGetFrames(taxonomy, tag, unit, input.period, scope);
     if (!framesResponse) {
+      /**
+       * A tag has frames only for the periods filers reported it in — revenue's
+       * ASC 606 tag has no annual frame before CY2014 — so a 404 on the tag read
+       * says nothing about the other tags the name maps to. The message names
+       * them because `content[]` renders the message, not error data.
+       */
+      const unqueriedNote =
+        unqueriedTags.length > 0
+          ? ` One call reads one tag, so these other tags '${concept}' maps to were not queried: ${unqueriedTags.join(', ')}.`
+          : '';
+      const outsideMappedTaxonomy = mapping !== undefined && mapping.taxonomy !== taxonomy;
+      /** Outside the mapped taxonomy the other tags 404 too, so the namespace note is the next step. */
+      const alternatesNote =
+        unqueriedTags.length > 0 && !outsideMappedTaxonomy
+          ? ' Query each unqueried tag as concept, with the same period and unit.'
+          : '';
       /** A tag SEC frames only in the other namespace 404s here too, so say which one was read. */
       const namespaceNote = mapping
-        ? mapping.taxonomy === taxonomy
-          ? ''
-          : ` '${concept}' maps to ${mapping.taxonomy} tags; omit taxonomy to read them from ${mapping.taxonomy}.`
+        ? outsideMappedTaxonomy
+          ? ` '${concept}' maps to ${mapping.taxonomy} tags; omit taxonomy to read them from ${mapping.taxonomy}.`
+          : ''
         : taxonomy === 'dei'
           ? ' This read the dei frames; a financial-statement tag needs taxonomy: us-gaap.'
           : ' This read the us-gaap frames; a cover-page tag such as EntityCommonStockSharesOutstanding needs taxonomy: dei.';
       throw ctx.fail(
         'no_data',
-        `No data for ${label}/${unit}/${input.period} in the ${taxonomy} frames.`,
+        `No data for ${tag}/${unit}/${input.period} in the ${taxonomy} frames.${unqueriedNote}`,
         {
           recovery: {
-            hint: `Check duration vs. instant period (add "I" for balance sheet items), correct unit (USD-per-shares for EPS), and period exists (data starts ~CY2009).${namespaceNote}`,
+            hint: `Check duration vs. instant period (add "I" for balance sheet items) and the unit (USD-per-shares for EPS). A tag has a frame only for the periods filers reported it in: older periods hold fewer filers, and a tag adopted later has none before it.${alternatesNote}${namespaceNote}`,
           },
           concept: tag,
           taxonomy,
           period: input.period,
           unit,
+          unqueried_tags: unqueriedTags,
         },
       );
     }
@@ -391,7 +411,6 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       max: sortedEnds[sortedEnds.length - 1] ?? '',
     };
 
-    const unqueriedTags = target.tags.slice(1);
     const relatedTags = mapping?.relatedTags ?? [];
     const caveats = fiscalQ4Caveats(input.period);
 
