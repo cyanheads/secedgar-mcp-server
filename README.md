@@ -88,7 +88,7 @@ The skill ships in `skills/secedgar-guide/SKILL.md`. Plugin hosts load it from t
 
 ### `secedgar_search_filings` <sub>tool</sub>
 
-- Full-text `query` (phrases, `OR`, `-exclusion`, `wildcard*`, `ticker:` / `cik:` scoping), or browse by `forms` and/or entity with no query; `filed_after` / `filed_before` work alone (a lone `filed_after` runs through today, a lone `filed_before` starts at 2001-01-01, or at 1993-01-01 before 2001); `limit` up to 100 (default 20; a value up to 1,000 is served at 100), `offset` up to 9,999 (only with `sort: "relevance"` on a 2001-onward search)
+- Full-text `query` (phrases, `OR`, `-exclusion`, `wildcard*`, `ticker:` / `cik:` scoping), or browse by `forms` and/or entity with no query; `filed_after` / `filed_before` work alone (a lone `filed_after` runs through today, a lone `filed_before` starts at 2001-01-01, or at 1993-01-01 before 2001); `limit` up to 100 (default 20; a value up to 1,000 is served at 100), `offset` up to 9,999; only `sort: "relevance"` on a 2001-onward search without `ticker:` / `cik:` scope pages EDGAR server-side, where offsets reach 9,900 (a page of 100 there ends at its 10,000-document cap) and a deeper one fails as `offset_out_of_range`
 - Full text covers 2001 onward; earlier ranges back to 1993 come from the archives, where free text needs `ticker:` / `cik:` scope and reads up to 50 documents (`scan` reports the counts)
 - One row per filing, tagged with `source` (`efts`, `submissions`, `full-index`); full-text rows list `matched_documents` (filenames for `secedgar_get_filing`); the response carries `total`, `form_distribution`, `total_is_exact`, and `total_documents` for full-text searches
 
@@ -99,7 +99,9 @@ The skill ships in `skills/secedgar-guide/SKILL.md`. Plugin hosts load it from t
 - `accession_number` in dash or 18-digit form, optional `cik` to speed the lookup, `document` for an exhibit, `include_xbrl` for XBRL artifacts; `content_limit` 1,000–200,000 characters per page (default 50,000; up to 1,000,000 is served at 200,000)
 - Page with `offset` / `next_offset` until `content_truncated` is false, or jump with `section` (a heading such as `item 1` or `part i`), then drop `section` to page on, since it outranks `offset`; the first page of a truncated document carries an `outline` of up to 50 headings with offsets
 - `documents` splits the filing into primary, exhibits, and auxiliary; `binary` entries (scans, PDFs, archives) fail as `binary_document`, and a `section` miss returns `section_not_found` with the outline
-- If the archive doesn't serve a filing's primary document (common in 2000–2001), the full submission `<accession>.txt` is read instead and the notice says so
+- A structured XML form the filer's submissions feed records through SEC's stylesheet (a recent Form 4, SCHEDULE 13D, or NPORT-P) reads as SEC renders it, with its labels and line breaks, so `section` reaches its Items; `documents` still lists the raw XML, which `document` returns as filed. A holdings report whose raw file passes 600 KB reads as filed
+- A 2000–2001 document the archive doesn't serve under its listed name (`0001.htm`) is read under its accession-prefixed name, and `document` takes either spelling; if neither is served, the full submission `<accession>.txt` is read instead and the notice says so
+- Without `cik`, the filer is found through EDGAR full-text search and the accession number's prefix, then, when none of those directories serves the filing, through the filers on the filing's index page — so a pre-2001 filing made through a filing agent resolves on its own, and a full-text search outage falls back instead of failing the call
 
 ---
 
@@ -148,7 +150,7 @@ The skill ships in `skills/secedgar-guide/SKILL.md`. Plugin hosts load it from t
 
 - `issuer` as a ticker, CIK, or name, plus an optional 9-character `cusip`, the precise match key (a name phrase-match both over- and under-matches); `quarter` as `YYYY-QN`, defaulting to the newest quarter past its 45-day filing deadline; `limit` 1–100 (default 20; up to 1,000 is served at 100) from up to 500 fetched filings
 - Rows carry `filer_cik`, `accession_number`, and `form`, while `search_mode` (`cusip` / `name`), `total_filings`, `fetched`, and `holders_in_quarter` size the result; the list is unranked, so pass a `filer_cik` to `secedgar_get_institutional_holdings` to read the position
-- When matching documents exceed the fetch budget, the notice gives an exact `secedgar_search_filings` continuation with the query, dates and document offset. Filter `results.period_ending` to the quarter end, then deduplicate across the sample's `filer_cik` and search results' `cik`, keeping the latest `filing_date`. Advance by 100 documents per full page; EDGAR's paging ceiling is 10,000 documents, and lower-bound totals may hide more beyond it
+- When matching documents exceed the fetch budget, the notice gives an exact `secedgar_search_filings` continuation with the query, dates and document offset. Filter `results.period_ending` to the quarter end, then deduplicate across the sample's `filer_cik` and search results' `cik`, keeping the latest `filing_date`. Advance by 100 documents per full page up to offset 9,900, whose page ends at EDGAR's 10,000-document paging ceiling; lower-bound totals may hide more beyond it
 
 ---
 
@@ -156,6 +158,7 @@ The skill ships in `skills/secedgar-guide/SKILL.md`. Plugin hosts load it from t
 
 - `issuer` is the company being held; `form_kind` `all` (default), `13D`, or `13G`; `include_amendments` (default true); `limit` 1–20 matching parsed filings (default 10; up to 1,000 is served at 20). The newest-first scan examines at most 50 documents, excluding schedules naming another issuer; exclusions and failed documents do not consume `limit`
 - Each filing lists `reporting_persons` with voting power, dispositive power, and `percent_of_class` per person, which joint filers report for the same shares, so they don't sum; a 13D carries `purpose_of_transaction`, a 13G has none
+- `purpose_of_transaction` and each person's `notes` come back as filed, line breaks included, up to 5,000 and 2,000 characters; a longer value keeps its first characters and sets `purpose_truncated` or `notes_truncated`, and the notice points to the whole text in the dataframe's `purpose_of_transaction` and `notes` columns or through `secedgar_get_filing`
 - Coverage starts 2024-12-18 with the structured XML schedules; `legacy_filings_before_coverage` counts the issuer's older `SC 13D` / `SC 13G` text filings
 - `total_structured_filings` partitions into `filings_examined` + `filings_not_examined`; examined documents partition into `filings_parsed` + `filings_excluded_other_issuer` + `filings_failed.length`. Failed accessions carry `document_not_found` (404) or `unparseable` (including missing issuer identity), and set `partial`. `truncated` means indexed schedules remain unexamined after the result limit or scan ceiling, independently of failures
 
@@ -173,15 +176,15 @@ The skill ships in `skills/secedgar-guide/SKILL.md`. Plugin hosts load it from t
 
 - `concept` as a friendly name or raw tag, `period` as `CY2023`, `CY2024Q2`, or `CY2023Q4I`, `taxonomy` `us-gaap` (default) or `dei`, `unit` (default `USD`), `sort` `desc` / `asc`; `limit` 1–100 (default 25; up to 1,000 is served at 100) with `offset` / `next_offset`
 - One call queries one tag: `unqueried_tags` and `related_tags` list variants to fetch separately; `value_distribution.max_to_p95_ratio` flags scale outliers, `period_end_range` shows fiscal-year mixing, and `caveats` flags fiscal-Q4 gaps
-- A `concept` that is neither a friendly name nor an UpperCamelCase tag fails as `unknown_concept`; a well-formed tag with no frame is `no_data`
+- A `concept` that is neither a friendly name nor an UpperCamelCase tag fails as `unknown_concept`; one whose tag has no frame for the period is `no_data`, which names the tag read and lists a friendly name's other tags in `unqueried_tags` (older periods often sit under an older tag: `revenue` before CY2014 is under `Revenues` or `SalesRevenueNet`)
 
 ---
 
 ### `secedgar_compare_companies` <sub>tool</sub>
 
-- 2–10 `companies` × 1–8 `concepts`; `taxonomy` `us-gaap` (default) or `ifrs-full`; `period_type` `annual` (default) or `quarterly`; `periods` 1–12 (default 4; up to 1,000 is served at 12), trimmed further when the inline matrix gets too large
+- 2–10 `companies` × 1–8 `concepts` (up to 100 of each are accepted: the first 10 companies and first 8 distinct concepts are compared, and the rest come back unread in `deferred_companies` / `deferred_concepts`, with a notice naming the re-calls that compare them); `taxonomy` `us-gaap` (default) or `ifrs-full`; `period_type` `annual` (default) or `quarterly`; `periods` 1–12 (default 4; up to 1,000 is served at 12), trimmed further when the inline matrix gets too large
 - `cells` align each value on a calendar `period` and keep its `frame`, `period_end`, and source `tag`; a call with no comparable annual data fails `no_comparable_data`
-- `failed_companies` (reason `not_found`, `ambiguous`, or `no_company_facts`) and `gaps` report what's missing, and `caveats` flag differing period ends and unit mismatches between companies
+- `failed_companies` (reason `not_found`, `ambiguous`, or `no_company_facts`) and `gaps` report what's missing, and `caveats` flag differing period ends and unit mismatches between companies; a company named twice (a ticker and its CIK) is read once, under the first input
 - An unrecognized concept is listed in `unknown_concepts` with a hint; the call fails as `unknown_concept` only when every concept is unrecognized
 
 ---
@@ -251,7 +254,7 @@ Agent-friendly output:
 - In-conversation SQL: any tool whose response carries a `dataset` field has staged its full result as a DuckDB dataframe (`df_<id>`), while the inline list stays capped at `limit`; inspect it with `secedgar_dataframe_describe`, then query it with `secedgar_dataframe_query`
 - Discriminated outputs and explicit gaps: `source` on filing-search rows, `search_mode`, 8-K item `regime`, typed `failed_companies` reasons, and `gaps` with `tags_tried` in place of zero-filled values
 - Completeness disclosure: `history_scanned_through`, `total_is_exact`, `publication_lag_days`, and `dataset.truncated` tell agents how deep a scan went and what it left out
-- One parameter name per concept: `company`, `filed_after` / `filed_before`, and `forms` mean the same thing on every tool, and common alternate spellings (`ticker`, `cik`, `start_date`, `end_date`, `form_types`, and others) are accepted as aliases
+- One parameter name per concept: `company`, `filed_after` / `filed_before`, and `forms` mean the same thing on every tool, and common alternate spellings (`ticker`, `cik`, `start_date`, `end_date`, `form_types`, and others) are accepted as aliases, as is `filing_limit` for `limit` on `secedgar_search_filings`, `secedgar_get_material_events`, and `secedgar_get_beneficial_owners`, where `limit` counts filings
 
 ## Getting started
 
@@ -293,7 +296,7 @@ SEC requires a User-Agent in `"AppName contact@email.com"` form on every request
 | `EDGAR_TICKER_CACHE_TTL` | Seconds to cache the company and fund ticker files. | `3600` |
 | `EDGAR_DATASET_TTL_SECONDS` | TTL for canvas dataframes, renewed on every dataframe operation. | `86400` |
 | `EDGAR_DATAFRAME_DROP_ENABLED` | Set `true` to expose `secedgar_dataframe_drop`, the only destructive tool. | `false` |
-| `EDGAR_CLAMP_OVERSIZED_LIMITS` | Serve an over-cap `limit`, `content_limit`, `periods`, `preview`, or `row_limit` at its cap instead of rejecting it. Set `false` to reject above the cap. | `true` |
+| `EDGAR_CLAMP_OVERSIZED_LIMITS` | Serve an over-cap `limit`, `content_limit`, `periods`, `preview`, or `row_limit` at its cap, and answer an over-cap `companies` or `concepts` list up to its cap with the rest returned unread, instead of rejecting it. Set `false` to reject above the cap. | `true` |
 | `EDGAR_MIRROR_ENABLED` | Enable the local SQLite mirror of company tickers and XBRL company-facts. Node/Bun only; bootstrap once with `bun run mirror:init`. | `false` |
 | `EDGAR_MIRROR_PATH` | Directory holding the mirror databases. | `./data/edgar-mirror` |
 | `EDGAR_MIRROR_REFRESH_CRON` | In-process refresh cron (HTTP transport only), e.g. `0 9 * * *`. Omit to refresh with `bun run mirror:refresh`. | — |
