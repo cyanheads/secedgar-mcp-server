@@ -154,7 +154,7 @@ describe('tools reading through the edge (#141)', () => {
     expect(result.isError).toBeFalsy();
     const text = blockText(result.content);
     expect(text).not.toContain('is not iterable');
-    expect(text).toContain('CY2025: $20058.0M (raw 20058000000)');
+    expect(text).toContain('CY2025: $20.06B (raw 20058000000)');
     expect(getFinancialsTool.output.parse(result.structuredContent).data).toEqual([
       expect.objectContaining({ period: 'CY2025', value: 20_058_000_000, form: '10-K' }),
     ]);

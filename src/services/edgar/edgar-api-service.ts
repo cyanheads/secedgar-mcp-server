@@ -437,24 +437,68 @@ function stripCompanySuffix(name: string): string | undefined {
 }
 
 /**
- * Delete every comma, period, and apostrophe (`'` and `’`) from a company name, the
- * comparison form the name passes' folded tiers read, so `QXO Inc` meets `QXO, Inc.`,
- * `U.S. Bancorp` meets `US BANCORP`, and `Macys` meets `Macy's, Inc.` (#210). A period
- * is deleted, never turned into a space, so a dotted initialism meets its undotted
- * spelling. Nothing else changes — whitespace runs, `&`, `-`, `/`, and `\` stay — and the
- * result is for comparison only: a returned name is never folded.
+ * Delete every comma, period, and apostrophe (`'` and `’`) from a company name, then
+ * collapse each whitespace run to one space and trim the ends — the comparison form the
+ * name passes' folded tiers read, so `QXO Inc` meets `QXO, Inc.`, `U.S. Bancorp` meets
+ * `US BANCORP`, `Macys` meets `Macy's, Inc.` (#210), and `Forgent Networks Inc` meets the
+ * former name `forgent networks  inc` (#219). A period is deleted, never turned into a
+ * space, so a dotted initialism meets its undotted spelling. Nothing else changes — `&`,
+ * `-`, `/`, and `\` stay, and so do spaced initials (`joinSpacedInitials` is a separate
+ * step) — and the result is for comparison only: a returned name is never folded.
  */
 export function foldNamePunctuation(name: string): string {
-  return name.replace(/[,.'’]/g, '');
+  return name
+    .replace(/[,.'’]/g, '')
+    .replace(/\s{2,}|[^\S ]/g, ' ')
+    .trim();
+}
+
+/**
+ * Join each run of two or more one-letter words into one word (`j m smucker co` →
+ * `jm smucker co`), so `JM Smucker` meets the conformed name `J M SMUCKER Co` and
+ * `WP Carey` meets `W. P. Carey Inc.` once folded (#219). Reads a folded name: words are
+ * split on single spaces, and a word is one letter in any script — a digit or a symbol
+ * ends the run. A space joins when a one-letter word sits on each side of it; the
+ * lookarounds are fixed-width, so the scan stays linear in the name's length.
+ */
+export function joinSpacedInitials(name: string): string {
+  return name.replace(/(?<=(?:^| )\p{L}) (?=\p{L}(?: |$))/gu, '');
+}
+
+/** A letter or digit: the characters a name's word boundary falls between (#218). */
+const NAME_WORD_CHAR = /[\p{L}\p{N}]/u;
+
+/**
+ * Whether index `at` of `text` is a word boundary — a letter or digit on exactly one side,
+ * regex `\b` read over every script (#218). Either end of the string counts as a side
+ * with neither.
+ */
+function isWordBoundary(text: string, at: number): boolean {
+  return NAME_WORD_CHAR.test(text.charAt(at - 1)) !== NAME_WORD_CHAR.test(text.charAt(at));
+}
+
+/**
+ * Whether `name` contains `query` starting at a word boundary, so a substring hit never
+ * begins inside a word: `embassy bancorp, inc.` does not contain `sy bancorp, inc.` (#218).
+ * The query may end mid-word (`berkshire hath`). Every occurrence is tried, since the first
+ * can sit mid-word and a later one at a word start.
+ */
+export function containsFromWordStart(name: string, query: string): boolean {
+  for (let at = name.indexOf(query); at >= 0; at = name.indexOf(query, at + 1)) {
+    if (isWordBoundary(name, at)) return true;
+  }
+  return false;
 }
 
 /**
  * Name-search tiers, strongest first: exact as written (`normalizeCompanySuffix` and
- * `stripCompanySuffix` included), exact once folded (`foldNamePunctuation` on both
- * sides, then the same two), prefix once folded, substring as written (#210).
+ * `stripCompanySuffix` included), exact once folded (`foldNamePunctuation` on both sides,
+ * then the same two), exact once spaced initials join (`joinSpacedInitials` on the folded
+ * forms, then the same two), prefix of the joined form ending at a word boundary of the
+ * name, substring as written starting at a word boundary of the name (#210, #218, #219).
  */
-type NameTier = 0 | 1 | 2 | 3;
-const NAME_TIERS: readonly NameTier[] = [0, 1, 2, 3];
+type NameTier = 0 | 1 | 2 | 3 | 4;
+const NAME_TIERS: readonly NameTier[] = [0, 1, 2, 3, 4];
 
 // ---------------------------------------------------------------------------
 // Near-match company suggestions
@@ -582,9 +626,12 @@ class EdgarApiService {
    * Resolve a query (ticker, name, or CIK) to company match(es).
    * - Numeric input → direct CIK lookup
    * - 1-5 uppercase letters → ticker lookup (O(1))
-   * - Otherwise → name search (exact as written, exact once commas, periods, and
-   *   apostrophes are folded out, prefix once folded, substring as written — resolved
-   *   within the best tier a current name reaches), then the catch-all ticker lookup
+   * - No letter or digit (`.`, `'`) → no match
+   * - Otherwise → name search (exact as written; exact once commas, periods, and
+   *   apostrophes are folded out and whitespace runs collapse; exact once spaced initials
+   *   join; prefix of the joined form ending at a word boundary; substring as written
+   *   starting at one — resolved within the best tier a current name reaches), then the
+   *   catch-all ticker lookup
    * Returns a single match, an array of multiple matches, or an empty array (no match).
    * On no-result name search, the returned empty array carries `suggestions` on
    * the thrown error at the handler layer — call `suggestCompanies` there.
@@ -610,29 +657,50 @@ class EdgarApiService {
       if (match) return match;
     }
 
-    // Name search, tiered exact → exact once folded → prefix once folded → substring. Both
-    // exact tiers also accept a suffix-normalized equality (#107) and the registry name
-    // minus its terminal suffix, so `Apple` names `Apple Inc.` exactly (#155); the query's
-    // own suffix is never dropped, so `Toro Co` never meets `TORO CORP.`. The folded tiers
-    // compare with commas, periods, and apostrophes deleted from both sides (#210). Exact
-    // as written ranks first, so `McGraw Hill, Inc.` never ties a former name that equals
-    // it only once folded, and substring stays as written, since `S.Y. Bancorp Inc` folded
-    // sits inside a folded `Embassy Bancorp, Inc.`.
+    // A query with no letter or digit names no company: `.` would fold to an empty string
+    // that starts every name (#219).
+    if (!NAME_WORD_CHAR.test(trimmed)) return [];
+
+    // Name search, tiered exact as written → exact once folded → exact once initials join →
+    // prefix → substring. The three exact tiers also accept a suffix-normalized equality
+    // (#107) and the registry name minus its terminal suffix, so `Apple` names `Apple Inc.`
+    // exactly (#155); the query's own suffix is never dropped, so `Toro Co` never meets
+    // `TORO CORP.`. The folded tier compares with commas, periods, and apostrophes deleted
+    // and whitespace runs collapsed on both sides (#210, #219); the joined tier and the
+    // prefix tier read that form with each run of one-letter words joined (`j m smucker co`
+    // → `jm smucker co`, #219). Each tier ranks above the looser one after it, so
+    // `McGraw Hill, Inc.` never ties a former name equal to it only once folded, and
+    // `US Gold` (U.S. GOLD CORP.) never ties McEwen's former `u s gold corp`, equal only once
+    // joined. No hit starts or ends inside a word of the name (#218): a prefix ends at a
+    // word boundary — `helix acquisition corp ii` is not a prefix of
+    // `helix acquisition corp iii` — and a substring, matched as written, starts at one, so
+    // `SY Bancorp` never names Embassy Bancorp; a query ending mid-word (`Berkshire Hath`)
+    // still matches there when the name as written contains it.
     const lower = trimmed.toLowerCase();
     const lowerNormalized = normalizeCompanySuffix(lower);
     const folded = foldNamePunctuation(lower);
     const foldedNormalized = normalizeCompanySuffix(folded);
-    // A suffix-dropped name is a prefix of the full one, so the strip runs on prefix hits
-    // only. A prefix as written is a prefix once folded, so the folded tiers rank it.
+    const joined = joinSpacedInitials(folded);
+    const joinedNormalized = normalizeCompanySuffix(joined);
+    // A suffix-dropped name is a prefix of the full one, so the strip runs on prefix hits only.
+    const isExact = (name: string, form: string, formNormalized: string): boolean =>
+      name === form ||
+      normalizeCompanySuffix(name) === formNormalized ||
+      (name.startsWith(form) && stripCompanySuffix(name) === form);
     const tierOf = (name: string): NameTier | undefined => {
-      if (name === lower || normalizeCompanySuffix(name) === lowerNormalized) return 0;
-      if (name.startsWith(lower) && stripCompanySuffix(name) === lower) return 0;
+      if (isExact(name, lower, lowerNormalized)) return 0;
       const foldedName = foldNamePunctuation(name);
-      if (foldedName === folded || normalizeCompanySuffix(foldedName) === foldedNormalized) {
-        return 1;
+      if (isExact(foldedName, folded, foldedNormalized)) return 1;
+      const joinedName = joinSpacedInitials(foldedName);
+      // With no initials joined on either side, this repeats the folded tier's comparison.
+      if (
+        (joinedName !== foldedName || joined !== folded) &&
+        isExact(joinedName, joined, joinedNormalized)
+      ) {
+        return 2;
       }
-      if (foldedName.startsWith(folded)) return stripCompanySuffix(foldedName) === folded ? 1 : 2;
-      return name.includes(lower) ? 3 : undefined;
+      if (joinedName.startsWith(joined) && isWordBoundary(joinedName, joined.length)) return 3;
+      return containsFromWordStart(name, lower) ? 4 : undefined;
     };
 
     // Current names are registry rows, which carry a ticker; former names (the committed
@@ -641,8 +709,8 @@ class EdgarApiService {
     // name joins at that tier or better but never outranks a current name, so a company
     // is never silently swapped for a former holder of its name; former names decide
     // alone only when no current name matches (#155).
-    const current: Record<NameTier, CikMatch[]> = { 0: [], 1: [], 2: [], 3: [] };
-    const former: Record<NameTier, CikMatch[]> = { 0: [], 1: [], 2: [], 3: [] };
+    const current: Record<NameTier, CikMatch[]> = { 0: [], 1: [], 2: [], 3: [], 4: [] };
+    const former: Record<NameTier, CikMatch[]> = { 0: [], 1: [], 2: [], 3: [], 4: [] };
     for (const entry of cache.allEntries) {
       if (!entry.name) continue;
       const tier = tierOf(entry.name.toLowerCase());

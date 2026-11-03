@@ -4,8 +4,9 @@
  * the name passes (exact → prefix → substring, including corporate-suffix normalization,
  * #107), resolution within the best tier — a suffix-dropped exact match, and former names
  * that tie current ones but never outrank them (#155) — the comma, period, and apostrophe
- * fold (#210), and the catch-all ticker fallback (including the dotted share-class retry,
- * #110). The registry fixture mirrors live
+ * fold (#210), whitespace runs and spaced initials (#219), word boundaries on the prefix and
+ * substring tiers (#218), and the catch-all ticker fallback (including the dotted
+ * share-class retry, #110). The registry fixture mirrors live
  * `company_tickers.json` rows verbatim, and the former names are the committed asset —
  * the suffix and share-class shapes these behaviors turn on only exist in real titles.
  * @module tests/services/edgar/edgar-api-service.resolve-cik
@@ -95,6 +96,16 @@ const REGISTRY: Array<{ cik_str: number; ticker: string; title: string }> = [
   { cik_str: 1449794, ticker: 'EMYB', title: 'Embassy Bancorp, Inc.' },
   { cik_str: 27093, ticker: 'USAU', title: 'U.S. GOLD CORP.' },
   { cik_str: 1947244, ticker: 'USGO', title: 'U.S. GoldMining Inc.' },
+  // Later SPACs whose titles extend an earlier one's former name mid-word, and a title holding
+  // a delisted symbol mid-word (#218).
+  { cik_str: 2099656, ticker: 'HLXC', title: 'Helix Acquisition Corp. III' },
+  { cik_str: 2030482, ticker: 'PLMK', title: 'Plum Acquisition Corp. IV' },
+  { cik_str: 2128045, ticker: 'BCCQ', title: 'Bleichroeder Acquisition Corp. III' },
+  { cik_str: 1724009, ticker: 'PRT', title: 'PermRock Royalty Trust' },
+  // Conformed names that space their initials (#219).
+  { cik_str: 91419, ticker: 'SJM', title: 'J M SMUCKER Co' },
+  { cik_str: 728535, ticker: 'JBHT', title: 'HUNT J B TRANSPORT SERVICES INC' },
+  { cik_str: 1025378, ticker: 'WPC', title: 'W. P. Carey Inc.' },
 ];
 
 const jsonResponse = (body: unknown) =>
@@ -337,8 +348,9 @@ describe('EdgarApiService.resolveCik', () => {
   });
 
   it('keeps the substring tier as written (#210)', async () => {
-    // Embassy Bancorp, Inc. contains 'sy bancorp inc' once folded, not 's.y. bancorp inc'.
-    expect(await resolveCiks('S.Y. Bancorp Inc')).toEqual([]);
+    // Embassy Bancorp, Inc. contains 'sy bancorp inc' once folded, not 's.y. bancorp inc'; the
+    // query reaches Stock Yards' former name 's y bancorp inc' once its initials join (#219).
+    expect(await resolveCiks('S.Y. Bancorp Inc')).toEqual(['0000835324']);
   });
 
   it.each([
@@ -353,6 +365,93 @@ describe('EdgarApiService.resolveCik', () => {
     ['Toro Corp.', '0001941131'],
   ])(
     'resolves %s, typed as the registry lists it, to its own CIK alone (#210)',
+    async (query, cik) => {
+      expect(await resolveCiks(query)).toEqual([cik]);
+    },
+  );
+
+  // --- Whitespace runs and spaced initials (#219) ---
+
+  it.each([
+    ['JM Smucker', '0000091419'],
+    ['J.M. Smucker', '0000091419'],
+    ['J. M. Smucker', '0000091419'],
+    ['J M Smucker', '0000091419'],
+    ['Hunt JB Transport Services', '0000728535'],
+    ['WP Carey', '0001025378'],
+    ['W.P. Carey', '0001025378'],
+  ])('resolves %s to a title that spaces its initials (#219)', async (query, cik) => {
+    expect(await resolveCiks(query)).toEqual([cik]);
+  });
+
+  it('matches the start of a title once its initials join, ending at a word (#219)', async () => {
+    // HUNT J B TRANSPORT SERVICES INC reads 'hunt jb transport services inc' once joined.
+    expect(await resolveCiks('Hunt JB Transport')).toEqual(['0000728535']);
+  });
+
+  it('resolves a former name with a double space typed single-spaced (#219)', async () => {
+    // 'forgent networks  inc', a former name of ASURE SOFTWARE INC.
+    expect(await resolveCiks('Forgent Networks Inc')).toEqual(['0000884144']);
+    expect(await resolveCiks('forgent networks  inc')).toEqual(['0000884144']);
+  });
+
+  it('collapses a whitespace run in the query (#219)', async () => {
+    expect(await resolveCiks('Blue Owl  Capital Inc')).toEqual(['0001823945']);
+  });
+
+  it('lists the current registrant first for a former name it equals once joined (#219)', async () => {
+    // The former name matches as written; U.S. GOLD CORP. matches once its initials join. A
+    // former name never outranks a current one (#155), so both list, current first.
+    expect(await resolveCiks('u s gold corp')).toEqual(['0000027093', '0000314203']);
+  });
+
+  it.each(['.', ',', "'", '..'])(
+    'fails %s, a query with no letter or digit, as no match (#219)',
+    async (query) => {
+      expect(await getEdgarApiService().resolveCik(query, scope())).toEqual([]);
+    },
+  );
+
+  // --- Word boundaries on the prefix and substring tiers (#218) ---
+
+  it.each([['SY Bancorp, Inc.'], ['SY Bancorp']])(
+    'resolves %s to Stock Yards, not to Embassy Bancorp around it (#218)',
+    async (query) => {
+      // 'embassy bancorp, inc.' contains the query inside 'embassy'; Stock Yards' former name
+      // 's y bancorp inc' (0000835324) equals it once its initials join.
+      expect(await resolveCiks(query)).toEqual(['0000835324']);
+    },
+  );
+
+  it.each([
+    ['helix acquisition corp ii', '0001869105'],
+    ['plum acquisition corp i', '0001840317'],
+    ['bleichroeder acquisition corp i', '0002028707'],
+  ])(
+    'resolves %s to its former holder alone, not a later SPAC extending its last word (#218)',
+    async (query, cik) => {
+      // 'helix acquisition corp iii' starts with 'helix acquisition corp ii' mid-word.
+      expect(await resolveCiks(query)).toEqual([cik]);
+    },
+  );
+
+  it('keeps a SPAC former name typed with its period beside the title containing it (#218)', async () => {
+    // 'helix acquisition corp. iii' contains 'helix acquisition corp. ii' as written, from its
+    // first word; the former name equals the query as written and joins the tie (#155).
+    expect(await resolveCiks('Helix Acquisition Corp. II')).toEqual(['0002099656', '0001869105']);
+  });
+
+  it('no longer reaches a title holding a delisted symbol mid-word (#218)', async () => {
+    // MRO has no registry row; 'permrock royalty trust' holds 'mro' inside 'permrock'.
+    expect(await getEdgarApiService().resolveCik('MRO', scope())).toEqual([]);
+    expect(await resolveCiks('PermRock')).toEqual(['0001724009']);
+  });
+
+  it.each([
+    ['Berkshire Hath', '0001067983'],
+    ['Microso', '0000789019'],
+  ])(
+    'resolves %s, a query ending mid-word that the title contains as written (#218)',
     async (query, cik) => {
       expect(await resolveCiks(query)).toEqual([cik]);
     },

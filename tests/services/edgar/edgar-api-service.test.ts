@@ -1,7 +1,9 @@
 /**
  * @fileoverview Tests for EdgarApiService helpers — `pickPreferredTicker` (CIK
  * tie-breaker), `normalizeCompanySuffix` (corporate-suffix comparison form),
- * `foldNamePunctuation` (the comma, period, and apostrophe fold),
+ * `foldNamePunctuation` (the comma, period, apostrophe, and whitespace-run fold),
+ * `joinSpacedInitials` and `containsFromWordStart` (the name passes' initials join and
+ * word-start substring test, with their linear-time bounds),
  * `trigramSimilarity`/`suggestCompanies` (near-match suggestions),
  * `buildTickerCache` MF-ticker merge behaviour via the private indexing logic, and
  * `parseSeriesFilingFeed` (fund series → its own filings).
@@ -10,7 +12,9 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  containsFromWordStart,
   foldNamePunctuation,
+  joinSpacedInitials,
   normalizeCompanySuffix,
   parseSeriesFilingFeed,
   pickPreferredTicker,
@@ -156,12 +160,22 @@ describe('foldNamePunctuation', () => {
     expect(foldNamePunctuation(input)).toBe(expected);
   });
 
-  it('leaves every other character in place, whitespace runs included', () => {
+  it('leaves every other character in place, spaced initials included', () => {
     expect(foldNamePunctuation('h&r block inc')).toBe('h&r block inc');
     expect(foldNamePunctuation('us bancorp \\de\\')).toBe('us bancorp \\de\\');
     expect(foldNamePunctuation('coca-cola co / ltd')).toBe('coca-cola co / ltd');
-    expect(foldNamePunctuation('ceva  inc')).toBe('ceva  inc');
     expect(foldNamePunctuation('j m smucker co')).toBe('j m smucker co');
+  });
+
+  it('collapses each whitespace run to one space and trims the ends (#219)', () => {
+    expect(foldNamePunctuation('ceva  inc')).toBe('ceva inc');
+    expect(foldNamePunctuation('forgent networks  inc')).toBe('forgent networks inc');
+    expect(foldNamePunctuation('acme\tholdings\r\ninc')).toBe('acme holdings inc');
+    expect(foldNamePunctuation('acme inc')).toBe('acme inc');
+    // A deleted mark can leave a run or an edge space behind it.
+    expect(foldNamePunctuation('acme , inc.')).toBe('acme inc');
+    expect(foldNamePunctuation('. acme .')).toBe('acme');
+    expect(foldNamePunctuation('..')).toBe('');
   });
 
   it('keeps the four suffix buckets apart once folded', () => {
@@ -169,6 +183,145 @@ describe('foldNamePunctuation', () => {
     expect(bucket('toro co')).toBe('toro company');
     expect(bucket('toro corp.')).toBe('toro corporation');
     expect(bucket('fluent, inc.')).not.toBe(bucket('fluent corp.'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// joinSpacedInitials (#219)
+// ---------------------------------------------------------------------------
+
+describe('joinSpacedInitials', () => {
+  it.each([
+    ['j m smucker co', 'jm smucker co'],
+    ['hunt j b transport services inc', 'hunt jb transport services inc'],
+    ['w p carey inc', 'wp carey inc'],
+    ['s y bancorp inc', 'sy bancorp inc'],
+    ['heineken holding n v', 'heineken holding nv'],
+    ['a b c d', 'abcd'],
+    ['a b foo c d', 'ab foo cd'],
+  ])('joins each run of one-letter words in %s', (input, expected) => {
+    expect(joinSpacedInitials(input)).toBe(expected);
+  });
+
+  it('leaves a lone one-letter word and longer words apart', () => {
+    expect(joinSpacedInitials('j smucker co')).toBe('j smucker co');
+    expect(joinSpacedInitials('smucker j')).toBe('smucker j');
+    expect(joinSpacedInitials('a bc d')).toBe('a bc d');
+    expect(joinSpacedInitials('jm smucker co')).toBe('jm smucker co');
+    expect(joinSpacedInitials('')).toBe('');
+  });
+
+  it('counts letters only, so a digit or symbol word breaks a run', () => {
+    expect(joinSpacedInitials('a 1 b')).toBe('a 1 b');
+    expect(joinSpacedInitials('j & m co')).toBe('j & m co');
+    expect(joinSpacedInitials('a-b c d')).toBe('a-b cd');
+  });
+
+  it('joins one-letter words in any script', () => {
+    expect(joinSpacedInitials('é è holdings')).toBe('éè holdings');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// containsFromWordStart (#218)
+// ---------------------------------------------------------------------------
+
+describe('containsFromWordStart', () => {
+  it('finds the query only where it starts a word of the name', () => {
+    expect(containsFromWordStart('embassy bancorp, inc.', 'sy bancorp, inc.')).toBe(false);
+    expect(containsFromWordStart('permrock royalty trust', 'mro')).toBe(false);
+    expect(containsFromWordStart('maui land & pineapple co inc', 'pineapple co')).toBe(true);
+    expect(containsFromWordStart('berkshire hathaway inc', 'berkshire')).toBe(true);
+  });
+
+  it('lets the query end mid-word', () => {
+    expect(containsFromWordStart('berkshire hathaway inc', 'berkshire hath')).toBe(true);
+  });
+
+  it('tries every occurrence, past one that sits mid-word', () => {
+    expect(containsFromWordStart('itau unibanco banco multiplo s.a.', 'banco')).toBe(true);
+    expect(containsFromWordStart('itau unibanco holding s.a.', 'banco')).toBe(false);
+  });
+
+  it('reads a letter or digit on exactly one side as the boundary, as regex \\b does', () => {
+    expect(containsFromWordStart('coca-cola co', 'cola co')).toBe(true);
+    expect(containsFromWordStart('3m co', 'm co')).toBe(false);
+    expect(containsFromWordStart('élan corp', 'lan corp')).toBe(false);
+    expect(containsFromWordStart('élan corp', 'élan')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Name-matching helpers over caller-sized text (#218, #219)
+// ---------------------------------------------------------------------------
+
+describe('name-matching helpers — linear in the text’s length (#218, #219)', () => {
+  const fill = (unit: string, chars: number) => unit.repeat(Math.ceil(chars / unit.length));
+
+  /**
+   * Thread CPU milliseconds one call takes, timed over a batch sized to hold the work near
+   * 320k characters per measurement, least of five: wall clock is noise under a parallel
+   * suite, and a 5k call alone is too short to time.
+   */
+  function perCallCpuMs(run: (text: string) => unknown, text: string): number {
+    const batch = Math.max(1, Math.round(320_000 / text.length));
+    let least = Number.POSITIVE_INFINITY;
+    for (let round = 0; round < 5; round++) {
+      const start = process.threadCpuUsage();
+      for (let i = 0; i < batch; i++) run(text);
+      const used = process.threadCpuUsage(start);
+      least = Math.min(least, (used.user + used.system) / 1000 / batch);
+    }
+    return least;
+  }
+
+  /**
+   * Doubles n from 5,000 to 320,000, checking the CPU bound at each size before building the
+   * next, so a quadratic shape fails fast instead of hanging, then holds the 64× span's ratio
+   * under 256, where a quadratic scan reaches 4,096.
+   */
+  function expectLinear(run: (text: string) => unknown, build: (n: number) => string): void {
+    const small = build(5_000);
+    run(small); // warm the JIT
+    const t5k = Math.max(perCallCpuMs(run, small), 0.001);
+    let last = t5k;
+    for (let n = 10_000; n <= 320_000; n *= 2) {
+      last = perCallCpuMs(run, build(n));
+      expect(last, `${n} characters`).toBeLessThan(100);
+    }
+    expect(last / t5k).toBeLessThan(256);
+  }
+
+  const shapes: Array<[string, (n: number) => string]> = [
+    ['a long run of one-letter words', (n) => fill('a ', n)],
+    ['one-letter words split by space runs', (n) => fill('a  ', n)],
+    ['one-letter words beside longer ones', (n) => fill('a bc ', n)],
+    ['a long run of spaces', (n) => `a${fill(' ', n)}b`],
+    ['marks that leave space runs once deleted', (n) => fill('a . ', n)],
+    ['one long line ending in a break', (n) => `${fill('§1 x', n)}\ny`],
+    ['breaks throughout', (n) => fill('  \r\n', n)],
+  ];
+
+  it.each(shapes)('foldNamePunctuation: %s (5k → 320k)', (_label, build) => {
+    expectLinear(foldNamePunctuation, build);
+  });
+
+  it.each(shapes)('joinSpacedInitials: %s (5k → 320k)', (_label, build) => {
+    expectLinear(joinSpacedInitials, build);
+  });
+
+  it.each([
+    ...shapes,
+    ['occurrences that all sit mid-word', (n: number) => fill('xab ', n)],
+  ] as Array<[string, (n: number) => string]>)(
+    'containsFromWordStart, %s as the name (5k → 320k)',
+    (_label, build) => {
+      expectLinear((text) => containsFromWordStart(text, 'ab'), build);
+    },
+  );
+
+  it.each(shapes)('containsFromWordStart, %s as the query (5k → 320k)', (_label, build) => {
+    expectLinear((text) => containsFromWordStart('helix acquisition corp. iii', text), build);
   });
 });
 
