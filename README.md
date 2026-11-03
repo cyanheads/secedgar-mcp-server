@@ -294,7 +294,7 @@ SEC requires a User-Agent in `"AppName contact@email.com"` form on every request
 | `EDGAR_RATE_LIMIT_RPS` | Max requests per second to SEC (1–10). | `10` |
 | `EDGAR_RATE_LIMIT_COOLDOWN_SECONDS` | Seconds to refuse calls locally after a 429 before one probe goes out. | `600` |
 | `EDGAR_TICKER_CACHE_TTL` | Seconds to cache the company and fund ticker files. | `3600` |
-| `EDGAR_DATASET_TTL_SECONDS` | TTL for canvas dataframes, renewed on every dataframe operation. | `86400` |
+| `EDGAR_DATASET_TTL_SECONDS` | Seconds a canvas dataframe lives, counted from when it is staged; queries do not extend it. | `86400` |
 | `EDGAR_DATAFRAME_DROP_ENABLED` | Set `true` to expose `secedgar_dataframe_drop`, the only destructive tool. | `false` |
 | `EDGAR_CLAMP_OVERSIZED_LIMITS` | Serve an over-cap `limit`, `content_limit`, `periods`, `preview`, or `row_limit` at its cap, and answer an over-cap `companies` or `concepts` list up to its cap with the rest returned unread, instead of rejecting it. Set `false` to reject above the cap. | `true` |
 | `EDGAR_MIRROR_ENABLED` | Enable the local SQLite mirror of company tickers and XBRL company-facts. Node/Bun only; bootstrap once with `bun run mirror:init`. | `false` |
