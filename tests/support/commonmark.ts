@@ -58,3 +58,22 @@ export function codeSpansIn(markdown: string): string[] {
     .filter((token) => token.type === 'code_inline')
     .map((token) => token.content);
 }
+
+/**
+ * Every fenced code block a CommonMark parse of `markdown` reads, in document
+ * order: its info string, its content as a client shows it (each line with its
+ * line feed), and the zero-based lines its opening and closing fences sit on.
+ * Lines count as CommonMark counts them, after CR and CRLF become LF.
+ */
+export function fencedBlocksIn(
+  markdown: string,
+): Array<{ info: string; content: string; openLine: number; closeLine: number }> {
+  return parser
+    .parse(markdown, {})
+    .filter((token) => token.type === 'fence')
+    .map((token) => {
+      // A fence's map ends on the line after its closing fence.
+      const [openLine, end] = token.map ?? [-1, -1];
+      return { info: token.info, content: token.content, openLine, closeLine: end - 1 };
+    });
+}
