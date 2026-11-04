@@ -81,7 +81,7 @@ The skill ships in `skills/secedgar-guide/SKILL.md`. Plugin hosts load it from t
 ### `secedgar_company_search` <sub>tool</sub>
 
 - `query` takes a ticker (equities, ETFs, mutual funds), a current or former company name, or a CIK; `include_filings` (default on) adds up to `filing_limit` filings (default 10; a value up to 1,000 is served at the 50 inline cap), filtered by `forms`, `filed_after`, and `filed_before`
-- Returns SIC code, exchanges, fiscal year end, and state of incorporation, plus `series_id` / `class_id` for a fund ticker; fails as `no_match` (with near matches in `data.suggestions`) or `multiple_matches`
+- Returns SIC code, exchanges, fiscal year end, and state of incorporation, plus `series_id` / `class_id` for a fund ticker; fails as `no_match` (with near matches in `data.suggestions`) or, for a name matching several companies, `ambiguous_company`, listing up to 10 by CIK, name, and ticker to retry with, plus the full count in `total_matches`
 - A date or form filter can reach into the archive (up to 10 pages); `history_scanned_through` reports how far it got
 
 ---
@@ -130,7 +130,7 @@ The skill ships in `skills/secedgar-guide/SKILL.md`. Plugin hosts load it from t
 
 ### `secedgar_get_insider_transactions` <sub>tool</sub>
 
-- `company` is the issuer, as a ticker, CIK, or current or former name; a name matching several companies fails as `ambiguous_company`, listing each CIK, name, and ticker to retry with; `transaction_type` `purchase` (code P), `sale` (code S), or `all` (default); `limit` 1–1,000, served at 100 (default 20); does not cover Forms 3 or 5
+- `company` is the issuer, as a ticker, CIK, or current or former name; a name matching several companies fails as `ambiguous_company`, listing up to 10 by CIK, name, and ticker to retry with, plus the full count in `total_matches`; `transaction_type` `purchase` (code P), `sale` (code S), or `all` (default); `limit` 1–1,000, served at 100 (default 20); does not cover Forms 3 or 5
 - Without a date window it scans up to 100 of the newest Form 4 / 4-A filings; `filed_after` / `filed_before` (inclusive, either alone) read any period since mid-2003, up to 100 filings; `history_scanned_through` names the oldest filing parsed
 - Each transaction carries the reporting person, relationship, `transaction_code` and `transaction_type`, `is_derivative`, unsigned `shares_traded` with `direction` (`acquire` / `dispose`), price per share, and shares owned after; `dataset.truncated` flags filings beyond those parsed, and `filings_other_issuer` counts Form 4s the company filed as a reporting owner of another issuer, which add no rows. Price text preserves the numeric digits in fixed-point notation, with at least two decimal places.
 
@@ -142,7 +142,7 @@ The skill ships in `skills/secedgar-guide/SKILL.md`. Plugin hosts load it from t
 - Older quarters are found in the archive (up to 10 pages); a quarter covered only by a 13F-NT notice fails as `no_filings_found` naming the notice's accession number and period
 - Holdings, paging, consolidation, and the dataframe cover the quarter composed from the original 13F-HR and its same-period 13F-HR/A amendments, applied in `acceptanceDateTime` order: a `RESTATEMENT` replaces everything composed so far (earlier `NEW HOLDINGS` included); a `NEW HOLDINGS` amendment appends its rows, unless its table repeats every composed row (CUSIP, class, put/call, discretion, shares, share type), in which case it applies as a restatement. Values normalize by each accession's own filing date. Only tables from the last readable restatement on are read
 - `amendments` (newest filed first) discloses each accession, filing date, and cover-page type (`UNAVAILABLE` with a reason when unreadable), plus `applied_as`: `restatement`, `new_holdings`, `superseded`, or `not_applied` (type or table unreadable, named in the notice); inspect any with `secedgar_get_filing`. `composed_accessions` lists the filings the rows come from, in application order. `amendment_search_complete=false` warns that bounded or unavailable archive discovery may have missed amendments
-- Holdings carry issuer, CUSIP, `market_value_usd` in whole USD, shares or principal, `put_call`, and `source_accession_numbers` (a consolidated position lists each filing it came from; also a dataframe column); `total_holdings_in_filing` counts the original 13F-HR's raw rows, `total_holdings_composed` the composed raw rows, and `total_positions` distinct composed positions; `accession_number` and `filing_date` name the original 13F-HR; a shared legal name fails as `ambiguous_entity`
+- Holdings carry issuer, CUSIP, `market_value_usd` in whole USD, shares or principal, `put_call`, and `source_accession_numbers` (a consolidated position lists each filing it came from; also a dataframe column); `total_holdings_in_filing` counts the original 13F-HR's raw rows, `total_holdings_composed` the composed raw rows, and `total_positions` distinct composed positions; `accession_number` and `filing_date` name the original 13F-HR; a shared legal name fails as `ambiguous_entity`, listing up to 10 by CIK and name plus the full count in `total_matches` (EDGAR's own count for a name found by entity search, a floor when `total_matches_is_lower_bound` is true)
 
 ---
 
