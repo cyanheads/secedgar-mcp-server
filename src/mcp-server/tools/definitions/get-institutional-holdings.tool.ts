@@ -10,6 +10,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
 import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import { formatUsd } from '@/mcp-server/tools/format-usd.js';
 import {
@@ -603,27 +604,33 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     // contain (#73). Both paths normalize to a candidate list so ambiguity is handled
     // uniformly and index 0 is never taken silently.
     const resolved = await api.resolveCik(input.company, callScope);
+    const entitySearch =
+      Array.isArray(resolved) && resolved.length === 0
+        ? await api.resolveEntityByName(input.company, callScope)
+        : undefined;
     const candidates: Array<{ cik: string; name: string | undefined; ticker: string | undefined }> =
-      Array.isArray(resolved)
-        ? resolved.length === 0
-          ? (await api.resolveEntityByName(input.company, callScope)).map((m) => ({
-              cik: m.cik,
-              name: m.name,
-              ticker: undefined,
-            }))
-          : resolved.map((m) => ({ cik: m.cik, name: m.name, ticker: m.ticker }))
-        : [{ cik: resolved.cik, name: resolved.name, ticker: resolved.ticker }];
+      entitySearch
+        ? entitySearch.matches.map((m) => ({ cik: m.cik, name: m.name, ticker: undefined }))
+        : (Array.isArray(resolved) ? resolved : [resolved]).map((m) => ({
+            cik: m.cik,
+            name: m.name,
+            ticker: m.ticker,
+          }));
 
     // Several filers match this name (the ticker cache returned multiple, or EFTS
     // returned distinct entities sharing a legal name) — list them for disambiguation
-    // by CIK, never auto-resolve to the top hit (#73).
+    // by CIK, never auto-resolve to the top hit (#73). EFTS returns its first 10 hits
+    // and counts the rest in its own total, a floor when `relation` is `gte` (#230).
     if (candidates.length > 1) {
-      const shown = candidates.slice(0, 10);
+      const total = entitySearch?.total;
+      const { shown, showing, data } = ambiguousMatches(candidates, {
+        total: total && { count: total.value, lowerBound: total.relation === 'gte' },
+      });
       const list = shown.map((c) => `${c.cik}${c.name ? ` (${c.name})` : ''}`).join(', ');
       throw ctx.fail(
         'ambiguous_entity',
-        `'${input.company}' matches multiple EDGAR entities: ${list}. Retry with the exact 10-digit CIK.`,
-        { matches: shown.map((c) => ({ cik: c.cik, name: c.name, ticker: c.ticker })) },
+        `'${input.company}' matches multiple EDGAR entities: ${list}. Retry with the exact 10-digit CIK.${showing}`,
+        data,
       );
     }
     const [match] = candidates;

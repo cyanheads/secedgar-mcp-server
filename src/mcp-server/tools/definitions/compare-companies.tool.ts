@@ -10,6 +10,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
 import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import {
   batchClamp,
@@ -366,7 +367,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
             reason: z
               .enum(['not_found', 'ambiguous', 'no_company_facts'])
               .describe(
-                'not_found: no CIK matched. ambiguous: several matched; the message lists them. no_company_facts: resolved, but the filer reports no XBRL. Match on this, not the message.',
+                'not_found: no CIK matched. ambiguous: several matched; the message lists up to 10. no_company_facts: resolved, but the filer reports no XBRL. Match on this, not the message.',
               ),
             message: z.string().describe('What went wrong and how to fix this one input.'),
           })
@@ -584,14 +585,12 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
         continue;
       }
       if (Array.isArray(resolved) && resolved.length > 1) {
-        const list = resolved
-          .slice(0, 5)
-          .map((m) => `${m.cik} ${m.name ?? 'Unknown'}${m.ticker ? ` (${m.ticker})` : ''}`)
-          .join(', ');
+        // The message carries the cut alone: failed_companies takes no field beyond its three.
+        const { list, showing } = ambiguousMatches(resolved);
         failed.push({
           input: supplied,
           reason: 'ambiguous',
-          message: `'${supplied}' matches multiple companies: ${list}. Retry with one of these tickers or 10-digit CIKs.`,
+          message: `'${supplied}' matches multiple companies: ${list}. Retry with one of these tickers or 10-digit CIKs.${showing}`,
         });
         continue;
       }
@@ -605,9 +604,12 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     }
 
     if (resolvedCompanies.length === 0) {
+      // Each failure's own message, so content[] carries the candidates data.failed_companies
+      // does — a text-only client is otherwise told to retry with nothing to pick from (#231).
+      const reasons = failed.map((f) => ` ${f.message}`).join('');
       throw ctx.fail(
         'no_companies_resolved',
-        `None of the ${deferredCompanies.length > 0 ? 'first ' : ''}${companyInputs.length} supplied companies resolved to a CIK.${unreadNote(deferred)}`,
+        `None of the ${deferredCompanies.length > 0 ? 'first ' : ''}${companyInputs.length} supplied companies resolved to a CIK.${reasons}${unreadNote(deferred)}`,
         { failed_companies: failed, ...deferred },
       );
     }

@@ -106,6 +106,15 @@ const REGISTRY: Array<{ cik_str: number; ticker: string; title: string }> = [
   { cik_str: 91419, ticker: 'SJM', title: 'J M SMUCKER Co' },
   { cik_str: 728535, ticker: 'JBHT', title: 'HUNT J B TRANSPORT SERVICES INC' },
   { cik_str: 1025378, ticker: 'WPC', title: 'W. P. Carey Inc.' },
+  // Seven titles that start with the word `Core`, in registry order, and no former name that
+  // does: one prefix tier holding more candidates than any cut short of all of them (#229).
+  { cik_str: 1856525, ticker: 'CNM', title: 'Core & Main, Inc.' },
+  { cik_str: 1710366, ticker: 'CNR', title: 'Core Natural Resources, Inc.' },
+  { cik_str: 1839341, ticker: 'CORZ', title: 'Core Scientific, Inc./tx' },
+  { cik_str: 1958086, ticker: 'CLB', title: 'Core Laboratories Inc. /DE/' },
+  { cik_str: 1026655, ticker: 'CMT', title: 'CORE MOLDING TECHNOLOGIES INC' },
+  { cik_str: 1853599, ticker: 'CCOOF', title: 'CORE SILVER CORP.' },
+  { cik_str: 1649009, ticker: 'CHAI', title: 'Core AI Holdings, Inc.' },
 ];
 
 const jsonResponse = (body: unknown) =>
@@ -196,6 +205,20 @@ describe('EdgarApiService.resolveCik', () => {
     // 'pineapple holdings, inc.' (CIK 22701) at the same tier; MAUI LAND & PINEAPPLE
     // only contains the query and stays out.
     expect(await resolveCiks('Pineapple')).toEqual(['0001938109', '0001710495', '0000022701']);
+  });
+
+  it('returns every candidate of the winning tier, in registry order (#229)', async () => {
+    // Seven current prefix hits; the cut that kept the first five is gone, so a consumer's
+    // own cut (10) and count see the whole tier.
+    expect(await resolveCiks('Core')).toEqual([
+      '0001856525',
+      '0001710366',
+      '0001839341',
+      '0001958086',
+      '0001026655',
+      '0001853599',
+      '0001649009',
+    ]);
   });
 
   it('keeps two suffix variants that both drop to the query ambiguous (#155)', async () => {

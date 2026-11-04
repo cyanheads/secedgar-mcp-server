@@ -3979,6 +3979,43 @@ describe('searchFilingsTool — a ticker: token matching several companies (#223
       thrownBy: 'service',
     });
   });
+
+  // The count beside the list, and the sentence a partial one ends with (#229); the wording is
+  // tabled in tests/mcp-server/tools/ambiguous-matches.test.ts.
+  it('counts a complete list as its length (#229)', async () => {
+    mockApi.resolveCik.mockResolvedValue(FLUENT);
+
+    const error = wireError(await runToolContract(searchFilingsTool, { query: 'ticker:Fluent' }));
+
+    expect(error.data).toMatchObject({ matches: FLUENT, total_matches: 2 });
+    expect(error.message).not.toContain('Showing');
+  });
+
+  it('lists 10 of 15 and ends the message with the Showing sentence (#229)', async () => {
+    const companies = Array.from({ length: 15 }, (_, i) => ({
+      cik: String(i).padStart(10, '0'),
+      name: `Fluent ${i}`,
+      ticker: `F${i}`,
+    }));
+    mockApi.resolveCik.mockResolvedValue(companies);
+
+    const result = await runToolContract(searchFilingsTool, { query: 'ticker:Fluent' });
+
+    const error = wireError(result);
+    expect(error.message).toMatch(
+      /^Entity targeting token 'ticker:Fluent' matches multiple companies: 0000000000 Fluent 0 \(F0\), .+, 0000000009 Fluent 9 \(F9\)\. Retry with ticker: or cik: and one of these tickers or 10-digit CIKs\. Showing 10 of 15 matches; for one not listed, retry with its ticker or CIK\.$/,
+    );
+    expect(error.data).toMatchObject({
+      reason: 'ambiguous_company',
+      matches: companies.slice(0, 10),
+      total_matches: 15,
+    });
+    // The token takes no spaces, so the sentence never offers a fuller name.
+    expect(readCommonMark(blockText(result.content))).toContain(
+      'Showing 10 of 15 matches; for one not listed, retry with its ticker or CIK.',
+    );
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
+  });
 });
 
 /**

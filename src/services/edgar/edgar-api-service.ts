@@ -344,6 +344,18 @@ export interface EntityNameMatch {
   name: string;
 }
 
+/** What EFTS entity-autocomplete answers for a name: its first page of hits and its count. */
+export interface EntityNameResolution {
+  /** The hits SEC returned (its first 10), in relevance order, deduped by CIK. */
+  matches: EntityNameMatch[];
+  /**
+   * SEC's `hits.total` for the name, which counts past the hits returned; `relation: 'gte'`
+   * makes `value` a floor. Absent when the response carries none, or one with no numeric
+   * `value` (#230).
+   */
+  total: { value: number; relation: string } | undefined;
+}
+
 /** One fund series of a registrant, as listed in company_tickers_mf.json. */
 export interface FundSeriesEntry {
   seriesId: string;
@@ -633,6 +645,9 @@ class EdgarApiService {
    *   starting at one — resolved within the best tier a current name reaches), then the
    *   catch-all ticker lookup
    * Returns a single match, an array of multiple matches, or an empty array (no match).
+   * Multiple matches are every candidate of that tier, deduplicated by CIK, current names
+   * first, never cut: a consumer shows the first ten through `ambiguousMatches` and counts
+   * the rest, which a cut here would hide (#229).
    * On no-result name search, the returned empty array carries `suggestions` on
    * the thrown error at the handler layer — call `suggestCompanies` there.
    */
@@ -737,9 +752,8 @@ class EdgarApiService {
       }
     }
 
-    const results = deduped.slice(0, 5);
-    if (results.length > 0) {
-      return results.length === 1 ? (results[0] as CikMatch) : results;
+    if (deduped.length > 0) {
+      return deduped.length === 1 ? (deduped[0] as CikMatch) : deduped;
     }
 
     // Also try as ticker if nothing matched (handles >5-char and digit-containing symbols
@@ -757,7 +771,8 @@ class EdgarApiService {
    * (`search-index?keysTyped=`). Covers any EDGAR filer — institutional managers,
    * trusts, individuals — that `company_tickers.json` (ticker-backed registrants only)
    * can never contain, so it's the name-resolution fallback for a ticker-cache miss.
-   * Returns candidates in SEC relevance order, deduped by CIK. Two entities can share
+   * Returns candidates in SEC relevance order, deduped by CIK, beside SEC's own count of the
+   * name's matches, which runs past the 10 hits it returns (#230). Two entities can share
    * a legal name under different CIKs (e.g. "VANGUARD GROUP INC" = a transfer agent and
    * the 13F filer), so callers must disambiguate rather than auto-pick the top hit (#73).
    * Distinct from `searchFilings`: same URL path, different query param (`keysTyped`)
@@ -765,7 +780,7 @@ class EdgarApiService {
    * failure of the search backend throws `efts_degraded_response` like a search's,
    * never reads as no match (#206). The name is escaped like a search's `q` (#205).
    */
-  async resolveEntityByName(name: string, scope: CallScope): Promise<EntityNameMatch[]> {
+  async resolveEntityByName(name: string, scope: CallScope): Promise<EntityNameResolution> {
     const url = new URL('https://efts.sec.gov/LATEST/search-index');
     url.searchParams.set('keysTyped', escapeEftsText(name));
     const response = await this.fetchJson<EftsEntityAutocompleteResponse>(url.toString(), scope, {
@@ -775,7 +790,7 @@ class EdgarApiService {
     if (backendError) throw eftsBackendFailure(url.toString(), backendError);
 
     const hits = response?.hits?.hits;
-    if (!Array.isArray(hits)) return [];
+    if (!Array.isArray(hits)) return { matches: [], total: undefined };
 
     const seen = new Set<string>();
     const matches: EntityNameMatch[] = [];
@@ -786,7 +801,10 @@ class EdgarApiService {
       seen.add(cik);
       matches.push({ cik, name: entity });
     }
-    return matches;
+    // A total with no numeric value reads as none, as searchFilings' shape guard reads it (#61):
+    // the ambiguity sentence formats `value`, so a malformed one would throw a raw TypeError.
+    const total = response.hits.total;
+    return { matches, total: typeof total?.value === 'number' ? total : undefined };
   }
 
   /** Reverse lookup: CIK → ticker symbol. */

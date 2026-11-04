@@ -351,11 +351,11 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     // whose former holder filed the window asked for (#223).
     const resolved = await api.resolveCik(input.company, scope);
     if (Array.isArray(resolved) && resolved.length > 1) {
-      const { list, matches } = ambiguousMatches(resolved);
+      const { list, showing, data } = ambiguousMatches(resolved);
       throw ctx.fail(
         'ambiguous_company',
-        `'${input.company}' matches multiple companies: ${list}. Retry with one of these tickers or 10-digit CIKs.`,
-        { matches },
+        `'${input.company}' matches multiple companies: ${list}. Retry with one of these tickers or 10-digit CIKs.${showing}`,
+        data,
       );
     }
     const match = Array.isArray(resolved) ? resolved[0] : resolved;

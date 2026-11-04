@@ -1197,6 +1197,119 @@ describe('compareCompaniesTool', () => {
   });
 });
 
+/**
+ * An ambiguous input's failed_companies message lists the first 10 candidates and, when there
+ * are more, the sentence saying so, adding no field (#229). The wording is tabled in
+ * tests/mcp-server/tools/ambiguous-matches.test.ts.
+ */
+describe('an ambiguous company in failed_companies (#229)', () => {
+  const companies = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      cik: String(i).padStart(10, '0'),
+      name: `American ${i}`,
+      ticker: `A${i}`,
+    }));
+  const listed = (n: number) =>
+    companies(n)
+      .map((c) => `${c.cik} ${c.name} (${c.ticker})`)
+      .join(', ');
+  const RETRY = 'Retry with one of these tickers or 10-digit CIKs.';
+  /** `CAL` resolves; `American` resolves to `n` candidates. */
+  const call = async (n: number) => {
+    mockApi.resolveCik.mockImplementation((q: string) =>
+      q === 'CAL' ? { cik: '0000789019', name: 'CALENDAR CO', ticker: 'CAL' } : companies(n),
+    );
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['CAL', 'American'],
+      concepts: ['revenue'],
+    });
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    return { output, text: readCommonMark(blockText(result.content)) };
+  };
+
+  it('lists a complete list whole, with no sentence', async () => {
+    const { output, text } = await call(2);
+
+    const message = `'American' matches multiple companies: ${listed(2)}. ${RETRY}`;
+    expect(output.failed_companies).toEqual([{ input: 'American', reason: 'ambiguous', message }]);
+    expect(text).toContain(`Excluded: American (ambiguous) — ${message}\n`);
+  });
+
+  it('lists 10 of 15 and ends the message with the Showing sentence', async () => {
+    const { output, text } = await call(15);
+
+    const message = `'American' matches multiple companies: ${listed(10)}. ${RETRY} Showing 10 of 15 matches; for one not listed, retry with a fuller name, its ticker, or its CIK.`;
+    expect(output.failed_companies).toEqual([{ input: 'American', reason: 'ambiguous', message }]);
+    expect(text).toContain(`Excluded: American (ambiguous) — ${message}\n`);
+  });
+});
+
+/**
+ * When no input resolves, the error message carries each input's failed_companies message,
+ * so content[] names the same reasons and candidates as the error data (#231).
+ */
+describe('no_companies_resolved names each failed input (#231)', () => {
+  const companies = (prefix: string, n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      cik: `${prefix}${String(i).padStart(9, '0')}`,
+      name: `${prefix === '1' ? 'American' : 'Bank'} ${i}`,
+      ticker: `${prefix === '1' ? 'A' : 'B'}${i}`,
+    }));
+  const listed = (prefix: string, n: number) =>
+    companies(prefix, n)
+      .map((c) => `${c.cik} ${c.name} (${c.ticker})`)
+      .join(', ');
+  const RETRY = 'Retry with one of these tickers or 10-digit CIKs.';
+  const AMERICAN = `'American' matches multiple companies: ${listed('1', 10)}. ${RETRY} Showing 10 of 15 matches; for one not listed, retry with a fuller name, its ticker, or its CIK.`;
+  const BANK = `'Bank' matches multiple companies: ${listed('2', 2)}. ${RETRY}`;
+  const NOPE = "'NOPE' did not resolve to a CIK. Use a ticker symbol or 10-digit CIK.";
+
+  beforeEach(() => {
+    mockApi.resolveCik.mockImplementation(async (q: string) =>
+      q === 'American' ? companies('1', 15) : q === 'Bank' ? companies('2', 2) : [],
+    );
+  });
+
+  it('lists every ambiguous input with its candidates, in the message and in content[]', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['American', 'Bank'],
+      concepts: ['revenue'],
+    });
+
+    const error = wireError(result);
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.message).toBe(
+      `None of the 2 supplied companies resolved to a CIK. ${AMERICAN} ${BANK}`,
+    );
+    expect(error.data.failed_companies).toEqual([
+      { input: 'American', reason: 'ambiguous', message: AMERICAN },
+      { input: 'Bank', reason: 'ambiguous', message: BANK },
+    ]);
+    expect(Object.keys(error.data).sort()).toEqual(['failed_companies', 'reason', 'recovery']);
+    const text = readCommonMark(blockText(result.content));
+    expect(text).toContain(AMERICAN);
+    expect(text).toContain(BANK);
+    expect(mockApi.tryGetCompanyFacts).not.toHaveBeenCalled();
+  });
+
+  it("lists a not-found input's message the same way", async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['NOPE', 'Bank'],
+      concepts: ['revenue'],
+    });
+
+    const error = wireError(result);
+    expect(error.message).toBe(
+      `None of the 2 supplied companies resolved to a CIK. ${NOPE} ${BANK}`,
+    );
+    expect(error.data.failed_companies).toEqual([
+      { input: 'NOPE', reason: 'not_found', message: NOPE },
+      { input: 'Bank', reason: 'ambiguous', message: BANK },
+    ]);
+    expect(readCommonMark(blockText(result.content))).toContain(`${NOPE} ${BANK}`);
+  });
+});
+
 // Through the real tool pipeline, so both client surfaces are asserted (#128).
 describe('concept names that are neither a friendly name nor an XBRL tag (#128)', () => {
   const edgarCalls = () =>
@@ -1400,6 +1513,13 @@ const EIGHT_CONCEPTS = [
   'cash',
 ];
 
+/** What a no_companies_resolved message says of `inputs` that each resolve to nothing (#231). */
+function notFoundMessages(inputs: readonly string[]): string {
+  return inputs
+    .map((i) => ` '${i}' did not resolve to a CIK. Use a ticker symbol or 10-digit CIK.`)
+    .join('');
+}
+
 /** CAL and JUN resolve; any other input resolves to nothing. */
 function wireTwoFilersAmongUnresolved() {
   mockApi.resolveCik.mockImplementation(async (q: string) =>
@@ -1541,7 +1661,9 @@ describe('lists at their caps', () => {
 
     const error = wireError(result);
     expect(error.data.reason).toBe('no_companies_resolved');
-    expect(error.message).toBe('None of the 10 supplied companies resolved to a CIK.');
+    expect(error.message).toBe(
+      `None of the 10 supplied companies resolved to a CIK.${notFoundMessages(atCaps.companies)}`,
+    );
     expect(Object.keys(error.data).sort()).toEqual(['failed_companies', 'reason', 'recovery']);
   });
 });
@@ -1895,7 +2017,7 @@ describe('lists past their caps (#201)', () => {
     const error = wireError(result);
     expect(error.data.reason).toBe('no_companies_resolved');
     expect(error.message).toBe(
-      "None of the first 10 supplied companies resolved to a CIK. Inputs past the first 10 companies were not read — deferred_companies: 'CAL'.",
+      `None of the first 10 supplied companies resolved to a CIK.${notFoundMessages([...TEN.slice(2), 'N9', 'N10'])} Inputs past the first 10 companies were not read — deferred_companies: 'CAL'.`,
     );
     expect(error.data.deferred_companies).toEqual(['CAL']);
     expect(error.data).not.toHaveProperty('deferred_concepts');
@@ -3175,11 +3297,13 @@ describe('caller and SEC strings in content[] (#221)', () => {
 
     const error = wireError(result);
     expect(error.data.reason).toBe('no_companies_resolved');
+    const failedInputs = [UNRESOLVED, ...FILLER, 'N7', 'N8', 'N9'];
     expect(error.message).toBe(
-      `None of the first 10 supplied companies resolved to a CIK. Inputs past the first 10 companies were not read — deferred_companies: '${DEFERRED}'.`,
+      `None of the first 10 supplied companies resolved to a CIK.${notFoundMessages(failedInputs)} Inputs past the first 10 companies were not read — deferred_companies: '${DEFERRED}'.`,
     );
-    expect(readCommonMark(blockText(result.content))).toContain(
-      `deferred_companies: '${DEFERRED}'.`,
-    );
+    const text = readCommonMark(blockText(result.content));
+    expect(text).toContain(`deferred_companies: '${DEFERRED}'.`);
+    // A failed input's own message, listed since #231, reads back the same way.
+    expect(text).toContain(notFoundMessages([UNRESOLVED]).trim());
   });
 });

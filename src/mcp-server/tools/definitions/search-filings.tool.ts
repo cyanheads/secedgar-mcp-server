@@ -342,13 +342,14 @@ async function resolveEntityTargeting(
   if (tickerMatch?.[1]) {
     const resolved = await getEdgarApiService().resolveCik(tickerMatch[1], scope);
     if (Array.isArray(resolved) && resolved.length > 1) {
-      const { list, matches } = ambiguousMatches(resolved);
+      // The token is `\S+`, so a fuller name with spaces cannot be retried through it.
+      const { list, showing, data } = ambiguousMatches(resolved, { singleToken: true });
       throw validationError(
-        `Entity targeting token 'ticker:${tickerMatch[1]}' matches multiple companies: ${list}. Retry with ticker: or cik: and one of these tickers or 10-digit CIKs.`,
+        `Entity targeting token 'ticker:${tickerMatch[1]}' matches multiple companies: ${list}. Retry with ticker: or cik: and one of these tickers or 10-digit CIKs.${showing}`,
         {
           reason: 'ambiguous_company',
           ...ctx.recoveryFor('ambiguous_company'),
-          matches,
+          ...data,
         },
       );
     }

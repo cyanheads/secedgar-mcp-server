@@ -855,6 +855,54 @@ describe('getFinancialsTool', () => {
 });
 
 /**
+ * An ambiguous_company error counts every candidate beside the 10 it lists, and a partial list
+ * says so (#229). The wording is tabled in tests/mcp-server/tools/ambiguous-matches.test.ts.
+ */
+describe('getFinancialsTool — ambiguous_company total_matches (#229)', () => {
+  const companies = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      cik: String(i).padStart(10, '0'),
+      name: `Company ${i}`,
+      ticker: `C${i}`,
+    }));
+  const call = () => runToolContract(getFinancialsTool, { company: 'Company', concept: 'revenue' });
+
+  it('lists 10 of 15 and ends the message with the Showing sentence', async () => {
+    mockApi.resolveCik.mockResolvedValue(companies(15));
+
+    const result = await call();
+
+    const error = wireError(result);
+    const listed = companies(10)
+      .map((c) => `${c.cik} ${c.name} (${c.ticker})`)
+      .join(', ');
+    expect(error.message).toBe(
+      `'Company' matches multiple companies: ${listed}. Retry with one of these tickers or 10-digit CIKs. Showing 10 of 15 matches; for one not listed, retry with a fuller name, its ticker, or its CIK.`,
+    );
+    expect(error.data).toMatchObject({
+      reason: 'ambiguous_company',
+      matches: companies(10),
+      total_matches: 15,
+    });
+    expect(readCommonMark(blockText(result.content))).toContain(
+      'Showing 10 of 15 matches; for one not listed, retry with a fuller name, its ticker, or its CIK.',
+    );
+    expect(mockApi.tryGetCompanyConcept).not.toHaveBeenCalled();
+  });
+
+  it('counts a complete list as its length, with no sentence', async () => {
+    mockApi.resolveCik.mockResolvedValue(companies(2));
+
+    const error = wireError(await call());
+
+    expect(error.message).toBe(
+      "'Company' matches multiple companies: 0000000000 Company 0 (C0), 0000000001 Company 1 (C1). Retry with one of these tickers or 10-digit CIKs.",
+    );
+    expect(error.data).toMatchObject({ matches: companies(2), total_matches: 2 });
+  });
+});
+
+/**
  * Each period's figure beside its raw value (#222): a USD value scaled by its own magnitude, a
  * per-share value and any other unit to every digit. The scale rule itself is tabled in
  * tests/mcp-server/tools/format-usd.test.ts; these cases prove the wiring per unit.

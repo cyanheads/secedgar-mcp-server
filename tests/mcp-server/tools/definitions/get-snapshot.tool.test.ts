@@ -16,7 +16,7 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
 }));
 
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import { blockText, caught } from '../../../support/assertions.js';
+import { blockText, caught, wireError } from '../../../support/assertions.js';
 import { readCommonMark } from '../../../support/commonmark.js';
 
 function fact(overrides: Partial<CompanyConceptUnit> & { frame: string }): CompanyConceptUnit {
@@ -830,6 +830,48 @@ describe('getSnapshotTool', () => {
       `⟨list_item_open⟩\n\n${line?.label} [revenue → us-gaap:SalesRevenueGoodsNet, USD]\n`,
     );
     for (const caveat of output.caveats) expect(text.split('\n\n')).toContain(`Caveat: ${caveat}`);
+  });
+});
+
+/**
+ * An ambiguous_company error counts every candidate beside the 10 it lists, and a partial list
+ * says so (#229). The wording is tabled in tests/mcp-server/tools/ambiguous-matches.test.ts.
+ */
+describe('getSnapshotTool — ambiguous_company total_matches (#229)', () => {
+  const companies = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ cik: String(i).padStart(10, '0'), name: `Co ${i}` }));
+  const call = () => runToolContract(getSnapshotTool, { company: 'Co' });
+
+  it('lists 10 of 15 and ends the message with the Showing sentence', async () => {
+    mockApi.resolveCik.mockResolvedValue(companies(15));
+
+    const result = await call();
+
+    const error = wireError(result);
+    const listed = companies(10)
+      .map((c) => `${c.cik} ${c.name}`)
+      .join(', ');
+    expect(error.message).toBe(
+      `'Co' matches multiple companies: ${listed}. Retry with one of these tickers or 10-digit CIKs. Showing 10 of 15 matches; for one not listed, retry with a fuller name, its ticker, or its CIK.`,
+    );
+    expect(error.data).toMatchObject({
+      reason: 'ambiguous_company',
+      matches: companies(10),
+      total_matches: 15,
+    });
+    expect(readCommonMark(blockText(result.content))).toContain('Showing 10 of 15 matches;');
+    expect(mockApi.tryGetCompanyFacts).not.toHaveBeenCalled();
+  });
+
+  it('counts a complete list as its length, with no sentence', async () => {
+    mockApi.resolveCik.mockResolvedValue(companies(2));
+
+    const error = wireError(await call());
+
+    expect(error.message).toBe(
+      "'Co' matches multiple companies: 0000000000 Co 0, 0000000001 Co 1. Retry with one of these tickers or 10-digit CIKs.",
+    );
+    expect(error.data).toMatchObject({ matches: companies(2), total_matches: 2 });
   });
 });
 

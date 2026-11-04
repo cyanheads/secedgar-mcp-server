@@ -7,6 +7,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { markdown } from '@cyanheads/mcp-ts-core/utils';
+import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
 import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import { normalizeFormFilter } from '@/mcp-server/tools/form-filter.js';
 import {
@@ -132,10 +133,10 @@ export const companySearchTool = tool('secedgar_company_search', {
         'SEC\'s ticker index reflects the filer\'s own submissions record, which can differ from the exchange-listed symbol. ETFs and mutual funds resolve only by ticker (e.g. "VOO"); operating companies also resolve by full legal name or 10-digit CIK.',
     },
     {
-      reason: 'multiple_matches',
-      code: JsonRpcErrorCode.NotFound,
-      when: 'Query is ambiguous and matches several companies',
-      recovery: 'Specify a ticker symbol for an exact match instead of a name fragment.',
+      reason: 'ambiguous_company',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The company input resolves to multiple entities and the target is ambiguous',
+      recovery: 'Use a ticker symbol or 10-digit CIK from the matches list for an exact match.',
     },
     {
       reason: 'rate_limited',
@@ -338,13 +339,12 @@ export const companySearchTool = tool('secedgar_company_search', {
         );
       }
       if (resolved.length > 1) {
-        const matches = resolved
-          .map((m) => `${m.ticker ?? m.cik} (${m.name ?? 'Unknown'})`)
-          .join(', ');
-        throw ctx.fail('multiple_matches', `Multiple matches for '${input.query}': ${matches}.`, {
-          query: input.query,
-          matches: resolved.map((m) => ({ cik: m.cik, name: m.name, ticker: m.ticker })),
-        });
+        const { list, showing, data } = ambiguousMatches(resolved);
+        throw ctx.fail(
+          'ambiguous_company',
+          `'${input.query}' matches multiple companies: ${list}. Retry with one of these tickers or 10-digit CIKs.${showing}`,
+          { query: input.query, ...data },
+        );
       }
     }
 

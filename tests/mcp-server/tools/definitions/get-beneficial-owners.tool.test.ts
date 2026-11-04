@@ -751,6 +751,66 @@ describe('getBeneficialOwnersTool', () => {
 });
 
 /**
+ * An ambiguous_issuer error keeps its own item wording and counts every candidate beside the
+ * 10 it lists, and a partial list says so (#229). The wording is tabled in
+ * tests/mcp-server/tools/ambiguous-matches.test.ts.
+ */
+describe('getBeneficialOwnersTool — ambiguous_issuer total_matches (#229)', () => {
+  const companies = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      cik: String(i).padStart(10, '0'),
+      name: `Company ${i}`,
+      ticker: `C${i}`,
+    }));
+
+  it('counts a complete list as its length, with no sentence', async () => {
+    const liberty = [
+      { cik: '0001560385', name: 'Liberty Media Corp', ticker: 'FWONA' },
+      { cik: '0001611983', name: 'Liberty Broadband Corp', ticker: 'LBRDA' },
+    ];
+    mockApi.resolveCik.mockResolvedValue(liberty);
+
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'Liberty' });
+
+    const error = wireError(result);
+    expect(error.message).toBe(
+      "'Liberty' matches multiple EDGAR companies: FWONA (Liberty Media Corp), LBRDA (Liberty Broadband Corp).",
+    );
+    expect(error.data).toMatchObject({
+      reason: 'ambiguous_issuer',
+      matches: liberty,
+      total_matches: 2,
+    });
+    expect(readCommonMark(blockText(result.content))).toContain(
+      'FWONA (Liberty Media Corp), LBRDA (Liberty Broadband Corp).',
+    );
+  });
+
+  it('lists 10 of 15 and ends the message with the Showing sentence', async () => {
+    mockApi.resolveCik.mockResolvedValue(companies(15));
+
+    const result = await runToolContract(getBeneficialOwnersTool, { issuer: 'Company' });
+
+    const error = wireError(result);
+    const listed = companies(10)
+      .map((c) => `${c.ticker} (${c.name})`)
+      .join(', ');
+    expect(error.message).toBe(
+      `'Company' matches multiple EDGAR companies: ${listed}. Showing 10 of 15 matches; for one not listed, retry with a fuller name, its ticker, or its CIK.`,
+    );
+    expect(error.data).toMatchObject({
+      reason: 'ambiguous_issuer',
+      matches: companies(10),
+      total_matches: 15,
+    });
+    expect(readCommonMark(blockText(result.content))).toContain(
+      'Showing 10 of 15 matches; for one not listed, retry with a fuller name, its ticker, or its CIK.',
+    );
+    expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+  });
+});
+
+/**
  * Filer-written Item 4 and cover-page footnote text: kept with its line breaks, bounded and
  * flagged per field on both surfaces, quoted as data in `content[]`, and staged uncut in the
  * dataframe (#200).

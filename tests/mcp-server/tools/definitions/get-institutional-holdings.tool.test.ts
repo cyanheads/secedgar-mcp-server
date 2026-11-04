@@ -249,7 +249,10 @@ beforeEach(() => {
   });
   // Ticker-cache miss falls back to EFTS entity-autocomplete; default to no hit so tests
   // opt into name resolution explicitly.
-  mockApi.resolveEntityByName.mockResolvedValue([]);
+  mockApi.resolveEntityByName.mockResolvedValue({
+    matches: [],
+    total: { value: 0, relation: 'eq' },
+  });
   mockApi.getSubmissions.mockResolvedValue(
     buildSubmissions({
       filings: [
@@ -1200,9 +1203,10 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
   it('resolves a name to one filer via EFTS entity-autocomplete (#73)', async () => {
     // Ticker cache misses the institutional name; EFTS resolves it to a single CIK.
     mockApi.resolveCik.mockResolvedValue([]);
-    mockApi.resolveEntityByName.mockResolvedValue([
-      { cik: '0000102909', name: 'VANGUARD GROUP INC' },
-    ]);
+    mockApi.resolveEntityByName.mockResolvedValue({
+      matches: [{ cik: '0000102909', name: 'VANGUARD GROUP INC' }],
+      total: { value: 1, relation: 'eq' },
+    });
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({ company: 'vanguard group inc' });
     const result = await getInstitutionalHoldingsTool.handler(input, ctx);
@@ -1220,10 +1224,13 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
   it('returns ambiguous_entity when a name resolves to multiple filers (#73)', async () => {
     // "vanguard group" resolves to the transfer agent AND the 13F filer — must list both.
     mockApi.resolveCik.mockResolvedValue([]);
-    mockApi.resolveEntityByName.mockResolvedValue([
-      { cik: '0000735286', name: 'VANGUARD GROUP INC' },
-      { cik: '0000102909', name: 'VANGUARD GROUP INC' },
-    ]);
+    mockApi.resolveEntityByName.mockResolvedValue({
+      matches: [
+        { cik: '0000735286', name: 'VANGUARD GROUP INC' },
+        { cik: '0000102909', name: 'VANGUARD GROUP INC' },
+      ],
+      total: { value: 2, relation: 'eq' },
+    });
     const ctx = createMockContext({ errors: getInstitutionalHoldingsTool.errors });
     const input = getInstitutionalHoldingsTool.input.parse({ company: 'vanguard group' });
 
@@ -1355,6 +1362,133 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
     expect(err.data.reason).toBe('no_filings_found');
     expect(err.data.suggestions).toBeUndefined(); // no operating-company routing
     expect(err.message).toContain('SOME FILING AGENT');
+  });
+});
+
+/**
+ * An ambiguous_entity error keeps its own item wording and counts every candidate beside the
+ * 10 it lists, and a partial list says so (#229); from entity search, the count is SEC's own
+ * (#230). The wording is tabled in tests/mcp-server/tools/ambiguous-matches.test.ts.
+ */
+describe('getInstitutionalHoldingsTool — ambiguous_entity total_matches', () => {
+  const RETRY = 'Retry with the exact 10-digit CIK.';
+  const SHOWING_15 =
+    'Showing 10 of 15 matches; for one not listed, retry with a fuller name, its ticker, or its CIK.';
+  const filers = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      cik: String(i).padStart(10, '0'),
+      name: `Capital ${i}`,
+      ticker: `K${i}`,
+    }));
+  const listed = (n: number) =>
+    filers(n)
+      .map((f) => `${f.cik} (${f.name})`)
+      .join(', ');
+
+  describe('from the ticker registry (#229)', () => {
+    it('counts a complete list as its length, with no sentence', async () => {
+      mockApi.resolveCik.mockResolvedValue(filers(2));
+
+      const result = await runToolContract(getInstitutionalHoldingsTool, { company: 'Capital' });
+
+      const error = wireError(result);
+      expect(error.message).toBe(
+        `'Capital' matches multiple EDGAR entities: 0000000000 (Capital 0), 0000000001 (Capital 1). ${RETRY}`,
+      );
+      expect(error.data).toMatchObject({
+        reason: 'ambiguous_entity',
+        matches: filers(2),
+        total_matches: 2,
+      });
+      expect(readCommonMark(blockText(result.content))).toContain(listed(2));
+    });
+
+    it('lists 10 of 15 and ends the message with the Showing sentence', async () => {
+      mockApi.resolveCik.mockResolvedValue(filers(15));
+
+      const result = await runToolContract(getInstitutionalHoldingsTool, { company: 'Capital' });
+
+      const error = wireError(result);
+      expect(error.message).toBe(
+        `'Capital' matches multiple EDGAR entities: ${listed(10)}. ${RETRY} ${SHOWING_15}`,
+      );
+      expect(error.data).toMatchObject({
+        reason: 'ambiguous_entity',
+        matches: filers(10),
+        total_matches: 15,
+      });
+      expect(readCommonMark(blockText(result.content))).toContain(SHOWING_15);
+      expect(mockApi.resolveEntityByName).not.toHaveBeenCalled();
+      expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+    });
+  });
+
+  /** SEC's entity search returns its first 10 hits and counts the rest in hits.total. */
+  describe('from EDGAR entity search (#230)', () => {
+    const entities = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        cik: String(2026150 + i).padStart(10, '0'),
+        name: `Wealth Management ${i} LLC`,
+      }));
+    const entityList = (n: number) =>
+      entities(n)
+        .map((e) => `${e.cik} (${e.name})`)
+        .join(', ');
+    const call = (total: { value: number; relation: string } | undefined, n = 10) => {
+      mockApi.resolveCik.mockResolvedValue([]);
+      mockApi.resolveEntityByName.mockResolvedValue({ matches: entities(n), total });
+      return runToolContract(getInstitutionalHoldingsTool, { company: 'Wealth Management LLC' });
+    };
+
+    it("lists SEC's 10 hits of an exact 598 and ends the message with the Showing sentence", async () => {
+      const result = await call({ value: 598, relation: 'eq' });
+
+      const error = wireError(result);
+      const showing =
+        'Showing 10 of 598 matches; for one not listed, retry with a fuller name, its ticker, or its CIK.';
+      expect(error.message).toBe(
+        `'Wealth Management LLC' matches multiple EDGAR entities: ${entityList(10)}. ${RETRY} ${showing}`,
+      );
+      expect(error.data).toMatchObject({
+        reason: 'ambiguous_entity',
+        matches: entities(10),
+        total_matches: 598,
+      });
+      expect(error.data).not.toHaveProperty('total_matches_is_lower_bound');
+      expect(readCommonMark(blockText(result.content))).toContain(showing);
+      expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+    });
+
+    it('reads a gte total as a floor, in the sentence and in data', async () => {
+      const result = await call({ value: 10000, relation: 'gte' });
+
+      const error = wireError(result);
+      const showing =
+        'Showing 10 of at least 10,000 matches; for one not listed, retry with a fuller name, its ticker, or its CIK.';
+      expect(error.message).toBe(
+        `'Wealth Management LLC' matches multiple EDGAR entities: ${entityList(10)}. ${RETRY} ${showing}`,
+      );
+      expect(error.data).toMatchObject({
+        reason: 'ambiguous_entity',
+        matches: entities(10),
+        total_matches: 10000,
+        total_matches_is_lower_bound: true,
+      });
+      expect(readCommonMark(blockText(result.content))).toContain(showing);
+    });
+
+    it.each([
+      ['a total equal to the hits listed', { value: 2, relation: 'eq' }],
+      ['no total in the response', undefined],
+    ])('counts the hits listed with no sentence for %s', async (_case, total) => {
+      const error = wireError(await call(total, 2));
+
+      expect(error.message).toBe(
+        `'Wealth Management LLC' matches multiple EDGAR entities: ${entityList(2)}. ${RETRY}`,
+      );
+      expect(error.data).toMatchObject({ matches: entities(2), total_matches: 2 });
+      expect(error.data).not.toHaveProperty('total_matches_is_lower_bound');
+    });
   });
 });
 

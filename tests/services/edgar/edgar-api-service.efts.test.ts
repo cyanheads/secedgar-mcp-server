@@ -9,7 +9,8 @@
  * backend (`errorType`) is a failed attempt on the retry ladder when the failure is
  * a transport one, and fails on its one request otherwise, with the backend's error
  * in typed fields (#206). Caller text is escaped before it reaches full-text search,
- * in `q` and `keysTyped` alike (#205).
+ * in `q` and `keysTyped` alike (#205). An entity lookup returns SEC's `hits.total` beside
+ * its hits (#230).
  * @module tests/services/edgar/edgar-api-service.efts
  */
 
@@ -143,10 +144,17 @@ describe('EdgarApiService.resolveEntityByName — EFTS entity-autocomplete (#73)
       ),
     );
 
-    const matches = await getEdgarApiService().resolveEntityByName('berkshire hathaway', scope());
+    const resolution = await getEdgarApiService().resolveEntityByName(
+      'berkshire hathaway',
+      scope(),
+    );
 
-    // Bare _id is zero-padded to the 10-digit CIK the submissions API expects.
-    expect(matches).toEqual([{ cik: '0001067983', name: 'BERKSHIRE HATHAWAY INC' }]);
+    // Bare _id is zero-padded to the 10-digit CIK the submissions API expects. A response
+    // carrying no hits.total reports none.
+    expect(resolution).toEqual({
+      matches: [{ cik: '0001067983', name: 'BERKSHIRE HATHAWAY INC' }],
+      total: undefined,
+    });
   });
 
   it('returns every distinct CIK for a name shared by multiple entities (Vanguard)', async () => {
@@ -167,12 +175,52 @@ describe('EdgarApiService.resolveEntityByName — EFTS entity-autocomplete (#73)
       ),
     );
 
-    const matches = await getEdgarApiService().resolveEntityByName('vanguard group', scope());
+    const { matches } = await getEdgarApiService().resolveEntityByName('vanguard group', scope());
 
     expect(matches).toEqual([
       { cik: '0000735286', name: 'VANGUARD GROUP INC' },
       { cik: '0000102909', name: 'VANGUARD GROUP INC' },
     ]);
+  });
+
+  /** Ten distinct entity hits, as EFTS returns its first page for a common name. */
+  const tenHits = Array.from({ length: 10 }, (_, i) => ({
+    _id: String(2026150 + i),
+    _source: { entity: `Wealth Management ${i} LLC`, rank: 1 },
+  }));
+
+  it.each([
+    ['an exact count', { value: 598, relation: 'eq' }],
+    ['a floor', { value: 10000, relation: 'gte' }],
+  ])('returns SEC hits.total beside its first page of hits, %s (#230)', async (_case, total) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ hits: { total, hits: tenHits } })),
+    );
+
+    const resolution = await getEdgarApiService().resolveEntityByName(
+      'Wealth Management LLC',
+      scope(),
+    );
+
+    expect(resolution.matches).toHaveLength(10);
+    expect(resolution.matches[0]).toEqual({ cik: '0002026150', name: 'Wealth Management 0 LLC' });
+    expect(resolution.total).toEqual(total);
+  });
+
+  it('reads a hits.total with no numeric value as no total (#230)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ hits: { total: {}, hits: tenHits } })),
+    );
+
+    const resolution = await getEdgarApiService().resolveEntityByName(
+      'Wealth Management LLC',
+      scope(),
+    );
+
+    expect(resolution.matches).toHaveLength(10);
+    expect(resolution.total).toBeUndefined();
   });
 
   it('sends the typed name via the keysTyped query param', async () => {
@@ -192,12 +240,12 @@ describe('EdgarApiService.resolveEntityByName — EFTS entity-autocomplete (#73)
       vi.fn(async () => jsonResponse({ hits: { total: { value: 0, relation: 'eq' }, hits: [] } })),
     );
 
-    const matches = await getEdgarApiService().resolveEntityByName(
+    const resolution = await getEdgarApiService().resolveEntityByName(
       'zzqqxyzzy nonexistent',
       scope(),
     );
 
-    expect(matches).toEqual([]);
+    expect(resolution).toEqual({ matches: [], total: { value: 0, relation: 'eq' } });
   });
 
   it('dedups repeated CIKs, keeping first-seen order', async () => {
@@ -215,7 +263,7 @@ describe('EdgarApiService.resolveEntityByName — EFTS entity-autocomplete (#73)
       ),
     );
 
-    const matches = await getEdgarApiService().resolveEntityByName('vanguard', scope());
+    const { matches } = await getEdgarApiService().resolveEntityByName('vanguard', scope());
 
     expect(matches).toEqual([{ cik: '0000102909', name: 'VANGUARD GROUP INC' }]);
   });
@@ -643,10 +691,10 @@ describe('EdgarApiService — a 200 relaying a failure of the search backend (#2
     it('still reads a body with no hit list and no backend error as no match', async () => {
       const { fetchMock } = stubEfts([0, {}]);
 
-      const matches = getEdgarApiService().resolveEntityByName('obscure capital', scope());
+      const resolution = getEdgarApiService().resolveEntityByName('obscure capital', scope());
       await vi.advanceTimersByTimeAsync(1_000);
 
-      await expect(matches).resolves.toEqual([]);
+      await expect(resolution).resolves.toEqual({ matches: [], total: undefined });
       expect(fetchMock).toHaveBeenCalledOnce();
     });
   });
@@ -733,7 +781,10 @@ describe('EdgarApiService — caller text is escaped before it reaches full-text
   it('escapes keysTyped the same way', async () => {
     const { fetchMock, urls } = stubEftsTerms();
 
-    const matches = await getEdgarApiService().resolveEntityByName('US BANCORP \\DE\\\t', scope());
+    const { matches } = await getEdgarApiService().resolveEntityByName(
+      'US BANCORP \\DE\\\t',
+      scope(),
+    );
 
     expect(urls[0]?.searchParams.get('keysTyped')).toBe('US BANCORP \\\\DE\\\\\\u0009');
     expect(matches).toEqual([{ cik: '0000036104', name: 'US BANCORP \\DE\\' }]);

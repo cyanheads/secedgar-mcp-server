@@ -7,6 +7,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
 import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import {
   type LimitClampOptions,
@@ -96,10 +97,10 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
         'Use a ticker symbol or 10-digit CIK for an exact match, or find the company with secedgar_company_search.',
     },
     {
-      reason: 'multiple_matches',
-      code: JsonRpcErrorCode.NotFound,
-      when: 'The query is ambiguous and matches several companies',
-      recovery: 'Retry with a ticker symbol or the 10-digit CIK from the matches list.',
+      reason: 'ambiguous_company',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'The company input resolves to multiple entities and the target is ambiguous',
+      recovery: 'Use a ticker symbol or 10-digit CIK from the matches list for an exact match.',
     },
     {
       reason: 'rate_limited',
@@ -303,12 +304,12 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
         );
       }
       if (resolved.length > 1) {
-        const matches = resolved
-          .map((m) => `${m.ticker ?? m.cik} (${m.name ?? 'Unknown'})`)
-          .join(', ');
-        throw ctx.fail('multiple_matches', `Multiple matches for '${input.company}': ${matches}.`, {
-          matches: resolved.map((m) => ({ cik: m.cik, name: m.name, ticker: m.ticker })),
-        });
+        const { list, showing, data } = ambiguousMatches(resolved);
+        throw ctx.fail(
+          'ambiguous_company',
+          `'${input.company}' matches multiple companies: ${list}. Retry with one of these tickers or 10-digit CIKs.${showing}`,
+          data,
+        );
       }
     }
 

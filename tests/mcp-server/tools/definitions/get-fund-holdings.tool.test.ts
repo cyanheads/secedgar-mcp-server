@@ -729,6 +729,66 @@ describe('getFundHoldingsTool — report selection', () => {
   });
 });
 
+/**
+ * An ambiguous_fund error keeps its own item wording and counts every candidate beside the 10
+ * it lists, and a partial list says so (#229). The wording is tabled in
+ * tests/mcp-server/tools/ambiguous-matches.test.ts.
+ */
+describe('getFundHoldingsTool — ambiguous_fund total_matches (#229)', () => {
+  const funds = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      cik: String(i).padStart(10, '0'),
+      name: `Fund ${i}`,
+      ticker: `F${i}`,
+    }));
+
+  it('counts a complete list as its length, with no sentence', async () => {
+    const vanguard = [
+      { cik: '0000036405', name: 'Vanguard Index Funds' },
+      { cik: '0000052848', name: 'Vanguard World Funds' },
+    ];
+    mockApi.resolveCik.mockResolvedValue(vanguard);
+
+    const result = await runToolContract(getFundHoldingsTool, { fund: 'Vanguard' });
+
+    const error = wireError(result);
+    expect(error.message).toBe(
+      "'Vanguard' matches multiple EDGAR companies: 0000036405 (Vanguard Index Funds), 0000052848 (Vanguard World Funds).",
+    );
+    expect(error.data).toMatchObject({
+      reason: 'ambiguous_fund',
+      matches: vanguard,
+      total_matches: 2,
+    });
+    expect(readCommonMark(blockText(result.content))).toContain(
+      '0000036405 (Vanguard Index Funds), 0000052848 (Vanguard World Funds).',
+    );
+  });
+
+  it('lists 10 of 15 and ends the message with the Showing sentence', async () => {
+    mockApi.resolveCik.mockResolvedValue(funds(15));
+
+    const result = await runToolContract(getFundHoldingsTool, { fund: 'Fund' });
+
+    const error = wireError(result);
+    const listed = funds(10)
+      .map((f) => `${f.ticker} (${f.name})`)
+      .join(', ');
+    expect(error.message).toBe(
+      `'Fund' matches multiple EDGAR companies: ${listed}. Showing 10 of 15 matches; for one not listed, retry with a fuller name, its ticker, or its CIK.`,
+    );
+    expect(error.data).toMatchObject({
+      reason: 'ambiguous_fund',
+      matches: funds(10),
+      total_matches: 15,
+    });
+    expect(readCommonMark(blockText(result.content))).toContain(
+      'Showing 10 of 15 matches; for one not listed, retry with a fuller name, its ticker, or its CIK.',
+    );
+    expect(mockApi.listFundSeries).not.toHaveBeenCalled();
+  });
+});
+
 describe('getFundHoldingsTool — response', () => {
   it('renders a numeric tiny weight without rounding or exponent notation', async () => {
     mockApi.tryGetFilingDocument.mockResolvedValue(

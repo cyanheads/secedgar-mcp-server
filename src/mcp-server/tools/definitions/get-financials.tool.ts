@@ -334,11 +334,11 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
     }
     if (Array.isArray(resolved) && resolved.length > 1) {
-      const { list, matches } = ambiguousMatches(resolved);
+      const { list, showing, data } = ambiguousMatches(resolved);
       throw ctx.fail(
         'ambiguous_company',
-        `'${input.company}' matches multiple companies: ${list}. Retry with one of these tickers or 10-digit CIKs.`,
-        { matches },
+        `'${input.company}' matches multiple companies: ${list}. Retry with one of these tickers or 10-digit CIKs.${showing}`,
+        data,
       );
     }
     const match = Array.isArray(resolved) ? resolved[0] : resolved;

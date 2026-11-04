@@ -11,6 +11,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
 import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import { fixedPoint } from '@/mcp-server/tools/fixed-point.js';
 import { formatUsd, groupedDigits } from '@/mcp-server/tools/format-usd.js';
@@ -515,12 +516,12 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       const resolved = await api.resolveCik(input.fund, scope);
       const candidates = Array.isArray(resolved) ? resolved : [resolved];
       if (candidates.length > 1) {
-        const shown = candidates.slice(0, 10);
+        const { shown, showing, data } = ambiguousMatches(candidates);
         const list = shown.map((c) => `${c.ticker ?? c.cik} (${c.name ?? 'Unknown'})`).join(', ');
         throw ctx.fail(
           'ambiguous_fund',
-          `'${input.fund}' matches multiple EDGAR companies: ${list}.`,
-          { matches: shown.map((c) => ({ cik: c.cik, name: c.name, ticker: c.ticker })) },
+          `'${input.fund}' matches multiple EDGAR companies: ${list}.${showing}`,
+          data,
         );
       }
       const match = candidates[0];

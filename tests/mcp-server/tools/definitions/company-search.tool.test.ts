@@ -255,7 +255,7 @@ describe('companySearchTool', () => {
     await expect(companySearchTool.handler(input, ctx)).rejects.toThrow(/No company found/);
   });
 
-  it('throws multiple_matches when array > 1', async () => {
+  it('throws ambiguous_company when array > 1 (#228)', async () => {
     mockApi.resolveCik.mockResolvedValue([
       { cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' },
       { cik: '0000001234', name: 'Apple Corp.', ticker: 'APCO' },
@@ -263,7 +263,10 @@ describe('companySearchTool', () => {
     const ctx = createMockContext({ errors: companySearchTool.errors });
     const input = companySearchTool.input.parse({ query: 'Apple' });
 
-    await expect(companySearchTool.handler(input, ctx)).rejects.toThrow(/Multiple matches/);
+    await expect(companySearchTool.handler(input, ctx)).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      data: { reason: 'ambiguous_company' },
+    });
   });
 
   it('handles array with single match', async () => {
@@ -822,6 +825,106 @@ describe('companySearchTool no_match recovery on the wire (#153)', () => {
     const text = readCommonMark(blockText(result.content));
     expect(text).toContain('MICROSOFT CORP (MSFT)');
     expect(text).toContain('Check `data.suggestions` for near matches.');
+  });
+});
+
+/**
+ * A name matching several companies fails as ambiguous_company, with get_financials' reason and
+ * wording, before any submissions read (#228); the list is cut to 10 with the full count beside
+ * it (#229). One company answers as before.
+ */
+describe('companySearchTool — a name matching several companies (#228)', () => {
+  const BLUE_OWL = [
+    { cik: '0001823945', name: 'BLUE OWL CAPITAL INC.', ticker: 'OWL' },
+    { cik: '0001655888', name: 'Blue Owl Capital Corp', ticker: 'OBDC' },
+  ];
+  const call = (args: Record<string, unknown>) => runToolContract(companySearchTool, args as never);
+
+  it('fails as ambiguous_company listing both CIKs, reading no submissions', async () => {
+    mockApi.resolveCik.mockResolvedValue(BLUE_OWL);
+
+    const result = await call({ query: 'Blue Owl Capital', include_filings: false });
+
+    const error = wireError(result);
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.message).toBe(
+      "'Blue Owl Capital' matches multiple companies: 0001823945 BLUE OWL CAPITAL INC. (OWL), 0001655888 Blue Owl Capital Corp (OBDC). Retry with one of these tickers or 10-digit CIKs.",
+    );
+    expect(error.data).toMatchObject({
+      reason: 'ambiguous_company',
+      query: 'Blue Owl Capital',
+      matches: BLUE_OWL,
+      total_matches: 2,
+      recovery: {
+        hint: 'Use a ticker symbol or 10-digit CIK from the matches list for an exact match.',
+      },
+    });
+    expect(readCommonMark(blockText(result.content))).toContain(
+      '0001823945 BLUE OWL CAPITAL INC. (OWL), 0001655888 Blue Owl Capital Corp (OBDC).',
+    );
+    expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+  });
+
+  it('lists 10 of 15 candidates, with the full count and the Showing sentence', async () => {
+    const companies = Array.from({ length: 15 }, (_, i) => ({
+      cik: String(i).padStart(10, '0'),
+      name: `Blue ${i}`,
+      ticker: `B${i}`,
+    }));
+    mockApi.resolveCik.mockResolvedValue(companies);
+
+    const result = await call({ query: 'Blue', include_filings: false });
+
+    const error = wireError(result);
+    expect(error.data).toMatchObject({
+      reason: 'ambiguous_company',
+      query: 'Blue',
+      matches: companies.slice(0, 10),
+      total_matches: 15,
+    });
+    expect(error.message).toMatch(
+      /, 0000000009 Blue 9 \(B9\)\. Retry with one of these tickers or 10-digit CIKs\. Showing 10 of 15 matches; for one not listed, retry with a fuller name, its ticker, or its CIK\.$/,
+    );
+    expect(error.message).not.toContain('Blue 10');
+    expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a ticker', 'OWL'],
+    ['a CIK', '1823945'],
+    ['a name naming one company', 'Blue Owl Capital Inc'],
+  ])('answers %s as before', async (_label, query) => {
+    mockApi.resolveCik.mockResolvedValue(BLUE_OWL[0]);
+    mockApi.getSubmissions.mockResolvedValue({
+      ...mockSubmissions,
+      cik: '0001823945',
+      name: 'BLUE OWL CAPITAL INC.',
+      tickers: ['OWL'],
+    });
+
+    const result = await call({ query, include_filings: false });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      cik: '0001823945',
+      name: 'BLUE OWL CAPITAL INC.',
+      tickers: ['OWL'],
+    });
+    expect(mockApi.getSubmissions).toHaveBeenCalledWith('0001823945', expect.any(CallScope));
+  });
+
+  it('declares ambiguous_company as get_financials does, and no multiple_matches', () => {
+    const defs = buildToolDefinitions({ dropEnabled: false, clampOversizedLimits: true });
+    const errors = (name: string) => defs.find((d) => d.name === name)?.errors ?? [];
+    const entry = (name: string) => errors(name).find((e) => e.reason === 'ambiguous_company');
+
+    expect(entry('secedgar_company_search')).toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+    });
+    expect(entry('secedgar_company_search')).toEqual(entry('secedgar_get_financials'));
+    expect(errors('secedgar_company_search').map((e) => e.reason)).not.toContain(
+      'multiple_matches',
+    );
   });
 });
 

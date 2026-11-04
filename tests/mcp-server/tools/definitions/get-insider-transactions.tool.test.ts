@@ -1797,6 +1797,38 @@ describe('getInsiderTransactionsTool — a company input matching several compan
       .properties.company.description;
     expect(company).not.toContain('top-ranked');
   });
+
+  // The count beside the list, and the sentence a partial one ends with (#229); the wording is
+  // tabled in tests/mcp-server/tools/ambiguous-matches.test.ts.
+  it('counts a complete list as its length (#229)', async () => {
+    mockApi.resolveCik.mockResolvedValue(ENERGIZER);
+
+    const error = wireError(
+      await runToolContract(getInsiderTransactionsTool, { company: 'Energizer Holdings Inc' }),
+    );
+
+    expect(error.data).toMatchObject({ matches: ENERGIZER, total_matches: 2 });
+    expect(error.message).not.toContain('Showing');
+  });
+
+  it('lists 10 of 15 and ends the message with the Showing sentence (#229)', async () => {
+    const companies = Array.from({ length: 15 }, (_, i) => ({
+      cik: String(i).padStart(10, '0'),
+      name: `Holdings ${i}`,
+      ticker: `H${i}`,
+    }));
+    mockApi.resolveCik.mockResolvedValue(companies);
+
+    const result = await runToolContract(getInsiderTransactionsTool, { company: 'Holdings' });
+
+    const error = wireError(result);
+    expect(error.message).toMatch(
+      /^'Holdings' matches multiple companies: 0000000000 Holdings 0 \(H0\), .+, 0000000009 Holdings 9 \(H9\)\. Retry with one of these tickers or 10-digit CIKs\. Showing 10 of 15 matches; for one not listed, retry with a fuller name, its ticker, or its CIK\.$/,
+    );
+    expect(error.data).toMatchObject({ matches: companies.slice(0, 10), total_matches: 15 });
+    expect(readCommonMark(allText(result))).toContain('Showing 10 of 15 matches;');
+    expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+  });
 });
 
 /**
