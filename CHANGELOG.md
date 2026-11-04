@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.18.1](changelog/0.18.x/0.18.1.md) — 2026-11-03
+
+Ambiguity errors count every match behind the 10 they list, and secedgar_get_filing's body reads back from content[] exactly as structuredContent carries it.
+
 ## [0.18.0](changelog/0.18.x/0.18.0.md) — 2026-11-03 · ⚠️ Breaking
 
 Company name resolution no longer matches inside a word, and no tool silently answers for the first of several matching companies.
