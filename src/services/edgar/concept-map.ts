@@ -1,9 +1,11 @@
 /**
- * @fileoverview Static mapping of friendly financial concept names to XBRL tags.
+ * @fileoverview Static mapping of friendly financial concept names to XBRL tags,
+ * and the lookup every concept input goes through: a name or alias in any case or
+ * separator form, a camelCase spelling of one, a standard formula, or a raw tag.
  * @module services/edgar/concept-map
  */
 
-import { trigramSimilarity } from './trigram-similarity.js';
+import { trigramScorer } from './trigram-similarity.js';
 import type { ConceptMapping, ConceptTaxonomy, TagSelection } from './types.js';
 
 /**
@@ -16,6 +18,12 @@ import type { ConceptMapping, ConceptTaxonomy, TagSelection } from './types.js';
  * least one 20-F IFRS filer — an IFRS element existing in the taxonomy is not
  * evidence that filers tag it. A concept with no confirmed IFRS element carries
  * no `ifrsTags` and is reported as a gap rather than mapped to a guess.
+ *
+ * `aliases` are taken from the label, never invented: the label keyed like a
+ * name (`&` as `and`), or that minus its sign qualifier (`(Benefit)`, `(Loss)`).
+ * A spelling with a second reading stays out — `eps` (basic or diluted), `total_debt` (`debt` is
+ * long-term only), `cost_of_revenue` (a `cogs` fallback tag that totals
+ * differently for service filers), `ppe` (gross or net) (#240).
  */
 const CONCEPT_MAP: Record<string, ConceptMapping> = {
   revenue: {
@@ -88,6 +96,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD/shares',
     label: 'Earnings Per Share (Basic)',
+    aliases: ['earnings_per_share_basic'],
   },
   eps_diluted: {
     group: 'per_share',
@@ -96,6 +105,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD/shares',
     label: 'Earnings Per Share (Diluted)',
+    aliases: ['earnings_per_share_diluted'],
   },
   shares_diluted: {
     group: 'per_share',
@@ -107,6 +117,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'shares',
     label: 'Weighted-Average Diluted Shares',
+    aliases: ['weighted_average_diluted_shares'],
   },
   assets: {
     group: 'balance_sheet',
@@ -116,6 +127,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Total Assets',
+    aliases: ['total_assets'],
   },
   liabilities: {
     group: 'balance_sheet',
@@ -124,6 +136,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Total Liabilities',
+    aliases: ['total_liabilities'],
   },
   equity: {
     group: 'balance_sheet',
@@ -144,6 +157,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: "Stockholders' Equity",
+    aliases: ['stockholders_equity'],
   },
   cash: {
     group: 'balance_sheet',
@@ -158,6 +172,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Cash and Cash Equivalents',
+    aliases: ['cash_and_cash_equivalents'],
   },
   debt: {
     group: 'balance_sheet',
@@ -171,6 +186,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Long-Term Debt',
+    aliases: ['long_term_debt'],
   },
   shares_outstanding: {
     group: 'entity_info',
@@ -208,6 +224,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Capital Expenditures',
+    aliases: ['capital_expenditures'],
   },
   depreciation_amortization: {
     group: 'cash_flow',
@@ -229,6 +246,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Depreciation & Amortization',
+    aliases: ['depreciation_and_amortization'],
   },
   // Distinct from `debt` (which targets long-term debt directly). `notes_payable` prefers
   // the notes-specific tags and only falls back to LongTermDebt for filers that report it
@@ -260,6 +278,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Cost of Goods Sold',
+    aliases: ['cost_of_goods_sold'],
   },
   rd_expense: {
     group: 'income_statement',
@@ -270,6 +289,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Research & Development Expense',
+    aliases: ['research_and_development_expense'],
   },
   sga_expense: {
     group: 'income_statement',
@@ -281,6 +301,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Selling, General & Administrative Expense',
+    aliases: ['selling_general_and_administrative_expense'],
   },
   interest_expense: {
     group: 'income_statement',
@@ -333,6 +354,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Pre-Tax Income (Loss)',
+    aliases: ['pre_tax_income'],
   },
   tax_expense: {
     group: 'income_statement',
@@ -347,6 +369,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Income Tax Expense (Benefit)',
+    aliases: ['income_tax_expense'],
   },
   stock_based_compensation: {
     group: 'income_statement',
@@ -434,6 +457,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Accounts Receivable (Net)',
+    aliases: ['accounts_receivable_net'],
   },
   accounts_payable: {
     group: 'balance_sheet',
@@ -468,6 +492,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Property, Plant & Equipment (Net)',
+    aliases: ['property_plant_and_equipment_net'],
   },
   goodwill: {
     group: 'balance_sheet',
@@ -484,6 +509,7 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
     taxonomy: 'us-gaap',
     unit: 'USD',
     label: 'Intangible Assets (Net)',
+    aliases: ['intangible_assets_net'],
   },
 
   // Cash flow
@@ -546,18 +572,59 @@ const CONCEPT_MAP: Record<string, ConceptMapping> = {
   },
 };
 
+/**
+ * Every catalog name and alias, each to its mapping. A `Map`, so an input such
+ * as `constructor` or `__proto__` reads nothing off `Object.prototype`, and a key
+ * two entries claim fails at load rather than resolving to whichever came last.
+ */
+const CONCEPT_INDEX = new Map<string, ConceptMapping>();
+for (const [name, mapping] of Object.entries(CONCEPT_MAP)) {
+  for (const key of [name, ...(mapping.aliases ?? [])]) {
+    if (CONCEPT_INDEX.has(key)) throw new Error(`Concept key '${key}' is claimed twice.`);
+    CONCEPT_INDEX.set(key, mapping);
+  }
+}
+
 /** The catalog key an input compares as: trimmed, lowercased, `-` and spaces as `_`. */
 function catalogKey(input: string): string {
   return input.trim().toLowerCase().replace(/[- ]/g, '_');
 }
 
+/** A lowercase letter or digit followed by an uppercase letter: one camelCase hump. */
+const CAMEL_HUMP = /([a-z0-9])([A-Z])/g;
+
 /**
- * Resolve a concept input to its mapping. Accepts friendly names in any case or
- * separator form (`Net Income`, `NET_INCOME`), with surrounding whitespace ignored.
- * Returns undefined if the input is not a known friendly name.
+ * The catalog key of an input split at its camelCase humps (`operatingIncome` →
+ * `operating_income`), for an input that opens lowercase. No item element in
+ * us-gaap, ifrs-full, dei, or srt opens lowercase, so the split never reads a raw
+ * tag as a catalog name, while an uppercase-initial one would (`InterestExpense`
+ * as the four-tag `interest_expense`, `SharesOutstanding` as a `dei` tag).
+ */
+function camelCaseKey(input: string): string | undefined {
+  const trimmed = input.trim();
+  return /^[a-z]/.test(trimmed) ? catalogKey(trimmed.replace(CAMEL_HUMP, '$1_$2')) : undefined;
+}
+
+/**
+ * An input's entry in a table keyed like the catalog: by its catalog key, and
+ * only on a miss by its camelCase key, so every spelling that resolved before
+ * still does (`capEx` is `capex`, never `cap_ex`).
+ */
+function lookup<T>(table: ReadonlyMap<string, T>, input: string): T | undefined {
+  const value = table.get(catalogKey(input));
+  if (value !== undefined) return value;
+  const split = camelCaseKey(input);
+  return split === undefined ? undefined : table.get(split);
+}
+
+/**
+ * Resolve a concept input to its mapping. Accepts a friendly name or alias in
+ * any case or separator form (`Net Income`, `NET_INCOME`, `capital_expenditures`)
+ * or split from camelCase (`operatingIncome`), with surrounding whitespace
+ * ignored. Returns undefined if the input names no catalog concept.
  */
 export function resolveConcept(input: string): ConceptMapping | undefined {
-  return CONCEPT_MAP[catalogKey(input)];
+  return lookup(CONCEPT_INDEX, input);
 }
 
 /**
@@ -578,11 +645,11 @@ const XBRL_TAG_SHAPE = /^[A-Z][A-Za-z0-9]*$/;
  * so any formula would understate it. A catalog name is resolved before this
  * table is read, so a future catalog entry of the same name wins.
  */
-const DERIVATIONS: Record<string, string> = {
-  free_cash_flow: 'operating_cash_flow − capex',
-  ebitda: 'operating_income + depreciation_amortization',
-  working_capital: 'current_assets − current_liabilities',
-};
+const DERIVATIONS: ReadonlyMap<string, string> = new Map([
+  ['free_cash_flow', 'operating_cash_flow − capex'],
+  ['ebitda', 'operating_income + depreciation_amortization'],
+  ['working_capital', 'current_assets − current_liabilities'],
+]);
 
 /** Minimum Dice score for a catalog name to be suggested — the company-name threshold. */
 const SUGGESTION_THRESHOLD = 0.3;
@@ -590,20 +657,19 @@ const SUGGESTION_THRESHOLD = 0.3;
 const SUGGESTION_LIMIT = 3;
 
 /**
- * Up to three catalog names nearest an input's catalog key, each scored on its
- * friendly name and on its label (words, not underscores) and kept at the higher
- * of the two, ties broken by name. The label is what reaches `capex` from
- * `capital_expenditures`, which scores 0.21 against the name alone.
+ * Up to three catalog names nearest an input's key, each scored on its friendly
+ * name and on its label (words, not underscores) and kept at the higher of the
+ * two, ties broken by name. The label is what reaches `capex` from
+ * `capital_spending`, which scores 0.24 against the name alone. Aliases are not
+ * scored, so they move no suggestion.
  */
 function nearestConcepts(key: string): string[] {
-  const words = key.replace(/_/g, ' ');
+  const scoreName = trigramScorer(key);
+  const scoreLabel = trigramScorer(key.replace(/_/g, ' '));
   return Object.entries(CONCEPT_MAP)
     .map(([name, mapping]) => ({
       name,
-      score: Math.max(
-        trigramSimilarity(key, name),
-        trigramSimilarity(words, mapping.label.toLowerCase()),
-      ),
+      score: Math.max(scoreName(name), scoreLabel(mapping.label.toLowerCase())),
     }))
     .filter((candidate) => candidate.score >= SUGGESTION_THRESHOLD)
     .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
@@ -648,7 +714,7 @@ export function unknownConceptHint(unknown: UnknownConcept): string {
 
 /**
  * Classify a concept input before any company resolution or SEC request.
- * Returns undefined for a catalog name (any case or separator form) and for
+ * Returns undefined for anything {@link resolveConcept} resolves and for
  * anything shaped like an XBRL element name — a well-formed tag the filer does
  * not report stays the tool's own no-data answer (#45). Everything else is
  * unknown, with its derivation or nearest catalog names (#128).
@@ -656,16 +722,15 @@ export function unknownConceptHint(unknown: UnknownConcept): string {
 export function findUnknownConcept(input: string): UnknownConcept | undefined {
   if (resolveConcept(input)) return;
   const concept = input.trim();
-  const key = catalogKey(input);
   /**
    * Read before the tag-shape test so `EBITDA` gets its formula: no us-gaap,
    * ifrs-full, dei, or srt element is named like any derivation key, so a
    * tag-shaped spelling of one could only ever 404.
    */
-  const derivation = DERIVATIONS[key];
+  const derivation = lookup(DERIVATIONS, input);
   if (!derivation && XBRL_TAG_SHAPE.test(concept)) return;
 
-  const suggestions = derivation ? [] : nearestConcepts(key);
+  const suggestions = derivation ? [] : nearestConcepts(camelCaseKey(input) ?? catalogKey(input));
   return { concept, ...(derivation ? { derivation } : {}), suggestions };
 }
 
@@ -767,7 +832,8 @@ function normalizeForSearch(s: string): string {
 }
 
 /**
- * Search concepts by substring against friendly name, label, and XBRL tags.
+ * Search concepts by substring against friendly name, aliases, label, and XBRL
+ * tags. An alias is searched on its own: a label spelling `&` holds no `and`.
  * Passing a raw XBRL tag will reverse-lookup the friendly mapping(s).
  * Empty/whitespace query returns all entries.
  *
@@ -788,6 +854,7 @@ export function searchConcepts(query: string, taxonomy?: string): ConceptEntry[]
   return entries.filter((entry) => {
     const haystacks = [
       normalizeForSearch(entry.name),
+      ...(entry.aliases ?? []).map(normalizeForSearch),
       normalizeForSearch(entry.label),
       ...entry.tags.map(normalizeForSearch),
       ...(entry.ifrsTags ?? []).map(normalizeForSearch),

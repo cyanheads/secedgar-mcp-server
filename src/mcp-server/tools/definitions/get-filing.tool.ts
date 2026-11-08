@@ -5,13 +5,13 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { markdown } from '@cyanheads/mcp-ts-core/utils';
-import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
+import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
 import {
   type LimitClampOptions,
   limitClamp,
   withLimitClamps,
 } from '@/mcp-server/tools/limit-clamp.js';
+import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import { filingArchiveUrl, getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import type { FilingDocumentHeader, FilingHeaders } from '@/services/edgar/filing-headers.js';
@@ -20,12 +20,16 @@ import {
   detectHeadings,
   type FilingHeading,
   filingToExtract,
+  findPhrase,
   foldForHeadingMatch,
   getExtractCache,
   headingKey,
+  type InDocumentLink,
   isTocHeading,
+  linkedSectionStart,
   MARKER_TITLE_RE,
   matchSectionLine,
+  type PhraseOccurrence,
   setExtractCache,
   spaceRunInMarker,
   windowText,
@@ -56,6 +60,15 @@ const FILING_CONTENT_END = '--- END SEC FILING CONTENT ---';
 /** Sentinel key suffix when no specific document is requested (primary document path). */
 const PRIMARY_SENTINEL = '\x00primary';
 
+/** Longest `find` phrase, in characters (#238). */
+const MAX_FIND_CHARS = 200;
+/** Most occurrences of a `find` phrase one response lists; `occurrences_total` counts them all. */
+const MAX_LISTED_OCCURRENCES = 20;
+/** How far before an occurrence a `find` page may open: to its line's start, else a word's. */
+const FIND_PAGE_LEAD_CHARS = 200;
+/** Characters of document text an occurrence's `context` keeps on each side of the match. */
+const OCCURRENCE_CONTEXT_CHARS = 40;
+
 /** What an archive miss asks the caller to pass, after a verb (#203). */
 const FILER_CIK = "the filer's CIK as cik (resolve it with secedgar_company_search)";
 /** Leads an archive miss's hint when SEC could not answer a lookup of the filing's filers (#215). */
@@ -76,10 +89,11 @@ interface FilingRecords {
 }
 
 /**
- * What this tool caches per `accession:document` key: the extract, the document it
- * was read from, and the CIK whose archive served it. A hit resolves its metadata
- * under that CIK, so it reports the `cik` and `filing_url` the miss did (#158).
- * This tool is the extract cache's only writer, so every entry carries the CIK.
+ * What this tool caches per `accession:document` key: the extract, its in-document
+ * links (#239), the document it was read from, and the CIK whose archive served
+ * it. A hit resolves its metadata under that CIK, so it reports the `cik` and
+ * `filing_url` the miss did (#158), and lands `section` where the miss did. This
+ * tool is the extract cache's only writer, so every entry carries the CIK.
  */
 interface FilingExtract extends CachedExtract {
   cik: string;
@@ -154,23 +168,23 @@ type ResolveOutcome =
 
 const documentEntrySchema = z
   .object({
-    name: z.string().describe('Document filename within the filing archive.'),
+    name: z.string().describe('Filename in the filing archive.'),
     type: z
       .string()
       .describe(
-        'SEC document type (e.g., "10-K", "EX-21.1", "GRAPHIC"), or without a submission header a filename-inferred label ("exhibit", "PDF", "unknown").',
+        'SEC type ("10-K", "EX-21.1", "GRAPHIC"); with no submission header, a filename label ("exhibit", "PDF", "unknown").',
       ),
     description: z
       .string()
       .optional()
-      .describe('SEC description (e.g., "Subsidiaries of the Registrant"). Absent when none.'),
+      .describe('SEC description, e.g. "Subsidiaries of the Registrant".'),
     size: z.number().optional().describe('File size in bytes.'),
     binary: z
       .boolean()
       .optional()
       .describe('True for a binary entry (scan, PDF, archive, spreadsheet); absent otherwise.'),
   })
-  .describe('One document entry from the filing.');
+  .describe('One filing document.');
 
 /** `content_limit`: a page holds at most 200,000 characters (#197). */
 const contentLimit = limitClamp({
@@ -181,12 +195,12 @@ const contentLimit = limitClamp({
   bound: 1_000_000,
   shape: (n) => n.default(50000),
   description:
-    'Maximum characters of document text to return per page. 10-K filings can exceed 500,000 characters; S-1/A can exceed 1,000,000. Default 50,000 captures ~12,000 words (typically business overview, risk factors, and MD&A). Increase to 200,000 for full financial statements, or decrease for quick summaries. Use offset or section for subsequent pages.',
+    'Maximum characters of document text to return per page. 10-K filings can exceed 500,000 characters; S-1/A can exceed 1,000,000. Default 50,000 captures ~12,000 words (typically business overview, risk factors, and MD&A). Increase to 200,000 for full financial statements, or decrease for quick summaries. Page on with offset; section and find open a page at a heading or a phrase.',
 });
 
 export const getFilingTool = tool('secedgar_get_filing', {
   description:
-    "Fetch a specific filing's metadata and document content by accession number. Returns the primary document as readable text. Use offset/next_offset for multi-page access to large filings (10-K, S-1 can exceed 1M chars): pass the next_offset from a truncated response as offset, without section, to read the next page. Use section to jump directly to a heading (e.g. 'risk factors', 'item 7') without needing an offset.",
+    "Fetch a specific filing's metadata and document content by accession number. Returns the primary document as readable text. Use offset/next_offset for multi-page access to large filings (10-K, S-1 can exceed 1M chars): pass the next_offset from a truncated response as offset, without section or find, to read the next page. Use section to jump directly to a heading (e.g. 'risk factors', 'item 7') without needing an offset, or find to open the page at a phrase in the text (e.g. 'net revenue retention') and list where it occurs.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   // Agent-facing disclosure of the content window. `content_truncated` types the
@@ -197,7 +211,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .string()
       .optional()
       .describe(
-        'How to read the next page, which file was read when the archive does not serve the indexed primary, when section landed on a document line rather than a detected heading, and how many headings were detected when the outline lists fewer.',
+        'How to read the next page or list more occurrences of find, which file was read when the archive does not serve the indexed primary, when section landed on a document line rather than a detected heading, and how many headings were detected when the outline lists fewer.',
       ),
     truncated: z
       .boolean()
@@ -245,26 +259,16 @@ export const getFilingTool = tool('secedgar_get_filing', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The section string matched no detected heading and no line of the document',
       recovery:
-        'Pick a heading from the outline in the error message, pass a subheading exactly as the document prints it, or use offset paging instead.',
+        'Pick a heading from the outline in the error message or pass a subheading exactly as the document prints it; pass a phrase that is not a heading as find, or page with offset.',
     },
     {
-      reason: 'rate_limited',
-      code: JsonRpcErrorCode.RateLimited,
-      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
+      reason: 'phrase_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No occurrence of the find phrase starts at or after offset: the document does not contain it, or holds it only before offset',
       recovery:
-        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
-      retryable: true,
-      thrownBy: 'service',
+        'Check the phrase against the document text, or pass a smaller offset to search from earlier in the document.',
     },
-    {
-      reason: 'sec_unreachable',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
-      recovery:
-        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
-      retryable: true,
-      thrownBy: 'service',
-    },
+    ...SEC_UPSTREAM_ERRORS,
   ],
 
   input: z.object({
@@ -303,14 +307,21 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .min(0)
       .default(0)
       .describe(
-        'Character offset into the extracted document text. Pass next_offset from a truncated response to continue reading the next page, and leave section out: section takes precedence over offset. Default 0 reads from the beginning.',
+        'Character offset into the extracted document text. Pass next_offset from a truncated response to continue reading the next page, and leave section and find out: section takes precedence over offset, and with find, offset is where the search starts. Default 0 reads from the beginning.',
       ),
     section: z
       .string()
       .min(1)
       .optional()
       .describe(
-        "Jump to a named section, matched against every detected heading and the document's own lines (e.g. 'risk factors', 'item 7', 'item 2.02', 'certain relationships'). The first match wins, in this order: a heading equal to the value, or whose title after its Item/Part marker equals it; the first Item or Part heading containing it; a document line equal to it — a subheading the outline omits ('Liquidity and Capital Resources') — unless the line labels a table row; the first other heading containing it; a table-row label equal to it, else a document line starting with it. In a proxy statement (DEF 14A and its variants), whose ITEM headings are ballot proposals, the first heading of any kind containing the value comes before both document-line steps. Within each heading step a body heading wins over a table-of-contents row, which lands only when nothing else at that step matches. A line landing says so in the notice; table-of-contents rows and wrapped cross-references are never line landings. A leading 20-F sub-item label on a heading or line ('3D.', 'B.') is ignored, so 'risk factors' reaches '3D. RISK FACTORS'; the value itself is matched as given. A value ending in a number matches only that number: 'item 1' reaches Item 1 and Item 1A, never Items 10–16, and 'part i' never reaches Part II. Every step ignores case, whitespace, and quote style, so a heading copied from the outline resolves whether it carries the filing's non-breaking spaces and curly quotes or plain ones; the steps comparing a whole heading or line (equal to, starting with) also ignore the punctuation between an Item or Part marker and its title, so 'Item 1A Risk Factors' reaches 'Item 1A. – Risk Factors'. Takes precedence over offset when both are provided, so leave it out when paging on with next_offset. On a miss, the error message includes the detected outline so you can pick the correct heading.",
+        "Jump to a named section, matched against every detected heading and the document's own lines (e.g. 'risk factors', 'item 7', 'item 2.02', 'certain relationships'). The first match wins, in this order: a heading equal to the value, or whose title after its Item/Part marker equals it; the first Item or Part heading containing it; a document line equal to it — a subheading the outline omits ('Liquidity and Capital Resources') — unless the line labels a table row; the first other heading containing it; a table-row label equal to it, else a document line starting with it. In a proxy statement (DEF 14A and its variants), whose ITEM headings are ballot proposals, the first heading of any kind containing the value comes before both document-line steps. Within each heading step a body heading wins over a table-of-contents row, which lands only when nothing else at that step matches; a table-of-contents row that links to its section lands on that section. A line landing says so in the notice; table-of-contents rows and wrapped cross-references are never line landings. A leading 20-F sub-item label on a heading or line ('3D.', 'B.') is ignored, so 'risk factors' reaches '3D. RISK FACTORS'; the value itself is matched as given. A value ending in a number matches only that number: 'item 1' reaches Item 1 and Item 1A, never Items 10–16, and 'part i' never reaches Part II. Every step ignores case, whitespace, and quote style, so a heading copied from the outline resolves whether it carries the filing's non-breaking spaces and curly quotes or plain ones; the steps comparing a whole heading or line (equal to, starting with) also ignore the punctuation between an Item or Part marker and its title, so 'Item 1A Risk Factors' reaches 'Item 1A. – Risk Factors'. For a phrase in the text that is not a heading, use find. Takes precedence over find and offset, so leave it out when paging on with next_offset. On a miss, the error message includes the detected outline so you can pick the correct heading.",
+      ),
+    find: z
+      .string()
+      .max(MAX_FIND_CHARS)
+      .optional()
+      .describe(
+        "Open the page at a phrase in the document's text (e.g. 'net revenue retention') and list where it occurs. Matched as a substring, ignoring case, whitespace runs, and quote style, so a phrase broken across a line matches; no patterns or whole-word matching. The page opens at the first occurrence at or after offset — at its line's start when that is at most 200 characters earlier, else at the first word starting within those 200 — and occurrences lists up to 20 from there with context, occurrences_total counting the whole document. Blank reads as omitted. With find, offset is where the search starts, so leave find out when paging on with next_offset; section takes precedence over find.",
       ),
   }),
 
@@ -380,7 +391,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       .number()
       .optional()
       .describe(
-        'Offset of the next page, to pass as offset without section; present while content_truncated is true.',
+        'Offset of the next page, to pass as offset without section or find; present while content_truncated is true.',
       ),
     outline: z
       .array(
@@ -395,8 +406,27 @@ export const getFilingTool = tool('secedgar_get_filing', {
       )
       .optional()
       .describe(
-        'Up to 50 detected headings, on the first page of a truncated response (offset=0, no section). Past 50, Item and Part headings come first (bare TOC copies of titled ones dropped), then the earliest others; the notice gives the detected count. Pass a heading offset as offset, or its text as section.',
+        'Up to 50 detected headings on a truncated first page (offset=0, no section or find). Past 50: Item and Part headings first (bare TOC copies of titled ones dropped), then the earliest; the notice gives the count. Pass text as section (a linked TOC row lands on its section) or offset as offset.',
       ),
+    occurrences: z
+      .array(
+        z
+          .object({
+            offset: z.number().describe('Character offset where the occurrence starts.'),
+            context: z
+              .string()
+              .describe(
+                'The match and up to 40 characters either side, whitespace runs as one space.',
+              ),
+          })
+          .describe('One occurrence of find.'),
+      )
+      .optional()
+      .describe('With find: up to 20 occurrences, from the one the page opens at.'),
+    occurrences_total: z
+      .number()
+      .optional()
+      .describe('With find: occurrences in the whole document.'),
     filing_url: z.string().describe('Direct URL to the filing on SEC.gov.'),
   }),
 
@@ -409,6 +439,8 @@ export const getFilingTool = tool('secedgar_get_filing', {
     // A blank `document` reads as omitted (#203): no archive file has a blank name,
     // and requesting one fetches SEC's directory listing page instead.
     const document = input.document?.trim() ? input.document : undefined;
+    // A blank `find` reads as omitted too (#238), the way a form client sends an unset field.
+    const find = input.find?.trim() ? input.find : undefined;
     const documentKey = document ?? PRIMARY_SENTINEL;
     const cacheKey = `${accn}:${documentKey}`;
 
@@ -416,6 +448,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
     const cached = getExtractCache(cacheKey) as FilingExtract | undefined;
 
     let fullText: string;
+    let links: InDocumentLink[];
     let resolvedCik: string;
     let index: FilingIndex;
     let targetName: string;
@@ -535,8 +568,14 @@ export const getFilingTool = tool('secedgar_get_filing', {
       unservedPrimary = resolved.unservedPrimary;
       records = resolved.records;
 
-      fullText = filingToExtract(resolved.html);
-      const extract: FilingExtract = { text: fullText, document: targetName, cik: resolvedCik };
+      links = [];
+      fullText = filingToExtract(resolved.html, links);
+      const extract: FilingExtract = {
+        text: fullText,
+        links,
+        document: targetName,
+        cik: resolvedCik,
+      };
       setExtractCache(cacheKey, extract);
     } else {
       // Cache hit — still need metadata. Re-resolve the index under the CIK whose
@@ -554,6 +593,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
       index = metaResolved.index;
       records = metaResolved.records;
       fullText = cached.text;
+      links = cached.links;
       targetName = cached.document;
       filingPrimaryName = metaResolved.filingPrimaryName;
       // A primary read cached from the full submission keeps reporting it (#158).
@@ -584,9 +624,14 @@ export const getFilingTool = tool('secedgar_get_filing', {
     const filingDate = idx >= 0 ? recent.filingDate[idx] : header?.filingDate;
     const periodEnding = idx >= 0 ? recent.reportDate[idx] : header?.periodOfReport;
 
-    // Determine effective offset (section wins over raw offset)
+    // Where the page starts: section, else find, else offset. Under find, offset
+    // is where the search starts (#238).
     let effectiveOffset = input.offset ?? 0;
     let lineNotice: string | undefined;
+    let phrase:
+      | { occurrences: Array<{ context: string; offset: number }>; total: number }
+      | undefined;
+    let findNotice: string | undefined;
 
     if (input.section) {
       // Every detected heading is a candidate; the 50-entry cap is the
@@ -600,7 +645,7 @@ export const getFilingTool = tool('secedgar_get_filing', {
         ? undefined
         : resolveSection(fullText, headings, input.section, PROXY_FORM_RE.test(form ?? ''));
       // The notices are authored Markdown, so the caller's section text is escaped.
-      const sectionText = escapeInline(input.section);
+      const sectionText = escapeMarkdownInline(input.section);
       if (landing?.source === 'line') {
         lineNotice = `No detected heading matches section '${sectionText}', so this page starts at the first document line that does.`;
       } else if (landing?.source === 'line-over-heading') {
@@ -618,8 +663,8 @@ export const getFilingTool = tool('secedgar_get_filing', {
           outline.length > 0 ? `\n\n${outlineLabel}\n${renderOutline(outline)}` : '';
         const hint =
           headings.length > 0
-            ? 'Pick a heading from the outline above and pass it as section; a subheading the outline omits matches when passed exactly as the document prints it.'
-            : 'No headings were detected in this document — use offset paging instead.';
+            ? 'Pick a heading from the outline above and pass it as section; a subheading the outline omits matches when passed exactly as the document prints it. For a phrase that is not a heading, pass it as find instead.'
+            : 'No headings were detected in this document — pass a phrase as find to locate it in the text, or use offset paging.';
         const problem = blank
           ? `Section is blank: ${describeBlankSection(input.section)}, leaving nothing to match.`
           : `Section '${input.section}' not found in this document.`;
@@ -629,7 +674,46 @@ export const getFilingTool = tool('secedgar_get_filing', {
           recovery: { hint },
         });
       }
-      effectiveOffset = landing.offset;
+      // A table-of-contents row that links forward lands on its section (#239).
+      effectiveOffset =
+        (landing.source === 'heading'
+          ? linkedSectionStart(fullText, landing.heading, links)
+          : undefined) ?? landing.offset;
+    } else if (find) {
+      const matches = findPhrase(fullText, find, input.offset, MAX_LISTED_OCCURRENCES);
+      const first = matches.listed[0];
+      if (first === undefined) {
+        // Each rule's hint names only that rule: absent from the document, or present only before offset.
+        const [problem, hint] =
+          matches.total === 0
+            ? [
+                `Phrase '${find}' does not occur in this document.`,
+                'Check the spelling, or pass a shorter part of the phrase: find ignores case, whitespace runs, and quote style, and matches every other character as given.',
+              ]
+            : [
+                `Phrase '${find}' does not occur at or after offset ${input.offset}; ${matches.before === 1 ? 'its one occurrence comes' : `all ${matches.before} occurrences come`} before it.`,
+                'Pass a smaller offset, or leave offset out, to search from the start of the document.',
+              ];
+        throw ctx.fail('phrase_not_found', problem, {
+          find,
+          offset: input.offset,
+          occurrences_before: matches.before,
+          recovery: { hint },
+        });
+      }
+      effectiveOffset = findPageStart(fullText, first.offset);
+      phrase = {
+        occurrences: matches.listed.map((o) => ({
+          offset: o.offset,
+          context: occurrenceContext(fullText, o),
+        })),
+        total: matches.total,
+      };
+      const atOrAfter = matches.total - matches.before;
+      const last = matches.listed[matches.listed.length - 1] ?? first;
+      if (atOrAfter > matches.listed.length) {
+        findNotice = `${matches.listed.length} of the ${atOrAfter} occurrences at or after offset ${input.offset} are listed; to list the next ones, pass the same find with offset ${last.end}.`;
+      }
     }
 
     // Validate offset
@@ -650,32 +734,37 @@ export const getFilingTool = tool('secedgar_get_filing', {
       pageLimit,
     );
 
-    // Emit outline on first-page truncated responses (not on subsequent pages or section jumps)
-    const shouldEmitOutline = truncated && effectiveOffset === 0 && !input.section;
+    // Emit outline on first-page truncated responses (not on subsequent pages, section jumps, or find pages)
+    const shouldEmitOutline = truncated && effectiveOffset === 0 && !input.section && !find;
     const detected = shouldEmitOutline ? detectHeadings(fullText) : undefined;
     const outline = detected && selectOutline(detected);
 
     // `notice` is last-wins across notice/truncated, so the fallback disclosure,
-    // the line-landing note, and the outline cut ride inside the truncation
-    // guidance. The outline is emitted only on a truncated page, so the cut
-    // always has guidance to join.
+    // the line-landing note, the find continuation, and the outline cut ride
+    // inside the truncation guidance. The outline is emitted only on a truncated
+    // page, so the cut always has guidance to join.
     const fallbackNotice = unservedPrimary
-      ? `The filing index names ${escapeInline(unservedPrimary)} as the primary document, but the SEC archive does not serve it, so this text is the full submission file ${escapeInline(targetName)}.`
+      ? `The filing index names ${escapeMarkdownInline(unservedPrimary)} as the primary document, but the SEC archive does not serve it, so this text is the full submission file ${escapeMarkdownInline(targetName)}.`
       : undefined;
     if (truncated) {
-      // section outranks offset, so a caller who keeps it reads this page again.
+      // section outranks offset, so a caller who keeps it reads this page again;
+      // one who keeps find searches on from next_offset instead of reading it.
       const nextPage = input.section
         ? 'as offset without section to read the next page — section takes precedence over offset.'
-        : 'as offset to read the next page, or jump with section.';
+        : find
+          ? 'as offset without find to read the next page — with find, offset is where the search starts.'
+          : 'as offset to read the next page, or jump with section.';
       const paging = `Showing ${text.length} of ${totalLength} characters. Pass next_offset (${nextOffset ?? '?'}) ${nextPage}`;
       const outlineCut = detected && outline && outlineCutNote(outline, detected);
       ctx.enrich.truncated({
         shown: text.length,
         cap: pageLimit,
-        guidance: [fallbackNotice, lineNotice, paging, outlineCut].filter(Boolean).join(' '),
+        guidance: [fallbackNotice, lineNotice, findNotice, paging, outlineCut]
+          .filter(Boolean)
+          .join(' '),
       });
-    } else if (fallbackNotice || lineNotice) {
-      ctx.enrich.notice([fallbackNotice, lineNotice].filter(Boolean).join(' '));
+    } else if (fallbackNotice || lineNotice || findNotice) {
+      ctx.enrich.notice([fallbackNotice, lineNotice, findNotice].filter(Boolean).join(' '));
     }
 
     // Headers give canonical document types; without them categorization falls
@@ -723,6 +812,8 @@ export const getFilingTool = tool('secedgar_get_filing', {
       content_total_length: totalLength,
       next_offset: nextOffset,
       outline,
+      occurrences: phrase?.occurrences,
+      occurrences_total: phrase?.total,
       filing_url: filingArchiveUrl(resolvedCik, accn, targetName),
     };
   },
@@ -730,12 +821,14 @@ export const getFilingTool = tool('secedgar_get_filing', {
   format: (result) => {
     const formLabel = result.form ?? 'Filing';
     // SEC's name, the filer's headings, and document descriptions render through
-    // escapeInline, so content[] reads back the structuredContent value (#221).
+    // escapeMarkdownInline, so content[] reads back the structuredContent value (#221).
     // The body between the sentinels (#69) is a fenced block sized past its own
     // backtick runs instead (#226): it reads back the same and keeps its column
     // layout, where escaping writes each leading space and tab as a character
     // reference and a rendered paragraph collapses whitespace runs.
-    const entity = result.company_name ? escapeInline(result.company_name) : 'Unknown entity';
+    const entity = result.company_name
+      ? escapeMarkdownInline(result.company_name)
+      : 'Unknown entity';
     const header = `**${formLabel}** — ${entity} (CIK ${result.cik})`;
 
     const filedPart = result.filing_date ? `Filed: ${result.filing_date}` : 'Filed: Unknown';
@@ -754,16 +847,23 @@ export const getFilingTool = tool('secedgar_get_filing', {
 
     const outline = result.outline?.map((h) => ({
       ...h,
-      heading: escapeInline(h.heading),
+      heading: escapeMarkdownInline(h.heading),
     }));
     const outlineText = outline?.length ? `\n\nOutline:\n${renderOutline(outline)}` : '';
+    // Each context is SEC text after an authored `[offset] ` label, so it renders
+    // escaped and reads back as the structuredContent value (#238).
+    const occurrencesText = result.occurrences
+      ? `\n\nOccurrences (${result.occurrences_total} in the document):\n${result.occurrences
+          .map((o) => `  [${o.offset}] ${escapeMarkdownInline(o.context)}`)
+          .join('\n')}`
+      : '';
 
     const url = `\nURL: ${result.filing_url}`;
     const body = markdown().codeBlock(result.content, 'text').build();
     return [
       {
         type: 'text',
-        text: `${header}\n${dateLine}\n${meta}${docs}${outlineText}${url}\n\n${FILING_CONTENT_BEGIN}\n${body}\n${FILING_CONTENT_END}`,
+        text: `${header}\n${dateLine}\n${meta}${docs}${outlineText}${occurrencesText}${url}\n\n${FILING_CONTENT_BEGIN}\n${body}\n${FILING_CONTENT_END}`,
       },
     ];
   },
@@ -845,14 +945,14 @@ function occursBeforeBoundary(
 }
 
 /**
- * Where `section` lands. `line` is a document line no heading tier supplied;
- * `line-over-heading` is an equal line that outranked a heading merely
- * containing the value, which the notice words apart.
+ * Where `section` lands: a detected heading, which a table-of-contents row's
+ * link can carry on to its section (#239), or a document line. `line` is a line
+ * no heading tier supplied; `line-over-heading` is an equal line that outranked
+ * a heading merely containing the value, which the notice words apart.
  */
-interface SectionLanding {
-  offset: number;
-  source: 'heading' | 'line' | 'line-over-heading';
-}
+type SectionLanding =
+  | { heading: FilingHeading; offset: number; source: 'heading' }
+  | { offset: number; source: 'line' | 'line-over-heading' };
 
 /**
  * Where `section` lands, over every detected heading (#169) and the document's
@@ -934,24 +1034,69 @@ function resolveSection(
     );
     return labelled ? 1 : undefined;
   });
-  if (exact) return { offset: exact.offset, source: 'heading' };
+  const onHeading = (heading: FilingHeading): SectionLanding => ({
+    heading,
+    offset: heading.offset,
+    source: 'heading',
+  });
+  if (exact) return onHeading(exact);
   const needle = foldForSectionMatch(section);
   const contains = (h: FilingHeading) => sectionMatches(foldForSectionMatch(h.heading), needle);
   if (proxy) {
     const heading = first(contains);
-    if (heading) return { offset: heading.offset, source: 'heading' };
+    if (heading) return onHeading(heading);
     const line = matchSectionLine(text, section);
     return line ? { offset: line.offset, source: 'line' } : undefined;
   }
   const itemOrPart = first((h) => isStructuralHeading(h) && contains(h));
-  if (itemOrPart) return { offset: itemOrPart.offset, source: 'heading' };
+  if (itemOrPart) return onHeading(itemOrPart);
   const line = matchSectionLine(text, section);
   // Tier 2 missed, so any heading containing the value is a non-Item one.
   const other = first(contains);
   if (line?.equal) return { offset: line.offset, source: other ? 'line-over-heading' : 'line' };
-  if (other) return { offset: other.offset, source: 'heading' };
+  if (other) return onHeading(other);
   if (line) return { offset: line.offset, source: 'line' };
   return;
+}
+
+/** Whether the character at `at` is whitespace as `\s` reads it; false past either end. */
+function isSpaceAt(text: string, at: number): boolean {
+  return /\s/.test(text.charAt(at));
+}
+
+/**
+ * Where a `find` page opens for an occurrence at `at` (#238): the start of the
+ * occurrence's line when that is at most {@link FIND_PAGE_LEAD_CHARS} characters
+ * earlier, else the first word starting within those characters, else the
+ * occurrence itself. Reads at most that many characters back.
+ */
+function findPageStart(text: string, at: number): number {
+  const floor = Math.max(0, at - FIND_PAGE_LEAD_CHARS);
+  const newline = text.slice(floor, at).lastIndexOf('\n');
+  if (newline !== -1) return floor + newline + 1;
+  if (floor === 0 || text.charAt(floor - 1) === '\n') return floor;
+  for (let i = floor; i < at; i++) {
+    if (isSpaceAt(text, i - 1) && !isSpaceAt(text, i)) return i;
+  }
+  return at;
+}
+
+/**
+ * An occurrence's `context`: the match and up to {@link OCCURRENCE_CONTEXT_CHARS}
+ * characters of document text on each side, each whitespace run shown as one
+ * space. An edge never splits a surrogate pair.
+ */
+function occurrenceContext(text: string, { offset, end }: PhraseOccurrence): string {
+  let start = Math.max(0, offset - OCCURRENCE_CONTEXT_CHARS);
+  let stop = Math.min(text.length, end + OCCURRENCE_CONTEXT_CHARS);
+  if (start > 0 && isLowSurrogate(text.charCodeAt(start))) start++;
+  if (stop < text.length && isLowSurrogate(text.charCodeAt(stop))) stop--;
+  return text.slice(start, stop).replace(/\s+/g, ' ');
+}
+
+/** Whether a code unit is the second half of a surrogate pair. */
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
 }
 
 /**
@@ -1439,9 +1584,10 @@ function accessionPrefixCik(accessionNumber: string): string {
 
 /**
  * Run an optional SEC lookup, answering `undefined` when SEC is unavailable for it:
- * no response or an unreadable body (`sec_unreachable`), a 5xx, or a full-text
- * search backend failure or refusal (`efts_degraded_response`), all
- * `ServiceUnavailable`, or a 504, which maps to `Timeout`. Everything else is
+ * no response or an unreadable body (`sec_unreachable`), a 500, 502, 503, or 504
+ * once its retries are spent (`sec_unavailable`, #233), or a full-text search
+ * backend failure or refusal (`efts_degraded_response`), all
+ * `ServiceUnavailable`, or a 408 or 425, which map to `Timeout`. Everything else is
  * rethrown untouched — the caller's cancellation, a rate-limit refusal (SEC's block
  * covers every request the call would send next), and any other failure that says
  * the request itself is wrong.
@@ -1791,7 +1937,7 @@ function formatDocList(entries: DocumentEntry[]): string {
         d.type,
         d.binary ? 'binary' : null,
         d.size !== undefined ? `${d.size}B` : null,
-        d.description ? `"${escapeInline(d.description)}"` : null,
+        d.description ? `"${escapeMarkdownInline(d.description)}"` : null,
       ]
         .filter(Boolean)
         .join(', ');

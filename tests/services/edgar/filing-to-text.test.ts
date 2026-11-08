@@ -144,7 +144,7 @@ describe('filingToExtract', () => {
 });
 
 describe('hasExtractCache / getExtractCache / setExtractCache', () => {
-  const entry = (text: string, document = 'doc.htm') => ({ text, document });
+  const entry = (text: string, document = 'doc.htm') => ({ text, document, links: [] });
 
   it('hasExtractCache returns false before any set', () => {
     expect(hasExtractCache('no-such-key')).toBe(false);
@@ -161,7 +161,11 @@ describe('hasExtractCache / getExtractCache / setExtractCache', () => {
 
   it('getExtractCache returns the text and its source document after setExtractCache', () => {
     setExtractCache('k2', entry('value2', '0000899681-00-000406.txt'));
-    expect(getExtractCache('k2')).toEqual({ text: 'value2', document: '0000899681-00-000406.txt' });
+    expect(getExtractCache('k2')).toEqual({
+      text: 'value2',
+      document: '0000899681-00-000406.txt',
+      links: [],
+    });
   });
 
   it('getExtractCache returns same value on repeated calls (LRU refresh, not eviction)', () => {
@@ -172,7 +176,7 @@ describe('hasExtractCache / getExtractCache / setExtractCache', () => {
 });
 
 describe('LRU eviction', () => {
-  const entry = (text: string) => ({ text, document: 'doc.htm' });
+  const entry = (text: string) => ({ text, document: 'doc.htm', links: [] });
 
   it('evicts the oldest entry when capacity (8) is exceeded', () => {
     // Fill to capacity
@@ -4001,5 +4005,88 @@ describe('filingToExtract — <TEXT> body scan worst cases stay linear (#136, #1
     ['a plain body with breaks throughout', (n: number) => `<TEXT>${fill('  \r\n', n)}</TEXT>`],
   ])('%s (5k → 320k)', (_label, build) => {
     expectLinear(filingToExtract, build, 320_000, 200);
+  });
+});
+
+/**
+ * Serve one HTML primary document through the mocked EDGAR service, so a
+ * `get_filing` round trip runs the real conversion — the in-document link pass
+ * included (#239) — heading detection, and `section` resolution over `html`.
+ */
+function serveHtmlFiling(accession: string, form: string, html: string) {
+  const tryGetFilingDocument = vi.fn(async () => html);
+  vi.mocked(getEdgarApiService).mockReturnValue({
+    findFilingCiks: vi.fn(async () => ['0001994000']),
+    tryGetFilingIndex: vi.fn(async () => ({
+      directory: {
+        name: accession.replace(/-/g, ''),
+        item: [
+          { name: 'prospectus.htm', type: 'text/html', size: '', 'last-modified': '2026-10-28' },
+        ],
+      },
+    })),
+    tryGetFilingDocument,
+    tryGetFilingHeaders: vi.fn(async () => null),
+    tryGetSubmissionHeader: vi.fn(async () => null),
+    getSubmissions: vi.fn(async () => ({
+      cik: '0001994000',
+      name: 'EXAMPLE PBC',
+      tickers: [],
+      exchanges: [],
+      filings: {
+        recent: {
+          accessionNumber: [accession],
+          filingDate: ['2026-10-28'],
+          form: [form],
+          primaryDocument: ['prospectus.htm'],
+          primaryDocDescription: [''],
+          reportDate: [''],
+        },
+        files: [],
+      },
+    })),
+  } as never);
+  return { tryGetFilingDocument };
+}
+
+/**
+ * The shape of Anthropic, PBC's S-1/A (0001628280-26-068676): an all-caps table
+ * of contents whose rows link each section, a cover page, then each section's
+ * mixed-case heading — a line heading detection does not list — after an empty
+ * target `div`, a page number, and the running `Table of Contents` link.
+ */
+const LINKED_TOC_S1 = [
+  '<html><body>',
+  '<div><a href="#cover">Table of Contents</a></div>',
+  '<div><a href="#rf">RISK FACTORS</a></div><div>12</div>',
+  '<div><a href="#uop">USE OF PROCEEDS</a></div><div>81</div>',
+  '<div>We are offering shares of our Class A common stock. Cover prose follows here.</div>',
+  '<div id="rf"></div><div>28</div><div><a href="#cover">Table of Contents</a></div>',
+  '<div>Risk Factors</div><p>Investing in our Class A common stock involves a high degree of risk.</p>',
+  '<div id="uop"></div><div>81</div><div>Use of Proceeds</div>',
+  '<p>We intend to use the net proceeds for general corporate purposes.</p>',
+  '</body></html>',
+].join('\n');
+
+describe('get_filing section — a table-of-contents row lands on the section it links to (#239)', () => {
+  const accession = '0001628280-26-068676';
+
+  it('lands risk factors on the line holding its linked section, not on the TOC row', async () => {
+    serveHtmlFiling(accession, 'S-1/A', LINKED_TOC_S1);
+    const text = filingToExtract(LINKED_TOC_S1);
+    const page = text.indexOf('28\nTable of Contents\nRisk Factors');
+    expect(page).toBeGreaterThan(text.indexOf('RISK FACTORS'));
+
+    const result = await runToolContract(getFilingTool, {
+      accession_number: accession,
+      cik: '1994000',
+      section: 'risk factors',
+      content_limit: 1000,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const content = (result.structuredContent as { content: string }).content;
+    expect(content).toBe(text.slice(page));
+    expect(contentText(result)).toContain('28\nTable of Contents\nRisk Factors\n\nInvesting');
   });
 });

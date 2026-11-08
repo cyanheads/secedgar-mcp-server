@@ -16,7 +16,7 @@ vi.mock('@/services/edgar/edgar-api-service.js', () => ({
 }));
 
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import { blockText, caught, wireError } from '../../../support/assertions.js';
+import { allText, bag, blockText, caught, wireError } from '../../../support/assertions.js';
 import { readCommonMark } from '../../../support/commonmark.js';
 
 function fact(overrides: Partial<CompanyConceptUnit> & { frame: string }): CompanyConceptUnit {
@@ -872,6 +872,66 @@ describe('getSnapshotTool — ambiguous_company total_matches (#229)', () => {
       "'Co' matches multiple companies: 0000000000 Co 0, 0000000001 Co 1. Retry with one of these tickers or 10-digit CIKs.",
     );
     expect(error.data).toMatchObject({ matches: companies(2), total_matches: 2 });
+  });
+});
+
+/**
+ * A ticker spelling EDGAR does not list, read as one it does (#235): the note reaches both
+ * surfaces as `resolvedAs`, and a non-US listing's miss says why. Values are tabled at their own
+ * seams; these cases prove the wiring, one per side.
+ */
+describe('getSnapshotTool — ticker readings (#235)', () => {
+  const NON_US =
+    'The .L suffix marks a non-US listing; EDGAR indexes SEC registrants by US ticker, name, or CIK.';
+
+  it('carries the reading on both surfaces', async () => {
+    const reading = 'AAPL.O read as AAPL (Apple Inc.)';
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0000320193',
+      name: 'Apple Inc.',
+      ticker: 'AAPL',
+      reading,
+    });
+
+    const result = await runToolContract(getSnapshotTool, { company: 'AAPL.O' });
+
+    expect(result.isError).toBeFalsy();
+    expect(bag(result.structuredContent).resolvedAs).toBe(reading);
+    expect(readCommonMark(allText(result))).toContain(
+      `⟨strong⟩Resolved as:⟨/strong⟩ ⟨code_inline:${reading}⟩`,
+    );
+  });
+
+  it('carries no note for a match no reading produced', async () => {
+    const result = await runToolContract(getSnapshotTool, { company: 'AAPL' });
+
+    expect(result.isError).toBeFalsy();
+    expect(bag(result.structuredContent)).not.toHaveProperty('resolvedAs');
+    expect(allText(result)).not.toContain('Resolved as');
+  });
+
+  it('adds the non-US listing sentence to company_not_found, before any data request', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+
+    const result = await runToolContract(getSnapshotTool, { company: 'VOD.L' });
+
+    const error = wireError(result);
+    expect(error.message).toBe(`Company 'VOD.L' not found. ${NON_US}`);
+    expect(error.data).toMatchObject({
+      reason: 'company_not_found',
+      recovery: { hint: 'Use a ticker symbol or 10-digit CIK number for an exact match.' },
+    });
+    expect(readCommonMark(blockText(result.content))).toContain(NON_US);
+    expect(mockApi.tryGetCompanyFacts).not.toHaveBeenCalled();
+  });
+
+  it('keeps the message unchanged for any other miss', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+
+    const error = wireError(await runToolContract(getSnapshotTool, { company: 'XYZNOTREAL' }));
+
+    expect(error.message).toBe("Company 'XYZNOTREAL' not found.");
+    expect(error.data).toMatchObject({ reason: 'company_not_found' });
   });
 });
 

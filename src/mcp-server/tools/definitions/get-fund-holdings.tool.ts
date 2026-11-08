@@ -11,8 +11,9 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
-import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
+import { datasetSchema } from '@/mcp-server/tools/dataset-schema.js';
 import { fixedPoint } from '@/mcp-server/tools/fixed-point.js';
 import { formatUsd, groupedDigits } from '@/mcp-server/tools/format-usd.js';
 import {
@@ -20,6 +21,8 @@ import {
   limitClamp,
   withLimitClamps,
 } from '@/mcp-server/tools/limit-clamp.js';
+import { resolvedAsField } from '@/mcp-server/tools/resolved-as.js';
+import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -27,6 +30,7 @@ import {
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, rawDocumentName } from '@/services/edgar/edgar-api-service.js';
+import { nonUsListingNote } from '@/services/edgar/listing-codes.js';
 import {
   type NportHeader,
   parseNportHeader,
@@ -268,24 +272,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       recovery:
         'Drop report_date to take the newest report, or use secedgar_search_filings with forms ["NPORT-P"] to see what the registrant has filed.',
     },
-    {
-      reason: 'rate_limited',
-      code: JsonRpcErrorCode.RateLimited,
-      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
-      recovery:
-        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
-      retryable: true,
-      thrownBy: 'service',
-    },
-    {
-      reason: 'sec_unreachable',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
-      recovery:
-        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
-      retryable: true,
-      thrownBy: 'service',
-    },
+    ...SEC_UPSTREAM_ERRORS,
   ],
 
   input: z.object({
@@ -361,9 +348,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
         'Days from the portfolio date to the filing date. Absent when the report omits its period date.',
       ),
     form: z.string().describe('EDGAR form name — "NPORT-P", or "NPORT-P/A" for an amended report.'),
-    accession_number: z
-      .string()
-      .describe('Accession number — pass to secedgar_get_filing for the full document.'),
+    accession_number: z.string().describe('Accession number for secedgar_get_filing.'),
     is_final_filing: z
       .boolean()
       .optional()
@@ -393,7 +378,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
     available_report_periods: z
       .array(z.string())
       .describe(
-        "Period end dates of this fund's reports, newest first: what report_date can address, about a decade back. A trust filing thousands of reports a year can miss periods here that report_date still reaches.",
+        "Period ends of this fund's reports, newest first, about a decade back: what report_date can address. For a trust filing thousands of reports a year, report_date also reaches periods missing here.",
       ),
     holdings: z
       .array(
@@ -466,16 +451,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       .describe(
         'One page of positions, `limit` rows starting at `offset`, largest first by percent of net assets.',
       ),
-    dataset: z
-      .object({
-        name: z
-          .string()
-          .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
-          ),
-        row_count: z.number().describe('Rows materialized in the dataframe.'),
-        expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
-      })
+    dataset: datasetSchema
       .optional()
       .describe(
         'Dataframe of every position, each row carrying the fund keys; joins 13F and 13D/G dataframes on cusip. Absent when canvas is unavailable or the report had no positions.',
@@ -498,6 +474,11 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       .describe('True when the inline holdings list was capped by limit.'),
     shown: z.number().optional().describe('Number of positions shown inline.'),
     cap: z.number().optional().describe('The limit cap applied.'),
+    resolvedAs: resolvedAsField,
+  },
+
+  enrichmentTrailer: {
+    resolvedAs: { label: 'Resolved as' },
   },
 
   async handler(input, ctx) {
@@ -526,8 +507,13 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
       }
       const match = candidates[0];
       if (!match) {
-        throw ctx.fail('fund_not_found', `Fund '${input.fund}' not found in EDGAR.`);
+        const note = nonUsListingNote(input.fund.trim());
+        throw ctx.fail(
+          'fund_not_found',
+          `Fund '${input.fund}' not found in EDGAR.${note ? ` ${note}` : ''}`,
+        );
       }
+      if (match.reading) ctx.enrich({ resolvedAs: match.reading });
       registrantCik = match.cik;
       targetSeries ??= match.seriesId?.toUpperCase();
     }
@@ -828,16 +814,16 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
 
   format: (result) => {
     // Filer-reported names and titles and the echoed fund input render through
-    // escapeInline, so a CommonMark parse reads back the structuredContent value (#221).
-    const label = escapeInline(result.series_name ?? result.registrant_name);
+    // escapeMarkdownInline, so a CommonMark parse reads back the structuredContent value (#221).
+    const label = escapeMarkdownInline(result.series_name ?? result.registrant_name);
     const lines: string[] = [
-      `**${label} portfolio** — input "${escapeInline(result.fund)}"`,
+      `**${label} portfolio** — input "${escapeMarkdownInline(result.fund)}"`,
       `Portfolio as of ${result.report_period_date ?? 'an unstated date'}, filed ${result.filing_date}${
         result.publication_lag_days !== undefined
           ? ` (${result.publication_lag_days} days later)`
           : ''
       } | ${result.form} ${result.accession_number}`,
-      `Registrant: ${escapeInline(result.registrant_name)} (CIK ${result.registrant_cik})${
+      `Registrant: ${escapeMarkdownInline(result.registrant_name)} (CIK ${result.registrant_cik})${
         result.series_id ? ` | series ${result.series_id}` : ''
       }${result.class_ids.length > 0 ? ` | classes ${result.class_ids.join(', ')}` : ''}`,
     ];
@@ -877,7 +863,7 @@ export const getFundHoldingsTool = tool('secedgar_get_fund_holdings', {
         .filter(Boolean)
         .join(' ');
       lines.push(
-        `**${escapeInline(h.name)}**${h.title && h.title !== h.name ? ` (${escapeInline(h.title)})` : ''}${ids ? ` — ${ids}` : ''}`,
+        `**${escapeMarkdownInline(h.name)}**${h.title && h.title !== h.name ? ` (${escapeMarkdownInline(h.title)})` : ''}${ids ? ` — ${ids}` : ''}`,
       );
       const value =
         h.value_usd !== undefined

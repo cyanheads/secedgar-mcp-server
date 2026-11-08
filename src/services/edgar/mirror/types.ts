@@ -5,8 +5,11 @@
  * @module services/edgar/mirror/types
  */
 
-/** SEC ticker→CIK directory (small direct-download JSON, ~200 KB). */
+/** SEC ticker→CIK directory (direct-download JSON, about 800 KB: 796,507 bytes on 2026-11-08). */
 export const TICKERS_URL = 'https://www.sec.gov/files/company_tickers.json';
+
+/** SEC mutual-fund / ETF ticker directory. */
+export const MF_TICKERS_URL = 'https://www.sec.gov/files/company_tickers_mf.json';
 
 /** SEC bulk XBRL company-facts archive, recompiled nightly (~1.3 GB). */
 export const COMPANY_FACTS_ZIP_URL =

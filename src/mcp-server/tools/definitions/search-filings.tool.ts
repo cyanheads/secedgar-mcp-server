@@ -13,14 +13,16 @@ import {
   notFound,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
-import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
+import { datasetSchema } from '@/mcp-server/tools/dataset-schema.js';
 import { normalizeFormFilter } from '@/mcp-server/tools/form-filter.js';
 import {
   type LimitClampOptions,
   limitClamp,
   withLimitClamps,
 } from '@/mcp-server/tools/limit-clamp.js';
+import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -33,6 +35,7 @@ import {
   quartersInRange,
 } from '@/services/edgar/edgar-api-service.js';
 import { filingToExtract } from '@/services/edgar/filing-to-text.js';
+import { nonUsListingNote } from '@/services/edgar/listing-codes.js';
 import { SubmissionsArchiveWalk } from '@/services/edgar/submissions-archive.js';
 import type { EftsHit, EftsResponse, FilingSource, FilingsRecent } from '@/services/edgar/types.js';
 
@@ -315,9 +318,70 @@ function extractTicker(displayName: string): string | null {
   return first ? first : null;
 }
 
-/** Strip an entity-targeting token from the query and collapse whitespace. */
-function stripToken(query: string, token: string): string {
-  return query.replace(token, '').replace(/\s+/g, ' ').trim();
+/** A `ticker:` or `cik:` term in a query (#243). */
+interface EntityToken {
+  /** Where {@link EntityToken.text} ends in the query. */
+  end: number;
+  kind: 'ticker' | 'cik';
+  /** Led by `-` or a `NOT` term: an exclusion, which no entity scope can express. */
+  negated: boolean;
+  /** Where {@link EntityToken.text} starts in the query. */
+  start: number;
+  /** The term as typed, its `+`, `-`, or `NOT ` included. */
+  text: string;
+  /** What follows the colon, up to the next whitespace, punctuation included. */
+  value: string;
+}
+
+/** A word boundary, then `ticker:` or `cik:` and a value; `\S+` ends at whitespace, never backtracks. */
+const ENTITY_TOKEN_RE = /\b(ticker|cik):(\S+)/gi;
+
+/**
+ * Every entity token in the query, in order. A `-` or `+` touching the token is part of it, and
+ * so is an uppercase `NOT` term before it (EDGAR full-text search reads `NOT` as exclusion);
+ * the token is found inside a quoted phrase too. One forward scan over the query, plus a walk
+ * back over the whitespace before each token, so linear in the query's length.
+ */
+function entityTokens(query: string): EntityToken[] {
+  const tokens: EntityToken[] = [];
+  for (const match of query.matchAll(ENTITY_TOKEN_RE)) {
+    const at = match.index;
+    const end = at + match[0].length;
+    const kind = match[1]?.toLowerCase() === 'cik' ? 'cik' : 'ticker';
+    const value = match[2] ?? '';
+    const sign = query[at - 1];
+    if (sign === '-') {
+      tokens.push({
+        kind,
+        value,
+        negated: true,
+        text: query.slice(at - 1, end),
+        start: at - 1,
+        end,
+      });
+      continue;
+    }
+    // A `+` is part of the token; a NOT term before it still negates it.
+    const lead = sign === '+' ? at - 1 : at;
+    let gap = lead;
+    while (gap > 0 && /\s/.test(query[gap - 1] ?? '')) gap--;
+    const notStart = gap - 3;
+    const negated =
+      gap < lead &&
+      notStart >= 0 &&
+      query.slice(notStart, gap) === 'NOT' &&
+      (notStart === 0 || /[\s(]/.test(query[notStart - 1] ?? ''));
+    const term = query.slice(lead, end);
+    tokens.push({
+      kind,
+      value,
+      negated,
+      text: negated ? `NOT ${term}` : term,
+      start: negated ? notStart : lead,
+      end,
+    });
+  }
+  return tokens;
 }
 
 /**
@@ -332,20 +396,56 @@ function stripToken(query: string, token: string): string {
  * a silently-broadened search misleads, and a stripped token can leave EFTS
  * with a blank query it rejects (#61). A `ticker:` token naming several companies
  * fails the same way, listing them, rather than scoping to the first (#223).
+ *
+ * One bare token scopes, a `+` before it removed with it. A token led by `-` or `NOT`, or a
+ * second token, fails `unsupported_entity_scope` before any request: EDGAR's `ciks` param only
+ * scopes in, full-text search ignores a `-ticker:` term, and a second token sent as text matches
+ * nothing (#243). A token inside a quoted phrase scopes like a bare one.
+ *
+ * `reading` is how `resolveCik` read a ticker spelling EDGAR does not list (#235), for the
+ * caller to name beside the CIK in `effectiveQuery`; every page of a search resolves the token
+ * again, so it reads the same each time.
  */
 async function resolveEntityTargeting(
   query: string,
   ctx: Context,
   scope: CallScope,
-): Promise<{ query: string; entityCik?: string }> {
-  const tickerMatch = query.match(/\bticker:(\S+)/i);
-  if (tickerMatch?.[1]) {
-    const resolved = await getEdgarApiService().resolveCik(tickerMatch[1], scope);
+): Promise<{ query: string; entityCik?: string; reading?: string | undefined }> {
+  const tokens = entityTokens(query);
+  const negated = tokens.find((token) => token.negated);
+  if (negated) {
+    throw validationError(
+      `Entity targeting token '${negated.text}' is negated; an entity token scopes a search to a company and cannot exclude one.`,
+      {
+        reason: 'unsupported_entity_scope',
+        recovery: {
+          hint: "To leave a company out, drop the token and skip the result rows whose cik is that company's.",
+        },
+      },
+    );
+  }
+  if (tokens.length > 1) {
+    throw validationError(
+      `The query holds ${tokens.length} entity targeting tokens (${tokens.map((t) => `'${t.text}'`).join(', ')}); a search is scoped to one company.`,
+      {
+        reason: 'unsupported_entity_scope',
+        recovery: { hint: 'Keep one ticker: or cik: token and run one search per company.' },
+      },
+    );
+  }
+  const [token] = tokens;
+  if (!token) return { query };
+  const rest = `${query.slice(0, token.start)}${query.slice(token.end)}`
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (token.kind === 'ticker') {
+    const resolved = await getEdgarApiService().resolveCik(token.value, scope);
     if (Array.isArray(resolved) && resolved.length > 1) {
       // The token is `\S+`, so a fuller name with spaces cannot be retried through it.
       const { list, showing, data } = ambiguousMatches(resolved, { singleToken: true });
       throw validationError(
-        `Entity targeting token 'ticker:${tickerMatch[1]}' matches multiple companies: ${list}. Retry with ticker: or cik: and one of these tickers or 10-digit CIKs.${showing}`,
+        `Entity targeting token 'ticker:${token.value}' matches multiple companies: ${list}. Retry with ticker: or cik: and one of these tickers or 10-digit CIKs.${showing}`,
         {
           reason: 'ambiguous_company',
           ...ctx.recoveryFor('ambiguous_company'),
@@ -355,26 +455,22 @@ async function resolveEntityTargeting(
     }
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
     if (!match?.cik) {
+      const note = nonUsListingNote(token.value);
       throw validationError(
-        `Entity targeting token 'ticker:${tickerMatch[1]}' does not resolve to a known company.`,
+        `Entity targeting token 'ticker:${token.value}' does not resolve to a known company.${note ? ` ${note}` : ''}`,
         { reason: 'unresolved_ticker', ...ctx.recoveryFor('unresolved_ticker') },
       );
     }
-    return { query: stripToken(query, tickerMatch[0]), entityCik: match.cik };
+    return { query: rest, entityCik: match.cik, reading: match.reading };
   }
 
-  const cikMatch = query.match(/\bcik:(\S+)/i);
-  if (cikMatch?.[1]) {
-    if (!/^\d{1,10}$/.test(cikMatch[1])) {
-      throw validationError(
-        `Entity targeting token 'cik:${cikMatch[1]}' is not a valid CIK — expected 1-10 digits.`,
-        { reason: 'invalid_cik', ...ctx.recoveryFor('invalid_cik') },
-      );
-    }
-    return { query: stripToken(query, cikMatch[0]), entityCik: cikMatch[1].padStart(10, '0') };
+  if (!/^\d{1,10}$/.test(token.value)) {
+    throw validationError(
+      `Entity targeting token 'cik:${token.value}' is not a valid CIK — expected 1-10 digits.`,
+      { reason: 'invalid_cik', ...ctx.recoveryFor('invalid_cik') },
+    );
   }
-
-  return { query };
+  return { query: rest, entityCik: token.value.padStart(10, '0') };
 }
 
 /**
@@ -818,7 +914,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     effectiveQuery: z
       .string()
       .describe(
-        'The query as executed: "(entity scope: CIK …)" for a ticker:/cik: token, "(browse: forms …)" for a forms-only browse, a pre-2001 range\'s archive route and dates (and quarters read, if the full-index cap bound), and "(filed <after> to <before>)" for a full-text search given one bound.',
+        'The query as executed: "(entity scope: CIK …)" for a ticker:/cik: token, with how an unlisted ticker spelling was read; "(browse: forms …)" for a forms browse; a pre-2001 range\'s archive route, dates, and quarters read if capped; "(filed <after> to <before>)" if given one bound.',
       ),
     notice: z
       .string()
@@ -862,6 +958,14 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       thrownBy: 'service',
     },
     {
+      reason: 'unsupported_entity_scope',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A ticker: or cik: token in the query is led by - or a NOT term, or follows another entity token',
+      recovery:
+        "Keep one ticker: or cik: token as its own term with no - or NOT before it. To leave a company out, drop the token and skip the result rows whose cik is that company's.",
+      thrownBy: 'service',
+    },
+    {
       reason: 'entity_not_found',
       code: JsonRpcErrorCode.NotFound,
       when: 'A cik: targeting token on a pre-2001 date range names a CIK with no EDGAR submissions history',
@@ -890,24 +994,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       recovery: `Use an offset of ${MAX_RELEVANCE_OFFSET} or less — a page there with limit 100 reaches EDGAR's 10,000-document cap — or narrow the search with a shorter filed_after/filed_before window, a forms filter, or more specific terms so fewer documents match.`,
       retryable: false,
     },
-    {
-      reason: 'rate_limited',
-      code: JsonRpcErrorCode.RateLimited,
-      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
-      recovery:
-        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
-      retryable: true,
-      thrownBy: 'service',
-    },
-    {
-      reason: 'sec_unreachable',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
-      recovery:
-        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
-      retryable: true,
-      thrownBy: 'service',
-    },
+    ...SEC_UPSTREAM_ERRORS,
     {
       reason: 'efts_degraded_response',
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -928,12 +1015,12 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
           .trim()
           .min(1, 'Query cannot be blank')
           .describe(
-            'Full-text search query. Supports: exact phrases ("material weakness"), boolean operators (revenue OR income), exclusion (-preliminary), wildcard suffix (account*), entity targeting (ticker:AAPL or cik:320193 in the query). Terms are AND\'d by default.',
+            'Full-text search query. Supports: exact phrases ("material weakness"), boolean operators (revenue OR income), exclusion (-preliminary), wildcard suffix (account*), entity targeting (one ticker:AAPL or cik:320193 term, never led by - or NOT). Terms are AND\'d by default.',
           ),
       ])
       .optional()
       .describe(
-        'Full-text search query. Optional — omit (or pass "") to browse by form type and/or entity instead, e.g. every S-1 in a date window, or a company\'s filings via ticker:/cik:. A date range alone is not a valid search; pair it with forms or entity targeting. The EFTS index that serves free text starts at 2001-01-01; a date range reaching earlier needs ticker:/cik: entity scope, which lets the tool read that entity\'s filings and match the terms locally (bounded to 50 documents, a few seconds at SEC\'s request rate), or drop the text terms and browse by form type (forms) and date. When present, supports exact phrases ("material weakness"), boolean operators (revenue OR income), exclusion (-preliminary), wildcard suffix (account*), and entity targeting (ticker:AAPL or cik:320193 in the query); terms are AND\'d by default. A multi-class share ticker resolves in either form — ticker:BRK-B and ticker:BRK.B scope to the same issuer. The pre-2001 local scan honors the same phrase / OR / exclusion / wildcard syntax.',
+        'Full-text search query. Optional — omit (or pass "") to browse by form type and/or entity instead, e.g. every S-1 in a date window, or a company\'s filings via ticker:/cik:. A date range alone is not a valid search; pair it with forms or entity targeting. The EFTS index that serves free text starts at 2001-01-01; a date range reaching earlier needs ticker:/cik: entity scope, which lets the tool read that entity\'s filings and match the terms locally (bounded to 50 documents, a few seconds at SEC\'s request rate), or drop the text terms and browse by form type (forms) and date. When present, supports exact phrases ("material weakness"), boolean operators (revenue OR income), exclusion (-preliminary), wildcard suffix (account*), and entity targeting (ticker:AAPL or cik:320193 in the query); terms are AND\'d by default. Entity targeting takes one ticker: or cik: term, never led by - or NOT: it scopes the search to one company and cannot exclude one. A multi-class share ticker resolves in either form — ticker:BRK-B and ticker:BRK.B scope to the same issuer — and an uppercase ticker also resolves as market-data feeds write it: venue-coded (UEC.N), a preferred class run together (CFGPH), or a class root (GLOP). The pre-2001 local scan honors the same phrase / OR / exclusion / wildcard syntax.',
       ),
     forms: z
       .array(z.string())
@@ -1002,13 +1089,13 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     total_is_exact: z
       .boolean()
       .describe(
-        "False when total is a lower bound: a search with terms whose 100-document window missed matches (or a relevance page past offset 0), EDGAR's 10,000 cap, or a pre-2001 archive or text scan that hit its cap. True does not mean every match is in the rows: a browse total can exceed the window.",
+        "False when total is a lower bound: a term search's 100-document window missed matches (or a relevance page past offset 0), EDGAR's 10,000 cap was hit, or a pre-2001 archive or text scan hit its cap.",
       ),
     total_documents: z
       .number()
       .optional()
       .describe(
-        "EDGAR's count of matching full-text documents, capped at 10,000. A search counts a filing once per matching document; a browse matches one document per filing. Absent on pure pre-2001 archive paths.",
+        "EDGAR's count of matching full-text documents, capped at 10,000; a search counts a filing once per matching document, a browse one document per filing. Absent on pure pre-2001 archive paths.",
       ),
     results: z
       .array(
@@ -1090,7 +1177,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       .record(z.string(), z.number())
       .optional()
       .describe(
-        'Filings in hand by form: every row assembled (what a dataframe holds), not only the page shown. Sums to total when every matching filing is in hand and every row has a form.',
+        'Filings in hand by form: every row assembled (what a dataframe holds), not only the page shown. Sums to total when every match is in hand with a form.',
       ),
     scan: z
       .object({
@@ -1105,17 +1192,10 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       })
       .optional()
       .describe(
-        "Pre-2001 entity-scoped free-text path only. Each candidate's whole accession .txt is read, so a match may sit in an exhibit rather than the body of the requested form.",
+        "Pre-2001 entity-scoped free-text path only. Each candidate's whole accession .txt is read, so a match may sit in an exhibit, not the requested form's body.",
       ),
-    dataset: z
-      .object({
-        name: z
-          .string()
-          .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
-          ),
-        row_count: z.number().describe('Rows materialized in the dataframe.'),
-        expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
+    dataset: datasetSchema
+      .extend({
         truncated: z
           .boolean()
           .describe(
@@ -1152,7 +1232,14 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     // server-side ciks param. Throws typed validation errors on bad tokens (#61).
     // Default to '' so a browse request (undefined query) resolves cleanly.
     const scope = new CallScope(ctx.signal);
-    const { query, entityCik } = await resolveEntityTargeting(input.query ?? '', ctx, scope);
+    const { query, entityCik, reading } = await resolveEntityTargeting(
+      input.query ?? '',
+      ctx,
+      scope,
+    );
+    // The scope as effectiveQuery names it on every path: the CIK, and how a ticker spelling
+    // EDGAR does not list was read (#235).
+    const entityNote = entityCik && `CIK ${entityCik}${reading ? `, ${reading}` : ''}`;
 
     const api = getEdgarApiService();
 
@@ -1234,7 +1321,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       const eftsWindowIncomplete = efts !== undefined && !efts.totalIsExact;
 
       const formsNote = forms ? `, forms ${forms.join(', ')}` : '';
-      const scopeNote = entityCik ? `CIK ${entityCik}` : 'full-index browse';
+      const scopeNote = entityNote || 'full-index browse';
       const archiveSource = entityCik
         ? 'the entity submissions history'
         : 'the quarterly EDGAR full-index';
@@ -1283,9 +1370,9 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
           : `Served from ${archiveSource} — full-text search covers 2001-present only.${quarterNote}${scanNote}`,
         zeroHitCriteria: [
           // The notice is authored Markdown, so the caller's text inside it is escaped.
-          ...(hasFreeText ? [`"${escapeInline(query)}"`] : []),
+          ...(hasFreeText ? [`"${escapeMarkdownInline(query)}"`] : []),
           ...(entityCik ? [`CIK ${entityCik}`] : []),
-          ...(forms ? [`forms [${escapeInline(forms.join(', '))}]`] : []),
+          ...(forms ? [`forms [${escapeMarkdownInline(forms.join(', '))}]`] : []),
           `dates ${startDate} to ${endDate}`,
         ].join(', '),
         scan,
@@ -1389,8 +1476,8 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       datasetName: dataset?.name,
     });
 
-    const searched = entityCik
-      ? `${query ? `${query} ` : ''}(entity scope: CIK ${entityCik})`
+    const searched = entityNote
+      ? `${query ? `${query} ` : ''}(entity scope: ${entityNote})`
       : query || (forms ? `(browse: forms ${forms.join(', ')})` : '');
     // A window the caller spelled out is already in their arguments; a filled one is not.
     const effectiveQuery = dates?.filled
@@ -1402,9 +1489,9 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       // browse path (no query text) lead with the form/entity criteria instead of an
       // empty quoted query. The notice is authored Markdown, so the query and forms are escaped.
       const criteria: string[] = [];
-      if (query) criteria.push(`"${escapeInline(query)}"`);
+      if (query) criteria.push(`"${escapeMarkdownInline(query)}"`);
       if (entityCik) criteria.push(`entity CIK ${entityCik}`);
-      if (forms) criteria.push(`forms [${escapeInline(forms.join(', '))}]`);
+      if (forms) criteria.push(`forms [${escapeMarkdownInline(forms.join(', '))}]`);
       if (dates) criteria.push(`dates ${dates.startDate} to ${dates.endDate}`);
       const criteriaText = criteria.length > 0 ? criteria.join(', ') : 'the given criteria';
       ctx.enrich.notice(
@@ -1485,21 +1572,21 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     // Names, descriptions, filenames, and locations are SEC text, escaped to read back as written.
     for (const r of result.results) {
       const period = r.period_ending ? ` (period: ${r.period_ending})` : '';
-      const desc = r.file_description ? ` — ${escapeInline(r.file_description)}` : '';
+      const desc = r.file_description ? ` — ${escapeMarkdownInline(r.file_description)}` : '';
       const matched = r.matched_documents?.length
         ? ` | matched documents: ${r.matched_documents
             .map((d) => {
-              const name = escapeInline(d.name);
-              return d.type ? `${name} (${escapeInline(d.type)})` : name;
+              const name = escapeMarkdownInline(d.name);
+              return d.type ? `${name} (${escapeMarkdownInline(d.type)})` : name;
             })
             .join(', ')}`
         : '';
       const sic = r.sic ? ` | SIC ${r.sic}` : '';
-      const loc = r.location ? ` | ${escapeInline(r.location)}` : '';
+      const loc = r.location ? ` | ${escapeMarkdownInline(r.location)}` : '';
       const src = r.source ? ` | source: ${r.source}` : '';
       const ident = r.ticker ? `${r.ticker}, CIK ${r.cik}` : `CIK ${r.cik}`;
       lines.push(
-        `- ${r.form ?? 'N/A'} ${r.filing_date}${period} — ${escapeInline(r.company_name)} (${ident})${sic}${loc}${desc}${matched}${src} [${r.accession_number}]`,
+        `- ${r.form ?? 'N/A'} ${r.filing_date}${period} — ${escapeMarkdownInline(r.company_name)} (${ident})${sic}${loc}${desc}${matched}${src} [${r.accession_number}]`,
       );
     }
     if (result.form_distribution) {

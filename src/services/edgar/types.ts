@@ -10,16 +10,15 @@ export interface CikMatch {
   classId?: string;
   exchange?: string;
   name?: string;
+  /**
+   * How a reading interpreted an input that neither the exact-symbol nor the dotted-class lookup
+   * answered, e.g. `UEC.N read as UEC (URANIUM ENERGY CORP)` or
+   * `GLOP read as GasLog Partners LP (GLOP-PA, GLOP-PB, GLOP-PC)`. Absent for every other match.
+   */
+  reading?: string;
   /** SEC fund series ID (e.g. "S000002839"). Present only for ETF/mutual-fund tickers resolved via company_tickers_mf.json. */
   seriesId?: string;
   ticker?: string;
-}
-
-/** Raw entry from SEC's company_tickers.json. */
-export interface TickerEntry {
-  cik_str: number;
-  ticker: string;
-  title: string;
 }
 
 /** Submissions API response (data.sec.gov/submissions/CIK*.json). */
@@ -290,6 +289,14 @@ export type TagSelection = 'coverage' | 'priority';
 
 /** Friendly concept name mapping. */
 export interface ConceptMapping {
+  /**
+   * Other spellings that resolve to this concept, keyed like its name: the label
+   * (`capital_expenditures`), or the label without its sign qualifier
+   * (`income_tax_expense` for `Income Tax Expense (Benefit)`). Each has one
+   * reading, so a spelling that could name another concept (`eps`, `total_debt`)
+   * is never one. Lookup and search only — the concept listings never show them.
+   */
+  aliases?: readonly string[];
   group: ConceptGroup;
   /**
    * How to pick among `ifrsTags` for a filer reporting several of them. Defaults

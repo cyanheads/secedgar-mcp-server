@@ -36,6 +36,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 import { getCanvasBridge, toDatasetField } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import {
+  allText,
   at,
   bag,
   blockText,
@@ -899,6 +900,88 @@ describe('getFinancialsTool — ambiguous_company total_matches (#229)', () => {
       "'Company' matches multiple companies: 0000000000 Company 0 (C0), 0000000001 Company 1 (C1). Retry with one of these tickers or 10-digit CIKs.",
     );
     expect(error.data).toMatchObject({ matches: companies(2), total_matches: 2 });
+  });
+});
+
+/**
+ * A ticker spelling EDGAR does not list, read as one it does (#235): the resolver's note reaches
+ * both surfaces as `resolvedAs`, and a non-US listing's miss says why. The readings and the
+ * sentence are tabled at their own seams (resolve-cik and listing-codes tests); these cases prove
+ * the wiring, one per side.
+ */
+describe('getFinancialsTool — ticker readings (#235)', () => {
+  const NON_US =
+    'The .T suffix marks a non-US listing; EDGAR indexes SEC registrants by US ticker, name, or CIK.';
+
+  it('carries the reading on both surfaces', async () => {
+    const reading = 'AAPL.O read as AAPL (Apple Inc.)';
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0000320193',
+      name: 'Apple Inc.',
+      ticker: 'AAPL',
+      reading,
+    });
+
+    const result = await runToolContract(getFinancialsTool, {
+      company: 'AAPL.O',
+      concept: 'revenue',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(bag(result.structuredContent).resolvedAs).toBe(reading);
+    expect(readCommonMark(allText(result))).toContain(
+      `⟨strong⟩Resolved as:⟨/strong⟩ ⟨code_inline:${reading}⟩`,
+    );
+  });
+
+  it('carries no note for a match no reading produced', async () => {
+    const result = await runToolContract(getFinancialsTool, {
+      company: 'AAPL',
+      concept: 'revenue',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(bag(result.structuredContent)).not.toHaveProperty('resolvedAs');
+    expect(allText(result)).not.toContain('Resolved as');
+  });
+
+  it('adds the non-US listing sentence to company_not_found, before any data request', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+
+    const result = await runToolContract(getFinancialsTool, {
+      company: '7203.T',
+      concept: 'revenue',
+    });
+
+    const error = wireError(result);
+    expect(error.message).toBe(`Company '7203.T' not found. ${NON_US}`);
+    expect(error.data).toMatchObject({
+      reason: 'company_not_found',
+      recovery: { hint: 'Use a ticker symbol or 10-digit CIK number for an exact match.' },
+    });
+    expect(readCommonMark(blockText(result.content))).toContain(NON_US);
+    expect(mockApi.tryGetCompanyConcept).not.toHaveBeenCalled();
+  });
+
+  it('reads the input as the resolver does, around its whitespace', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+
+    const error = wireError(
+      await runToolContract(getFinancialsTool, { company: '7203.T ', concept: 'revenue' }),
+    );
+
+    expect(error.message).toBe(`Company '7203.T ' not found. ${NON_US}`);
+  });
+
+  it('keeps the message unchanged for any other miss', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+
+    const error = wireError(
+      await runToolContract(getFinancialsTool, { company: 'XYZNOTREAL', concept: 'revenue' }),
+    );
+
+    expect(error.message).toBe("Company 'XYZNOTREAL' not found.");
+    expect(error.data).toMatchObject({ reason: 'company_not_found' });
   });
 });
 
@@ -2931,10 +3014,10 @@ describe('concept names that are neither a friendly name nor an XBRL tag (#128)'
     expect(edgarCalls()).toBe(0);
   });
 
-  it('suggests capex for capital_expenditures, matched on its label', async () => {
+  it('suggests capex for capital_spending, matched on its label', async () => {
     const result = await runToolContract(getFinancialsTool, {
       company: 'AAPL',
-      concept: 'capital_expenditures',
+      concept: 'capital_spending',
     });
 
     const suggestions = wireError(result).data.suggestions;
@@ -2959,6 +3042,8 @@ describe('concept names that are neither a friendly name nor an XBRL tag (#128)'
     'netincomeloss',
     'Net Income!',
     '   ',
+    '__proto__',
+    'constructor',
   ])('fails %j as unknown_concept without building a request', async (concept) => {
     const result = await runToolContract(getFinancialsTool, { company: 'AAPL', concept });
 
@@ -3018,6 +3103,24 @@ describe('concept names that are neither a friendly name nor an XBRL tag (#128)'
       );
     },
   );
+
+  it.each([
+    ['capital_expenditures', 'PaymentsToAcquirePropertyPlantAndEquipment'],
+    ['cash_and_cash_equivalents', 'CashAndCashEquivalentsAtCarryingValue'],
+    ['operatingIncome', 'OperatingIncomeLoss'],
+  ])('reads the spelling %s as its catalog concept, sending %s (#240)', async (concept, tag) => {
+    const result = await runToolContract(getFinancialsTool, { company: 'AAPL', concept });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.tryGetCompanyConcept).toHaveBeenCalledWith(
+      '0000320193',
+      'us-gaap',
+      tag,
+      expect.any(CallScope),
+    );
+    expect(result.structuredContent).toMatchObject({ concept: tag });
+    expect(blockText(result.content)).toContain(tag);
+  });
 });
 
 // Through the real tool pipeline, so the hint is asserted as a client receives it (#164).

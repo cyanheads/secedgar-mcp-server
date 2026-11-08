@@ -14,7 +14,7 @@ import type {
   SyncGenerator,
   SyncPage,
 } from '@cyanheads/mcp-ts-core/mirror';
-import { lastModifiedToIso, TICKERS_URL } from './types.js';
+import { lastModifiedToIso, MF_TICKERS_URL, TICKERS_URL } from './types.js';
 
 /** Raw entry from company_tickers.json (object keyed by arbitrary integer index). */
 interface RawTickerEntry {
@@ -28,9 +28,6 @@ interface MfTickerFile {
   data: Array<[number, string, string, string]>;
   fields: string[];
 }
-
-/** URL for SEC's mutual-fund / ETF ticker directory. */
-const MF_TICKERS_URL = 'https://www.sec.gov/files/company_tickers_mf.json';
 
 /**
  * Build the ticker-layer ingester. The returned generator downloads both

@@ -193,7 +193,18 @@ function preservePlainTextBodies(sgml: string): string {
   return copied === 0 ? sgml : out + sgml.slice(copied);
 }
 
-/** One cached extraction: the text and the archive document it was read from. */
+/**
+ * One in-document link of an extraction (#239): where the link's text starts and
+ * where the text after its target begins, both as offsets into the extracted
+ * text. A target is the first element carrying the link's fragment as its `id`,
+ * else the first `<a>` carrying it as its `name`, as a browser resolves it.
+ */
+export interface InDocumentLink {
+  offset: number;
+  target: number;
+}
+
+/** One cached extraction: the text, the archive document it was read from, and its in-document links. */
 export interface CachedExtract {
   /**
    * The document the text came from. Under a primary-document key this can
@@ -203,6 +214,8 @@ export interface CachedExtract {
    * (#158) — so a cache hit reports the same document the miss did.
    */
   document: string;
+  /** The links {@link filingToExtract} recorded, in text order, so a cache hit lands where the miss did (#239). */
+  links: InDocumentLink[];
   text: string;
 }
 
@@ -244,18 +257,386 @@ function stripInlineXbrl(html: string): string {
 }
 
 /**
+ * The sentinels that frame a marker's index in the input `convert()` receives
+ * (#239): two noncharacters, distinct so the strip pass reads the decimal index
+ * between them. The parser passes them through as text and no case transform
+ * changes them or the digits, so each lands in the output where its text does.
+ */
+const SENTINEL_OPEN = '﷐';
+const SENTINEL_CLOSE = '﷑';
+/**
+ * html-to-text's default `maxInputLength`, which {@link CONVERT_OPTIONS} keeps:
+ * longer input is cut silently, so marked input past it would convert
+ * differently from the input it marks.
+ */
+const MAX_CONVERT_INPUT_CHARS = 16_777_216;
+
+/**
+ * The named references the parser decodes to one of its whitespace characters:
+ * a tab, a line feed, and five spellings of U+200B. Named references are
+ * case-sensitive, so `&tab;` stays text.
+ */
+const WHITESPACE_NAMED_REFERENCES = [
+  '&Tab;',
+  '&NewLine;',
+  '&ZeroWidthSpace;',
+  '&NegativeVeryThinSpace;',
+  '&NegativeThinSpace;',
+  '&NegativeMediumSpace;',
+  '&NegativeThickSpace;',
+];
+
+/**
+ * Whether a code unit is one of html-to-text's whitespace characters
+ * (`whitespaceCharacters`: space, tab, CR, LF, form feed, U+200B), which it
+ * collapses and trims. NBSP is not one: the parser keeps it as text.
+ */
+function isConvertWhitespace(code: number): boolean {
+  return (
+    code === 0x20 ||
+    code === 0x09 ||
+    code === 0x0a ||
+    code === 0x0c ||
+    code === 0x0d ||
+    code === 0x200b
+  );
+}
+
+/** Whether a code unit is an ASCII letter — the first character of a tag name. */
+function isAsciiLetter(code: number): boolean {
+  return (code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a);
+}
+
+/** Whether a code unit is HTML's ASCII whitespace, which ends a tag or attribute name and an unquoted value. */
+function isHtmlSpace(code: number): boolean {
+  return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d;
+}
+
+/**
+ * The code point a numeric character reference at `at` (`&#…`) decodes to, and
+ * the index just past it, or undefined when `at` opens none. It takes every
+ * digit that follows and its `;` is optional, as the parser reads it: `&#32` is
+ * a space, and `&#x9b` is U+009B, not a tab and a `b`. A value past U+10FFFF,
+ * which the parser replaces, is clamped there.
+ */
+function numericReference(html: string, at: number): { end: number; value: number } | undefined {
+  const hex = (html.charCodeAt(at + 2) | 0x20) === 0x78; /* x or X */
+  const digits = at + (hex ? 3 : 2);
+  let end = digits;
+  let value = 0;
+  for (; end < html.length; end++) {
+    const digit = Number.parseInt(html.charAt(end), hex ? 16 : 10);
+    if (Number.isNaN(digit)) break;
+    value = Math.min(value * (hex ? 16 : 10) + digit, 0x110000);
+  }
+  if (end === digits) return;
+  return { end: html.charCodeAt(end) === 0x3b /* ; */ ? end + 1 : end, value };
+}
+
+/**
+ * The index just past a character reference at `at` that the parser decodes to
+ * one of its whitespace characters, or -1 when the reference at `at` decodes to
+ * anything else.
+ */
+function whitespaceReferenceEnd(html: string, at: number): number {
+  if (html.charCodeAt(at + 1) !== 0x23 /* # */) {
+    const named = WHITESPACE_NAMED_REFERENCES.find((name) => html.startsWith(name, at));
+    return named === undefined ? -1 : at + named.length;
+  }
+  const reference = numericReference(html, at);
+  return reference && isConvertWhitespace(reference.value) ? reference.end : -1;
+}
+
+/**
+ * Whether `input` holds a sentinel, literal or as a numeric reference the parser
+ * decodes to one (`&#xFDD0;`, `&#64977`). One forward pass over the `&#` openers.
+ */
+function holdsSentinel(input: string): boolean {
+  if (input.includes(SENTINEL_OPEN) || input.includes(SENTINEL_CLOSE)) return true;
+  for (let at = input.indexOf('&#'); at !== -1; ) {
+    const reference = numericReference(input, at);
+    if (reference?.value === 0xfdd0 || reference?.value === 0xfdd1) return true;
+    at = input.indexOf('&#', reference?.end ?? at + 2);
+  }
+  return false;
+}
+
+/** The index of the first `</name` at or after `from`, any case, or -1 — a `script` or `style` body's end. */
+function rawTextEnd(html: string, name: string, from: number): number {
+  for (let at = html.indexOf('</', from); at !== -1; at = html.indexOf('</', at + 2)) {
+    if (html.slice(at + 2, at + 2 + name.length).toLowerCase() === name) return at;
+  }
+  return -1;
+}
+
+/** What one start tag names: its fragment link and its target names. */
+interface TagAnchors {
+  /** The fragment an `<a href="#…">` points to. */
+  href?: string | undefined;
+  /** The element's `id`. */
+  id?: string | undefined;
+  /** An `<a>` element's `name`. */
+  name?: string | undefined;
+}
+
+/**
+ * The `href`, `id`, and `name` attributes of a start tag whose attributes run
+ * from `from` to `to` (the closing `>`), read by hand: names are
+ * case-insensitive, values quoted with `"` or `'` or unquoted, and a quote left
+ * open ends at `to`. Every index is read once, so the pass stays linear.
+ */
+function readTagAnchors(html: string, tag: string, from: number, to: number): TagAnchors {
+  const anchors: TagAnchors = {};
+  const endsName = (code: number) =>
+    isHtmlSpace(code) || code === 0x2f /* / */ || code === 0x3d; /* = */
+  for (let at = from; at < to; ) {
+    if (endsName(html.charCodeAt(at))) {
+      at++;
+      continue;
+    }
+    const nameStart = at;
+    while (at < to && !endsName(html.charCodeAt(at))) at++;
+    const attribute = html.slice(nameStart, at).toLowerCase();
+    while (at < to && isHtmlSpace(html.charCodeAt(at))) at++;
+    if (at >= to || html.charCodeAt(at) !== 0x3d /* = */) continue;
+    at++;
+    while (at < to && isHtmlSpace(html.charCodeAt(at))) at++;
+    const quote = html.charAt(at);
+    let value: string;
+    if (quote === '"' || quote === "'") {
+      let close = at + 1;
+      while (close < to && html.charAt(close) !== quote) close++;
+      value = html.slice(at + 1, close);
+      at = close + 1;
+    } else {
+      const valueStart = at;
+      while (at < to && !isHtmlSpace(html.charCodeAt(at))) at++;
+      value = html.slice(valueStart, at);
+    }
+    if (attribute === 'id') anchors.id ??= value;
+    else if (tag === 'a' && attribute === 'name') anchors.name ??= value;
+    else if (tag === 'a' && attribute === 'href') {
+      const href = value.trim();
+      if (href.length > 1 && href.startsWith('#')) anchors.href ??= href.slice(1);
+    }
+  }
+  return anchors;
+}
+
+/** One link or target the markup scan found, at the next text character after its start tag (-1: none). */
+interface MarkupAnchor {
+  at: number;
+  fragment: string;
+  kind: 'href' | 'id' | 'name';
+}
+
+/**
+ * Every fragment link and fragment target in `html`, each placed at the first
+ * character the parser renders as text after its start tag: tags, comments,
+ * `script` and `style` bodies, and its whitespace — literal or a reference — are
+ * passed over, so a mark there joins the next word instead of standing alone. A
+ * mark right after the tag would leave a blank line where an empty target `div`
+ * sits, and a doubled space after an empty link before a `&#8203;` cell.
+ *
+ * One forward pass: a `<` opening a tag (a letter, `/`, `!`, or `?` after it)
+ * reads to the next `>`, and one with no `>` after it ends the scan, since the
+ * parser renders nothing past it either; a `script` or `style` body runs to its
+ * closer, and one with no closer ends the scan too. Anchors waiting for text are
+ * held until the next text character, which places them all at once; while none
+ * waits, the scan jumps from text to the next `<`.
+ */
+function scanMarkupAnchors(html: string): MarkupAnchor[] {
+  const anchors: MarkupAnchor[] = [];
+  let waiting = 0;
+  const place = (at: number) => {
+    for (let k = anchors.length - waiting; k < anchors.length; k++) {
+      const anchor = anchors[k];
+      if (anchor) anchor.at = at;
+    }
+    waiting = 0;
+  };
+  for (let at = 0; at < html.length; ) {
+    const code = html.charCodeAt(at);
+    if (code === 0x3c /* < */) {
+      const next = html.charCodeAt(at + 1);
+      const opensTag = isAsciiLetter(next);
+      if (opensTag || next === 0x2f /* / */ || next === 0x21 /* ! */ || next === 0x3f /* ? */) {
+        if (next === 0x21 && html.startsWith('--', at + 2)) {
+          // `<!-->` and `<!--->` close at once, as the parser reads them.
+          const close = html.indexOf('-->', at + 2);
+          if (close === -1) break;
+          at = close + 3;
+          continue;
+        }
+        const end = html.indexOf('>', at + 1);
+        if (end === -1) break;
+        if (!opensTag) {
+          at = end + 1;
+          continue;
+        }
+        let nameEnd = at + 1;
+        while (
+          nameEnd < end &&
+          !isHtmlSpace(html.charCodeAt(nameEnd)) &&
+          html.charCodeAt(nameEnd) !== 0x2f /* / */
+        ) {
+          nameEnd++;
+        }
+        const tag = html.slice(at + 1, nameEnd).toLowerCase();
+        const found = readTagAnchors(html, tag, nameEnd, end);
+        for (const kind of ['href', 'id', 'name'] as const) {
+          const fragment = found[kind];
+          if (fragment === undefined) continue;
+          anchors.push({ at: -1, fragment, kind });
+          waiting++;
+        }
+        at = end + 1;
+        if (tag === 'script' || tag === 'style') {
+          at = rawTextEnd(html, tag, at);
+          if (at === -1) break;
+        }
+        continue;
+      }
+    } else if (waiting === 0) {
+      const lt = html.indexOf('<', at + 1);
+      if (lt === -1) break;
+      at = lt;
+      continue;
+    } else if (isConvertWhitespace(code)) {
+      at++;
+      continue;
+    } else if (code === 0x26 /* & */) {
+      const end = whitespaceReferenceEnd(html, at);
+      if (end !== -1) {
+        at = end;
+        continue;
+      }
+    }
+    // A text character: a `<` that opens no tag, an `&` that is no whitespace, anything else.
+    if (waiting > 0) place(at);
+    at++;
+  }
+  return anchors;
+}
+
+/** The marked input for one conversion, and which markers pair up as links. */
+interface LinkMarking {
+  /** Each recorded link as the indices of its own marker and its target's. */
+  links: Array<{ marker: number; target: number }>;
+  marked: string;
+  markers: number;
+}
+
+/**
+ * Mark `input` — the string `convert()` receives — with a sentinel before each
+ * in-document link's and each linked target's first text character (#239).
+ * `undefined` when there is nothing to mark, or when marking could change the
+ * conversion: the input already carries a sentinel, literal or as a reference,
+ * or the marked input would pass {@link MAX_CONVERT_INPUT_CHARS}.
+ */
+function markInDocumentLinks(input: string): LinkMarking | undefined {
+  if (holdsSentinel(input)) return;
+  const anchors = scanMarkupAnchors(input);
+  const byId = new Map<string, MarkupAnchor>();
+  const byName = new Map<string, MarkupAnchor>();
+  for (const anchor of anchors) {
+    if (anchor.kind === 'id' && !byId.has(anchor.fragment)) byId.set(anchor.fragment, anchor);
+    if (anchor.kind === 'name' && !byName.has(anchor.fragment)) byName.set(anchor.fragment, anchor);
+  }
+  const markerOf = new Map<MarkupAnchor, number>();
+  const pairs: Array<[MarkupAnchor, MarkupAnchor]> = [];
+  for (const anchor of anchors) {
+    if (anchor.kind !== 'href' || anchor.at === -1) continue;
+    const target = byId.get(anchor.fragment) ?? byName.get(anchor.fragment);
+    if (target === undefined || target.at === -1) continue;
+    pairs.push([anchor, target]);
+    markerOf.set(anchor, -1);
+    markerOf.set(target, -1);
+  }
+  if (pairs.length === 0) return;
+  // Anchors come out of the scan in input order with nondecreasing positions,
+  // so the marked string is built in one forward pass.
+  const parts: string[] = [];
+  let copied = 0;
+  let markers = 0;
+  let length = input.length;
+  for (const anchor of anchors) {
+    if (!markerOf.has(anchor)) continue;
+    const sentinel = `${SENTINEL_OPEN}${markers}${SENTINEL_CLOSE}`;
+    markerOf.set(anchor, markers++);
+    length += sentinel.length;
+    if (length > MAX_CONVERT_INPUT_CHARS) return;
+    parts.push(input.slice(copied, anchor.at), sentinel);
+    copied = anchor.at;
+  }
+  parts.push(input.slice(copied));
+  return {
+    links: pairs.map(([link, target]) => ({
+      marker: markerOf.get(link) ?? -1,
+      target: markerOf.get(target) ?? -1,
+    })),
+    marked: parts.join(''),
+    markers,
+  };
+}
+
+/**
+ * The converted text with every sentinel removed, and each marker's offset in
+ * that text (-1 for a marker whose text the parser never rendered, such as one
+ * inside an attribute value). One forward pass. Every sentinel in the output is
+ * one {@link markInDocumentLinks} placed — it refuses input that already holds
+ * one — so an opener without its closer is a broken invariant, not filing text.
+ */
+function stripSentinels(converted: string, markers: number): { offsets: Int32Array; text: string } {
+  const offsets = new Int32Array(markers).fill(-1);
+  const parts: string[] = [];
+  let length = 0;
+  let copied = 0;
+  for (let open = converted.indexOf(SENTINEL_OPEN); open !== -1; ) {
+    const close = converted.indexOf(SENTINEL_CLOSE, open + 1);
+    if (close === -1)
+      throw new Error('Unclosed in-document link sentinel in converted filing text');
+    parts.push(converted.slice(copied, open));
+    length += open - copied;
+    offsets[Number(converted.slice(open + 1, close))] = length;
+    copied = close + 1;
+    open = converted.indexOf(SENTINEL_OPEN, copied);
+  }
+  parts.push(converted.slice(copied));
+  return { offsets, text: parts.join('') };
+}
+
+/**
  * Extract full plain text from a filing document — HTML, or an SGML submission,
  * every readable document in order with plain-text `<TEXT>` bodies keeping their
  * lines (see {@link preservePlainTextBodies}). Pure and deterministic — the same
  * input always yields the same string. Caching is the caller's responsibility via
  * `getExtractCache`/`setExtractCache` (keyed `accession:document`), which lets a
  * cache hit skip the document fetch as well as this conversion.
+ *
+ * Given `links`, the document's in-document links are pushed onto it in text
+ * order (#239): sentinels marking each link and target go into the input
+ * `convert()` receives, before the first character it renders as text after the
+ * start tag ({@link scanMarkupAnchors}), and come back out of its output in one
+ * pass, so the text is byte-identical to the unmarked conversion. Input holding
+ * a sentinel already, or too long to mark within the parser's input limit, is
+ * converted unmarked and records no links. One conversion either way.
  */
-export function filingToExtract(html: string): string {
-  return convert(
-    preservePlainTextBodies(neutralizePageMarkers(stripInlineXbrl(html))),
-    CONVERT_OPTIONS,
+export function filingToExtract(html: string, links?: InDocumentLink[]): string {
+  const input = preservePlainTextBodies(neutralizePageMarkers(stripInlineXbrl(html)));
+  if (links === undefined) return convert(input, CONVERT_OPTIONS);
+  const marking = markInDocumentLinks(input);
+  if (marking === undefined) return convert(input, CONVERT_OPTIONS);
+  const { offsets, text } = stripSentinels(
+    convert(marking.marked, CONVERT_OPTIONS),
+    marking.markers,
   );
+  for (const link of marking.links) {
+    const offset = offsets[link.marker] ?? -1;
+    const target = offsets[link.target] ?? -1;
+    if (offset !== -1 && target !== -1) links.push({ offset, target });
+  }
+  return text;
 }
 
 /** Return true if the cache has an entry for cacheKey (allows skipping the document fetch). */
@@ -970,6 +1351,122 @@ export function foldForHeadingMatch(value: string): string {
     .toLowerCase();
 }
 
+/** One whitespace code point, as `\s` reads it — the run {@link foldForHeadingMatch} collapses. */
+const WHITESPACE_CHAR_RE = /^\s$/u;
+
+/**
+ * The {@link foldForHeadingMatch} fold of one code point that is not
+ * whitespace: a typographic quote becomes its ASCII counterpart, anything else
+ * its lowercase form, which can be longer than the source (U+0130 lowercases to
+ * two code units).
+ */
+function foldCodePoint(codePoint: number): string {
+  if (codePoint === 0x2018 || codePoint === 0x2019) return "'";
+  if (codePoint === 0x201c || codePoint === 0x201d) return '"';
+  return String.fromCodePoint(codePoint).toLowerCase();
+}
+
+/**
+ * Feed `text` through the {@link foldForHeadingMatch} fold one code point at a
+ * time: each whitespace run as one space, every other code point as its folded
+ * code units, each unit with the offset and end of the code point it came from.
+ * Folding per code point is what lets every unit map back to a document offset,
+ * since a lowercase form can be longer than its source.
+ */
+function foldEach(text: string, emit: (unit: number, offset: number, end: number) => void): void {
+  let inSpace = false;
+  for (let at = 0; at < text.length; ) {
+    const code = text.charCodeAt(at);
+    if (code < 0x80) {
+      const space = code === 0x20 || (code >= 0x09 && code <= 0x0d);
+      if (!space) emit(code >= 0x41 && code <= 0x5a ? code + 0x20 : code, at, at + 1);
+      else if (!inSpace) emit(0x20, at, at + 1);
+      inSpace = space;
+      at++;
+      continue;
+    }
+    const codePoint = text.codePointAt(at) ?? code;
+    const end = at + (codePoint > 0xffff ? 2 : 1);
+    const char = text.slice(at, end);
+    if (WHITESPACE_CHAR_RE.test(char)) {
+      if (!inSpace) emit(0x20, at, end);
+      inSpace = true;
+    } else {
+      const folded = foldCodePoint(codePoint);
+      for (let k = 0; k < folded.length; k++) emit(folded.charCodeAt(k), at, end);
+      inSpace = false;
+    }
+    at = end;
+  }
+}
+
+/** One occurrence {@link findPhrase} found, as offsets into the text: where it starts and where it ends. */
+export interface PhraseOccurrence {
+  end: number;
+  offset: number;
+}
+
+/** What {@link findPhrase} found in a document. */
+export interface PhraseMatches {
+  /** Occurrences starting before the search start. */
+  before: number;
+  /** The first occurrences starting at or after the search start, in order, up to the limit. */
+  listed: PhraseOccurrence[];
+  /** Occurrences in the whole text. */
+  total: number;
+}
+
+/**
+ * Every occurrence of `phrase` in `text` under the {@link foldForHeadingMatch}
+ * fold (#238) — case, whitespace runs, and quote style ignored, so a phrase
+ * broken across a line or set with a non-breaking space matches — counted over
+ * the whole text, with the first `limit` that start at or after `from` listed by
+ * their document offsets. Substring matching; occurrences do not overlap.
+ * `phrase` must hold something besides whitespace.
+ *
+ * Both operands fold one code point at a time ({@link foldEach}), and each
+ * folded unit keeps the offset of the code point it came from, so a lowercase
+ * form longer than its source (U+0130) shifts no later offset. One forward pass
+ * of Knuth–Morris–Pratt over the folded units, holding the offsets of the last
+ * `phrase`-length units in a ring: linear in the text, and memory bounded by
+ * the phrase and `limit`, whatever the occurrence count.
+ */
+export function findPhrase(
+  text: string,
+  phrase: string,
+  from: number,
+  limit: number,
+): PhraseMatches {
+  const units: number[] = [];
+  foldEach(phrase, (unit) => {
+    if (unit !== 0x20 || (units.length > 0 && units[units.length - 1] !== 0x20)) units.push(unit);
+  });
+  if (units[units.length - 1] === 0x20) units.pop();
+  const length = units.length;
+  const fallback = new Int32Array(length);
+  for (let i = 1, k = 0; i < length; i++) {
+    while (k > 0 && units[i] !== units[k]) k = fallback[k - 1] ?? 0;
+    if (units[i] === units[k]) k++;
+    fallback[i] = k;
+  }
+  const starts = new Int32Array(length);
+  const matches: PhraseMatches = { before: 0, listed: [], total: 0 };
+  let seen = 0;
+  let matched = 0;
+  foldEach(text, (unit, offset, end) => {
+    starts[seen++ % length] = offset;
+    while (matched > 0 && unit !== units[matched]) matched = fallback[matched - 1] ?? 0;
+    if (unit === units[matched]) matched++;
+    if (matched < length) return;
+    matched = 0;
+    const start = starts[seen % length] ?? offset;
+    matches.total++;
+    if (start < from) matches.before++;
+    else if (matches.listed.length < limit) matches.listed.push({ offset: start, end });
+  });
+  return matches;
+}
+
 /**
  * A TOC page cell on a line of its own: a page number, a lettered
  * financial-statement page ("F-3"), or a lowercase roman front-matter page
@@ -1084,10 +1581,7 @@ export function isTocHeading(text: string, heading: FilingHeading): boolean {
   const lineStart = text.lastIndexOf('\n', heading.offset - 1) + 1;
   const newline = text.indexOf('\n', heading.offset);
   const lineEnd = newline === -1 ? text.length : newline;
-  const titledHere =
-    !BARE_MARKER_HEADING_RE.test(heading.heading) &&
-    text.startsWith(heading.heading, heading.offset);
-  const title = titledHere
+  const title = isTitledAt(text, heading)
     ? { line: text.slice(lineStart, lineEnd), end: lineEnd + 1 }
     : nextContentLine(text, lineEnd + 1);
   if (title === undefined) return false;
@@ -1104,6 +1598,73 @@ export function isTocHeading(text: string, heading: FilingHeading): boolean {
   if (!sameCase) return false;
   const pageEnd = text.indexOf('\n', below.end);
   return PAGE_CELL_LINE_RE.test(text.slice(below.end, pageEnd === -1 ? text.length : pageEnd));
+}
+
+/**
+ * Whether a heading's text is printed at its offset — not a bare marker, nor a
+ * marker joined to a title printed on a later line ({@link titleAfterMarkerLine}).
+ */
+function isTitledAt(text: string, heading: FilingHeading): boolean {
+  return (
+    !BARE_MARKER_HEADING_RE.test(heading.heading) &&
+    text.startsWith(heading.heading, heading.offset)
+  );
+}
+
+/** The span of a {@link ContentLine}, its newline excluded. */
+function lineSpan(line: ContentLine): { end: number; start: number } {
+  return { start: line.end - 1 - line.line.length, end: line.end - 1 };
+}
+
+/**
+ * Where `section` continues when it lands on a table-of-contents row
+ * ({@link isTocHeading}) that links forward to its section (#239): the start of
+ * the line holding the first text after the link's target, or undefined when
+ * the heading is no TOC row or its row carries no such link — every other
+ * landing stays where it is. A row is the heading's own line; for a heading not
+ * printed at its offset (a bare marker joined to a later title), that title's
+ * line too; then the next line with content when it is a page cell. A link
+ * counts when its text starts on one of those lines and its target lies past
+ * the row, so a back-link to the table of contents never moves a landing.
+ *
+ * Anthropic, PBC's S-1/A (0001628280-26-068676) prints its table of contents in
+ * capitals, a detected heading, and each section's own heading in mixed case,
+ * which detection does not list, so `risk factors` took the TOC row alone. Over
+ * 61 sampled 2008–2026 filings × 60 section values this moves 20 landings, each
+ * off a TOC row onto its section, and no other. `links` is in text order; one
+ * pass up to the row's end.
+ */
+export function linkedSectionStart(
+  text: string,
+  heading: FilingHeading,
+  links: readonly InDocumentLink[],
+): number | undefined {
+  if (links.length === 0 || !isTocHeading(text, heading)) return;
+  const newline = text.indexOf('\n', heading.offset);
+  const own = {
+    start: text.lastIndexOf('\n', heading.offset - 1) + 1,
+    end: newline === -1 ? text.length : newline,
+  };
+  const row = [own];
+  let after = own.end + 1;
+  if (!isTitledAt(text, heading)) {
+    const title = nextContentLine(text, after);
+    if (title !== undefined) {
+      row.push(lineSpan(title));
+      after = title.end;
+    }
+  }
+  const page = nextContentLine(text, after);
+  if (page !== undefined && PAGE_CELL_LINE_RE.test(page.line)) row.push(lineSpan(page));
+  const rowEnd = row[row.length - 1]?.end ?? own.end;
+  for (const link of links) {
+    if (link.offset > rowEnd) break;
+    if (link.target <= rowEnd) continue;
+    if (row.some((line) => link.offset >= line.start && link.offset < line.end)) {
+      return text.lastIndexOf('\n', link.target - 1) + 1;
+    }
+  }
+  return;
 }
 
 /**

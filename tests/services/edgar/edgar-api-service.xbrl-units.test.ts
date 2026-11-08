@@ -124,8 +124,11 @@ describe('XBRL unit validation at the service edge (#141)', () => {
   });
 
   it('applies to mirror-served payloads too', async () => {
+    // A filer the store holds whose submissions read 404s, so the store answers (#234).
     mirrorRef.current = {
       companyFactsReady: vi.fn().mockResolvedValue(true),
+      holdsFiler: vi.fn().mockResolvedValue(true),
+      companyFactsCheckpoint: vi.fn().mockResolvedValue('2026-11-01T00:00:00.000Z'),
       getCompanyConcept: vi.fn().mockResolvedValue({
         ...malformedConcept,
         units: { USD: {}, EUR: [tenK] },

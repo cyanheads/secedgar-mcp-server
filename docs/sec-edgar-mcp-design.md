@@ -12,7 +12,7 @@ The core tools designed below. The full shipped surface — snapshot, comparison
 |:-----|:------------|:-----------|:------------|
 | `secedgar_company_search` | Find companies and retrieve entity info with optional recent filings. Entry point for most workflows. | `query`, `include_filings?`, `forms?`, `filing_limit?` | `readOnlyHint`, `openWorldHint` |
 | `secedgar_search_filings` | Search EDGAR filings since 1993 — EFTS full-text for 2001-present, archive-backed browse (submissions history / quarterly full-index) for pre-2001 ranges. | `query`, `forms?`, `filed_after?`, `filed_before?`, `limit?`, `offset?` | `readOnlyHint`, `openWorldHint` |
-| `secedgar_get_filing` | Fetch a specific filing's metadata and document content by accession number. | `accession_number`, `cik?`, `content_limit?`, `document?` | `readOnlyHint`, `idempotentHint` |
+| `secedgar_get_filing` | Fetch a specific filing's metadata and document content by accession number, paged by offset, by section heading, or at a phrase. | `accession_number`, `cik?`, `content_limit?`, `document?`, `include_xbrl?`, `offset?`, `section?`, `find?` | `readOnlyHint`, `idempotentHint` |
 | `secedgar_get_financials` | Get historical XBRL financial data for a company. Accepts friendly concept names. | `company`, `concept`, `taxonomy?`, `period_type?`, `unit?`, `limit?` | `readOnlyHint`, `idempotentHint` |
 | `secedgar_fetch_frames` | Compare a financial metric across all reporting companies for a specific period. | `concept`, `period`, `taxonomy?`, `unit?`, `limit?`, `offset?`, `sort?` | `readOnlyHint`, `openWorldHint` |
 
@@ -167,7 +167,7 @@ output: z.object({
 
 **Handler flow:**
 1. If `query` looks like a number → treat as CIK, zero-pad
-2. If `query` is 1-5 letters → case-insensitive ticker lookup via `Map` (O(1))
+2. If `query` is 1-5 letters in any case, or anything typed in uppercase → the listed-symbol lookup via `Map` (O(1)), a dotted class retried hyphenated (`BRK.B` → BRK-B, #110); then, for uppercase input, the ticker-spelling readings (`UEC.N`, `CFGPH`, `GLOP`; a non-US code such as `7203.T` is no match, #235)
 3. Otherwise → case-insensitive name search over `company_tickers.json` titles and committed former names, tiered: exact as written (including the registry title with its corporate suffix dropped, so "Apple" matches "Apple Inc."), exact once commas, periods, and apostrophes are deleted and whitespace runs collapse on both sides ("QXO Inc" matches "QXO, Inc."), exact once runs of one-letter words join on that form ("JM Smucker" matches "J M SMUCKER Co"), prefix of the joined form ending at a word boundary ("U.S. Bancorp" matches "US BANCORP \DE\"), then substring as written starting at a word boundary. Each tier ranks above the looser one after it, so a title typed as listed never ties a former name that equals it only without punctuation (#210), and "US Gold" names U.S. GOLD CORP. alone instead of tying the former name "u s gold corp", equal only once joined (#219). No hit begins or ends inside a word of the name, so "SY Bancorp" never names Embassy Bancorp and "helix acquisition corp ii" never lists Helix Acquisition Corp. III; a query ending mid-word still matches a name that contains it as written ("Berkshire Hath") (#218). A query with no letter or digit matches nothing. Resolve within the best tier a current title reaches and return every match from it; a former name can tie a current title but never outrank one. No fuzzy-matching library needed — prefix + substring covers practical cases across ~10K entries.
 4. Fetch `data.sec.gov/submissions/CIK{padded}.json`
 5. Filter `filings.recent` parallel arrays by `forms` if provided
@@ -193,7 +193,7 @@ input: z.object({
       + 'boolean operators (revenue OR income), '
       + 'exclusion (-preliminary), '
       + 'wildcard suffix (account*), '
-      + 'entity targeting (cik:320193 or ticker:AAPL within the query string). '
+      + 'entity targeting (one cik:320193 or ticker:AAPL term, never led by - or NOT). '
       + 'Terms are AND\'d by default.'),
   forms: z.array(z.string()).optional()
     .describe('Filter to specific form types (e.g., ["10-K", "10-Q", "8-K"]). '
@@ -239,7 +239,8 @@ output: z.object({
 **Key design decisions:**
 - Default `limit: 20` (not 100) — most searches don't need 100 results and it keeps LLM context lean
 - One row per filing, with `total` and `form_distribution` counting filings — EFTS returns a hit per matching document, so a filing whose body and exhibits match would otherwise fill several rows. EFTS counts only documents (`hits.total.value`, and the `form_filter` aggregation, whose buckets also fold amendments into the root form) and serves 100 hits per request whatever `size` asks, so a search's exact filing count exists only when one window holds every match; past that, `total` is the window's filings with `total_is_exact: false`, and `total_documents` keeps EFTS's count. A browse (no `q`) is the exception: EFTS matches each filing's primary document alone, so `hits.total.value` is the filing count and becomes `total`, trusted while the window shows one document per accession. `form_distribution` describes the filings in hand rather than the whole match set (#124)
-- Entity filtering via `cik:` / `ticker:` in the `query` string, resolved to a CIK passed through EFTS's plural `ciks` param (the singular `entity` param is ignored) — server-side scope, so filings under a former company name on the same CIK are included
+- Entity filtering via one `cik:` / `ticker:` term in the `query` string, resolved to a CIK passed through EFTS's plural `ciks` param (the singular `entity` param is ignored) — server-side scope, so filings under a former company name on the same CIK are included. A `ticker:` term takes every spelling `resolveCik` reads (`UEC.N`, `CFGPH`, `GLOP`, #235), and `effectiveQuery` names the reading beside the CIK, `(entity scope: CIK 0001334933, UEC.N read as UEC (URANIUM ENERGY CORP))`, identically on every page, since each page resolves the term again
+  - *Decision:* a term led by `-` or a `NOT` term, or a second entity term, fails `unsupported_entity_scope` before any request (#243). `ciks` only scopes in, so an exclusion has no scope to become, and passed through as text it changes nothing (full-text search returns the same documents with or without `-ticker:AAPL`), while a second term sent as text matches nothing. A `+` before the term is removed with it, a term inside a quoted phrase still scopes with the phrase read without it, and attached punctuation (`(ticker:AAPL)`) keeps failing `unresolved_ticker` / `invalid_cik`.
 - A relevance `offset` past 9,900 fails as `offset_out_of_range` before any request — EFTS refuses a `from` past 9,900 whatever the query, so sending it can only fail
   - *Decision:* the check sits on the one path that sends `offset` as `from` (relevance, no entity scope, a 2001-onward range), and the schema keeps `.max(9999)`, because the date-sorted, entity-scoped, and archive paths page rows the call assembled, and a pre-2001 browse answers offsets 9,901–9,999; narrowing the schema would reject calls that answer (#214).
 
@@ -257,41 +258,42 @@ output: z.object({
 
 ```ts
 input: z.object({
-  accession_number: z.string()
-    .describe('Filing accession number in either format: '
-      + '"0000320193-23-000106" (dashes) or "000032019323000106" (no dashes). '
-      + 'Obtained from secedgar_company_search or secedgar_search_filings results.'),
-  cik: z.string().optional()
-    .describe('Filer CIK. Optional but recommended — speeds up the archive lookup. '
-      + 'If omitted, the filer is looked up through EDGAR full-text search and the accession number prefix, '
-      + 'then through the filers the filing index page names.'),
-  content_limit: z.number().int().min(1000).max(1000000).default(50000) // served at min(content_limit, 200000)
-    .describe('Maximum characters of document text to return. '
-      + '10-K filings can exceed 500,000 characters. Default 50,000 captures the first ~12,000 words '
-      + '(typically business overview, risk factors, and MD&A). '
-      + 'Increase to 200,000 for full financial statements, or decrease for quick summaries.'),
-  document: z.string().optional()
-    .describe('Specific document filename within the filing (e.g., "ex-21.htm" for subsidiaries list). '
-      + 'Default: the primary document. Available documents listed in the response metadata.'),
+  accession_number: z.string(),          // "0000320193-23-000106" or "000032019323000106"
+  cik: z.string().optional(),            // speeds the lookup; without it, full-text search, the accession prefix, then the index page's filers
+  content_limit: z.number().int().min(1000).max(1000000).default(50000), // a page is served at min(content_limit, 200000)
+  document: z.string().optional(),       // an exhibit or other filename; omitted or blank: the primary
+  include_xbrl: z.boolean().default(false), // XBRL viewer and taxonomy files, under documents.xbrl
+  offset: z.number().int().min(0).default(0), // where the page starts; under find, where the search starts
+  section: z.string().min(1).optional(), // a heading, or a document line equal to or starting with the value; outranks find and offset
+  find: z.string().max(200).optional(),  // a phrase in the text, folded like section; outranks offset; blank reads as omitted
+})
+
+const documentEntry = z.object({
+  name: z.string(), type: z.string(), description: z.string().optional(),
+  size: z.number().optional(), binary: z.boolean().optional(),
 })
 
 output: z.object({
   accession_number: z.string(),
-  form: z.string(),
-  filing_date: z.string(),
-  company_name: z.string(),
+  form: z.string().optional(),           // from the submissions feed, else the filing's SEC header
+  filing_date: z.string().optional(),
+  company_name: z.string().optional(),
   cik: z.string(),
   period_ending: z.string().optional(),
-  primary_document: z.string(),
-  documents: z.array(z.object({
-    name: z.string(),
-    type: z.string(),
-    size: z.number().optional(),
-  })).describe('All documents in this filing. Use the name field with the document input param to fetch exhibits.'),
-  content: z.string().describe('Document text content, truncated to content_limit.'),
-  content_truncated: z.boolean().describe('True if content was truncated.'),
-  content_total_length: z.number().describe('Full document length before truncation.'),
-  filing_url: z.string().describe('Direct URL to the filing on SEC.gov.'),
+  primary_document: z.string(),          // the path read: an SEC rendering, an accession-prefixed name, or <accession>.txt
+  requested_document: z.string().optional(),
+  documents: z.object({
+    primary: z.array(documentEntry), exhibits: z.array(documentEntry),
+    auxiliary: z.array(documentEntry), xbrl: z.array(documentEntry).optional(),
+  }),
+  content: z.string(),                   // this page's text
+  content_truncated: z.boolean(),
+  content_total_length: z.number(),
+  next_offset: z.number().optional(),    // pass as offset, without section or find, for the next page
+  outline: z.array(z.object({ heading: z.string(), offset: z.number() })).optional(), // up to 50, on a truncated first page with no section or find
+  occurrences: z.array(z.object({ offset: z.number(), context: z.string() })).optional(), // with find: up to 20, from the one the page opens at
+  occurrences_total: z.number().optional(), // with find: occurrences in the whole document
+  filing_url: z.string(),
 })
 ```
 
@@ -302,11 +304,14 @@ output: z.object({
 4. Determine target document (primary or specified). With the index, read the `<accn>-index-headers.html` page and the filer's submissions feed together (both also feed the response metadata). The primary is the feed's `primaryDocument` (last path segment) when the accession is in its recent window, else the document the header page types with the submission's form, else the largest readable document, never an `R<n>.htm` viewer page. Size alone picks an 8-K's larger press-release exhibit, so it is only the fallback
 5. Fetch document HTML. A primary the feed records through a stylesheet path (`xslSCHEDULE_13D_X02/primary_doc.xml`) is read as SEC renders it at that path while the index lists the raw file at 600,000 bytes or less: the raw XML strips to one unlabeled line, and a holdings report's rendering runs about 20 times its raw size. A rendering that answers 404, or that SEC cannot serve, gives way to the raw file, and `documents` keeps the raw file as the primary (#216). A sequence-numbered name that answers 404 (`0001.htm`, common in 2000–2001 indexes) is read again as `<accession>-0001.htm` in the same directory, and a caller-named document resolves in either spelling (#213). `primary_document` and `filing_url` name the path read. When the primary the index names is served under neither spelling — the prefixed read answering 404, or SEC unable to serve it, as with a rendering — read the full submission `<accession>.txt` instead and say so in the response notice; a caller-named document served under neither fails with a hint naming the submission (unless it is the submission) and `cik`. Index entries with no filename are dropped, and a blank `document` reads as omitted
 6. Convert HTML to clean text (strip tags, normalize whitespace, preserve table structure where possible). Filer-written text in an SEC rendering (`div.largetext`, styled `white-space: pre-wrap`) keeps its whitespace, so a 13D's Item paragraphs stay apart (#216)
-7. Truncate to `content_limit`
+7. Pick where the page starts: `section`'s landing, where a table-of-contents row that links to its section lands on that section (#239); else, with `find`, the first occurrence at or after `offset` — its line's start when that is at most 200 characters back, else the first word starting within those 200 (#238); else `offset`
+8. Cut `content_limit` characters from there at a word boundary; a cut page reports `next_offset`
 
 **Error guidance:**
 - 404 → `"Filing not found. Verify the accession number. Format: '0000320193-23-000106' (with dashes)."`
 - Document not in filing → `"Document '{name}' not found in this filing. Available documents: {list}. Use one of these names."`
+- `section` matches nothing → `section_not_found` with the outline, pointing a phrase that is not a heading at `find`
+- No occurrence of `find` at or after `offset` → `phrase_not_found`, saying how many occur before `offset`
 
 ---
 
@@ -418,7 +423,9 @@ Alternate-definition tags (`cash` incl. restricted cash, `equity` incl. noncontr
 Revenue is the most complex: companies switched from `SalesRevenueNet` to `RevenueFromContractWithCustomerExcludingAssessedTax` around 2017-2018 (ASC 606 adoption). The handler tries all variants and merges for full history.
 
 **Error guidance:**
-- Neither a friendly name nor tag-shaped (`/^[A-Z][A-Za-z0-9]*$/` after trimming) → `unknown_concept` (`NotFound`) before company resolution or any SEC request: `"'{name}' is neither a supported concept name nor an XBRL tag."`, with a recovery hint carrying a formula for a standard combination (`free_cash_flow` → `operating_cash_flow − capex`, `ebitda` → `operating_income + depreciation_amortization`, `working_capital` → `current_assets − current_liabilities`) or up to three closest catalog names (Dice trigram ≥ 0.3 against name and label), then a pointer to `secedgar_search_concepts`. Shared by `get_financials`, `compare_companies` (which fails only when every concept is unknown and otherwise lists them in `unknown_concepts`), and `fetch_frames`.
+- Neither a friendly name nor tag-shaped (`/^[A-Z][A-Za-z0-9]*$/` after trimming) → `unknown_concept` (`NotFound`) before company resolution or any SEC request: `"'{name}' is neither a supported concept name nor an XBRL tag."`, with a recovery hint carrying a formula for a standard combination (`free_cash_flow` → `operating_cash_flow − capex`, `ebitda` → `operating_income + depreciation_amortization`, `working_capital` → `current_assets − current_liabilities`) or up to three closest catalog names (Dice trigram ≥ 0.3 against name and label), then a pointer to `secedgar_search_concepts`. Shared by `get_financials`, `compare_companies` (which fails only when every concept is unknown and otherwise lists them in `unknown_concepts`), and `fetch_frames`. A friendly name is a catalog name or one of its aliases (`capital_expenditures` for `capex`, `cash_and_cash_equivalents` for `cash`) in any case or separator form, or a lowerCamelCase spelling of either (`operatingIncome`), which is split at its humps only after the input misses as typed; the formula table is read the same way, so `freeCashFlow` gets its formula. `__proto__` and `constructor` are unknown like any other name.
+  - *Decision:* an alias is the concept's label keyed like a name, or that label minus its sign qualifier (`income_tax_expense`, `pre_tax_income`), and only where it has one reading — `total_debt`, `total_equity`, `eps`, `cost_of_revenue`, `net_sales`, and `ppe` each name more than one quantity and stay unknown. Names and aliases resolve through one `Map` built at load, so a key two entries claim fails at startup and no input reads a property off `Object.prototype` (#240).
+  - *Decision:* the camelCase split applies only to input opening lowercase: no item element opens lowercase, while a split uppercase-initial tag would read a catalog ladder in place of the tag asked for (`InterestExpense` → `interest_expense`'s four tags, `SharesOutstanding` → a `dei` tag) (#240).
   - *Decision:* the tag-shape test is the rejection line because every item element in us-gaap, ifrs-full, dei, and srt matches it and SEC matches tags case-sensitively, so nothing that could return data is rejected; it also keeps path-shaped input out of the request URL, where the tag is a path segment.
   - *Decision:* `total_debt` has no formula — `debt` is long-term only and the catalog has no current-portion concept, so any formula would understate.
 - No data for concept → `"No XBRL data for '{tag}' under {taxonomy} for this company. This company may use a different tag or taxonomy. Try 'ifrs-full' for foreign filers."`
@@ -547,7 +554,7 @@ output: z.object({
 Owns all EDGAR HTTP I/O. Init/accessor pattern — initialized in `setup()`.
 
 - **Paced fetch** — One process-wide `createPacer` queue spaces request starts to 10 req/s (100ms apart). Separate from the framework's inbound rate limiter — this prevents SEC IP bans.
-- **Retry with backoff** — Retries 500/502/503/504, an attempt that gets no HTTP response at all (a refused or reset connection, a DNS failure, a connect timeout), and a 2xx whose body fails to read after its headers (the connection breaks off mid-body, invalid chunk framing or compression, or no body bytes for 15 s), with exponential backoff: 3 attempts, sleeping 1 s and then 2 s between them, each re-admitted through the block gate and re-paced. Each attempt gets 15 s from dispatch to response headers before it is aborted and counted as no response — Bun has no connect timeout of its own, and neither runtime bounds a server that accepts and never answers — and queue time in the pacer is outside that cap. The body read is bounded only by its idle limit, measured between reads, so a large body that keeps arriving is never cut, while a stalled one fails its attempt after 15 s — the runtimes alone bound a stall at undici's 300 s on Node and not at all on Bun. Every body is read inside the ladder; an error status's diagnostic body is read through the same reader, bounded to 500 bytes, the idle limit, the budget, and the caller's signal (#202), and a body the ladder does not read (404, retried 5xx, 429, an answer landing as the caller cancels) is cancelled (#188); a probe whose headers arrive still reopens the block gate, and only its own call retries a body that then breaks. Once the attempts run out, the last one decides: a 5xx fails with its status, no HTTP response or a body that failed to read as `sec_unreachable` (`ServiceUnavailable`, retryable). A 200 body that reads whole but is not JSON where JSON is expected fails as `sec_unreachable` on its one request, unretried. EDGAR full-text search answers a failure of its search backend with a 200 naming the error class (`errorType`); its two readers (the search and the entity lookup) opt in, so a transport class (`ConnectionError`, `TimeoutError`, `NoLivingConnectionsError`) fails the attempt and retries like a 5xx, its wait and backoff charged to the budget, and ends as `efts_degraded_response` (`retryable: true`), while any other class fails on its one request (`retryable: false`), each carrying `upstreamErrorType` and `upstreamErrorMessage` bounded to 500 bytes (#206). A submissions document or archive page whose JSON lacks the arrays its readers index (the six filing columns, `filings.files`, `tickers`, `exchanges`) fails the same way, before the cache write (#186). Each message is composed from the host, the attempts, and the transport code (Bun's own `code`, Node's `cause.code`) or the timeout; the runtime's text rides `cause` to the log only. **Cancellation and the failure budget (#179):** each tool call builds one `CallScope` (`call-scope.ts`) from `ctx.signal` and passes it to every service method that reaches SEC. The caller's signal reaches every pacer wait, block-gate wait, `fetch`, body read, and backoff sleep: a queued request leaves the pacer unsent, an in-flight attempt aborts, and whatever rejects once the signal has fired is rethrown with the caller's reason — never retried and never counted as a no-response or body-read failure. The scope also carries a 40 s failure budget (`CALL_FAILURE_BUDGET_MS`) that keeps a call against an unresponsive SEC inside the MCP client's 60 s default. Only time SEC spends failing the call is charged: the wait on each attempt that got no response headers or a 5xx, each backoff sleep, the idle time of a stalled body, and the wait on a probe whose silence the call counts as its own attempt. Healthy progress is never charged — pacer queue time, answered requests, a body still arriving — so a call SEC keeps answering with a 2xx is never cut, however long its pacer waits run. Each attempt's header wait and each body-idle wait is the lesser of its 15 s cap and the budget left, and a backoff is slept only while the budget outlasts it; concurrent failing attempts in one call each charge it. Once the budget is spent no further attempt or backoff starts, in that call only: the request fails with the error its last attempt earned (a 5xx keeps its status mapping; no response or an unreadable body is `sec_unreachable`), its message saying retries stopped at the call's 40 s budget for SEC failures. A request that finds the budget already spent by earlier requests sends nothing and fails as `sec_unreachable` with a "No request sent … budget … spent" message. The ticker-file load (`company_tickers.json`, then `company_tickers_mf.json`) is shared by every call that needs the ticker index, so it runs under its own scope (`CallScope.unowned()`): a full budget and a signal that never fires. A call waiting on it (`awaitShared`) is charged the failure time the load spends while it waits, no more, with one wait per call — a second wait from the same call joins the first. A waiter's cancel ends only its own wait; the load completes and caches for the others. A 429 is never retried: SEC blocks the IP until its request rate has stayed under the limit for ten minutes, and each request sent meanwhile restarts that clock.
+- **Retry with backoff** — Retries 500/502/503/504, an attempt that gets no HTTP response at all (a refused or reset connection, a DNS failure, a connect timeout), and a 2xx whose body fails to read after its headers (the connection breaks off mid-body, invalid chunk framing or compression, or no body bytes for 15 s), with exponential backoff: 3 attempts, sleeping 1 s and then 2 s between them, each re-admitted through the block gate and re-paced. Each attempt gets 15 s from dispatch to response headers before it is aborted and counted as no response — Bun has no connect timeout of its own, and neither runtime bounds a server that accepts and never answers — and queue time in the pacer is outside that cap. The body read is bounded only by its idle limit, measured between reads, so a large body that keeps arriving is never cut, while a stalled one fails its attempt after 15 s — the runtimes alone bound a stall at undici's 300 s on Node and not at all on Bun. Every body is read inside the ladder; an error status's diagnostic body is read through the same reader, bounded to 500 bytes, the idle limit, the budget, and the caller's signal (#202), and a body the ladder does not read (404, retried 5xx, 429, an answer landing as the caller cancels) is cancelled (#188); a probe whose headers arrive still reopens the block gate, and only its own call retries a body that then breaks. Once the attempts run out, the last one decides: a 500, 502, 503, or 504 fails as `sec_unavailable` and no HTTP response or a body that failed to read as `sec_unreachable`, both `ServiceUnavailable` (a 504 too, with `data.status` keeping it) and retryable, with a hint to retry the same call in a minute (#233). A 200 body that reads whole but is not JSON where JSON is expected fails as `sec_unreachable` on its one request, unretried. EDGAR full-text search answers a failure of its search backend with a 200 naming the error class (`errorType`); its two readers (the search and the entity lookup) opt in, so a transport class (`ConnectionError`, `TimeoutError`, `NoLivingConnectionsError`) fails the attempt and retries like a 5xx, its wait and backoff charged to the budget, and ends as `efts_degraded_response` (`retryable: true`), while any other class fails on its one request (`retryable: false`), each carrying `upstreamErrorType` and `upstreamErrorMessage` bounded to 500 bytes (#206). A submissions document or archive page whose JSON lacks the arrays its readers index (the six filing columns, `filings.files`, `tickers`, `exchanges`) fails the same way, before the cache write (#186). Each message is composed from the host, the attempts, and the transport code (Bun's own `code`, Node's `cause.code`) or the timeout; the runtime's text rides `cause` to the log only. **Cancellation and the failure budget (#179):** each tool call builds one `CallScope` (`call-scope.ts`) from `ctx.signal` and passes it to every service method that reaches SEC. The caller's signal reaches every pacer wait, block-gate wait, `fetch`, body read, and backoff sleep: a queued request leaves the pacer unsent, an in-flight attempt aborts, and whatever rejects once the signal has fired is rethrown with the caller's reason — never retried and never counted as a no-response or body-read failure. The scope also carries a 40 s failure budget (`CALL_FAILURE_BUDGET_MS`) that keeps a call against an unresponsive SEC inside the MCP client's 60 s default. Only time SEC spends failing the call is charged: the wait on each attempt that got no response headers or a 5xx, each backoff sleep, the idle time of a stalled body, and the wait on a probe whose silence the call counts as its own attempt. Healthy progress is never charged — pacer queue time, answered requests, a body still arriving — so a call SEC keeps answering with a 2xx is never cut, however long its pacer waits run. Each attempt's header wait and each body-idle wait is the lesser of its 15 s cap and the budget left, and a backoff is slept only while the budget outlasts it; concurrent failing attempts in one call each charge it. Once the budget is spent no further attempt or backoff starts, in that call only: the request fails with the error its last attempt earned (a 5xx is `sec_unavailable`; no response or an unreadable body is `sec_unreachable`), its message saying retries stopped at the call's 40 s budget for SEC failures. A request that finds the budget already spent by earlier requests sends nothing and fails as `sec_unreachable` with a "No request sent … budget … spent" message. The ticker-file load (`company_tickers.json`, then `company_tickers_mf.json`) is shared by every call that needs the ticker index, so it runs under its own scope (`CallScope.unowned()`): a full budget and a signal that never fires. A call waiting on it (`awaitShared`) is charged the failure time the load spends while it waits, no more, with one wait per call — a second wait from the same call joins the first. A waiter's cancel ends only its own wait; the load completes and caches for the others. A 429 is never retried: SEC blocks the IP until its request rate has stayed under the limit for ten minutes, and each request sent meanwhile restarts that clock.
 - **Rate-limit block gate** — A 429 stops all outbound SEC traffic for `EDGAR_RATE_LIMIT_COOLDOWN_SECONDS` (default 600): calls fail locally as `rate_limited` with `retryAfter` counting down, then the first call after the cool-down goes out alone as a probe. Mirror-served reads keep answering during the block.
 - **User-Agent** — Required `"AppName contact@email.com"` header on every request.
 - **CIK resolution** — Loads `company_tickers.json` into memory (TTL: 1 hour). Builds O(1) lookup indexes: ticker → CIK (`Map`), CIK → entity (`Map`). Name search over current and former names ranks exact as written, exact once commas, periods, and apostrophes are deleted and whitespace runs collapse, exact once spaced initials join, prefix of the joined form ending at a word boundary, then substring as written starting at one.
@@ -576,11 +583,13 @@ interface ConceptMapping {
   taxonomy: string;     // us-gaap | ifrs-full | dei
   unit: string;         // USD | USD/shares | shares
   label: string;        // Human-readable label
+  aliases?: readonly string[];  // other one-reading spellings, e.g. capital_expenditures
 }
 
 const CONCEPT_MAP: Record<string, ConceptMapping> = { /* ... */ };
+const CONCEPT_INDEX: Map<string, ConceptMapping>;  // every name and alias, built at load
 
-function resolveConcept(input: string): ConceptMapping | undefined;
+function resolveConcept(input: string): ConceptMapping | undefined;  // as typed, then split from lowerCamelCase
 function findUnknownConcept(input: string): UnknownConcept | undefined;  // neither a catalog name nor tag-shaped
 ```
 
@@ -610,7 +619,7 @@ function filingToText(html: string, limit?: number): {
 
 | Layer | Source | Store | Backs |
 |:------|:-------|:------|:------|
-| Ticker/CIK | `company_tickers.json` (~200 KB JSON) + fund symbols from `company_tickers_mf.json` (empty name, no series/class) | `tickers` — PK `ticker`, index `cik` | `resolveCik`, `cikToTicker` |
+| Ticker/CIK | `company_tickers.json` (~800 KB JSON) + fund symbols from `company_tickers_mf.json` (empty name, no series/class) | `tickers` — PK `ticker`, index `cik` | `resolveCik`, `cikToTicker` |
 | XBRL company-facts | `companyfacts.zip` (~1.3 GB bulk archive) | `company_concepts` — PK `cik\|taxonomy\|tag`, `units` JSON blob, indexes `taxonomy,tag` and `cik` | `tryGetCompanyConcept`, `tryGetCompanyFacts`, `tryGetFrames` |
 
 One row per `(cik, taxonomy, tag)` stores the concept's full `units` map verbatim, so a point read (`getByIds`) reconstructs the `companyconcept` API shape and a `taxonomy+tag` scan reconstructs the `frames` API shape off the same ~2.5M-row table — no separate ~10⁸-row fact-inversion table, keeping the store inside the embedded-SQLite tier.
@@ -621,12 +630,25 @@ One row per `(cik, taxonomy, tag)` stores the concept's full `units` map verbati
 
 - **Init** (`bun run mirror:init`) — out-of-band one-shot. Downloads `company_tickers.json`, then streams `companyfacts.zip` through fflate (`Unzip` + `UnzipInflate`), parsing each `CIK*.json` entry into rows with bounded memory. The durable `checkpoint` (the archive's `Last-Modified`) is emitted only on a terminal page after the whole archive has drained, so an interrupted ingest leaves no completion checkpoint and the next refresh re-streams the full archive (idempotent upserts) rather than skipping a partial store as already-synced.
 - **Refresh** (`bun run mirror:refresh`, or in-process via `EDGAR_MIRROR_REFRESH_CRON` on HTTP) — re-downloads the ticker file and, for company-facts, a `Last-Modified` HEAD short-circuits when the nightly archive (rebuilt ~03:00 ET) is unchanged; otherwise re-ingests. Upsert-only — a company/ticker dropped upstream lingers (low-harm; CIKs are permanent).
+- **One sync per store** — each SQLite store carries the framework's sync lease, so an init or refresh started while another process syncs the same store file is refused (`Conflict`, `data.reason: 'sync_locked'`): `mirror:init` and `mirror:refresh` exit 1 with "Mirror sync is already in progress in another process or instance.", and the in-process refresh logs the skip at `info` and waits for its next tick. A run killed mid-sync holds the lease until it lapses (2 minutes).
 - **Readiness** — point lookups (`resolveCik`, `tryGetCompanyConcept`) key off the durable completion marker (`mirror.ready()`), so they keep serving during a refresh. The cross-company frames aggregation gates on the stricter `companyFactsComplete()` (`status === 'complete'`): a full-table scan over a partial or mid-(re)sync store would yield a silently-incomplete frame, so frames fall back to the live API until the layer is fully synced.
 - **In-container ops** — the production Docker image carries the three `mirror:*` scripts plus a minimal path-alias `tsconfig.json` (`@/*` → `./dist/*`), so an operator can run `docker exec <container> bun run mirror:<init|refresh|verify>` against a deployed server — no rebuild, no out-of-band store shipping. Bun runs the `.ts` scripts natively and resolves their `@/` imports against the compiled `./dist/` via the emitted tsconfig.
 
 ### Routing
 
-`resolveCik`, `tryGetCompanyConcept`, `tryGetCompanyFacts`, and `tryGetFrames` check the mirror first when enabled and ready (`tryGetFrames` requires the stricter completeness gate above); on a miss they fall back to the live API when `EDGAR_MIRROR_FALLBACK_LIVE` (default `true`) — covering filings newer than the last refresh — or return empty/throw under strict mirror-only mode. Frames are assembled from the company-facts store and therefore carry no `loc` (business location); the live frames endpoint adds it, and the tool treats an empty value as absent.
+With `EDGAR_MIRROR_FALLBACK_LIVE` (default `true`), each routed read goes live wherever SEC may hold something newer than the store, and the store answers when that live read fails with anything but the caller's cancel (#234). Before a layer is ready (frames: complete, the stricter gate above) every read is live.
+
+| Read | Live when | Store answers otherwise |
+|:-----|:----------|:------------------------|
+| Ticker index (`resolveCik`) | every ticker-cache TTL, as with no mirror | only if `company_tickers.json` fails: all mirror rows, standing for the TTL. Mirror fund rows always join, behind the live fund slice |
+| `tryGetCompanyConcept`, `tryGetCompanyFacts` | the filer's newest `isXBRL` filing, on any form, was accepted on or after the day before the companyfacts checkpoint (the archive's `Last-Modified`); or the store does not hold the filer | the stored row; a tag the store lacks is `null` with no live read, as SEC's 404 for an unreported tag |
+| `tryGetFrames` | the period's filing window was still open at the checkpoint: `CY####` until October 31 of the next year, a quarterly or instant period until six months after its calendar quarter ends | the store's frame, holder-form rules applied (#123, #142); live on a miss |
+
+- **Recency read.** The filer's newest XBRL acceptance comes from its submissions document through `getSubmissions` and its cache, so it costs one read per filer per TTL and nothing in a call that already read the document; archive pages count to the end of their last filing day. A store with no checkpoint reads live without it. Point reads asking while a filer's read is in flight share it — another call's read only when it cannot outspend their own failure budget — and ask again under their own scope when the call that started it is cancelled. The submissions cache holds at most 160 MiB of documents by the service's size estimate (448 MiB with the archive-page and full-index caches), dropping the one used longest ago.
+- **Failures.** A failed recency or live point read leaves the store answering for that filer, without asking SEC, for 60 s or the failure's `retryAfter` when longer, so a 429 block never turns an answer the store holds into a failure. A read the call's own failure budget ended, SEC failing none of its attempts (never sent, or its only attempt cut short of its 15 s wait), answers from the store and marks nothing, since it says nothing about SEC or the filer. A live 404 is SEC answering, not failing: the stored row answers where the store holds one, since SEC never drops a fact from a filer's companyfacts once reported, `null` answers where it does not, and nothing is marked. The store answers only where it holds the answer: a live failure for a filer it lacks, or for an open period it has no frame for, stands. A call whose failure budget is already spent reads the store for a filer it holds.
+- **Why these rules.** Reading the ticker file every TTL costs one request and picks up symbols listed since the last refresh. The per-filer recency read makes the store's miss authoritative, so an unchanged filer's unreported tags cost no live read. A closed frames period keeps the holder-form rules only the store applies. A gate on the store's age was rejected: a monthly store would answer nothing from the mirror, and a nightly one would still miss same-day filings.
+
+Strict mirror-only mode (`false`) sends no request for any of these reads: a miss is empty, and an unsynced layer throws. Frames are assembled from the company-facts store and therefore carry no `loc` (business location); the live frames endpoint adds it, and the tool treats an empty value as absent.
 
 ### Config
 
@@ -635,7 +657,7 @@ One row per `(cik, taxonomy, tag)` stores the concept's full `units` map verbati
 | `EDGAR_MIRROR_ENABLED` | `false` | Enable the mirror. |
 | `EDGAR_MIRROR_PATH` | `./data/edgar-mirror` | Directory for the two SQLite databases. |
 | `EDGAR_MIRROR_REFRESH_CRON` | — | In-process nightly refresh cron (HTTP only); recommended `0 9 * * *`. |
-| `EDGAR_MIRROR_FALLBACK_LIVE` | `true` | Fall back to the live API on a miss. |
+| `EDGAR_MIRROR_FALLBACK_LIVE` | `true` | Read live wherever SEC may hold something newer than the store (Routing above), the store answering when that read fails. `false` is strict mirror-only. |
 
 `submissions.zip` (filing-history metadata) and the EFTS full-text index are out of scope — a follow-on issue for the former, no bulk download for the latter.
 
@@ -686,7 +708,7 @@ Insider trading (Form 4) is a common workflow, but Form 4 documents are structur
 
 The submissions feed cross-lists schedules under investors as well as issuers. `secedgar_get_beneficial_owners` therefore checks each parsed issuer CIK before attributing ownership, comparing without zero-padding. Its newest-first scan stops at `limit` matching parsed filings or 50 examined documents. `total_structured_filings = filings_examined + filings_not_examined`, and `filings_examined = filings_parsed + filings_excluded_other_issuer + filings_failed.length`. A missing document records `document_not_found`; an unreadable schedule or unusable issuer identity records `unparseable`. These failures set `partial` and retain successful filings; `truncated` instead identifies unexamined schedules. Inline and dataframe ownership rows contain only matching schedules, and the notice composes document recovery with the applicable scan bound and dataframe guidance.
 
-Item 4 `purpose_of_transaction` and each reporting person's `notes` are filer-written text, returned as filed with their line breaks. Each has its own bound, 5,000 and 2,000 characters: a longer value is its first characters, nothing appended, flagged by `purpose_truncated` or `notes_truncated`, and the one composed notice counts the cuts and points to the whole text in the dataframe, whose rows carry both fields uncut, or in the filing through `secedgar_get_filing`. The purpose bound is the trade between completeness and one call's size. Of 48 sampled Item 4s, 5,000 returns 44 whole, while 1,200 cut 34. Uncut, the 20 longest make a 136.5 KB response, against 117 KB at the bound. `format()` quotes each value as data: `escapeInline`, then `> ` before every line, so a CommonMark parse reads back the `structuredContent` value, CR and CRLF as LF, and a filer line opening with `>` or a fence stays text (#200).
+Item 4 `purpose_of_transaction` and each reporting person's `notes` are filer-written text, returned as filed with their line breaks. Each has its own bound, 5,000 and 2,000 characters: a longer value is its first characters, nothing appended, flagged by `purpose_truncated` or `notes_truncated`, and the one composed notice counts the cuts and points to the whole text in the dataframe, whose rows carry both fields uncut, or in the filing through `secedgar_get_filing`. The purpose bound is the trade between completeness and one call's size. Of 48 sampled Item 4s, 5,000 returns 44 whole, while 1,200 cut 34. Uncut, the 20 longest make a 136.5 KB response, against 117 KB at the bound. `format()` quotes each value as data: `escapeMarkdownInline`, then `> ` before every line, so a CommonMark parse reads back the `structuredContent` value, CR and CRLF as LF, and a filer line opening with `>` or a fence stays text (#200).
 
 ### Why compose 13F amendments into the quarter?
 
@@ -706,6 +728,13 @@ Discovery continues through the relevant submissions archive coverage, bounded a
 - *Decision:* when both lists defer, the notice names three re-calls with the same other inputs — the deferred companies with the 8 compared concepts, the 10 companies read with the deferred concepts, and the two deferred lists together — one per set of unread cells. Two re-calls, each pairing one deferred list with the other full input list, pass the other cap, re-defer, and read the deferred-by-deferred cells twice. A lone deferred company is paired with one of the 10 in its two re-calls, since `companies` takes at least two, and that company leaves the second re-call, so no unread cell is read twice; the first re-call reads the paired company's compared cells again.
 - *Decision:* each list is rejected past 100, since past the cap it is only echoed back and a wider screen is `secedgar_fetch_frames`' job. `EDGAR_CLAMP_OVERSIZED_LIMITS` governs it beside the numeric clamps (#197); a second switch would be a knob no deployment needs. Off, 10 and 8 are the advertised maxima again.
 - *Decision:* an input resolving to a CIK an earlier input resolved is read once, under the earlier input, with a caveat worded like the concept merge, and is not a `failed_companies` entry (#217).
+
+### Why one shared canvas per tenant?
+
+Every staged dataframe lives on the tenant's one canvas so that tables from different tools join in a single query.
+
+- *Decision:* the canvas bridge reaches it only through `DataCanvas.acquireShared`, and the `df-meta/` records are purged whenever the stored canvas is replaced. Concurrent first stagings would otherwise each mint a canvas and strand tables on the losers, and records left behind by a dead canvas would have `secedgar_dataframe_describe` list tables that no longer exist. Describe, drop, and the expiry sweep never mint a canvas.
+- *Decision:* `secedgar_dataframe_describe` without a `name` is refused as `listing_unavailable` over HTTP with `MCP_AUTH_MODE=none`. Every caller there resolves to the `default` tenant and so shares one canvas, and a listing would show each caller the others' dataframes with their query parameters. Describing, querying, and dropping by exact name are unchanged, as is listing over stdio and authenticated HTTP.
 
 ### Why not wrap an existing npm package?
 

@@ -464,6 +464,16 @@ describe('EdgarMirror — init + read helpers', () => {
     expect(await mirror.getCompanyFacts('999999')).toBeNull();
   });
 
+  it('says whether the store holds any row for a filer, padded or not (#234)', async () => {
+    expect(await mirror.holdsFiler('320193')).toBe(true);
+    expect(await mirror.holdsFiler('0000789019')).toBe(true);
+    expect(await mirror.holdsFiler('999999')).toBe(false);
+  });
+
+  it('reports the company-facts checkpoint: the bulk archive’s Last-Modified at the last sync (#234)', async () => {
+    expect(await mirror.companyFactsCheckpoint()).toBe('2026-05-31T03:00:00.000Z');
+  });
+
   it('assembles a cross-company frame for one concept × period', async () => {
     const frame = await mirror.getFrames('us-gaap', 'Revenues', 'USD', 'CY2023');
     expect(frame?.pts).toBe(2);

@@ -1,12 +1,15 @@
 /**
  * @fileoverview Adapter between the SEC EDGAR tools and the framework
- * DataCanvas primitive. Holds one shared canvas per tenant, generates
- * `df_XXXXX_XXXXX` table names, tracks per-table TTL + provenance in
- * `ctx.state`, and lazy-sweeps expired metadata on every public op. The
- * framework handles DuckDB-level TTL via `RegisterTableOptions.ttlMs`;
- * system-catalog access is denied via `QueryOptions.denySystemCatalogs`.
- * Best-effort: failed canvas operations log a warning and return
- * `undefined`/empty so the caller's inline response remains useful.
+ * DataCanvas primitive. Reaches the tenant's one shared canvas through
+ * `DataCanvas.acquireShared`, which keeps its id in `ctx.state`, mints it once
+ * under concurrent first calls, and purges the `df-meta/` records of a canvas
+ * that died before minting the next (#241). Generates `df_XXXXX_XXXXX` table
+ * names, tracks per-table TTL + provenance in `ctx.state`, and lazy-sweeps
+ * expired metadata on every public op. The framework handles DuckDB-level TTL
+ * via `RegisterTableOptions.ttlMs`; system-catalog access is denied via
+ * `QueryOptions.denySystemCatalogs`. Registration is best-effort: a failed
+ * canvas operation logs a warning and returns `undefined` so the producing
+ * tool's inline response remains useful.
  * @module services/canvas-bridge/canvas-bridge
  */
 
@@ -18,10 +21,11 @@ import {
   inferSchemaFromRows,
   type QueryResult,
 } from '@cyanheads/mcp-ts-core/canvas';
+import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { McpError, notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { idGenerator } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
-import { isSelectShaped, stripStringLiterals } from './sql-gate-extras.js';
+import { stripStringLiterals } from './sql-gate-extras.js';
 
 /** Per-table provenance + TTL metadata persisted in `ctx.state`. */
 export interface DataframeMeta {
@@ -120,18 +124,58 @@ export interface BridgeQueryOptions {
   sourceTool?: string;
 }
 
+/** Options accepted by {@link CanvasBridge}; {@link initCanvasBridge} derives them from the transport. */
+export interface CanvasBridgeOptions {
+  /**
+   * Whether `secedgar_dataframe_describe` may list every dataframe. Off over
+   * HTTP with auth `none`, where every caller resolves to one tenant and so
+   * shares one canvas; a dataframe is then described by its name only (#242).
+   */
+  listingEnabled: boolean;
+}
+
 const META_PREFIX = 'df-meta/';
 
+/**
+ * The one shape a dataframe name takes: what {@link CanvasBridge} mints and what
+ * `register_as` accepts. A name of any other shape names no dataframe, so it is
+ * answered as unknown without a `ctx.state` read, whose key rules would
+ * otherwise reject it with a reason-less storage error.
+ */
+export const DATAFRAME_NAME_RE = /^df_[A-Z0-9]{5}_[A-Z0-9]{5}$/;
 /** Recovery hint for a `register_as` name that collides with an existing dataframe (#60). */
-const REGISTER_AS_CLASH_HINT =
+export const REGISTER_AS_CLASH_HINT =
   'Drop the existing dataframe with secedgar_dataframe_drop (when enabled), choose a different df_XXXXX_XXXXX name, or omit register_as.';
-const CANVAS_ID_KEY = 'canvas-id';
+
+/**
+ * Recovery hint for a `df_<id>` the canvas does not hold (#47, #54). It points at
+ * the name the producing tool returned and says where listing is refused, so it
+ * reads true in both deployment shapes (#242).
+ */
+export const MISSING_TABLE_HINT =
+  'Reference the df_<id> name the producing tool returned in its `dataset` field, or a register_as name, and re-run that tool if the table expired. secedgar_dataframe_describe without a name lists the active dataframes, except over HTTP with auth none, where that listing is refused.';
+
+/** Recovery hint for SQL that names a DuckDB system catalog or metadata view, as a table or as an alias. */
+export const SYSTEM_CATALOG_HINT =
+  'Query only the df_<id> tables, by the name the producing tool returned in its `dataset` field; a column alias, table alias, or CTE named like a DuckDB metadata view (the name the message gives) is refused too, so rename it.';
+
+/** Recovery hint for SQL that names a file as a table, or otherwise asks the engine to read or write outside the canvas. */
+export const SQL_READ_ONLY_HINT =
+  'Query only the df_<id> tables, by the name the producing tool returned in its `dataset` field, referenced by bare name; this surface reads no files and cannot create, alter, or drop anything.';
 
 /** Token character set for `df_XXXXX_XXXXX` table names. */
 const TABLE_NAME_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
 export class CanvasBridge {
-  constructor(private readonly canvas: DataCanvas) {}
+  constructor(
+    private readonly canvas: DataCanvas,
+    private readonly options: CanvasBridgeOptions,
+  ) {}
+
+  /** Whether a describe without a name may list every dataframe (#242). */
+  get listingEnabled(): boolean {
+    return this.options.listingEnabled;
+  }
 
   /**
    * Persist a row set as `df_<id>` on the tenant's shared canvas. Returns
@@ -151,7 +195,7 @@ export class CanvasBridge {
 
     try {
       await this.sweepExpired(ctx);
-      const instance = await this.acquireSharedCanvas(ctx);
+      const instance = await this.canvasFor(ctx, true);
       const tableName = this.mintTableName();
       // inferSchemaFromRows always emits nullable: true since mcp-ts-core 0.10.4,
       // so the explicit force-nullable pass is no longer needed.
@@ -197,12 +241,17 @@ export class CanvasBridge {
   }
 
   /**
-   * List dataframes with provenance. Sweeps expired tables first so the
-   * listing reflects what's actually queryable.
+   * The named dataframe's provenance, or every dataframe's when `tableName` is
+   * omitted. Resolves the live canvas first, without minting one, so the records
+   * of a canvas that died are purged before any is read; then sweeps expired
+   * tables, so what is returned is what a query can reach. A name not shaped
+   * like a dataframe name returns nothing, reading no state.
    */
   async describe(ctx: Context, tableName?: string): Promise<DataframeMeta[]> {
+    if (tableName !== undefined && !DATAFRAME_NAME_RE.test(tableName)) return [];
+    await this.canvasFor(ctx, false);
     await this.sweepExpired(ctx);
-    if (tableName) {
+    if (tableName !== undefined) {
       const meta = await ctx.state.get<DataframeMeta>(`${META_PREFIX}${tableName}`);
       return meta ? [meta] : [];
     }
@@ -212,21 +261,22 @@ export class CanvasBridge {
   }
 
   /**
-   * Run a SELECT against the shared canvas. Framework gate runs inside
-   * `canvas.query`; this method additionally rejects system-catalog access
-   * before handing the SQL off. Optional `registerAs` chains the result as a
-   * new dataframe with a fresh per-table TTL (not inherited from parents).
+   * Run a SELECT against the shared canvas, minting it when none is live. The
+   * framework's read-only gate runs inside `instance.query`, with
+   * `denySystemCatalogs` set. Optional `registerAs` chains the result as a new
+   * dataframe with a fresh per-table TTL (not inherited from parents).
    *
-   * A pre-check surfaces a structured `missing_table` for an unregistered or
-   * TTL-expired `df_<id>` before the framework gate's generic rejection. Any raw
-   * DuckDB execution error that escapes the gate is re-thrown as a structured
-   * `invalid_sql`; framework errors matching a declared tool-contract reason
-   * (`missing_table`, `register_as_clash`, `system_catalog_access`) are rebuilt
-   * with the contract recovery hint (#47, #54, #60); other structured McpErrors
-   * propagate as-is — including the framework's `sql_execution_error` (a SELECT
-   * that prepared and then failed on the data), `invalid_sql`, `multi_statement`,
-   * `denied_function`, `sql_read_only`, and `plan_operator_not_allowed`, each of
-   * which already carries its own recovery hint.
+   * A pre-check answers an unregistered or TTL-expired `df_<id>` as
+   * `missing_table` from the records alone, before the canvas is acquired. Any
+   * raw DuckDB execution error that escapes the gate is re-thrown as a structured
+   * `invalid_sql`. The framework's `missing_table`, `register_as_clash`, and
+   * `system_catalog_access` are rebuilt with this server's recovery hints (#47,
+   * #54, #60), as is `sql_read_only`, whose engine hint points at a listing
+   * (#242), and its `non_select_statement` without the `statementType` it
+   * carries; other structured McpErrors propagate as-is — the framework's
+   * `sql_execution_error` (a SELECT that prepared and then failed on the data),
+   * `invalid_sql`, `multi_statement`, `denied_function`, and
+   * `plan_operator_not_allowed`, each with its own recovery hint.
    */
   async query(
     ctx: Context,
@@ -235,7 +285,7 @@ export class CanvasBridge {
   ): Promise<{ result: QueryResult; meta?: DataframeMeta }> {
     await this.sweepExpired(ctx);
     await this.assertReferencedDataframesExist(ctx, sql);
-    const instance = await this.acquireSharedCanvas(ctx);
+    const instance = await this.canvasFor(ctx, true);
 
     const registerAs = options.registerAs;
     // (#60) Reject a clashing register_as target against tracked dataframes before
@@ -271,10 +321,9 @@ export class CanvasBridge {
     } catch (err) {
       if (err instanceof McpError) {
         const data = err.data as Record<string, unknown> | undefined;
-        // (#54) The framework gate's missing_table message and hint name internal SDK
-        // methods ("registerTable()", "describe()"). Rebuild both with agent-facing
-        // tool guidance so clients see consistent recovery text regardless of which
-        // code path rejected.
+        // (#54) The framework's missing_table hint points at a generic describe tool.
+        // Rebuild it with this server's guidance, so a missing table reads the same
+        // whether the records or the canvas refused it.
         if (data?.reason === 'missing_table') {
           const tableName = data.tableName;
           const subject =
@@ -284,39 +333,13 @@ export class CanvasBridge {
             {
               reason: 'missing_table',
               ...(tableName !== undefined && { tableName }),
-              recovery: {
-                hint: 'Use secedgar_dataframe_describe to list available dataframes and verify the table name.',
-              },
+              recovery: { hint: MISSING_TABLE_HINT },
             },
           );
         }
-        // (#52) The framework gate prepares every statement. When a SELECT has an
-        // unknown column, DuckDB's binder throws before it can determine the statement
-        // type, so the gate assigns statementType: 'UNKNOWN' and reason:
-        // 'non_select_statement'. Guard on UNKNOWN (a genuine non-SELECT that prepares
-        // successfully carries its real statementType, e.g. 'INSERT') and re-check the
-        // SQL text — if it starts with SELECT or WITH it was a column/expression error,
-        // not a non-SELECT. The framework discards the binder detail, so we cannot name
-        // the offending column; point to dataframe_describe instead.
-        if (
-          data?.reason === 'non_select_statement' &&
-          data?.statementType === 'UNKNOWN' &&
-          isSelectShaped(sql)
-        ) {
-          throw validationError(
-            'The query is SELECT-shaped but failed to prepare — most likely an unknown column name or invalid expression. Use secedgar_dataframe_describe to check column names.',
-            {
-              reason: 'invalid_sql',
-              recovery: {
-                hint: 'Use secedgar_dataframe_describe to check column names and verify the query.',
-              },
-            },
-          );
-        }
-        // (#60) A framework-origin error arrives with the gate's generic hint, which
-        // the contract fill never replaces, or with none. Rebuild
-        // both remaining declared reasons with their contract recovery text, mirroring
-        // the missing_table treatment above.
+        // (#60) A framework-origin clash arrives with the gate's generic hint, which
+        // the contract fill never replaces, or with none. Rebuild it with the
+        // contract recovery text, mirroring the missing_table treatment above.
         if (data?.reason === 'register_as_clash') {
           const tableName = data.tableName;
           const subject =
@@ -332,33 +355,35 @@ export class CanvasBridge {
             },
           );
         }
+        // The gate's hint sends the caller to a listing and is silent on the alias
+        // case: its name scan refuses a column alias, table alias, or CTE spelled
+        // like a metadata view as readily as the view itself.
         if (data?.reason === 'system_catalog_access') {
           throw validationError(err.message, {
             ...data,
-            recovery: {
-              hint: 'Query only df_<id> tables. Use secedgar_dataframe_describe to list available dataframes.',
-            },
+            recovery: { hint: SYSTEM_CATALOG_HINT },
           });
         }
-        // (#74) A genuine non-SELECT (statementType 'DROP', 'INSERT', etc.) skips the
-        // #52 UNKNOWN reclassification above and would otherwise propagate without a
-        // recovery hint. Rewrap it — mirroring the reason-preserving rewraps above —
-        // so the declared contract guidance reaches the wire. The reason stays
-        // 'non_select_statement'; only recovery is added.
+        // The engine's hint sends the caller to a listing, which is refused over HTTP
+        // with auth none (#242).
+        if (data?.reason === 'sql_read_only') {
+          throw validationError(err.message, { ...data, recovery: { hint: SQL_READ_ONLY_HINT } });
+        }
+        // (#74) The gate refuses every non-SELECT before it is prepared, as
+        // `statementType: 'UNKNOWN'` on every path but an EXPLAIN failure, where it is
+        // 'SELECT'; no caller reads it, so it stays off the wire. The gate's hint is
+        // kept: it is written per shape (a PIVOT without an IN list names the list),
+        // and the contract's recovery fills in when one is ever missing.
         if (data?.reason === 'non_select_statement') {
-          throw validationError(err.message, {
-            ...data,
-            recovery: {
-              hint: 'Query only SELECT statements against df_<id> tables. Use secedgar_dataframe_describe to inspect available dataframes.',
-            },
-          });
+          const { statementType: _statementType, ...rest } = data;
+          throw validationError(err.message, rest);
         }
         // All other structured McpErrors propagate as-is.
         throw err;
       }
       // Any unclassified raw DuckDB execution error that escaped the framework's
-      // prepare gate → structured invalid_sql. Missing tables are handled by the
-      // pre-check above (the gate rejects an unbindable statement first).
+      // prepare gate → structured invalid_sql. A missing table arrives as the
+      // framework's missing_table, rebuilt above.
       const msg = err instanceof Error ? err.message : String(err);
       throw validationError(msg, {
         reason: 'invalid_sql',
@@ -377,15 +402,7 @@ export class CanvasBridge {
       // serializes BIGINT as strings in query results (would mistype as VARCHAR),
       // and a zero-row result has nothing to sniff. describe() is authoritative
       // for both. Framework always emits nullable: true on inferred columns since 0.10.4.
-      //
-      // WORKAROUND (#53): instance.describe({ tableName }) triggers a DuckDB binder
-      // error — "Ambiguous reference to column name 'table_name'" — because the
-      // framework's describe() pushes an unqualified table_name filter into a WHERE
-      // clause where a LEFT JOIN to duckdb_tables() is in scope. Use the unfiltered
-      // describe() and find the entry by name instead. Revert to describe({ tableName })
-      // when the framework qualifies the filter (t.table_name).
-      const allTables = await instance.describe();
-      const info = allTables.find((t) => t.name === tableName);
+      const [info] = await instance.describe({ tableName, signal: ctx.signal });
       const columnSchema: ColumnSchema[] =
         info?.columns ?? result.columns.map((name) => ({ name, type: 'VARCHAR' as const }));
       meta = {
@@ -406,14 +423,13 @@ export class CanvasBridge {
   }
 
   /**
-   * Surface a helpful, structured `missing_table` for a referenced `df_<id>`
-   * handle that isn't registered — mistyped, or TTL-expired since it was minted.
-   * Runs before the framework SQL gate, which otherwise rejects an unbindable
-   * table with a generic "could not be prepared" `non_select_statement` (the gate
-   * prepares every statement, so a missing table fails there first). Only the
-   * minted-handle pattern `df_<5>_<5>` is checked; string literals are stripped so
-   * a quoted handle never false-triggers, and other identifiers fall through to
-   * the gate (#47).
+   * Answer a referenced `df_<id>` handle with no record — mistyped, or
+   * TTL-expired since it was minted — as `missing_table` from the records
+   * alone, before the canvas is acquired, so a mistyped handle mints no canvas.
+   * Only the minted-handle pattern `df_<5>_<5>` is checked; string literals and
+   * quoted identifiers are stripped so a quoted handle never false-triggers, and
+   * other identifiers fall through to the gate, which answers a table the canvas
+   * lacks as `missing_table` itself (#47).
    */
   private async assertReferencedDataframesExist(ctx: Context, sql: string): Promise<void> {
     const referenced = stripStringLiterals(sql).match(/\bdf_[A-Z0-9]{5}_[A-Z0-9]{5}\b/g);
@@ -422,29 +438,30 @@ export class CanvasBridge {
       if ((await ctx.state.get(`${META_PREFIX}${name}`)) === null) {
         throw notFound(`Dataframe '${name}' does not exist or has expired.`, {
           reason: 'missing_table',
-          recovery: {
-            hint: 'Use secedgar_dataframe_describe to list available dataframes, then reference one of those names.',
-          },
+          recovery: { hint: MISSING_TABLE_HINT },
         });
       }
     }
   }
 
   /**
-   * Idempotent drop. Removes the table from the canvas and the metadata
-   * entry from `ctx.state`. Returns true when the table was found and
-   * removed; false when neither side had it.
+   * Idempotent drop. Removes the table from the live canvas and the metadata
+   * entry from `ctx.state`, minting no canvas. Returns true when either side
+   * had it; false when neither did, or the name is not shaped like a dataframe
+   * name, which reads no state.
    */
   async drop(ctx: Context, tableName: string): Promise<boolean> {
+    if (!DATAFRAME_NAME_RE.test(tableName)) return false;
+    // Resolved before the record is read, so a dead canvas's purged record never reports a drop.
+    const instance = await this.canvasFor(ctx, false);
     await this.sweepExpired(ctx);
     const metaKey = `${META_PREFIX}${tableName}`;
     const hadMeta = (await ctx.state.get(metaKey)) !== null;
     await ctx.state.delete(metaKey);
+    if (!instance) return hadMeta;
 
     try {
-      const instance = await this.acquireSharedCanvas(ctx);
-      const dropped = await instance.drop(tableName);
-      return dropped || hadMeta;
+      return (await instance.drop(tableName)) || hadMeta;
     } catch (error) {
       ctx.log.warning('Canvas drop failed', {
         tableName,
@@ -456,16 +473,18 @@ export class CanvasBridge {
 
   /**
    * Iterate provenance entries, drop tables whose `expiresAt` is in the
-   * past. Best-effort: a failure to drop one table does not stop the sweep
-   * for others.
+   * past. The live canvas is resolved only once an expired entry turns up, and
+   * never minted: with none live, the entry's record alone is deleted.
+   * Best-effort: a failure to drop one table does not stop the sweep for others.
    */
   private async sweepExpired(ctx: Context): Promise<void> {
     const nowIso = new Date().toISOString();
-    let instance: CanvasInstance | undefined;
+    let live: Promise<CanvasInstance | undefined> | undefined;
     for await (const { key, meta } of this.iterateMeta(ctx)) {
       if (meta.expiresAt > nowIso) continue;
 
-      instance ??= await this.acquireSharedCanvas(ctx).catch(() => undefined);
+      live ??= this.canvasFor(ctx, false);
+      const instance = await live;
       if (instance) {
         try {
           await instance.drop(meta.tableName);
@@ -503,22 +522,29 @@ export class CanvasBridge {
   }
 
   /**
-   * Acquire the tenant's shared canvas. Reuse the stored canvas ID when one
-   * is still live; mint a fresh canvas when the stored ID is unknown or
-   * expired (registry returns NotFound; `acquire(undefined)` mints a new one).
+   * The tenant's shared canvas, through `acquireShared` under its default
+   * `canvas-id` key (the key this bridge has always stored the id under, so an
+   * id stored earlier is reused). `create: false` never mints and resolves
+   * `undefined` when no canvas is live. Whenever none is live, `df-meta/` is
+   * purged first, under the framework's per-tenant lock: no call obtains the
+   * next canvas until the purge settles, so it can never delete a record written
+   * for that canvas (#241).
    */
-  private async acquireSharedCanvas(ctx: Context): Promise<CanvasInstance> {
-    const stored = await ctx.state.get<string>(CANVAS_ID_KEY);
-    if (stored) {
-      try {
-        return await this.canvas.acquire(stored, ctx);
-      } catch {
-        await ctx.state.delete(CANVAS_ID_KEY);
-      }
-    }
-    const instance = await this.canvas.acquire(undefined, ctx);
-    await ctx.state.set(CANVAS_ID_KEY, instance.canvasId);
-    return instance;
+  private canvasFor(ctx: Context, create: true): Promise<CanvasInstance>;
+  private canvasFor(ctx: Context, create: false): Promise<CanvasInstance | undefined>;
+  private canvasFor(ctx: Context, create: boolean): Promise<CanvasInstance | undefined> {
+    return this.canvas.acquireShared(ctx, { create, onReplace: () => this.purgeMeta(ctx) });
+  }
+
+  /**
+   * Delete every `df-meta/` record: the tables they describe died with the
+   * canvas that held them. Idempotent, since `acquireShared` runs it again after
+   * it throws, after a failed mint, and after the lock holder is cancelled.
+   */
+  private async purgeMeta(ctx: Context): Promise<void> {
+    const keys: string[] = [];
+    for await (const { key } of this.iterateMeta(ctx)) keys.push(key);
+    if (keys.length > 0) await ctx.state.deleteMany(keys);
   }
 
   /** Mint a `df_XXXXX_XXXXX` table name (14 chars, ~3.7×10^15 keyspace). */
@@ -533,12 +559,22 @@ let _bridge: CanvasBridge | undefined;
 
 /**
  * Wire the canvas bridge during `setup()`. `canvas` is `undefined` when the
- * framework didn't construct a DataCanvas (`CANVAS_PROVIDER_TYPE=none`,
- * default, or Workers). Tools that materialize dataframes call
- * {@link getCanvasBridge} and skip materialization when the bridge is absent.
+ * framework didn't construct a DataCanvas (`CANVAS_PROVIDER_TYPE=none`, or
+ * Workers). Tools that materialize dataframes call {@link getCanvasBridge} and
+ * skip materialization when the bridge is absent. Listing is off over HTTP with
+ * auth `none`: every caller there resolves to the `default` tenant and so shares
+ * one canvas (#242). `ctx.tenantId` is `default` on stdio too, so the switch
+ * reads the transport.
  */
-export function initCanvasBridge(canvas: DataCanvas | undefined): void {
-  _bridge = canvas ? new CanvasBridge(canvas) : undefined;
+export function initCanvasBridge(
+  canvas: DataCanvas | undefined,
+  config: Pick<AppConfig, 'mcpTransportType' | 'mcpAuthMode'>,
+): void {
+  _bridge = canvas
+    ? new CanvasBridge(canvas, {
+        listingEnabled: !(config.mcpTransportType === 'http' && config.mcpAuthMode === 'none'),
+      })
+    : undefined;
 }
 
 /** Return the canvas bridge, or `undefined` when canvas is unavailable. */

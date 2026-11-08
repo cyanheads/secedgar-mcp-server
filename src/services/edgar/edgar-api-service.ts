@@ -17,7 +17,7 @@ import {
 } from '@cyanheads/mcp-ts-core/utils';
 import { parseDocument } from 'htmlparser2';
 import { getServerConfig } from '@/config/server-config.js';
-import { getEdgarMirror } from '@/services/edgar/mirror/index.js';
+import { type EdgarMirror, getEdgarMirror } from '@/services/edgar/mirror/index.js';
 import { CALL_FAILURE_BUDGET_MS, CallScope } from './call-scope.js';
 import formerNamesData from './data/former-names.json' with { type: 'json' };
 import {
@@ -26,7 +26,9 @@ import {
   parseSubmissionHeader,
   type SubmissionHeader,
 } from './filing-headers.js';
-import { trigramSimilarity } from './trigram-similarity.js';
+import { listedSymbol, readTickerSpelling } from './listing-codes.js';
+import { MF_TICKERS_URL, TICKERS_URL } from './mirror/types.js';
+import { trigramScorer } from './trigram-similarity.js';
 import type {
   CikMatch,
   CompanyConceptResponse,
@@ -39,7 +41,6 @@ import type {
   FramesResponse,
   FullIndexEntry,
   SubmissionsResponse,
-  TickerEntry,
 } from './types.js';
 import { childText, findTag, findTags } from './xml-nodes.js';
 
@@ -86,6 +87,14 @@ const BODY_IDLE_TIMEOUT_MS = 15_000;
  * `rate_limited` (#122).
  */
 const SEC_UNREACHABLE_REASON = 'sec_unreachable';
+
+/**
+ * `data.reason` once SEC answered the last attempt with a 500, 502, 503, or 504,
+ * whatever the earlier attempts got (#233). Declared and set retryable beside
+ * `sec_unreachable`, under one code for all four: a 504 is SEC's gateway failing,
+ * as this service's own header timeout is (#173), not this request timing out.
+ */
+const SEC_UNAVAILABLE_REASON = 'sec_unavailable';
 
 /**
  * One attempt's outcome: SEC's HTTP answer, whatever its status, or none at all — a
@@ -259,9 +268,6 @@ function rateLimitHint(retryAfterSeconds: number): string {
   return `SEC is rate-limiting this server's IP. It resumes serving an IP only after its request rate has stayed below 10 requests/second for 10 minutes, and any request sent meanwhile restarts that clock, so this server sends nothing to SEC until the cool-down ends — retry in ${retryAfterSeconds} seconds. A shared outbound IP can trigger the block even while this server stays under the limit.`;
 }
 
-/** URL for SEC's mutual-fund ticker file (ETFs and open-end funds). */
-const MF_TICKERS_URL = 'https://www.sec.gov/files/company_tickers_mf.json';
-
 /**
  * How long a failed load of the fund-ticker file stands before one resolution
  * refetches it (#119). A window rather than every resolution: against a
@@ -269,6 +275,120 @@ const MF_TICKERS_URL = 'https://www.sec.gov/files/company_tickers_mf.json';
  * to each one. After a rate-limit failure the window stretches to the cool-down.
  */
 const FUND_SLICE_RETRY_MS = 60_000;
+
+const DAY_MS = 86_400_000;
+
+/**
+ * How long a filer's failed recency read or live point read stands before a point read
+ * asks SEC about that filer again, the mirror answering meanwhile (#234): against a
+ * persistent 5xx, each filer costs one three-attempt ladder a minute rather than one per read.
+ */
+const FILER_RETRY_MS = 60_000;
+
+/** Most filers the failure marks hold; past it the mark used longest ago is dropped. */
+const FILER_FAILURE_LIMIT = 4_096;
+
+const MIB = 1_048_576;
+
+/**
+ * Most bytes each per-key cache of parsed SEC documents holds, by the estimates below —
+ * 448 MiB across the three; past its limit a cache drops the entries used longest ago.
+ * Every company-scoped read and every mirror point read (#234) goes through the submissions
+ * cache. The full-index share holds the heaviest run of quarters one pre-2001 browse reads
+ * (`FULL_INDEX_QUARTER_SCAN_CAP` in `search-filings.tool.ts`, 8: 1999Q1–2000Q4, about
+ * 221 MiB by `FULL_INDEX_ROW_BYTES`), so the next page of a browse reads no quarter again:
+ * a share smaller than one scan drops each quarter before the repeat reaches it.
+ * Exported for the cache tests.
+ */
+export const CACHE_BYTE_LIMITS = {
+  submissions: 160 * MIB,
+  archivePages: 32 * MIB,
+  fullIndex: 256 * MIB,
+} as const;
+
+/**
+ * Estimated heap one value of a parsed filings column set retains (`filings.recent` or an
+ * archive page), at least the most measured under Bun or Node. Exported for the cache tests.
+ */
+export const FILING_VALUE_BYTES = 24;
+
+/**
+ * Estimated heap a parsed submissions document retains beyond its `recent` columns (entity
+ * metadata, the archive-page manifest), at least the most measured under Bun or Node.
+ * Exported for the cache tests.
+ */
+export const SUBMISSIONS_DOC_BYTES = 4_096;
+
+/**
+ * Estimated heap one parsed full-index row retains, at least the most measured under Bun or
+ * Node. Exported for the cache tests.
+ */
+export const FULL_INDEX_ROW_BYTES = 352;
+
+/** A cached SEC document and when it was read. */
+interface Cached<T> {
+  at: number;
+  data: T;
+}
+
+/**
+ * A string-keyed map keeping the entries used most recently — a read or a write is a use —
+ * whose weights sum to at most `limit`: a write past it drops the entries used longest ago,
+ * and an entry heavier than `limit` on its own is not kept. The one eviction mechanism for
+ * the per-key document caches (weighed in estimated bytes) and the filer failure marks (one
+ * apiece).
+ */
+class LruMap<V> {
+  private readonly entries = new Map<string, { value: V; weight: number }>();
+  private readonly limit: number;
+  private total = 0;
+
+  constructor(limit: number) {
+    this.limit = limit;
+  }
+
+  /** The value under `key`, which becomes the entry used most recently. */
+  get(key: string): V | undefined {
+    const entry = this.entries.get(key);
+    if (entry === undefined) return undefined;
+    this.entries.delete(key);
+    this.entries.set(key, entry);
+    return entry.value;
+  }
+
+  /**
+   * Write `value` as the entry used most recently, then drop the least recently used until
+   * the weights fit. A value heavier than the limit is not kept and drops only its own key's
+   * earlier entry.
+   */
+  set(key: string, value: V, weight: number): void {
+    this.delete(key);
+    if (weight > this.limit) return;
+    this.entries.set(key, { value, weight });
+    this.total += weight;
+    for (const [oldest, entry] of this.entries) {
+      if (this.total <= this.limit) break;
+      this.entries.delete(oldest);
+      this.total -= entry.weight;
+    }
+  }
+
+  delete(key: string): void {
+    const entry = this.entries.get(key);
+    if (entry === undefined) return;
+    this.entries.delete(key);
+    this.total -= entry.weight;
+  }
+}
+
+/** Estimated heap a parsed filings column set retains: each column value at {@link FILING_VALUE_BYTES}. */
+function filingColumnsBytes(columns: FilingsRecent): number {
+  let values = 0;
+  for (const column of Object.values(columns)) {
+    if (Array.isArray(column)) values += column.length;
+  }
+  return values * FILING_VALUE_BYTES;
+}
 
 /** Trigram similarity threshold — minimum Dice score to include a candidate suggestion. */
 const TRIGRAM_THRESHOLD = 0.3;
@@ -526,13 +646,13 @@ const NAME_TIERS: readonly NameTier[] = [0, 1, 2, 3, 4];
  * meets TRIGRAM_THRESHOLD, sorted descending.
  */
 export function suggestCompanies(query: string, allEntries: CikMatch[]): CompanySuggestion[] {
-  const q = query.toLowerCase();
+  const similarity = trigramScorer(query.toLowerCase());
   const scored: Array<{ score: number; entry: CikMatch }> = [];
 
   for (const entry of allEntries) {
     const score = Math.max(
-      entry.name ? trigramSimilarity(q, entry.name.toLowerCase()) : 0,
-      entry.ticker ? trigramSimilarity(q, entry.ticker.toLowerCase()) : 0,
+      entry.name ? similarity(entry.name.toLowerCase()) : 0,
+      entry.ticker ? similarity(entry.ticker.toLowerCase()) : 0,
     );
     if (score >= TRIGRAM_THRESHOLD) {
       scored.push({ score, entry });
@@ -565,12 +685,38 @@ class EdgarApiService {
   private gate: BlockGate = OPEN_GATE;
   private tickerCache: TickerCache | undefined;
   private tickerCacheLoad: SharedLoad<TickerCache> | undefined;
-  /** Per-CIK submissions doc cache, keyed by padded CIK (TTL = EDGAR_TICKER_CACHE_TTL). */
-  private submissionsCache = new Map<string, { at: number; data: SubmissionsResponse }>();
-  /** Per-page submissions archive cache, keyed by page name (TTL = EDGAR_TICKER_CACHE_TTL). */
-  private archivePageCache = new Map<string, { at: number; data: FilingsRecent }>();
-  /** Per-quarter full-index cache, keyed by `${year}Q${quarter}` (TTL = EDGAR_TICKER_CACHE_TTL). */
-  private fullIndexCache = new Map<string, { at: number; data: FullIndexEntry[] }>();
+  /**
+   * Per-CIK submissions doc cache, keyed by padded CIK (TTL = EDGAR_TICKER_CACHE_TTL), holding at
+   * most `CACHE_BYTE_LIMITS.submissions`. Mirror point reads take each filer's recency from it
+   * (#234), so every filer the mirror serves passes through it.
+   */
+  private readonly submissionsCache = new LruMap<Cached<SubmissionsResponse>>(
+    CACHE_BYTE_LIMITS.submissions,
+  );
+  /** The newest XBRL acceptance each cached submissions document records, worked out once per document (#234). */
+  private readonly xbrlRecency = new WeakMap<SubmissionsResponse, number>();
+  /**
+   * Filers whose recency read or live point read SEC just failed, keyed by padded CIK, each
+   * mapped to the instant the mirror stops answering for it unasked (#234), at most
+   * {@link FILER_FAILURE_LIMIT} of them.
+   */
+  private readonly filerFailures = new LruMap<number>(FILER_FAILURE_LIMIT);
+  /** Each filer's recency read in flight, which the point reads asking meanwhile share (#234). */
+  private readonly recencyLoads = new Map<string, SharedLoad<number | undefined>>();
+  /**
+   * Per-page submissions archive cache, keyed by page name (TTL = EDGAR_TICKER_CACHE_TTL),
+   * holding at most `CACHE_BYTE_LIMITS.archivePages`.
+   */
+  private readonly archivePageCache = new LruMap<Cached<FilingsRecent>>(
+    CACHE_BYTE_LIMITS.archivePages,
+  );
+  /**
+   * Per-quarter full-index cache, keyed by `${year}Q${quarter}` (TTL = EDGAR_TICKER_CACHE_TTL),
+   * holding at most `CACHE_BYTE_LIMITS.fullIndex`.
+   */
+  private readonly fullIndexCache = new LruMap<Cached<FullIndexEntry[]>>(
+    CACHE_BYTE_LIMITS.fullIndex,
+  );
 
   constructor() {
     const config = getServerConfig();
@@ -637,13 +783,18 @@ class EdgarApiService {
   /**
    * Resolve a query (ticker, name, or CIK) to company match(es).
    * - Numeric input → direct CIK lookup
-   * - 1-5 uppercase letters → ticker lookup (O(1))
+   * - 1-5 letters in any case, or anything typed in uppercase → the ticker lookup (O(1)):
+   *   the symbol as listed, else a dotted share class in its hyphenated form (#110)
+   * - Typed in uppercase, unlisted → the ticker-spelling readings (`readTickerSpelling`,
+   *   #235): a US venue code dropped (`UEC.N`), a preferred class run together (`CFGPH`), a
+   *   root listed only as classes (`GLOP`), each match carrying `reading`; a non-US listing
+   *   (`7203.T`) is no match
    * - No letter or digit (`.`, `'`) → no match
    * - Otherwise → name search (exact as written; exact once commas, periods, and
    *   apostrophes are folded out and whitespace runs collapse; exact once spaced initials
    *   join; prefix of the joined form ending at a word boundary; substring as written
-   *   starting at one — resolved within the best tier a current name reaches), then the
-   *   catch-all ticker lookup
+   *   starting at one — resolved within the best tier a current name reaches), then, for
+   *   input not typed in uppercase, the ticker lookup
    * Returns a single match, an array of multiple matches, or an empty array (no match).
    * Multiple matches are every candidate of that tier, deduplicated by CIK, current names
    * first, never cut: a consumer shows the first ten through `ambiguousMatches` and counts
@@ -665,12 +816,19 @@ class EdgarApiService {
       return { cik: padded };
     }
 
-    // Short alphabetic → ticker (includes ETF/MF tickers from company_tickers_mf.json)
+    // A listed symbol (ETF/MF tickers from company_tickers_mf.json included) answers first for
+    // short alphabetic input in any case, and for any input typed in uppercase, so a reading
+    // or the period fold never takes a symbol the file lists; brokers and market-data sites
+    // write BRK.B where the file lists BRK-B, and no registrant has both forms on file (#110).
     const upper = trimmed.toUpperCase();
-    if (/^[A-Z]{1,5}$/.test(upper)) {
-      const match = cache.byTicker.get(upper);
-      if (match) return match;
-    }
+    const typedUpper = trimmed === upper;
+    const listed = listedSymbol(upper, cache.byTicker);
+    if (listed && (typedUpper || /^[A-Z]{1,5}$/.test(upper))) return listed;
+
+    // Uppercase spellings vendors write for listed symbols, ahead of the name passes, which
+    // otherwise read `GS.K` as GSK plc through the period fold (#235).
+    const reading = readTickerSpelling(trimmed, cache);
+    if (reading !== undefined) return reading;
 
     // A query with no letter or digit names no company: `.` would fold to an empty string
     // that starts every name (#219).
@@ -756,14 +914,9 @@ class EdgarApiService {
       return deduped.length === 1 ? (deduped[0] as CikMatch) : deduped;
     }
 
-    // Also try as ticker if nothing matched (handles >5-char and digit-containing symbols
-    // that bypassed the early ticker gate above). On a miss, retry a dotted symbol in
-    // SEC's hyphenated share-class form — brokers and market-data sites write BRK.B where
-    // company_tickers.json lists BRK-B, and no registrant has both forms on file (#110).
-    const tickerMatch =
-      cache.byTicker.get(upper) ??
-      (upper.includes('.') ? cache.byTicker.get(upper.replaceAll('.', '-')) : undefined);
-    return tickerMatch ?? [];
+    // A symbol typed in mixed or lower case, outside the short alphabetic shape, keeps the name
+    // passes ahead of its ticker lookup (`brk.b`, `Bf.b`).
+    return listed ?? [];
   }
 
   /**
@@ -878,18 +1031,21 @@ class EdgarApiService {
    * the last year or 1,000 filings, whichever holds more — + the `files[]`
    * archive-page manifest). Cached per CIK within
    * the ticker-cache TTL — the doc is large and re-read on every archive-paging
-   * scan (#78). A 404 throws (uncached) so a bad CIK still surfaces. A body without
+   * scan (#78) and by every mirror point read (#234) — within
+   * `CACHE_BYTE_LIMITS.submissions`, the documents used longest ago dropped first. A 404
+   * throws (uncached) so a bad CIK still surfaces. A body without
    * the shape the readers index fails as `sec_unreachable` (#186). Like every cache
    * here, written only by a completed read — a cancelled or rejected one caches nothing.
    */
   async getSubmissions(cik: string, scope: CallScope): Promise<SubmissionsResponse> {
     const padded = cik.padStart(10, '0');
-    const cached = this.submissionsCache.get(padded);
-    if (cached && this.isFresh(cached.at)) return cached.data;
+    const cached = this.readFresh(this.submissionsCache, padded);
+    if (cached !== undefined) return cached;
     const url = `https://data.sec.gov/submissions/CIK${padded}.json`;
     const data = await this.fetchJson<unknown>(url, scope);
     if (!isSubmissionsBody(data)) throw unexpectedShape(url, 'a submissions document');
-    this.submissionsCache.set(padded, { at: Date.now(), data });
+    const bytes = SUBMISSIONS_DOC_BYTES + filingColumnsBytes(data.filings.recent);
+    this.submissionsCache.set(padded, { at: Date.now(), data }, bytes);
     return data;
   }
 
@@ -899,15 +1055,16 @@ class EdgarApiService {
    * `recent` window. Read through `SubmissionsArchiveWalk`. The page body is a flat parallel-array object
    * field-compatible with `FilingsRecent`; one without its six indexed columns fails
    * as `sec_unreachable`, uncached (#186). Cached per page within the ticker-cache
-   * TTL (pages are large and effectively immutable once archived).
+   * TTL (pages are large and effectively immutable once archived) and
+   * `CACHE_BYTE_LIMITS.archivePages`, the pages used longest ago dropped first.
    */
   async fetchArchivePage(name: string, scope: CallScope): Promise<FilingsRecent> {
-    const cached = this.archivePageCache.get(name);
-    if (cached && this.isFresh(cached.at)) return cached.data;
+    const cached = this.readFresh(this.archivePageCache, name);
+    if (cached !== undefined) return cached;
     const url = `https://data.sec.gov/submissions/${name}`;
     const data = await this.fetchJson<unknown>(url, scope);
     if (!isFilingColumns(data)) throw unexpectedShape(url, 'a submissions archive page');
-    this.archivePageCache.set(name, { at: Date.now(), data });
+    this.archivePageCache.set(name, { at: Date.now(), data }, filingColumnsBytes(data));
     return data;
   }
 
@@ -918,7 +1075,8 @@ class EdgarApiService {
    * full-text only reaches 2001, but the quarterly indexes reach 1993. The file
    * is not form-filterable server-side (a whole-quarter download), so callers
    * bound how many quarters they scan and filter client-side (#77). Cached per
-   * quarter within the ticker-cache TTL — an archived quarter is immutable.
+   * quarter within the ticker-cache TTL — an archived quarter is immutable — and
+   * `CACHE_BYTE_LIMITS.fullIndex`, the quarters used longest ago dropped first.
    */
   async fetchFullIndexQuarter(
     year: number,
@@ -926,15 +1084,24 @@ class EdgarApiService {
     scope: CallScope,
   ): Promise<FullIndexEntry[]> {
     const key = `${year}Q${quarter}`;
-    const cached = this.fullIndexCache.get(key);
-    if (cached && this.isFresh(cached.at)) return cached.data;
+    const cached = this.readFresh(this.fullIndexCache, key);
+    if (cached !== undefined) return cached;
     const text = await this.fetchText(
       `https://www.sec.gov/Archives/edgar/full-index/${year}/QTR${quarter}/master.idx`,
       scope,
     );
     const data = parseMasterIndex(text);
-    this.fullIndexCache.set(key, { at: Date.now(), data });
+    this.fullIndexCache.set(key, { at: Date.now(), data }, data.length * FULL_INDEX_ROW_BYTES);
     return data;
+  }
+
+  /** The document cached under `key` while within the ticker-cache TTL; an expired entry is dropped. */
+  private readFresh<T>(cache: LruMap<Cached<T>>, key: string): T | undefined {
+    const cached = cache.get(key);
+    if (cached === undefined) return undefined;
+    if (this.isFresh(cached.at)) return cached.data;
+    cache.delete(key);
+    return undefined;
   }
 
   /** True when a cache entry loaded at `at` is still within the ticker-cache TTL. */
@@ -1199,16 +1366,16 @@ class EdgarApiService {
    * Fetch every XBRL fact a company has reported. Returns `null` on 404.
    * Backs the whole-company reads (`get_snapshot`, `compare_companies`) and the
    * no-data error path, which surfaces the namespaces and tags a filer uses.
-   * Served from the local mirror when enabled and synced — the mirror stores one
-   * row per (cik, taxonomy, tag) and reassembles the API shape off a `cik` point
-   * lookup; the live API is the fallback. A concept unit that arrives as
-   * anything but an array is dropped (#141).
+   * Routed through the local mirror by {@link pointRead}; the mirror stores one row
+   * per (cik, taxonomy, tag) and reassembles the API shape off a `cik` point lookup.
+   * A concept unit that arrives as anything but an array is dropped (#141).
    */
   async tryGetCompanyFacts(cik: string, scope: CallScope): Promise<CompanyFactsResponse | null> {
     const padded = cik.padStart(10, '0');
-    const facts = await this.mirrorOrLive(
-      (m) => m.companyFactsReady(),
-      (m) => m.getCompanyFacts(cik),
+    const facts = await this.pointRead(
+      padded,
+      scope,
+      (mirror) => mirror.getCompanyFacts(cik),
       () =>
         this.tryFetchJson<CompanyFactsResponse>(
           `https://data.sec.gov/api/xbrl/companyfacts/CIK${padded}.json`,
@@ -1223,10 +1390,10 @@ class EdgarApiService {
 
   /**
    * Fetch XBRL data for a concept. Returns `null` if the company does not report this tag.
-   * Served from the local mirror when enabled and synced; the live API is the
-   * fallback (and covers filings newer than the last refresh when `mirrorFallbackLive`).
-   * A payload whose every unit arrives malformed comes back with no units — the
-   * tag is named but carries nothing (#141).
+   * Routed through the local mirror by {@link pointRead}: where the store answers, a tag
+   * it lacks for a filer it holds is `null` with no live read, as SEC's 404 for an
+   * unreported tag would be (#234). A payload whose every unit arrives malformed comes
+   * back with no units — the tag is named but carries nothing (#141).
    */
   async tryGetCompanyConcept(
     cik: string,
@@ -1235,9 +1402,10 @@ class EdgarApiService {
     scope: CallScope,
   ): Promise<CompanyConceptResponse | null> {
     const padded = cik.padStart(10, '0');
-    const concept = await this.mirrorOrLive(
-      (m) => m.companyFactsReady(),
-      (m) => m.getCompanyConcept(cik, taxonomy, tag),
+    const concept = await this.pointRead(
+      padded,
+      scope,
+      (mirror) => mirror.getCompanyConcept(cik, taxonomy, tag),
       () =>
         this.tryFetchJson<CompanyConceptResponse>(
           `https://data.sec.gov/api/xbrl/companyconcept/CIK${padded}/${taxonomy}/${tag}.json`,
@@ -1250,62 +1418,187 @@ class EdgarApiService {
 
   /**
    * Fetch cross-company frame data. Returns `null` if no companies report this combination.
-   * A frame is a full scan of the company-facts store, so it is served from the
-   * mirror only when that layer is fully synced (`companyFactsComplete()`) — a
-   * partial or mid-sync store would yield a silently-incomplete frame, so frames
-   * fall back to the live API until the mirror is complete. The live API is also
-   * the fallback on a genuine miss.
+   * A frame is a full scan of the company-facts store, so the mirror serves it only once
+   * that layer is fully synced (`companyFactsComplete()`): a partial or mid-sync store
+   * would yield a silently incomplete frame, so frames read live until it is complete,
+   * and strict mode (`mirrorFallbackLive` off) throws instead (#29). On a complete store:
+   * - Strict mode → the store's frame, `null` on a miss; nothing is sent.
+   * - A period whose filing window was still open at the companyfacts checkpoint
+   *   ({@link frameWindowClosesMs}), or a store with no checkpoint → live, since filers
+   *   may have reported for it since (#234). On any failure but the caller's cancel the
+   *   store's frame answers, or the live failure stands when the store has none.
+   * - A closed period → the store's frame, which applies the holder-form rules the live
+   *   frames API cannot (#123, #142); live on a miss.
    */
-  tryGetFrames(
+  async tryGetFrames(
     taxonomy: string,
     tag: string,
     unit: string,
     period: string,
     scope: CallScope,
   ): Promise<FramesResponse | null> {
-    return this.mirrorOrLive(
-      (m) => m.companyFactsComplete(),
-      (m) => m.getFrames(taxonomy, tag, unit, period),
-      () =>
-        this.tryFetchJson<FramesResponse>(
-          `https://data.sec.gov/api/xbrl/frames/${taxonomy}/${tag}/${unit}/${period}.json`,
-          scope,
-        ),
-    );
+    const live = () =>
+      this.tryFetchJson<FramesResponse>(
+        `https://data.sec.gov/api/xbrl/frames/${taxonomy}/${tag}/${unit}/${period}.json`,
+        scope,
+      );
+    const mirror = getEdgarMirror();
+    if (!mirror) return live();
+    const strict = !getServerConfig().mirrorFallbackLive;
+    if (!(await mirror.companyFactsComplete())) {
+      if (strict) throw companyFactsNotSynced();
+      return live();
+    }
+    const stored = () => mirror.getFrames(taxonomy, tag, unit, period);
+    if (strict) return stored();
+    // No checkpoint parses to NaN, which compares false: the period counts as open.
+    const checkpointMs = Date.parse((await mirror.companyFactsCheckpoint()) ?? '');
+    if (!(checkpointMs >= frameWindowClosesMs(period))) {
+      try {
+        return await live();
+      } catch (error) {
+        if (scope.signal.aborted) throw error;
+        const frame = await stored();
+        if (frame === null) throw error;
+        return frame;
+      }
+    }
+    return (await stored()) ?? live();
   }
 
   /**
-   * Route a company-facts query through the local mirror when ready, with live-API
-   * fallback. The `ready` predicate is the caller's readiness gate — point lookups
-   * pass `companyFactsReady()` (tolerant of an in-progress refresh); the frames
-   * aggregation passes the stricter `companyFactsComplete()` so a partial or
-   * mid-sync store never yields an incomplete frame. Paths:
-   * - Mirror ready + hit → return mirror result
-   * - Mirror ready + miss + fallbackLive → fall through to live()
-   * - Mirror ready + miss + strict → return null
-   * - Mirror not ready + fallbackLive → fall through to live()
-   * - Mirror not ready + strict → throw ServiceUnavailable
-   * - No mirror → fall through to live()
+   * Route a point read of one filer (`tryGetCompanyConcept`, `tryGetCompanyFacts`; `cik`
+   * zero-padded) through the local mirror (#234):
+   * - No mirror → live.
+   * - The company-facts layer has never synced → live; strict mode (`mirrorFallbackLive`
+   *   off) throws instead.
+   * - Strict mode → the store, `null` on a miss; nothing is sent.
+   * - A filer the store does not hold → live, failing as the live read does, since the
+   *   store has nothing to answer with.
+   * - The call's SEC-failure budget already spent, or no sign the filer has filed XBRL
+   *   since the store's facts were compiled ({@link filerMayHaveFiled}) → the store; a tag
+   *   it lacks is `null`, as SEC answers for a tag the filer does not report.
+   * - Otherwise → live. A 404 answers the store's row where it holds one, since SEC never
+   *   drops a fact from a filer's companyfacts once reported, and `null` where it does not.
+   *   On any failure but the caller's cancel the store answers, and goes on answering for
+   *   that filer without asking SEC for {@link FILER_RETRY_MS}, or the failure's
+   *   `retryAfter` when longer — so a rate-limit refusal never turns an answer the store
+   *   holds into a failure — unless the call's own spent failure budget ended the read
+   *   ({@link markFilerFailed}).
    */
-  private async mirrorOrLive<T>(
-    ready: (mirror: NonNullable<ReturnType<typeof getEdgarMirror>>) => Promise<boolean>,
-    mirrorRead: (mirror: NonNullable<ReturnType<typeof getEdgarMirror>>) => Promise<T | null>,
+  private async pointRead<T>(
+    cik: string,
+    scope: CallScope,
+    mirrorRead: (mirror: EdgarMirror) => Promise<T | null>,
     live: () => Promise<T | null>,
   ): Promise<T | null> {
     const mirror = getEdgarMirror();
-    if (mirror) {
-      if (await ready(mirror)) {
-        const hit = await mirrorRead(mirror);
-        if (hit != null) return hit;
-        if (!getServerConfig().mirrorFallbackLive) return null;
-      } else if (!getServerConfig().mirrorFallbackLive) {
-        throw serviceUnavailable(
-          'EDGAR mirror enabled but the company-facts layer is not synced; run `bun run mirror:init`',
-          { layer: 'companyfacts' },
-        );
+    if (!mirror) return live();
+    const strict = !getServerConfig().mirrorFallbackLive;
+    if (!(await mirror.companyFactsReady())) {
+      if (strict) throw companyFactsNotSynced();
+      return live();
+    }
+    if (strict) return mirrorRead(mirror);
+    if (!(await mirror.holdsFiler(cik))) return live();
+    if (scope.remainingMs === 0 || !(await this.filerMayHaveFiled(mirror, cik, scope))) {
+      return mirrorRead(mirror);
+    }
+    let answer: T | null;
+    try {
+      answer = await live();
+    } catch (error) {
+      if (scope.signal.aborted) throw error;
+      this.markFilerFailed(cik, error);
+      return mirrorRead(mirror);
+    }
+    return answer ?? mirrorRead(mirror);
+  }
+
+  /**
+   * Whether SEC may hold facts for the filer that the store lacks: its newest XBRL filing
+   * ({@link filerRecency}) was accepted on or after the day before the companyfacts
+   * checkpoint — the bulk archive's `Last-Modified` — a margin for filings accepted while
+   * SEC compiled it. A store with no checkpoint answers yes, reading nothing; a failed
+   * recency read answers no, so the store answers.
+   */
+  private async filerMayHaveFiled(
+    mirror: EdgarMirror,
+    cik: string,
+    scope: CallScope,
+  ): Promise<boolean> {
+    const checkpointMs = Date.parse((await mirror.companyFactsCheckpoint()) ?? '');
+    if (Number.isNaN(checkpointMs)) return true;
+    const latestXbrlMs = await this.filerRecency(cik, scope);
+    return latestXbrlMs !== undefined && latestXbrlMs >= checkpointMs - DAY_MS;
+  }
+
+  /**
+   * The filer's newest XBRL acceptance in ms ({@link latestXbrlAcceptanceMs}) from its
+   * submissions document, read through `getSubmissions` and its cache — so a call that
+   * already holds the document sends nothing, and otherwise one read goes out per filer
+   * per TTL — or `undefined` while a failure marks the filer ({@link markFilerFailed}).
+   * Point reads asking while a read is in flight share it: a read the same call started,
+   * or another call's that cannot outspend this call's SEC-failure budget, the waiter
+   * charged the failure time it spent waiting; a read that could outlast the waiter's
+   * budget is not joined, and the call reads for itself. A shared read is cancelled only
+   * by the call that started it, and then each waiter asks again under its own scope. The
+   * caller's own cancel rethrows untouched.
+   */
+  private async filerRecency(cik: string, scope: CallScope): Promise<number | undefined> {
+    for (;;) {
+      const failedUntil = this.filerFailures.get(cik);
+      if (failedUntil !== undefined) {
+        if (Date.now() < failedUntil) return undefined;
+        this.filerFailures.delete(cik);
+      }
+      const load = this.recencyLoads.get(cik);
+      if (!load) {
+        const promise = this.readFilerRecency(cik, scope).finally(() => {
+          this.recencyLoads.delete(cik);
+        });
+        this.recencyLoads.set(cik, { promise, scope, waits: new Map() });
+        return await promise;
+      }
+      if (load.scope === scope) return await load.promise;
+      if (load.scope.remainingMs > scope.remainingMs)
+        return await this.readFilerRecency(cik, scope);
+      try {
+        return await awaitShared(load, scope);
+      } catch (error) {
+        // A shared read rejects only when the call that started it is cancelled.
+        if (scope.signal.aborted || !load.scope.signal.aborted) throw error;
       }
     }
-    return live();
+  }
+
+  /** One recency read; any failure but the caller's cancel answers `undefined`, marking the filer ({@link markFilerFailed}). */
+  private async readFilerRecency(cik: string, scope: CallScope): Promise<number | undefined> {
+    try {
+      const submissions = await this.getSubmissions(cik, scope);
+      let latest = this.xbrlRecency.get(submissions);
+      if (latest === undefined) {
+        latest = latestXbrlAcceptanceMs(submissions.filings);
+        this.xbrlRecency.set(submissions, latest);
+      }
+      return latest;
+    } catch (error) {
+      if (scope.signal.aborted) throw error;
+      this.markFilerFailed(cik, error);
+      return undefined;
+    }
+  }
+
+  /**
+   * Have the store answer for the filer without asking SEC — no recency read, no live
+   * point read — for {@link FILER_RETRY_MS}, or the failure's `retryAfter` when longer.
+   * A failure the call's own failure budget ended ({@link budgetEndedFailures}) marks
+   * nothing: SEC failed none of its attempts, so it says nothing about the filer.
+   */
+  private markFilerFailed(cik: string, error: unknown): void {
+    if (error instanceof McpError && budgetEndedFailures.has(error)) return;
+    const until = Date.now() + Math.max(FILER_RETRY_MS, retryAfterMs(error));
+    this.filerFailures.set(cik, until, 1);
   }
 
   // --- Internals ---
@@ -1319,8 +1612,8 @@ class EdgarApiService {
    * (#181): a 5xx, an attempt that got no HTTP response, a 2xx whose body failed to
    * read, and — for a request that opts in with `backendFailure` — a 2xx whose whole
    * body relays a transient failure of the search backend (#206) all retry up to
-   * `MAX_RETRIES` attempts, and then the last attempt decides — a 5xx throws its
-   * status-classified `McpError`, a backend failure `efts_degraded_response`, the
+   * `MAX_RETRIES` attempts, and then the last attempt decides — a 5xx throws
+   * `sec_unavailable` (#233), a backend failure `efts_degraded_response`, the
    * other two `sec_unreachable`. Other non-OK statuses throw at once, as does
    * the local refusal while SEC's rate-limit block is active, and the pacer's
    * `RequestCancelled` — those are `McpError`s from `send()`, never retried.
@@ -1354,7 +1647,7 @@ class EdgarApiService {
         // Spent before this attempt could go out — by an earlier request, or by a
         // concurrent one while this retry waited for its slot. A 5xx it ends with had
         // its body released before the backoff, so the error is built without one.
-        if (failed === undefined) throw secUnreachable(url, outcome);
+        if (failed === undefined) throw endedByBudget(secUnreachable(url, outcome));
         throw await this.ladderFailure(
           url,
           failed,
@@ -1400,21 +1693,27 @@ class EdgarApiService {
         failed = last;
         continue;
       }
-      throw await this.ladderFailure(
+      const cut = cutByBudget(last);
+      const error = await this.ladderFailure(
         url,
         last,
-        { attempt, budgetStopped: attempt < MAX_RETRIES || cutByBudget(last) },
+        { attempt, budgetStopped: attempt < MAX_RETRIES || cut },
         scope,
       );
+      // A wait this call's budget cut spends what is left of it, so no attempt follows one:
+      // a first attempt cut short means SEC failed none of this request's attempts.
+      throw attempt === 1 && cut ? endedByBudget(error) : error;
     }
   }
 
   /**
    * The error a request's last attempt earned: `sec_unreachable` for no response or
    * an unreadable body; `efts_degraded_response` for a body relaying a failure of the
-   * search backend (#206); for an HTTP answer, its status-classified `McpError`, with
-   * the 403 and 429 hints. A 5xx ladder the failure budget stopped keeps its status
-   * mapping and `data`, and its message says the budget stopped it (#179).
+   * search backend (#206); `sec_unavailable` for a 500, 502, 503, or 504, its message
+   * naming the attempt the ladder ended on and, when the failure budget stopped it,
+   * the budget (#179, #233); for any other HTTP answer, its status-classified
+   * `McpError`, with the 403 and 429 hints. Every HTTP answer keeps the status
+   * mapping's `data`: `url`, `status`, and SEC's `Retry-After` when it sends one.
    *
    * An HTTP answer's body is read under `scope` for the error's diagnostic
    * (`errorBodyHead`, #202) — except a 429's, and the one `scope` is `null` for: a
@@ -1431,23 +1730,30 @@ class EdgarApiService {
     if (last.kind !== 'answered') return secUnreachable(url, last, end);
 
     const { response } = last;
+    const { status } = response;
+    const host = new URL(url).hostname;
     const data: Record<string, unknown> = { url };
-    if (response.status === 403) {
-      const host = new URL(url).hostname;
+    if (status === 403) {
       data.recovery = {
         hint: `${host} may be blocking requests. Check EDGAR_USER_AGENT format ("AppName contact@email.com") or retry later.`,
       };
-    } else if (response.status === 429) {
+    } else if (status === 429) {
       // send() closed the gate on this response, so the wait is the full cool-down.
       const retryAfter = this.cooldownSecondsRemaining();
       data.reason = RATE_LIMITED_REASON;
       data.retryable = true;
       data.retryAfter = retryAfter;
       data.recovery = { hint: rateLimitHint(retryAfter) };
+    } else if (RETRYABLE_STATUSES.has(status)) {
+      data.reason = SEC_UNAVAILABLE_REASON;
+      data.retryable = true;
+      data.recovery = {
+        hint: `SEC EDGAR (${host}) answered the last attempt with HTTP ${status} — a failure on SEC's side, not a problem with the request. Retry the same call in a minute.`,
+      };
     }
     // A 429's body is SEC's full HTML block page; the hint above carries everything
     // actionable, so the markup is not forwarded (#112).
-    if (scope === null || response.status === 429) {
+    if (scope === null || status === 429) {
       await discardBody(response);
     } else {
       const body = await errorBodyHead(response, scope);
@@ -1459,10 +1765,10 @@ class EdgarApiService {
       data,
       captureBody: false,
     });
-    if (!end.budgetStopped) return error;
-    return new McpError(
-      error.code,
-      `SEC EDGAR returned HTTP ${response.status} on attempt ${end.attempt} of ${MAX_RETRIES}; ${BUDGET_STOP_TEXT}.`,
+    if (!RETRYABLE_STATUSES.has(status)) return error;
+    const { close, onAttempt } = ladderEndText(end);
+    return serviceUnavailable(
+      `SEC EDGAR (${host}) answered HTTP ${status} on ${onAttempt}${close}`,
       error.data,
       { cause: error },
     );
@@ -1625,49 +1931,63 @@ class EdgarApiService {
   }
 
   /**
-   * Everything the ticker index holds but the live fund slice, preferring the local
-   * mirror when it is enabled and synced; company_tickers.json is the cold-start /
-   * not-ready fallback and the only source when the mirror is off. `liveFunds` says
-   * whether company_tickers_mf.json supplements it: always on the live path, and on
-   * the mirror path under `mirrorFallbackLive`, where it covers a mirror synced
-   * before fund ingestion (#43) and is the only source of series and class IDs,
-   * since the mirror stores a fund symbol as a bare ticker → CIK row. Strict mirror
-   * mode reads nothing live, so the mirror's fund rows are its only fund tickers.
+   * Everything the ticker index holds but the live fund slice. `liveFunds` says whether
+   * company_tickers_mf.json supplements it — everywhere but strict mirror mode — as the
+   * only source of series and class IDs, since the mirror stores a fund symbol as a bare
+   * ticker → CIK row (#43).
+   * - No mirror, or its ticker layer not synced → company_tickers.json, failing as that
+   *   read does; strict mode (`mirrorFallbackLive` off) throws instead.
+   * - Strict mode → the mirror's rows, its fund rows its only fund tickers; nothing is sent.
+   * - Otherwise → company_tickers.json, read every TTL as with no mirror, plus the mirror's
+   *   fund rows, which rank behind the live fund slice and still resolve a symbol it lacks
+   *   (#135). When the ticker file fails — a rate-limit refusal included — the index is
+   *   built from all the mirror's rows and stands for the TTL, with one warning (#234).
+   *   The load runs under the shared ticker load's scope, which no caller can cancel.
    */
   private async loadTickerBase(
     scope: CallScope,
   ): Promise<{ liveFunds: boolean; rows: TickerIndexRow[] }> {
     const mirror = getEdgarMirror();
-    if (mirror && (await mirror.tickersReady())) {
-      const rows = await mirror.getTickerRows();
-      if (rows.length > 0) {
-        return {
-          liveFunds: getServerConfig().mirrorFallbackLive,
-          rows: rows.map(mirrorIndexRow),
-        };
+    const mirrorRows =
+      mirror && (await mirror.tickersReady())
+        ? (await mirror.getTickerRows()).map(mirrorIndexRow)
+        : [];
+    if (mirror && !getServerConfig().mirrorFallbackLive) {
+      if (mirrorRows.length === 0) {
+        throw serviceUnavailable(
+          'EDGAR mirror enabled but the ticker layer is not synced; run `bun run mirror:init`',
+          { layer: 'tickers' },
+        );
       }
-    } else if (mirror && !getServerConfig().mirrorFallbackLive) {
-      throw serviceUnavailable(
-        'EDGAR mirror enabled but the ticker layer is not synced; run `bun run mirror:init`',
-        { layer: 'tickers' },
-      );
+      return { liveFunds: false, rows: mirrorRows };
     }
+    if (mirrorRows.length === 0)
+      return { liveFunds: true, rows: await this.fetchTickerFile(scope) };
 
-    const raw = await this.fetchJson<Record<string, TickerEntry>>(
-      'https://www.sec.gov/files/company_tickers.json',
-      scope,
-    );
-    return {
-      liveFunds: true,
-      rows: Object.values(raw).map(
-        (entry): EquityRow => ({
-          cik: String(entry.cik_str).padStart(10, '0'),
-          kind: 'equity',
-          name: entry.title,
-          ticker: entry.ticker,
+    try {
+      const equity = await this.fetchTickerFile(scope);
+      return {
+        liveFunds: true,
+        rows: [...equity, ...mirrorRows.filter((row) => row.kind === 'fund')],
+      };
+    } catch (error) {
+      // Background index maintenance with no request of its own to attach to (#43).
+      logger.warning(
+        "Ticker file (company_tickers.json) failed to load; the ticker index is built from the local mirror's rows until it reloads.",
+        withExtra(requestContextService.createRequestContext({ operation: 'loadTickerBase' }), {
+          endpoint: 'company_tickers',
+          ...failureFields(error),
         }),
-      ),
-    };
+      );
+      return { liveFunds: true, rows: mirrorRows };
+    }
+  }
+
+  /** company_tickers.json as equity rows; a 200 holding no ticker entry fails as `sec_unreachable`. */
+  private async fetchTickerFile(scope: CallScope): Promise<EquityRow[]> {
+    const rows = parseTickerFile(await this.fetchJson<unknown>(TICKERS_URL, scope));
+    if (!rows) throw unexpectedShape(TICKERS_URL, 'the ticker file');
+    return rows;
   }
 
   /**
@@ -1684,21 +2004,15 @@ class EdgarApiService {
    * included (#179).
    */
   private async loadMfTickers(scope: CallScope): Promise<FundSlice> {
-    let retryAfterMs = 0;
+    let retryMs = FUND_SLICE_RETRY_MS;
     let cause: Record<string, unknown> = { reason: 'malformed_body' };
     try {
       const rows = parseMfTickerFile(await this.fetchJson<MfTickerFile>(MF_TICKERS_URL, scope));
       if (rows) return { retryAt: undefined, rows };
     } catch (error) {
-      const data = error instanceof McpError ? error.data : undefined;
-      if (typeof data?.retryAfter === 'number') retryAfterMs = data.retryAfter * 1000;
-      cause = {
-        ...(typeof data?.status === 'number' && { status: data.status }),
-        ...(typeof data?.reason === 'string' && { reason: data.reason }),
-        error: error instanceof Error ? error.message : String(error),
-      };
+      retryMs = Math.max(FUND_SLICE_RETRY_MS, retryAfterMs(error));
+      cause = failureFields(error);
     }
-    const retryMs = Math.max(FUND_SLICE_RETRY_MS, retryAfterMs);
     // Background index maintenance with no request of its own to attach to, so the
     // global logger carries it (#43).
     logger.warning(
@@ -1799,6 +2113,106 @@ function arrayUnits(
     if (Array.isArray(values)) kept[unit] = values;
   }
   return kept;
+}
+
+/**
+ * The newest acceptance time, in ms, among the XBRL filings a submissions document lists
+ * (#234). The `isXBRL` flag counts on any form: companyfacts takes facts from 8-Ks and
+ * 424B2 fee exhibits as well as periodic reports. Archive pages are not read, so each
+ * counts as an XBRL filing at the end of its last filing day (`filingTo` plus a day).
+ * `+Infinity` — read live — when `recent` lacks either column or a time does not parse;
+ * `-Infinity` when the filer lists no XBRL filing.
+ */
+function latestXbrlAcceptanceMs(filings: SubmissionsResponse['filings']): number {
+  const { acceptanceDateTime, isXBRL } = filings.recent;
+  if (!Array.isArray(acceptanceDateTime) || !Array.isArray(isXBRL)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  let latest = Number.NEGATIVE_INFINITY;
+  for (const [i, flag] of isXBRL.entries()) {
+    if (flag !== 1) continue;
+    const accepted = Date.parse(acceptanceDateTime[i] ?? '');
+    if (Number.isNaN(accepted)) return Number.POSITIVE_INFINITY;
+    latest = Math.max(latest, accepted);
+  }
+  for (const page of filings.files) {
+    const filedTo = Date.parse(page.filingTo);
+    if (Number.isNaN(filedTo)) return Number.POSITIVE_INFINITY;
+    latest = Math.max(latest, filedTo + DAY_MS);
+  }
+  return latest;
+}
+
+/** A frames period: `CY2025`, `CY2026Q3`, or the instant `CY2026Q3I`. */
+const FRAME_PERIOD = /^CY(\d{4})(?:Q([1-4])I?)?$/;
+
+/**
+ * When filers stop reporting for a frames period, in ms (#234): November 1 of the next
+ * year for an annual period, whose frame takes fiscal years ending as late as June 30
+ * plus four months to file; the first day of the seventh month after its calendar
+ * quarter for a quarterly or instant period. `+Infinity`, never closed, for any other.
+ */
+function frameWindowClosesMs(period: string): number {
+  const match = FRAME_PERIOD.exec(period);
+  if (!match) return Number.POSITIVE_INFINITY;
+  const year = Number(match[1]);
+  return match[2] === undefined
+    ? Date.UTC(year + 1, 10, 1)
+    : Date.UTC(year, Number(match[2]) * 3 + 6, 1);
+}
+
+/**
+ * The wait a failure's `data.retryAfter` asks for, in ms, at most the rate-limit
+ * cool-down; 0 when it names none. A rate-limit refusal carries whole seconds; a 5xx
+ * carries SEC's `Retry-After` header as sent, read when it gives seconds (an HTTP-date
+ * reads as none).
+ */
+function retryAfterMs(error: unknown): number {
+  const retryAfter = error instanceof McpError ? error.data?.retryAfter : undefined;
+  const seconds = typeof retryAfter === 'string' ? Number(retryAfter) : retryAfter;
+  if (typeof seconds !== 'number' || !(seconds > 0)) return 0;
+  return Math.min(seconds, getServerConfig().rateLimitCooldownSeconds) * 1000;
+}
+
+/** A failed ticker-file load's log fields: its HTTP status and `data.reason` when it carries them, and its message. */
+function failureFields(error: unknown): Record<string, unknown> {
+  const data = error instanceof McpError ? error.data : undefined;
+  return {
+    ...(typeof data?.status === 'number' && { status: data.status }),
+    ...(typeof data?.reason === 'string' && { reason: data.reason }),
+    error: error instanceof Error ? error.message : String(error),
+  };
+}
+
+/** Strict mirror mode's failure while the company-facts layer has never completed a sync. */
+function companyFactsNotSynced(): McpError {
+  return serviceUnavailable(
+    'EDGAR mirror enabled but the company-facts layer is not synced; run `bun run mirror:init`',
+    { layer: 'companyfacts' },
+  );
+}
+
+/**
+ * Parse company_tickers.json — `{ cik_str, ticker, title }` entries keyed by index — into
+ * equity rows, skipping any entry without that shape. Returns `undefined` when no entry
+ * has it, which the caller fails like any unreadable answer (#234).
+ */
+function parseTickerFile(raw: unknown): EquityRow[] | undefined {
+  if (!isRecord(raw)) return;
+  const rows: EquityRow[] = [];
+  for (const entry of Object.values(raw)) {
+    if (!isRecord(entry) || typeof entry.ticker !== 'string' || typeof entry.title !== 'string') {
+      continue;
+    }
+    if (typeof entry.cik_str !== 'number' && typeof entry.cik_str !== 'string') continue;
+    rows.push({
+      cik: String(entry.cik_str).padStart(10, '0'),
+      kind: 'equity',
+      name: entry.title,
+      ticker: entry.ticker,
+    });
+  }
+  return rows.length > 0 ? rows : undefined;
 }
 
 /**
@@ -2300,6 +2714,20 @@ function cutByBudget(last: FailedAttempt): boolean {
       return unhandled;
     }
   }
+}
+
+/**
+ * The failures the call's own failure budget caused, SEC failing none of the request's
+ * attempts (#179): a request the spent budget kept from being sent, and one whose only
+ * attempt the budget cut short of its own 15 s wait. A filer is never marked failed for one
+ * (`markFilerFailed`, #234). Tracked here rather than on `data`, which reaches the caller.
+ */
+const budgetEndedFailures = new WeakSet<McpError>();
+
+/** `error`, recorded as one the call's own failure budget caused ({@link budgetEndedFailures}). */
+function endedByBudget(error: McpError): McpError {
+  budgetEndedFailures.add(error);
+  return error;
 }
 
 /** How a failure the call's failure budget ended says so, in its message (#179). */

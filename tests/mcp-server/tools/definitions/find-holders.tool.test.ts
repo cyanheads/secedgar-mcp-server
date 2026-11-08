@@ -684,6 +684,73 @@ describe('findHoldersTool — ambiguous_issuer total_matches (#229)', () => {
   });
 });
 
+/**
+ * A ticker spelling EDGAR does not list, read as one it does (#235): the note reaches both
+ * surfaces as `resolvedAs`, and a non-US listing's miss says why. Values are tabled at their own
+ * seams; these cases prove the wiring, one per side.
+ */
+describe('findHoldersTool — ticker readings (#235)', () => {
+  const NON_US =
+    'The .TO suffix marks a non-US listing; EDGAR indexes SEC registrants by US ticker, name, or CIK.';
+  const call = (args: Record<string, unknown>) => runToolContract(findHoldersTool, args as never);
+
+  it('carries the reading on both surfaces', async () => {
+    const reading = 'AAPL.O read as AAPL (Apple Inc.)';
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0000320193',
+      name: 'Apple Inc.',
+      ticker: 'AAPL',
+      reading,
+    });
+
+    const result = await call({ issuer: 'AAPL.O', quarter: '2025-Q1' });
+
+    expect(result.isError).toBeFalsy();
+    expect(bag(result.structuredContent).resolvedAs).toBe(reading);
+    expect(readCommonMark(allText(result))).toContain(
+      `⟨strong⟩Resolved as:⟨/strong⟩ ⟨code_inline:${reading}⟩`,
+    );
+  });
+
+  it('carries no note for a match no reading produced', async () => {
+    const result = await call({ issuer: 'AAPL', quarter: '2025-Q1' });
+
+    expect(result.isError).toBeFalsy();
+    expect(bag(result.structuredContent)).not.toHaveProperty('resolvedAs');
+    expect(allText(result)).not.toContain('Resolved as');
+  });
+
+  it('adds the non-US listing sentence to issuer_not_found, before any search', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+
+    const result = await call({ issuer: 'SHOP.TO', quarter: '2025-Q1' });
+
+    const error = wireError(result);
+    expect(error.message).toBe(
+      `No EDGAR company name found for issuer 'SHOP.TO', so there is nothing to match against 13F information tables. ${NON_US}`,
+    );
+    expect(error.data).toMatchObject({
+      reason: 'issuer_not_found',
+      recovery: {
+        hint: 'Confirm the issuer with secedgar_company_search, or pass the cusip parameter to search the information tables directly.',
+      },
+    });
+    expect(readCommonMark(blockText(result.content))).toContain(NON_US);
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
+  });
+
+  it('keeps the message unchanged for any other miss', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+
+    const error = wireError(await call({ issuer: 'XYZNOTREAL', quarter: '2025-Q1' }));
+
+    expect(error.message).toBe(
+      "No EDGAR company name found for issuer 'XYZNOTREAL', so there is nothing to match against 13F information tables.",
+    );
+    expect(error.data).toMatchObject({ reason: 'issuer_not_found' });
+  });
+});
+
 // Through the real argument-parsing path, where `inputAliases` is applied (#152).
 describe('findHoldersTool parameter names (#152)', () => {
   const call = (args: Record<string, unknown>) => runToolContract(findHoldersTool, args as never);

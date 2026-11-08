@@ -1310,6 +1310,100 @@ describe('no_companies_resolved names each failed input (#231)', () => {
   });
 });
 
+/**
+ * A ticker spelling EDGAR does not list, read as one it does (#235): one caveat per input read
+ * this way, worded as the resolver's note, and a non-US listing's failed_companies message says
+ * why. Values are tabled at their own seams; these cases prove the wiring, one per side.
+ */
+describe('compareCompaniesTool — ticker readings (#235)', () => {
+  const READING = 'CAL.N read as CAL (CALENDAR CO)';
+  const NON_US =
+    'The .T suffix marks a non-US listing; EDGAR indexes SEC registrants by US ticker, name, or CIK.';
+  const MISS = "'7203.T' did not resolve to a CIK. Use a ticker symbol or 10-digit CIK.";
+  const readings = (caveats: readonly string[]) => caveats.filter((c) => c.includes(' read as '));
+
+  beforeEach(() => {
+    mockApi.resolveCik.mockImplementation(async (q: string) => {
+      if (q === '7203.T' || q === 'NOPE') return [];
+      if (q === 'JUN') return { cik: '0000320193', name: 'JUNE CO', ticker: 'JUN' };
+      const cal = { cik: '0000789019', name: 'CALENDAR CO', ticker: 'CAL' };
+      return q === 'CAL.N' ? { ...cal, reading: READING } : cal;
+    });
+  });
+
+  it('states the reading as one caveat, on both surfaces', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['CAL.N', 'JUN'],
+      concepts: ['revenue'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    expect(output.companies.map((c) => c.input)).toEqual(['CAL.N', 'JUN']);
+    expect(readings(output.caveats)).toEqual([READING]);
+    expect(readCommonMark(allText(result))).toContain(`Caveat: ${READING}`);
+  });
+
+  it('states the reading of an input merged under an earlier one, before the merge', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['CAL', 'CAL.N', 'JUN'],
+      concepts: ['revenue'],
+    });
+
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    expect(output.companies.map((c) => c.input)).toEqual(['CAL', 'JUN']);
+    const merged =
+      "'CAL.N' names the same company as 'CAL', so the comparison reads it once, under 'CAL'.";
+    expect(output.caveats.filter((c) => c === READING || c === merged)).toEqual([READING, merged]);
+  });
+
+  it('states no reading for inputs no reading produced', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['CAL', 'JUN'],
+      concepts: ['revenue'],
+    });
+
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    expect(readings(output.caveats)).toEqual([]);
+    expect(allText(result)).not.toContain(' read as ');
+  });
+
+  it("adds the non-US listing sentence to a not_found input's message, on both surfaces", async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['7203.T', 'CAL'],
+      concepts: ['revenue'],
+    });
+
+    expect(result.isError).toBeFalsy();
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    expect(output.failed_companies).toEqual([
+      { input: '7203.T', reason: 'not_found', message: `${MISS} ${NON_US}` },
+    ]);
+    expect(readCommonMark(allText(result))).toContain(
+      `Excluded: 7203.T (not_found) — ${MISS} ${NON_US}`,
+    );
+  });
+
+  it('carries the sentence into no_companies_resolved when nothing resolves', async () => {
+    const error = wireError(
+      await runToolContract(compareCompaniesTool, {
+        companies: ['7203.T', 'NOPE'],
+        concepts: ['revenue'],
+      }),
+    );
+
+    const NOPE = "'NOPE' did not resolve to a CIK. Use a ticker symbol or 10-digit CIK.";
+    expect(error.message).toBe(
+      `None of the 2 supplied companies resolved to a CIK. ${MISS} ${NON_US} ${NOPE}`,
+    );
+    expect(error.data.failed_companies).toEqual([
+      { input: '7203.T', reason: 'not_found', message: `${MISS} ${NON_US}` },
+      { input: 'NOPE', reason: 'not_found', message: NOPE },
+    ]);
+    expect(mockApi.tryGetCompanyFacts).not.toHaveBeenCalled();
+  });
+});
+
 // Through the real tool pipeline, so both client surfaces are asserted (#128).
 describe('concept names that are neither a friendly name nor an XBRL tag (#128)', () => {
   const edgarCalls = () =>
@@ -1498,6 +1592,47 @@ describe('concept inputs that resolve to the same concept (#145)', () => {
     // JUNE CO reports no assets at all.
     expect(output.gaps.map((g) => [g.company, g.concept])).toEqual([['JUNE CO', 'assets']]);
     expect(blockText(result.content).match(/reports no assets/g)).toHaveLength(1);
+  });
+
+  it('merges an alias and a camelCase spelling into the catalog name before them (#240)', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['CAL', 'JUN'],
+      concepts: ['assets', 'total_assets', 'totalAssets'],
+      periods: 2,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    expect(output.concepts.map((c) => c.concept)).toEqual(['assets']);
+    expect(output.unknown_concepts).toEqual([]);
+    expect(output.cells.length).toBeGreaterThan(0);
+    expect(output.cells.every((c) => c.concept === 'assets' && c.tag === 'Assets')).toBe(true);
+    expect(output.gaps.map((g) => [g.company, g.concept])).toEqual([['JUNE CO', 'assets']]);
+    expect(mergeNotes(output.caveats)).toEqual([
+      "'total_assets' and 'totalAssets' resolve to the same concept as 'assets', so the comparison reads them once, under 'assets'.",
+    ]);
+    const text = blockText(result.content);
+    expect(readCommonMark(text)).toContain(`Caveat: ${at(mergeNotes(output.caveats))}`);
+    expect(text.match(/^Concept: /gm)).toHaveLength(1);
+  });
+
+  it('merges capital_expenditures into capex, the AC pair, with no gap per spelling (#240)', async () => {
+    const result = await runToolContract(compareCompaniesTool, {
+      companies: ['CAL', 'JUN'],
+      concepts: ['revenue', 'capex', 'capital_expenditures'],
+      periods: 2,
+    });
+
+    const output = compareCompaniesTool.output.parse(result.structuredContent);
+    expect(output.concepts.map((c) => c.concept)).toEqual(['revenue', 'capex']);
+    // Neither filer reports capex: one gap per company, not one per spelling.
+    expect(output.gaps.map((g) => [g.company, g.concept])).toEqual([
+      ['CALENDAR CO', 'capex'],
+      ['JUNE CO', 'capex'],
+    ]);
+    expect(mergeNotes(output.caveats)).toEqual([
+      "'capital_expenditures' resolves to the same concept as 'capex', so the comparison reads it once, under 'capex'.",
+    ]);
   });
 });
 

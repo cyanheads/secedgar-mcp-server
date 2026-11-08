@@ -11,13 +11,16 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
-import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
+import { datasetSchema } from '@/mcp-server/tools/dataset-schema.js';
 import {
   type LimitClampOptions,
   limitClamp,
   withLimitClamps,
 } from '@/mcp-server/tools/limit-clamp.js';
+import { resolvedAsField } from '@/mcp-server/tools/resolved-as.js';
+import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -31,6 +34,7 @@ import {
 } from '@/services/edgar/beneficial-ownership-parser.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, rawDocumentName } from '@/services/edgar/edgar-api-service.js';
+import { nonUsListingNote } from '@/services/edgar/listing-codes.js';
 import { sameCik } from '@/services/edgar/same-cik.js';
 
 /**
@@ -84,7 +88,7 @@ function clip(text: string | undefined, max: number): { text: string | undefined
  * paragraph. The caller follows the quote with a blank line before anything else it writes.
  */
 function quote(text: string, indent = ''): string[] {
-  return escapeInline(text)
+  return escapeMarkdownInline(text)
     .split('\n')
     .map((line) => `${indent}> ${line}`);
 }
@@ -137,24 +141,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       recovery:
         'Use secedgar_search_filings with forms ["SC 13D","SC 13G"] to reach the pre-2024-12-18 text filings, then read them with secedgar_get_filing.',
     },
-    {
-      reason: 'rate_limited',
-      code: JsonRpcErrorCode.RateLimited,
-      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
-      recovery:
-        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
-      retryable: true,
-      thrownBy: 'service',
-    },
-    {
-      reason: 'sec_unreachable',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
-      recovery:
-        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
-      retryable: true,
-      thrownBy: 'service',
-    },
+    ...SEC_UPSTREAM_ERRORS,
   ],
 
   input: z.object({
@@ -195,7 +182,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     issuer_name: z.string().describe('EDGAR-conformed name of the resolved issuer.'),
     form_kind: z
       .enum(['all', '13D', '13G'])
-      .describe('The schedule filter applied — the requested value, or the default "all".'),
+      .describe('The schedule filter applied (default "all").'),
     total_structured_filings: z
       .number()
       .describe(
@@ -232,7 +219,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     legacy_filings_before_coverage: z
       .number()
       .describe(
-        'Legacy SC 13D / SC 13G filings (pre-2024-12-18) in the recent submissions window; find them with secedgar_search_filings. A floor: the window holds the last year or 1,000 filings.',
+        'Legacy SC 13D / SC 13G filings (pre-2024-12-18) in the recent submissions window (last year or 1,000 filings), so a floor; find them with secedgar_search_filings.',
       ),
     filings: z
       .array(
@@ -247,9 +234,7 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
               .string()
               .optional()
               .describe('Amendment sequence from the cover page. Absent on an original filing.'),
-            accession_number: z
-              .string()
-              .describe('Accession number — pass to secedgar_get_filing for the full document.'),
+            accession_number: z.string().describe('Accession number for secedgar_get_filing.'),
             filing_date: z.string().describe('Date the schedule was submitted (YYYY-MM-DD).'),
             event_date: z
               .string()
@@ -356,15 +341,8 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
           .describe('One SCHEDULE 13D or 13G filing made about this issuer.'),
       )
       .describe('Blockholder filings, newest first, capped at limit.'),
-    dataset: z
-      .object({
-        name: z
-          .string()
-          .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
-          ),
-        row_count: z.number().describe('Rows materialized in the dataframe.'),
-        expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
+    dataset: datasetSchema
+      .extend({
         truncated: z.boolean().describe('True when indexed schedules remain unexamined.'),
       })
       .optional()
@@ -378,14 +356,14 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
       .string()
       .optional()
       .describe('Exclusions, document recovery, scan bounds, cut text, and dataframe guidance.'),
-    truncated: z
-      .boolean()
-      .optional()
-      .describe(
-        'True when schedules remain unexamined after the result limit or 50-document ceiling.',
-      ),
+    truncated: z.boolean().optional().describe('True when filings_not_examined > 0.'),
     shown: z.number().optional().describe('Number of filings returned.'),
     cap: z.number().optional().describe('Result limit or document ceiling that stopped scanning.'),
+    resolvedAs: resolvedAsField,
+  },
+
+  enrichmentTrailer: {
+    resolvedAs: { label: 'Resolved as' },
   },
 
   async handler(input, ctx) {
@@ -406,8 +384,13 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     }
     const match = candidates[0];
     if (!match) {
-      throw ctx.fail('issuer_not_found', `Issuer '${input.issuer}' not found in EDGAR.`);
+      const note = nonUsListingNote(input.issuer.trim());
+      throw ctx.fail(
+        'issuer_not_found',
+        `Issuer '${input.issuer}' not found in EDGAR.${note ? ` ${note}` : ''}`,
+      );
     }
+    if (match.reading) ctx.enrich({ resolvedAs: match.reading });
 
     const submissions = await api.getSubmissions(match.cik, scope);
     const recent = submissions.filings.recent;
@@ -679,10 +662,10 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
 
   format: (result) => {
     // Filer-written strings, the issuer's EDGAR name, and the caller's issuer input render
-    // through escapeInline, the free text as a blockquote, so content[] reads back
+    // through escapeMarkdownInline, the free text as a blockquote, so content[] reads back
     // the structuredContent value as text (#200, #221).
     const lines: string[] = [
-      `**5%+ beneficial owners of ${escapeInline(result.issuer_name)}** (CIK ${result.issuer_cik}) — input "${escapeInline(result.issuer)}"`,
+      `**5%+ beneficial owners of ${escapeMarkdownInline(result.issuer_name)}** (CIK ${result.issuer_cik}) — input "${escapeMarkdownInline(result.issuer)}"`,
       `Schedule filter: ${result.form_kind} | ${result.filings_parsed} of ${result.total_structured_filings} structured filings parsed`,
       `${result.filings_examined} examined | ${result.filings_excluded_other_issuer} excluded for another issuer | ${result.filings_failed.length} failed | ${result.filings_not_examined} not examined | partial: ${result.partial}`,
       `Structured coverage starts ${result.structured_coverage_from}; ${result.legacy_filings_before_coverage} legacy SC 13D/SC 13G filings sit before it in the submissions window (read those with secedgar_get_filing).`,
@@ -695,13 +678,13 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
     for (const f of result.filings) {
       lines.push('');
       const amendment = f.is_amendment
-        ? ` (amendment${f.amendment_number ? ` no. ${escapeInline(f.amendment_number)}` : ''})`
+        ? ` (amendment${f.amendment_number ? ` no. ${escapeMarkdownInline(f.amendment_number)}` : ''})`
         : '';
       lines.push(`## ${f.form}${amendment} — filed ${f.filing_date} [${f.accession_number}]`);
       const bits = [`Schedule ${f.schedule}`];
       if (f.event_date) bits.push(`event ${f.event_date}`);
-      if (f.security_class) bits.push(escapeInline(f.security_class));
-      if (f.cusips.length > 0) bits.push(`CUSIP ${escapeInline(f.cusips.join(', '))}`);
+      if (f.security_class) bits.push(escapeMarkdownInline(f.security_class));
+      if (f.cusips.length > 0) bits.push(`CUSIP ${escapeMarkdownInline(f.cusips.join(', '))}`);
       lines.push(bits.join(' | '));
 
       for (const p of f.reporting_persons) {
@@ -712,11 +695,11 @@ export const getBeneficialOwnersTool = tool('secedgar_get_beneficial_owners', {
             ? `${p.aggregate_amount_owned.toLocaleString()} shares`
             : 'amount N/A';
         const idBits: string[] = [];
-        if (p.cik) idBits.push(`CIK ${escapeInline(p.cik)}`);
-        if (p.citizenship) idBits.push(escapeInline(p.citizenship));
-        if (p.person_types.length > 0) idBits.push(escapeInline(p.person_types.join('/')));
+        if (p.cik) idBits.push(`CIK ${escapeMarkdownInline(p.cik)}`);
+        if (p.citizenship) idBits.push(escapeMarkdownInline(p.citizenship));
+        if (p.person_types.length > 0) idBits.push(escapeMarkdownInline(p.person_types.join('/')));
         lines.push(
-          `- **${escapeInline(p.name)}**${idBits.length > 0 ? ` (${idBits.join(', ')})` : ''}`,
+          `- **${escapeMarkdownInline(p.name)}**${idBits.length > 0 ? ` (${idBits.join(', ')})` : ''}`,
         );
         lines.push(`  ${owned} | ${pct}`);
         lines.push(

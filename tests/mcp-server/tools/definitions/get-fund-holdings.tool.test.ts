@@ -39,7 +39,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 }));
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
-import { blockText, wireError } from '../../../support/assertions.js';
+import { allText, bag, blockText, wireError } from '../../../support/assertions.js';
 import { readCommonMark } from '../../../support/commonmark.js';
 
 interface FilingRow {
@@ -786,6 +786,72 @@ describe('getFundHoldingsTool — ambiguous_fund total_matches (#229)', () => {
       'Showing 10 of 15 matches; for one not listed, retry with a fuller name, its ticker, or its CIK.',
     );
     expect(mockApi.listFundSeries).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A ticker spelling EDGAR does not list, read as one it does (#235): the note reaches both
+ * surfaces as `resolvedAs`, and a non-US listing's miss says why. Values are tabled at their own
+ * seams; these cases prove the wiring, one per side.
+ */
+describe('getFundHoldingsTool — ticker readings (#235)', () => {
+  const NON_US =
+    'The .L suffix marks a non-US listing; EDGAR indexes SEC registrants by US ticker, name, or CIK.';
+  const call = (args: Record<string, unknown>) =>
+    runToolContract(getFundHoldingsTool, args as never);
+
+  it('carries the reading on both surfaces', async () => {
+    const reading = 'VOO.P read as VOO (VANGUARD INDEX FUNDS)';
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0000036405',
+      ticker: 'VOO',
+      seriesId: 'S000002839',
+      classId: 'C000092055',
+      reading,
+    });
+
+    const result = await call({ fund: 'VOO.P' });
+
+    expect(result.isError).toBeFalsy();
+    expect(bag(result.structuredContent).resolvedAs).toBe(reading);
+    expect(readCommonMark(allText(result))).toContain(
+      `⟨strong⟩Resolved as:⟨/strong⟩ ⟨code_inline:${reading}⟩`,
+    );
+  });
+
+  it('carries no note for a match no reading produced', async () => {
+    const result = await call({ fund: 'VOO' });
+
+    expect(result.isError).toBeFalsy();
+    expect(bag(result.structuredContent)).not.toHaveProperty('resolvedAs');
+    expect(allText(result)).not.toContain('Resolved as');
+  });
+
+  it('adds the non-US listing sentence to fund_not_found, before any fund read', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+
+    const result = await call({ fund: 'VUSA.L' });
+
+    const error = wireError(result);
+    expect(error.message).toBe(`Fund 'VUSA.L' not found in EDGAR. ${NON_US}`);
+    expect(error.data).toMatchObject({
+      reason: 'fund_not_found',
+      recovery: {
+        hint: 'Use secedgar_company_search with the fund ticker to get its CIK and series ID.',
+      },
+    });
+    expect(readCommonMark(blockText(result.content))).toContain(NON_US);
+    expect(mockApi.getFundSeriesFilings).not.toHaveBeenCalled();
+    expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+  });
+
+  it('keeps the message unchanged for any other miss', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+
+    const error = wireError(await call({ fund: 'XYZNOTREAL' }));
+
+    expect(error.message).toBe("Fund 'XYZNOTREAL' not found in EDGAR.");
+    expect(error.data).toMatchObject({ reason: 'fund_not_found' });
   });
 });
 

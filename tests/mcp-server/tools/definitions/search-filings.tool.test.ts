@@ -4068,3 +4068,450 @@ describe('searchFilingsTool — format() values read back under CommonMark (#221
     expect(text).not.toMatch(/⟨(em|code_inline|a )/);
   });
 });
+
+/**
+ * One bare ticker: or cik: term scopes a search, and a + before it goes with it; a token led by
+ * - or NOT, or a second one, fails unsupported_entity_scope before any request, on the full-text
+ * and the pre-2001 paths alike; a token inside a quoted phrase scopes as before, and attached
+ * punctuation still fails unresolved_ticker / invalid_cik (#243).
+ */
+describe('searchFilingsTool — the shapes an entity token takes (#243)', () => {
+  const APPLE = { cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' };
+  const WINDOW = { filed_after: '2026-10-01', filed_before: '2026-11-07' };
+  const PRE_2001 = { filed_after: '1996-01-01', filed_before: '1999-12-31' };
+  const noRequestSent = () => {
+    expect(mockApi.resolveCik).not.toHaveBeenCalled();
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
+    expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+    expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+    expect(mockApi.fetchFullIndexQuarter).not.toHaveBeenCalled();
+  };
+
+  beforeEach(() => {
+    mockApi.resolveCik.mockResolvedValue(APPLE);
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: { total: { value: 0, relation: 'eq' }, hits: [] },
+    });
+  });
+
+  describe('what keeps today’s answer', () => {
+    it.each([
+      ['ticker:AAPL revenue', 'revenue', 'AAPL'],
+      ['cik:320193', '', undefined],
+      ['ticker:BRK.B', '', 'BRK.B'],
+      // A token inside a quoted phrase scopes the search, the phrase read without it.
+      ['"Apple ticker:AAPL Inc"', '"Apple Inc"', 'AAPL'],
+      ['"Apple Inc" ticker:AAPL', '"Apple Inc"', 'AAPL'],
+      // Case-insensitive, as it always was.
+      ['TICKER:AAPL revenue', 'revenue', 'AAPL'],
+      // A word that only ends in NOT is no NOT term, before a +-signed token too.
+      ['CANNOT ticker:AAPL', 'CANNOT', 'AAPL'],
+      ['CANNOT +ticker:AAPL', 'CANNOT', 'AAPL'],
+    ])('scopes %s, sending q %j', async (query, q, ticker) => {
+      const result = await runToolContract(searchFilingsTool, {
+        query,
+        forms: ['10-K'],
+        ...WINDOW,
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockApi.searchFilings).toHaveBeenCalledWith(
+        expect.objectContaining({ query: q, ciks: ['0000320193'] }),
+        expect.any(CallScope),
+      );
+      if (ticker) expect(mockApi.resolveCik).toHaveBeenCalledWith(ticker, expect.any(CallScope));
+      else expect(mockApi.resolveCik).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['(ticker:AAPL)', 'AAPL)'],
+      ['"Apple Inc" "ticker:AAPL"', 'AAPL"'],
+    ])('fails %s, punctuation attached, as unresolved_ticker naming it', async (query, value) => {
+      mockApi.resolveCik.mockResolvedValue([]);
+
+      const error = wireError(await runToolContract(searchFilingsTool, { query, ...WINDOW }));
+
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data.reason).toBe('unresolved_ticker');
+      expect(error.message).toBe(
+        `Entity targeting token 'ticker:${value}' does not resolve to a known company.`,
+      );
+      expect(mockApi.resolveCik).toHaveBeenCalledWith(value, expect.any(CallScope));
+      expect(mockApi.searchFilings).not.toHaveBeenCalled();
+    });
+
+    it('fails cik:ABC123 as invalid_cik', async () => {
+      const error = wireError(
+        await runToolContract(searchFilingsTool, { query: 'cik:ABC123', ...WINDOW }),
+      );
+
+      expect(error.data.reason).toBe('invalid_cik');
+      expect(error.message).toBe(
+        "Entity targeting token 'cik:ABC123' is not a valid CIK — expected 1-10 digits.",
+      );
+      noRequestSent();
+    });
+
+    it.each([['xticker:AAPL revenue'], ['my_ticker:AAPL revenue']])(
+      'reads %s, a word character before the token, as text',
+      async (query) => {
+        await runToolContract(searchFilingsTool, { query, ...WINDOW });
+
+        expect(mockApi.resolveCik).not.toHaveBeenCalled();
+        expect(mockApi.searchFilings).toHaveBeenCalledWith(
+          expect.objectContaining({ query, ciks: undefined }),
+          expect.any(CallScope),
+        );
+      },
+    );
+  });
+
+  it('removes a + before the token with it, sending what the bare token sends', async () => {
+    await runToolContract(searchFilingsTool, { query: '"Apple Inc" +ticker:AAPL', ...WINDOW });
+    await runToolContract(searchFilingsTool, { query: '"Apple Inc" ticker:AAPL', ...WINDOW });
+
+    const [plus, bare] = mockApi.searchFilings.mock.calls.map((call) => call[0]);
+    expect(plus).toMatchObject({ query: '"Apple Inc"', ciks: ['0000320193'] });
+    expect(plus).toEqual(bare);
+  });
+
+  const NEGATED =
+    "To leave a company out, drop the token and skip the result rows whose cik is that company's.";
+  const REPEATED = 'Keep one ticker: or cik: token and run one search per company.';
+
+  it('throws the negated hint as the sentence the contract recovery closes on', () => {
+    const recovery = searchFilingsTool.errors?.find(
+      (e) => e.reason === 'unsupported_entity_scope',
+    )?.recovery;
+    expect(recovery?.endsWith(` ${NEGATED}`)).toBe(true);
+  });
+
+  describe.each([
+    ['a full-text range', WINDOW],
+    ['a pre-2001 range', PRE_2001],
+  ])('on %s', (_label, window) => {
+    it.each([
+      ['"Apple Inc" -ticker:AAPL', '-ticker:AAPL'],
+      ['"Apple Inc" -cik:320193', '-cik:320193'],
+      ['"Apple Inc" NOT ticker:AAPL', 'NOT ticker:AAPL'],
+      // A + is part of the token, and a NOT term before it still negates it.
+      ['"Apple Inc" NOT +ticker:AAPL', 'NOT +ticker:AAPL'],
+      ['revenue (NOT ticker:AAPL)', 'NOT ticker:AAPL)'],
+      ['-ticker:AAPL', '-ticker:AAPL'],
+      // A negation counts wherever it sits, a second token beside it included.
+      ['ticker:MSFT revenue -ticker:AAPL', '-ticker:AAPL'],
+    ])('fails %s, a negated token, sending nothing', async (query, token) => {
+      const result = await runToolContract(searchFilingsTool, { query, forms: ['8-K'], ...window });
+
+      const error = wireError(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.message).toBe(
+        `Entity targeting token '${token}' is negated; an entity token scopes a search to a company and cannot exclude one.`,
+      );
+      expect(error.data).toMatchObject({
+        reason: 'unsupported_entity_scope',
+        recovery: { hint: NEGATED },
+      });
+      const text = blockText(result.content);
+      expect(text).toContain(`Recovery: ${NEGATED}`);
+      expect(text).toContain('(reason unsupported_entity_scope');
+      noRequestSent();
+    });
+
+    it.each([
+      ['ticker:AAPL ticker:MSFT', "'ticker:AAPL', 'ticker:MSFT'"],
+      ['ticker:AAPL cik:789019', "'ticker:AAPL', 'cik:789019'"],
+      ['revenue +ticker:AAPL cik:789019 ticker:IBM', "'+ticker:AAPL', 'cik:789019', 'ticker:IBM'"],
+    ])('fails %s, more than one token, naming each, sending nothing', async (query, named) => {
+      const count = named.split(', ').length;
+      const result = await runToolContract(searchFilingsTool, { query, ...window });
+
+      const error = wireError(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.message).toBe(
+        `The query holds ${count} entity targeting tokens (${named}); a search is scoped to one company.`,
+      );
+      expect(error.data).toMatchObject({
+        reason: 'unsupported_entity_scope',
+        recovery: { hint: REPEATED },
+      });
+      expect(blockText(result.content)).toContain(`Recovery: ${REPEATED}`);
+      noRequestSent();
+    });
+  });
+
+  it('declares unsupported_entity_scope as a validation error raised below the handler', () => {
+    expect(searchFilingsTool.errors?.find((e) => e.reason === 'unsupported_entity_scope')).toEqual({
+      reason: 'unsupported_entity_scope',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'A ticker: or cik: token in the query is led by - or a NOT term, or follows another entity token',
+      recovery:
+        "Keep one ticker: or cik: token as its own term with no - or NOT before it. To leave a company out, drop the token and skip the result rows whose cik is that company's.",
+      thrownBy: 'service',
+    });
+  });
+});
+
+/**
+ * A ticker: token resolveCik read as a listed symbol (#235) names the reading inside
+ * effectiveQuery's scope parenthetical, on the full-text and the pre-2001 paths and on every page
+ * of either; a match no reading produced keeps the bare CIK. A non-US listing's
+ * unresolved_ticker says what the suffix is. The readings themselves are tabled in the
+ * resolve-cik and listing-codes tests.
+ */
+describe('searchFilingsTool — a ticker spelling EDGAR does not list (#235)', () => {
+  const READING = 'UEC.N read as UEC (URANIUM ENERGY CORP)';
+  const UEC = { cik: '0001334933', name: 'URANIUM ENERGY CORP', ticker: 'UEC' };
+  const FULL_TEXT = { filed_after: '2026-10-01', filed_before: '2026-11-07' };
+  const PRE_2001 = { filed_after: '1996-01-01', filed_before: '1999-12-31' };
+  const STRADDLE = { filed_after: '1999-01-01', filed_before: '2026-11-07' };
+
+  type Result = Awaited<ReturnType<typeof runToolContract>>;
+  const textOf = (result: Result) =>
+    result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n');
+
+  /** effectiveQuery as structuredContent carries it, checked against the code literal content[] reads back as. */
+  function echoed(result: Result): string {
+    expect(result.isError).toBeFalsy();
+    const value = String(bag(result.structuredContent).effectiveQuery);
+    expect(readCommonMark(textOf(result))).toContain(`Query: ⟨code_inline:${value}⟩`);
+    return value;
+  }
+
+  const uecHit = (n: number) => ({
+    _id: `0001334933-26-00000${n}:uec-${n}.htm`,
+    _source: {
+      adsh: `0001334933-26-00000${n}`,
+      form: '8-K',
+      file_date: `2026-10-0${n}`,
+      display_names: ['URANIUM ENERGY CORP  (UEC)  (CIK 0001334933)'],
+      ciks: ['0001334933'],
+    },
+  });
+
+  beforeEach(() => {
+    // Only the token's own resolution reads; the pre-2001 arm's CIK lookup gets the bare match.
+    mockApi.resolveCik.mockImplementation(async (input: string) =>
+      input === 'UEC.N' ? { ...UEC, reading: READING } : UEC,
+    );
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: { total: { value: 4, relation: 'eq' }, hits: [1, 2, 3, 4].map(uecHit) },
+    });
+    mockApi.getSubmissions.mockResolvedValue(
+      submissionsWith(
+        [
+          { accession: 'SUB-1999', date: '1999-06-01', form: '8-K' },
+          { accession: 'SUB-1998', date: '1998-06-01', form: '8-K' },
+          { accession: 'SUB-1997', date: '1997-06-01', form: '8-K' },
+        ],
+        'URANIUM ENERGY CORP',
+      ),
+    );
+  });
+
+  it.each([
+    [
+      'a full-text range, read',
+      'uranium ticker:UEC.N',
+      FULL_TEXT,
+      'uranium (entity scope: CIK 0001334933, UEC.N read as UEC (URANIUM ENERGY CORP))',
+    ],
+    [
+      'a full-text range, listed',
+      'uranium ticker:UEC',
+      FULL_TEXT,
+      'uranium (entity scope: CIK 0001334933)',
+    ],
+    [
+      'a pre-2001 range, read',
+      'ticker:UEC.N',
+      PRE_2001,
+      '(pre-2001 archive: CIK 0001334933, UEC.N read as UEC (URANIUM ENERGY CORP), forms 8-K, 1996-01-01 to 1999-12-31)',
+    ],
+    [
+      'a pre-2001 range, listed',
+      'ticker:UEC',
+      PRE_2001,
+      '(pre-2001 archive: CIK 0001334933, forms 8-K, 1996-01-01 to 1999-12-31)',
+    ],
+    [
+      'a range split at 2001, read',
+      'ticker:UEC.N',
+      STRADDLE,
+      '(split at 2001-01-01: CIK 0001334933, UEC.N read as UEC (URANIUM ENERGY CORP), forms 8-K, 1999-01-01 to 2026-11-07)',
+    ],
+  ])('on %s, effectiveQuery reads %j', async (_label, query, window, expected) => {
+    const result = await runToolContract(searchFilingsTool, { query, forms: ['8-K'], ...window });
+
+    expect(echoed(result)).toBe(expected);
+  });
+
+  it.each([
+    ['a full-text range', 'uranium ticker:UEC.N', FULL_TEXT],
+    ['a pre-2001 range', 'ticker:UEC.N', PRE_2001],
+  ])(
+    'on %s, scopes a second page as the first, under the same note',
+    async (_label, query, window) => {
+      const page = (offset: number) =>
+        runToolContract(searchFilingsTool, { query, forms: ['8-K'], limit: 2, offset, ...window });
+      const first = await page(0);
+      const second = await page(2);
+
+      expect(echoed(second)).toBe(echoed(first));
+      expect(echoed(second)).toContain(`CIK 0001334933, ${READING}`);
+      const accessions = (result: Result) =>
+        records(bag(result.structuredContent).results).map((row) => row.accession_number);
+      expect(accessions(first)).toHaveLength(2);
+      expect(accessions(second)).toHaveLength(window === FULL_TEXT ? 2 : 1);
+      expect(accessions(second)).not.toContain(accessions(first)[0]);
+      // Each page resolves the token as typed and sends the same scope.
+      const typed = mockApi.resolveCik.mock.calls.filter(([input]) => input === 'UEC.N');
+      expect(typed).toHaveLength(2);
+      const [firstSearch, secondSearch] = mockApi.searchFilings.mock.calls.map((call) => call[0]);
+      expect(secondSearch).toEqual(firstSearch);
+      const [firstFeed, secondFeed] = mockApi.getSubmissions.mock.calls.map((call) => call[0]);
+      expect(secondFeed).toEqual(firstFeed);
+    },
+  );
+
+  it('ends unresolved_ticker for ticker:7203.T with the non-US listing sentence, sending nothing', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+
+    const result = await runToolContract(searchFilingsTool, {
+      query: 'ticker:7203.T',
+      ...FULL_TEXT,
+    });
+
+    const error = wireError(result);
+    const message =
+      "Entity targeting token 'ticker:7203.T' does not resolve to a known company. The .T suffix marks a non-US listing; EDGAR indexes SEC registrants by US ticker, name, or CIK.";
+    expect(error.data.reason).toBe('unresolved_ticker');
+    expect(error.message).toBe(message);
+    expect(textOf(result)).toContain(message);
+    expect(mockApi.resolveCik).toHaveBeenCalledWith('7203.T', expect.any(CallScope));
+    expect(mockApi.searchFilings).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The entity-token scan reads caller text, so each shape that could slow a scan — an opener with
+ * no value, a whitespace run the NOT test walks back over, NOT terms stacked before a token, a
+ * long digit run, tokens throughout, and the two line-break shapes — is timed through the
+ * handler on the path it takes, scoped or rejected, and must stay linear (#243).
+ */
+describe('searchFilingsTool — entity tokens read in time linear in the query’s length (#243)', () => {
+  const WINDOW = { filed_after: '2026-10-01', filed_before: '2026-11-07' };
+  const fill = (unit: string, chars: number) => unit.repeat(Math.ceil(chars / unit.length));
+
+  beforeEach(() => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000000001', name: 'A CORP', ticker: 'A' });
+    mockApi.searchFilings.mockResolvedValue({
+      ...mockEftsResponse,
+      hits: { total: { value: 0, relation: 'eq' }, hits: [] },
+    });
+  });
+
+  /** The path one call took: `scoped`, or the reason it was rejected with. */
+  async function pathOf(
+    input: z.infer<typeof searchFilingsTool.input>,
+    ctx: Parameters<typeof searchFilingsTool.handler>[1],
+  ): Promise<string> {
+    try {
+      await searchFilingsTool.handler(input, ctx);
+      return 'scoped';
+    } catch (error) {
+      return String((error as { data?: { reason?: unknown } }).data?.reason);
+    }
+  }
+
+  /**
+   * Thread CPU milliseconds one call takes, least of five rounds, each a batch sized to hold the
+   * work near 320k characters: wall clock is noise under a parallel suite, and a 5k call alone is
+   * too short to time. The query goes through the input schema first, as a caller's does.
+   */
+  async function perCallCpuMs(query: string): Promise<{ ms: number; path: string }> {
+    const input = searchFilingsTool.input.parse({ query, ...WINDOW });
+    // The schema trims, so every shape keeps its runs inside the query, where the scan meets them.
+    expect(input.query?.length).toBe(query.length);
+    const ctx = createMockContext({ errors: searchFilingsTool.errors });
+    const batch = Math.max(1, Math.round(320_000 / query.length));
+    let path = '';
+    let least = Number.POSITIVE_INFINITY;
+    for (let round = 0; round < 5; round++) {
+      vi.clearAllMocks();
+      const start = process.threadCpuUsage();
+      for (let i = 0; i < batch; i++) path = await pathOf(input, ctx);
+      const used = process.threadCpuUsage(start);
+      least = Math.min(least, (used.user + used.system) / 1000 / batch);
+    }
+    return { ms: least, path };
+  }
+
+  const REJECTED = 'unsupported_entity_scope';
+
+  /**
+   * Doubles n from 5,000 to 320,000, checking the CPU bound at each size before building the
+   * next, so a quadratic shape fails fast instead of hanging, then holds the 64× span's ratio
+   * under 256, where a quadratic scan reaches 4,096. Every size must take the expected path, and
+   * the last batch must have sent the scoped search, or sent nothing.
+   */
+  it.each([
+    [
+      'an opener with no value, then a token',
+      (n: number) => `${fill('ticker: ', n)}ticker:A`,
+      'scoped',
+    ],
+    [
+      'an opener with no value, then a negated token',
+      (n: number) => `${fill('ticker: ', n)}-ticker:A`,
+      REJECTED,
+    ],
+    ['a whitespace run before the token', (n: number) => `x${' '.repeat(n)}ticker:A`, 'scoped'],
+    [
+      'a whitespace run between NOT and the token',
+      (n: number) => `x NOT${' '.repeat(n)}ticker:A`,
+      REJECTED,
+    ],
+    ['NOT terms before the token', (n: number) => `${fill('NOT ', n)}ticker:A`, REJECTED],
+    ['NOT terms, a word, then the token', (n: number) => `${fill('NOT ', n)}x ticker:A`, 'scoped'],
+    ['a long digit run before the token', (n: number) => `${fill('7', n)} ticker:A`, 'scoped'],
+    ['a long digit run as the CIK', (n: number) => `cik:${fill('7', n)}`, 'invalid_cik'],
+    ['tokens throughout', (n: number) => fill('ticker:A ', n).trimEnd(), REJECTED],
+    ['one long line ending in a break', (n: number) => `${fill('§1 x', n)}\ny ticker:A`, 'scoped'],
+    [
+      'one long line ending in a break, two tokens',
+      (n: number) => `${fill('§1 x', n)}\ny ticker:A cik:1`,
+      REJECTED,
+    ],
+    ['breaks throughout', (n: number) => `x${fill('  \r\n', n)}ticker:A`, 'scoped'],
+    [
+      'breaks throughout, a negated token',
+      (n: number) => `x${fill('  \r\n', n)}-ticker:A`,
+      REJECTED,
+    ],
+  ])('%s (5k → 320k)', async (_label, build, expected) => {
+    const small = build(5_000);
+    await perCallCpuMs(small); // warm the JIT
+    const first = await perCallCpuMs(small);
+    expect(first.path).toBe(expected);
+    const t5k = Math.max(first.ms, 0.001);
+    let last = first.ms;
+    for (let n = 10_000; n <= 320_000; n *= 2) {
+      const timed = await perCallCpuMs(build(n));
+      expect(timed.path, `${n} characters`).toBe(expected);
+      expect(timed.ms, `${n} characters`).toBeLessThan(100);
+      last = timed.ms;
+    }
+    expect(last / t5k).toBeLessThan(256);
+    if (expected === 'scoped') {
+      expect(mockApi.searchFilings).toHaveBeenLastCalledWith(
+        expect.objectContaining({ ciks: ['0000000001'] }),
+        expect.any(CallScope),
+      );
+    } else {
+      expect(mockApi.searchFilings).not.toHaveBeenCalled();
+    }
+  });
+});

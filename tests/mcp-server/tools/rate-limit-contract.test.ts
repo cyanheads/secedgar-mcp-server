@@ -5,7 +5,9 @@
  * and `content[]` — with the same reason whether SEC answered the 429 or the
  * server refused the call without sending it. The same tools declare
  * `sec_unreachable`, the failure once the last attempt gets no complete, readable
- * response (#173, #181), or a submissions body lacks its shape (#186). Every tool that
+ * response (#173, #181), or a submissions body lacks its shape (#186), and
+ * `sec_unavailable`, the failure once the last attempt draws a 500, 502, 503, or 504
+ * (#233). Every tool that
  * fails on EDGAR full-text search declares `efts_degraded_response`, the failure once its
  * search backend fails every attempt or refuses the request (#206). Driven through
  * `runToolContract` over the real `EdgarApiService` with `globalThis.fetch` stubbed.
@@ -103,6 +105,79 @@ describe('sec_unreachable on the tool contracts (#173)', () => {
         "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
       ]),
     );
+  });
+});
+
+describe('sec_unavailable on the tool contracts (#233)', () => {
+  it('is declared directly after sec_unreachable by exactly the tools that declare rate_limited, in one entry', () => {
+    const defs = buildToolDefinitions({ dropEnabled: true, clampOversizedLimits: true });
+    const declaring = (reason: string) =>
+      defs.filter((def) => def.errors?.some((e) => e.reason === reason)).map((def) => def.name);
+
+    expect(declaring('sec_unavailable')).toEqual(declaring('rate_limited'));
+    for (const def of defs) {
+      const errors = def.errors ?? [];
+      const at = errors.findIndex((e) => e.reason === 'sec_unavailable');
+      if (at === -1) continue;
+      expect(errors[at - 1]?.reason, def.name).toBe('sec_unreachable');
+      expect(errors[at], def.name).toEqual({
+        reason: 'sec_unavailable',
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        when: "SEC EDGAR answered HTTP 500, 502, 503, or 504 on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out)",
+        recovery:
+          'Retry the same call in a minute — SEC EDGAR failed on its side, and nothing in the request needs to change.',
+        retryable: true,
+        thrownBy: 'service',
+      });
+    }
+  });
+});
+
+describe('a call SEC answers with a 5xx on every attempt (#233)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('unmocked fetch')));
+    initEdgarApiService();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('fails as sec_unavailable on both surfaces after three attempts, a 504 coded ServiceUnavailable like the other three', async () => {
+    const fetchMock = vi.fn(async () => new Response('Gateway Timeout', { status: 504 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const pending = runToolContract(companySearchTool, { query: 'AAPL' });
+    await vi.advanceTimersByTimeAsync(10_000);
+    const result = await pending;
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(result.isError).toBe(true);
+    const message = 'SEC EDGAR (www.sec.gov) answered HTTP 504 on the last of 3 attempts.';
+    const hint =
+      "SEC EDGAR (www.sec.gov) answered the last attempt with HTTP 504 — a failure on SEC's side, not a problem with the request. Retry the same call in a minute.";
+    expect(envelope(result)).toEqual({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message,
+      data: {
+        reason: 'sec_unavailable',
+        retryable: true,
+        url: 'https://www.sec.gov/files/company_tickers.json',
+        status: 504,
+        statusCode: 504,
+        body: 'Gateway Timeout',
+        responseBody: 'Gateway Timeout',
+        recovery: { hint },
+      },
+    });
+    expect(result.content).toEqual([
+      {
+        type: 'text',
+        text: `Error: ${message}\n\nRecovery: ${hint}\n\n(reason sec_unavailable · retryable)`,
+      },
+    ]);
   });
 });
 
@@ -623,8 +698,11 @@ describe('a call during SEC’s rate-limit block (#116)', () => {
     expect(upstreamText).toContain('HTTP 429');
     expect(upstreamText).toContain('Recovery: SEC is rate-limiting');
     expect(upstreamText).toContain('retry in 600 seconds');
-    // The thrown error carries the `retryable` its contract entry declares (#122).
-    expect(upstreamText.trimEnd()).toMatch(/\(reason rate_limited · retryable\)$/);
+    // The thrown error carries the `retryable` its contract entry declares (#122), and
+    // the trailer renders `data.retryAfter`.
+    expect(upstreamText.trimEnd()).toMatch(
+      /\(reason rate_limited · retryable · retry after 600\)$/,
+    );
 
     expect(refused.isError).toBe(true);
     expect(envelope(refused)).toMatchObject({
@@ -635,6 +713,6 @@ describe('a call during SEC’s rate-limit block (#116)', () => {
     const refusedText = blockText(refused.content);
     expect(refusedText).toContain('request not sent');
     expect(refusedText).toContain('retry in 510 seconds');
-    expect(refusedText.trimEnd()).toMatch(/\(reason rate_limited · retryable\)$/);
+    expect(refusedText.trimEnd()).toMatch(/\(reason rate_limited · retryable · retry after 510\)$/);
   });
 });

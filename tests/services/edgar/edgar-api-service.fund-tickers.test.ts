@@ -4,9 +4,10 @@
  * A failed load of `company_tickers_mf.json` is not cached with the equity index:
  * it gets its own short retry window — at least the cool-down after a 429 — and one
  * resolution after it refetches the slice for everyone, while the equity index keeps
- * its TTL (#119). On the mirror path a live fund entry supersedes the mirror's bare
- * fund row for the same symbol, and mirror fund rows never map a trust CIK back to
- * one fund's ticker (#135).
+ * its TTL (#119). On the mirror path the equity rows come from the live ticker file,
+ * and from the mirror only when that file fails to load (#234); a live fund entry
+ * supersedes the mirror's bare fund row for the same symbol, and mirror fund rows
+ * never map a trust CIK back to one fund's ticker (#135).
  * @module tests/services/edgar/edgar-api-service.fund-tickers
  */
 
@@ -502,8 +503,146 @@ describe('EdgarApiService — fund-ticker slice', () => {
       expect(await resolve('VOO')).toEqual(VOO_LIVE);
       expect(await resolve('VTI')).toMatchObject({ seriesId: 'S000002848', classId: 'C000007773' });
       expect(await resolve('AAPL')).toEqual(AAPL);
-      expect(calls).toEqual({ tickers: 0, mf: 1 });
+      expect(calls).toEqual({ tickers: 1, mf: 1 });
     });
+
+    it('resolves a mirror fund row for a symbol the live fund file lacks (#135)', async () => {
+      useMirror(MIRROR_ROWS);
+      stubTickerFiles({
+        mf: [{ fields: MF_FILE.fields, data: [[36405, 'S000002848', 'C000007773', 'VTI']] }],
+      });
+
+      expect(await resolve('VOO')).toEqual({ cik: '0000036405', ticker: 'VOO' });
+      expect(await resolve('VTI')).toMatchObject({ seriesId: 'S000002848' });
+    });
+
+    it('reads company_tickers.json live, so a symbol listed since the mirror’s last sync resolves (#234)', async () => {
+      useMirror(MIRROR_ROWS);
+      const calls = stubTickerFiles({
+        tickers: [
+          { ...OPERATING, '1': { cik_str: 835011, ticker: 'CASK', title: 'MGP INGREDIENTS INC' } },
+        ],
+      });
+
+      expect(await resolve('CASK')).toEqual({
+        cik: '0000835011',
+        ticker: 'CASK',
+        name: 'MGP INGREDIENTS INC',
+      });
+      expect(await resolve('AAPL')).toEqual(AAPL);
+      expect(await resolve('VOO')).toEqual(VOO_LIVE);
+      expect(calls).toEqual({ tickers: 1, mf: 1 });
+    });
+
+    it.each([
+      ['a 404', 404, 50, 1],
+      ['a 403', 403, 50, 1],
+      ['a 503 on every attempt', 503, 5_000, 3],
+      ['no HTTP response on any attempt', NODE_RESET, 5_000, 3],
+      ['a 200 that is not the ticker file', { unexpected: true }, 50, 1],
+    ] as const)(
+      'builds the index from the mirror’s rows after %s, and keeps it for the TTL (#234)',
+      async (_label, answer, settle, attempts) => {
+        const warning = vi.spyOn(logger, 'warning').mockImplementation(() => undefined);
+        useMirror(MIRROR_ROWS);
+        const calls = stubTickerFiles({
+          tickers: [
+            ...Array.from({ length: attempts }, () => answer),
+            {
+              ...OPERATING,
+              '1': { cik_str: 835011, ticker: 'CASK', title: 'MGP INGREDIENTS INC' },
+            },
+          ],
+        });
+
+        expect(await resolve('AAPL', settle)).toEqual(AAPL);
+        expect(await resolve('VOO')).toEqual(VOO_LIVE);
+        expect(await resolve('CASK')).toEqual([]);
+        expect(calls).toEqual({ tickers: attempts, mf: 1 });
+
+        // The fallback index stands for the whole TTL, then the live file is read again.
+        vi.setSystemTime(T0 + 3_600_000 - 1_000);
+        expect(await resolve('CASK')).toEqual([]);
+        expect(calls.tickers).toBe(attempts);
+        vi.setSystemTime(T0 + 3_600_000 + 10_000);
+        expect(await resolve('CASK')).toMatchObject({ cik: '0000835011' });
+        expect(calls.tickers).toBe(attempts + 1);
+
+        const fallbacks = warning.mock.calls.filter(([message]) =>
+          String(message).includes('company_tickers.json'),
+        );
+        expect(fallbacks).toHaveLength(1);
+        expect(fallbacks[0]?.[1]).toMatchObject({
+          operation: 'loadTickerBase',
+          extra: { endpoint: 'company_tickers' },
+        });
+      },
+    );
+
+    it('builds the index from the mirror’s rows during a rate-limit block, sending nothing (#116, #234)', async () => {
+      vi.spyOn(logger, 'warning').mockImplementation(() => undefined);
+      // A read of another route draws the 429 that closes the block gate.
+      const blocked = vi.fn(async () => new Response('blocked', { status: 429 }));
+      vi.stubGlobal('fetch', blocked);
+      await run(
+        getEdgarApiService()
+          .getSubmissions('320193', scope())
+          .catch(() => undefined),
+      );
+      useMirror(MIRROR_ROWS);
+
+      expect(await resolve('AAPL')).toEqual(AAPL);
+      expect(await resolve('VOO')).toEqual({ cik: '0000036405', ticker: 'VOO' });
+      expect(blocked).toHaveBeenCalledOnce();
+    });
+
+    it('fails a ticker-file failure as it is when the mirror’s ticker layer is not ready', async () => {
+      mirrorRef.current = {
+        tickersReady: vi.fn(async () => false),
+        getTickerRows: vi.fn(async () => MIRROR_ROWS),
+      };
+      stubTickerFiles({ tickers: [404] });
+
+      const error = await run(
+        getEdgarApiService()
+          .resolveCik('AAPL', scope())
+          .then(
+            () => undefined,
+            (rejection: unknown) => rejection as McpError,
+          ),
+      );
+
+      expect(error?.message).toContain('404');
+      expect(mirrorRef.current.getTickerRows).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['an object with no ticker entry', { unexpected: true }],
+      ['an empty object', {}],
+    ] as const)(
+      'with no mirror, fails a ticker file that is %s as sec_unreachable and caches nothing (#234)',
+      async (_label, body) => {
+        const calls = stubTickerFiles({ tickers: [body, OPERATING] });
+
+        const error = await run(
+          getEdgarApiService()
+            .resolveCik('AAPL', scope())
+            .then(
+              () => undefined,
+              (rejection: unknown) => rejection as McpError,
+            ),
+        );
+
+        expect(error?.data).toMatchObject({
+          reason: 'sec_unreachable',
+          retryable: true,
+          url: TICKERS_URL,
+        });
+        // The next resolution reads the file again rather than an empty index cached for the TTL.
+        expect(await resolve('AAPL')).toEqual(AAPL);
+        expect(calls.tickers).toBe(2);
+      },
+    );
 
     it('never maps a trust CIK back to one fund ticker (#135)', async () => {
       useMirror(MIRROR_ROWS);
@@ -526,12 +665,12 @@ describe('EdgarApiService — fund-ticker slice', () => {
 
       await vi.advanceTimersByTimeAsync(30_000);
       expect(await run(api.resolveFundSeries('S000002839', scope()))).toBeUndefined();
-      expect(calls).toEqual({ tickers: 0, mf: 1 });
+      expect(calls).toEqual({ tickers: 1, mf: 1 });
 
       await vi.advanceTimersByTimeAsync(31_000);
       expect(await run(api.resolveFundSeries('S000002839', scope()))).toEqual(VOO_LIVE);
       expect(await resolve('VOO')).toEqual(VOO_LIVE);
-      expect(calls).toEqual({ tickers: 0, mf: 2 });
+      expect(calls).toEqual({ tickers: 1, mf: 2 });
     });
 
     it('in strict mode resolves a fund ticker to its CIK from the mirror row, with no live request', async () => {

@@ -583,9 +583,9 @@ describe('findUnknownConcept (#128)', () => {
     expect(findUnknownConcept('total_debt')?.suggestions).toContain('debt');
   });
 
-  it('suggests capex for capital_expenditures, reached through its label', () => {
-    expect(findUnknownConcept('capital_expenditures')?.suggestions).toEqual(['capex']);
-    expect(findUnknownConcept('long_term_debt')?.suggestions).toEqual(['debt']);
+  it('suggests capex for capital_spending, reached through its label', () => {
+    expect(findUnknownConcept('capital_spending')?.suggestions).toEqual(['capex']);
+    expect(findUnknownConcept('long_term_borrowings')?.suggestions).toEqual(['debt']);
   });
 
   it('suggests nothing below the threshold, and still names secedgar_search_concepts', () => {
@@ -658,7 +658,7 @@ describe('trimming (#128)', () => {
 
 describe('unknown-concept wording (#128)', () => {
   it('names a single suggestion in the singular', () => {
-    const unknown = findUnknownConcept('capital_expenditures');
+    const unknown = findUnknownConcept('capital_spending');
     expect(unknown && unknownConceptHint(unknown)).toMatch(
       /^The closest supported name is capex\. List every supported name/,
     );
@@ -669,5 +669,291 @@ describe('unknown-concept wording (#128)', () => {
     expect(describeUnknownConcepts(unknown ? [unknown] : []).message).toBe(
       'An empty concept is neither a supported concept name nor an XBRL tag.',
     );
+  });
+});
+
+/** The spellings #240 accepts, each beside the catalog name it reads as. */
+const ALIASES: ReadonlyArray<readonly [alias: string, name: string]> = [
+  ['capital_expenditures', 'capex'],
+  ['cash_and_cash_equivalents', 'cash'],
+  ['total_assets', 'assets'],
+  ['total_liabilities', 'liabilities'],
+  ['stockholders_equity', 'equity'],
+  ['long_term_debt', 'debt'],
+  ['cost_of_goods_sold', 'cogs'],
+  ['depreciation_and_amortization', 'depreciation_amortization'],
+  ['research_and_development_expense', 'rd_expense'],
+  ['selling_general_and_administrative_expense', 'sga_expense'],
+  ['earnings_per_share_basic', 'eps_basic'],
+  ['earnings_per_share_diluted', 'eps_diluted'],
+  ['weighted_average_diluted_shares', 'shares_diluted'],
+  ['property_plant_and_equipment_net', 'ppe_net'],
+  ['intangible_assets_net', 'intangible_assets'],
+  ['accounts_receivable_net', 'accounts_receivable'],
+  ['income_tax_expense', 'tax_expense'],
+  ['pre_tax_income', 'pretax_income'],
+];
+
+/** The formula table's keys, which no catalog spelling may shadow. */
+const DERIVATION_KEYS = ['free_cash_flow', 'ebitda', 'working_capital'];
+
+/** Every key the catalog index holds: each concept's name and its aliases. */
+const indexKeys = () =>
+  listConcepts().flatMap((entry) =>
+    [entry.name, ...(entry.aliases ?? [])].map((key) => ({ key, name: entry.name })),
+  );
+
+// Characterization: each of these answered this way before #240 and still does.
+describe('spellings #240 leaves as they were', () => {
+  it.each([
+    ['capEx', 'capex'],
+    ['cASH', 'cash'],
+    ['eps_Diluted', 'eps_diluted'],
+    ['epS_diluted', 'eps_diluted'],
+    ['rEVENUE', 'revenue'],
+    ['nET_INCOME', 'net_income'],
+  ])('resolves the mixed-case catalog name %j to %s', (input, name) => {
+    expect(resolveConcept(input)).toBeDefined();
+    expect(resolveConcept(input)).toBe(resolveConcept(name));
+  });
+
+  it.each([
+    'InterestExpense',
+    'NotesPayable',
+    'SharesOutstanding',
+    'GrossProfit',
+    'NetIncome',
+    'EPSDiluted',
+  ])('keeps the uppercase-initial %s a raw tag, never split into a catalog name (#45)', (input) => {
+    expect(resolveConcept(input)).toBeUndefined();
+    expect(findUnknownConcept(input)).toBeUndefined();
+    expect(resolveConceptTarget(input, 'us-gaap')).toEqual({
+      label: input,
+      tagSelection: 'priority',
+      tags: [input],
+      taxonomy: 'us-gaap',
+    });
+  });
+
+  it.each([
+    ['total_debt', { concept: 'total_debt', suggestions: ['assets', 'debt', 'liabilities'] }],
+    ['total_equity', { concept: 'total_equity', suggestions: ['equity', 'assets', 'liabilities'] }],
+    [
+      'free_cash_flow',
+      { concept: 'free_cash_flow', derivation: 'operating_cash_flow − capex', suggestions: [] },
+    ],
+    [
+      'ebitda',
+      {
+        concept: 'ebitda',
+        derivation: 'operating_income + depreciation_amortization',
+        suggestions: [],
+      },
+    ],
+    [
+      'ebitDA',
+      {
+        concept: 'ebitDA',
+        derivation: 'operating_income + depreciation_amortization',
+        suggestions: [],
+      },
+    ],
+    ['capitalSpending', { concept: 'capitalSpending', suggestions: ['capex'] }],
+    ['toString', { concept: 'toString', suggestions: [] }],
+    ['hasOwnProperty', { concept: 'hasOwnProperty', suggestions: [] }],
+    ['valueOf', { concept: 'valueOf', suggestions: [] }],
+  ])('keeps %s unknown with the same formula or suggestions (#128)', (input, expected) => {
+    expect(findUnknownConcept(input)).toEqual(expected);
+    expect(resolveConcept(input)).toBeUndefined();
+  });
+
+  it.each(['__proto__', 'constructor', 'toString'])(
+    'finds no concept searching for %s',
+    (input) => {
+      expect(searchConcepts(input)).toEqual([]);
+    },
+  );
+});
+
+describe('Object.prototype names as concepts (#240)', () => {
+  /**
+   * The catalog lookup read these off Object.prototype: `constructor` resolved
+   * to the Object function and `__proto__` to Object.prototype, so the concept
+   * passed as known and its target carried no tags for the tools to read.
+   */
+  it.each(['__proto__', '__PROTO__', ' __proto__ ', 'constructor', ' constructor\n'])(
+    'fails %j as unknown on every lookup path',
+    (input) => {
+      const concept = input.trim();
+      expect(resolveConcept(input)).toBeUndefined();
+      expect(findUnknownConcept(input)).toEqual({ concept, suggestions: [] });
+      expect(resolveConceptTarget(input, 'us-gaap')).toEqual({
+        label: concept,
+        tagSelection: 'priority',
+        tags: [concept],
+        taxonomy: 'us-gaap',
+      });
+    },
+  );
+
+  it.each(['Constructor', 'CONSTRUCTOR'])(
+    'passes the tag-shaped %s as a raw tag, like any UpperCamelCase input (#45)',
+    (input) => {
+      expect(resolveConcept(input)).toBeUndefined();
+      expect(findUnknownConcept(input)).toBeUndefined();
+      expect(resolveConceptTarget(input, 'us-gaap').tags).toEqual([input]);
+    },
+  );
+});
+
+describe('aliases (#240)', () => {
+  it.each(ALIASES)('resolves %s to the %s mapping itself', (alias, name) => {
+    const mapping = resolveConcept(name);
+    expect(mapping).toBeDefined();
+    for (const form of [alias, alias.toUpperCase(), alias.replace(/_/g, ' '), ` ${alias}\t`]) {
+      expect(resolveConcept(form), JSON.stringify(form)).toBe(mapping);
+      expect(findUnknownConcept(form), JSON.stringify(form)).toBeUndefined();
+    }
+    expect(resolveConceptTarget(alias, 'us-gaap')).toEqual(resolveConceptTarget(name, 'us-gaap'));
+    expect(resolveConceptTarget(alias, 'ifrs-full')).toEqual(
+      resolveConceptTarget(name, 'ifrs-full'),
+    );
+  });
+
+  it('carries exactly these aliases, each on the entry it reads as', () => {
+    const listed = indexKeys().filter(({ key, name }) => key !== name);
+    expect(listed.map(({ key, name }) => [key, name]).sort()).toEqual(
+      [...ALIASES].map((a) => [...a]).sort(),
+    );
+  });
+
+  it('keys every alias like a catalog name, apart from every other key and every formula', () => {
+    const keys = indexKeys().map(({ key }) => key);
+    expect(new Set(keys).size).toBe(keys.length);
+    for (const { key, name } of indexKeys()) {
+      if (key === name) continue;
+      // Lowercase words joined by `_`: the form an input takes once keyed, and
+      // never an element name, which has no `_`.
+      expect(key).toMatch(/^[a-z]+(?:_[a-z]+)+$/);
+      expect(DERIVATION_KEYS).not.toContain(key);
+    }
+    for (const key of DERIVATION_KEYS) {
+      expect(findUnknownConcept(key)?.derivation, key).toBeDefined();
+    }
+  });
+
+  it('gives every input one reading, whether read as typed or split at its humps', () => {
+    /**
+     * A lowercase-initial input is looked up as typed, then split at its humps
+     * (`operatingIncome` → `operating_income`); the two keys differ only in
+     * underscores. So index keys and formula keys that match once their
+     * underscores are dropped would give one input two readings.
+     */
+    const readings = new Map<string, Set<string>>();
+    const add = (key: string, reading: string) => {
+      const bare = key.replace(/_/g, '');
+      readings.set(bare, (readings.get(bare) ?? new Set<string>()).add(reading));
+    };
+    for (const { key, name } of indexKeys()) add(key, name);
+    for (const key of DERIVATION_KEYS) add(key, `formula ${key}`);
+    for (const [bare, names] of readings) expect([...names], bare).toHaveLength(1);
+  });
+
+  it('finds every catalog name and alias through secedgar_search_concepts', () => {
+    for (const { key, name } of indexKeys()) {
+      expect(
+        searchConcepts(key).map((entry) => entry.name),
+        key,
+      ).toContain(name);
+    }
+  });
+
+  it('keeps the catalog at 36 concepts: an alias is a spelling, not an entry', () => {
+    expect(listConcepts()).toHaveLength(36);
+    expect(searchConcepts('')).toHaveLength(36);
+  });
+});
+
+describe('camelCase input (#240)', () => {
+  it.each([
+    ['operatingIncome', 'operating_income'],
+    ['epsDiluted', 'eps_diluted'],
+    ['stockBasedCompensation', 'stock_based_compensation'],
+    ['capitalExpenditures', 'capex'],
+    ['cashAndCashEquivalents', 'cash'],
+    ['preTaxIncome', 'pretax_income'],
+    [' netIncome ', 'net_income'],
+  ])('reads %j as %s', (input, name) => {
+    expect(resolveConcept(name)).toBeDefined();
+    expect(resolveConcept(input)).toBe(resolveConcept(name));
+    expect(findUnknownConcept(input)).toBeUndefined();
+  });
+
+  it.each([
+    ['freeCashFlow', 'operating_cash_flow − capex'],
+    ['workingCapital', 'current_assets − current_liabilities'],
+  ])('answers %s with its formula', (input, formula) => {
+    expect(findUnknownConcept(input)).toEqual({
+      concept: input,
+      derivation: formula,
+      suggestions: [],
+    });
+  });
+
+  it('scores a camelCase miss on its split form', () => {
+    expect(findUnknownConcept('netIncomeLoss')?.suggestions).toEqual([
+      'net_income',
+      'pretax_income',
+      'operating_income',
+    ]);
+  });
+});
+
+describe('the camelCase key — linear in the input’s length (#240)', () => {
+  const fill = (unit: string, chars: number) => unit.repeat(Math.ceil(chars / unit.length));
+
+  /**
+   * Thread CPU milliseconds one lookup takes, timed over a batch sized to hold
+   * the work near 320k characters per measurement, least of five: wall clock is
+   * noise under a parallel suite, and a 5k call alone is too short to time.
+   */
+  function perCallCpuMs(text: string): number {
+    const batch = Math.max(1, Math.round(320_000 / text.length));
+    let least = Number.POSITIVE_INFINITY;
+    for (let round = 0; round < 5; round++) {
+      const start = process.threadCpuUsage();
+      for (let i = 0; i < batch; i++) resolveConcept(text);
+      const used = process.threadCpuUsage(start);
+      least = Math.min(least, (used.user + used.system) / 1000 / batch);
+    }
+    return least;
+  }
+
+  /**
+   * Doubles n from 5,000 to 320,000, checking the CPU bound at each size before
+   * building the next, so a quadratic shape fails fast instead of hanging, then
+   * holds the 64× span's ratio under 256, where a quadratic scan reaches 4,096.
+   */
+  function expectLinear(build: (n: number) => string): void {
+    const small = build(5_000);
+    resolveConcept(small); // warm the JIT
+    const t5k = Math.max(perCallCpuMs(small), 0.001);
+    let last = t5k;
+    for (let n = 10_000; n <= 320_000; n *= 2) {
+      last = perCallCpuMs(build(n));
+      expect(last, `${n} characters`).toBeLessThan(100);
+    }
+    expect(last / t5k).toBeLessThan(256);
+  }
+
+  // Each shape opens lowercase, so the plain key misses and the split runs on all of it.
+  it.each([
+    ['a hump at every other character', (n: number) => fill('aB', n)],
+    ['a long digit run', (n: number) => `a${fill('1', n)}`],
+    ['one uppercase run', (n: number) => `a${fill('B', n)}`],
+    ['one long line ending in a break', (n: number) => `a${fill('§1 x', n)}\ny`],
+    ['breaks throughout', (n: number) => `a${fill('  \r\n', n)}B`],
+  ])('%s (5k → 320k)', (_label, build) => {
+    expectLinear(build);
   });
 });

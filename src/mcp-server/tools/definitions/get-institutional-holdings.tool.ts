@@ -10,14 +10,17 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError, validationError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
-import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
+import { datasetSchema } from '@/mcp-server/tools/dataset-schema.js';
 import { formatUsd } from '@/mcp-server/tools/format-usd.js';
 import {
   type LimitClampOptions,
   limitClamp,
   withLimitClamps,
 } from '@/mcp-server/tools/limit-clamp.js';
+import { resolvedAsField } from '@/mcp-server/tools/resolved-as.js';
+import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -25,6 +28,7 @@ import {
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+import { nonUsListingNote } from '@/services/edgar/listing-codes.js';
 import {
   type HoldingRow,
   parseInfoTableXml,
@@ -427,24 +431,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       recovery:
         'Use secedgar_get_filing with the accession number to inspect the filing documents directly.',
     },
-    {
-      reason: 'rate_limited',
-      code: JsonRpcErrorCode.RateLimited,
-      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
-      recovery:
-        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
-      retryable: true,
-      thrownBy: 'service',
-    },
-    {
-      reason: 'sec_unreachable',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
-      recovery:
-        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
-      retryable: true,
-      thrownBy: 'service',
-    },
+    ...SEC_UPSTREAM_ERRORS,
     {
       reason: 'efts_degraded_response',
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -564,16 +551,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       .describe(
         '`limit` rows from `offset`: positions by value when consolidate=true, else raw rows in application order.',
       ),
-    dataset: z
-      .object({
-        name: z
-          .string()
-          .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
-          ),
-        row_count: z.number().describe('Rows materialized in the dataframe.'),
-        expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
-      })
+    dataset: datasetSchema
       .optional()
       .describe(
         'Composed positions, shaped by consolidate; join on cusip + reporting_period. Absent without canvas or holdings.',
@@ -591,6 +569,11 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       .describe('True when the inline holdings[] was capped by limit.'),
     shown: z.number().optional().describe('Number of holdings shown inline.'),
     cap: z.number().optional().describe('The limit cap applied.'),
+    resolvedAs: resolvedAsField,
+  },
+
+  enrichmentTrailer: {
+    resolvedAs: { label: 'Resolved as' },
   },
 
   async handler(input, ctx) {
@@ -608,14 +591,19 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       Array.isArray(resolved) && resolved.length === 0
         ? await api.resolveEntityByName(input.company, callScope)
         : undefined;
-    const candidates: Array<{ cik: string; name: string | undefined; ticker: string | undefined }> =
-      entitySearch
-        ? entitySearch.matches.map((m) => ({ cik: m.cik, name: m.name, ticker: undefined }))
-        : (Array.isArray(resolved) ? resolved : [resolved]).map((m) => ({
-            cik: m.cik,
-            name: m.name,
-            ticker: m.ticker,
-          }));
+    const candidates: Array<{
+      cik: string;
+      name: string | undefined;
+      reading?: string | undefined;
+      ticker: string | undefined;
+    }> = entitySearch
+      ? entitySearch.matches.map((m) => ({ cik: m.cik, name: m.name, ticker: undefined }))
+      : (Array.isArray(resolved) ? resolved : [resolved]).map((m) => ({
+          cik: m.cik,
+          name: m.name,
+          reading: m.reading,
+          ticker: m.ticker,
+        }));
 
     // Several filers match this name (the ticker cache returned multiple, or EFTS
     // returned distinct entities sharing a legal name) — list them for disambiguation
@@ -635,8 +623,13 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     }
     const [match] = candidates;
     if (!match) {
-      throw ctx.fail('company_not_found', `Entity '${input.company}' not found.`);
+      const note = nonUsListingNote(input.company.trim());
+      throw ctx.fail(
+        'company_not_found',
+        `Entity '${input.company}' not found.${note ? ` ${note}` : ''}`,
+      );
     }
+    if (match.reading) ctx.enrich({ resolvedAs: match.reading });
 
     // Validate the requested quarter's format before any lookup (fail fast on bad input).
     let periodEnd: string | undefined;
@@ -1078,10 +1071,10 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       result.total_positions !== undefined
         ? `Showing ${result.holdings.length} of ${result.total_positions} positions (consolidated from ${result.total_holdings_composed} info-table rows)`
         : `Showing ${result.holdings.length} of ${result.total_holdings_composed} info-table rows`;
-    // Filer and issuer names and the class title render through escapeInline, so a
+    // Filer and issuer names and the class title render through escapeMarkdownInline, so a
     // CommonMark parse reads back the structuredContent value (#221).
     const lines: string[] = [
-      `**13F-HR Holdings** — ${escapeInline(result.filer_name)} (CIK ${result.filer_cik})`,
+      `**13F-HR Holdings** — ${escapeMarkdownInline(result.filer_name)} (CIK ${result.filer_cik})`,
       `Filed: ${result.filing_date}${period} | Accession: ${result.accession_number}`,
       countLine,
       `Composed from: ${result.composed_accessions.join(', ')} (${result.total_holdings_composed} rows; original 13F-HR: ${result.total_holdings_in_filing})`,
@@ -1114,10 +1107,10 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
           : 'shares N/A';
       const putCallStr = h.put_call ? ` [${h.put_call}]` : '';
       const cusipStr = h.cusip ? ` CUSIP ${h.cusip}` : '';
-      const classStr = h.title_of_class ? ` (${escapeInline(h.title_of_class)})` : '';
+      const classStr = h.title_of_class ? ` (${escapeMarkdownInline(h.title_of_class)})` : '';
       const discStr = h.investment_discretion ? ` | discretion: ${h.investment_discretion}` : '';
 
-      lines.push(`**${escapeInline(h.issuer_name)}**${classStr}${cusipStr}${putCallStr}`);
+      lines.push(`**${escapeMarkdownInline(h.issuer_name)}**${classStr}${cusipStr}${putCallStr}`);
       lines.push(
         `${sharesStr} | ${valueStr}${discStr} | source: ${h.source_accession_numbers.join(', ')}`,
       );

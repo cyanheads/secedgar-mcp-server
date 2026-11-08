@@ -10,14 +10,16 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
-import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
+import { datasetSchema } from '@/mcp-server/tools/dataset-schema.js';
 import {
   batchClamp,
   type LimitClampOptions,
   limitClamp,
   withLimitClamps,
 } from '@/mcp-server/tools/limit-clamp.js';
+import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -41,6 +43,7 @@ import {
 } from '@/services/edgar/concept-series.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { missingQuarterCaveats } from '@/services/edgar/fiscal-periods.js';
+import { nonUsListingNote } from '@/services/edgar/listing-codes.js';
 import type { CikMatch, CompanyFactsResponse, ConceptMapping } from '@/services/edgar/types.js';
 
 /** Full-year duration frame — `CY2024`. */
@@ -96,7 +99,7 @@ const conceptsBatch = batchClamp({
   cap: MAX_CONCEPTS,
   bound: LIST_BOUND,
   description:
-    'Concepts to compare — friendly names like "revenue" or "net_income" (discover them with secedgar_search_concepts) or raw XBRL tags.',
+    'Concepts to compare — friendly names like "revenue" or "net_income", in any spelling secedgar_get_financials accepts (discover them with secedgar_search_concepts), or raw XBRL tags.',
   overCap: `The first ${MAX_CONCEPTS} distinct concepts are compared, spellings of one concept counting once and an unrecognized name not at all; a longer list, up to ${LIST_BOUND}, returns each input naming a further concept unread in deferred_concepts.`,
 });
 
@@ -301,24 +304,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       when: 'Every requested concept is neither a supported friendly name nor shaped like an XBRL tag, so no request is sent',
       recovery: 'Use a friendly name from secedgar_search_concepts or a valid raw XBRL tag.',
     },
-    {
-      reason: 'rate_limited',
-      code: JsonRpcErrorCode.RateLimited,
-      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
-      recovery:
-        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
-      retryable: true,
-      thrownBy: 'service',
-    },
-    {
-      reason: 'sec_unreachable',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
-      recovery:
-        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
-      retryable: true,
-      thrownBy: 'service',
-    },
+    ...SEC_UPSTREAM_ERRORS,
   ],
 
   input: z.object({
@@ -474,18 +460,9 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     caveats: z
       .array(z.string())
       .describe(
-        "Comparability warnings (company ones prefixed with the name): missing quarters; a concept 2+ years behind the company's other lines; an instant with no fiscal-year-end value (annual); differing period ends or units; values only before the inline window; merged inputs.",
+        "Comparability warnings (company ones prefixed with the name): missing quarters; a concept 2+ years behind the company's other lines; an annual instant with no fiscal-year-end value; differing period ends or units; values only before the inline window; merged inputs; how a ticker was read.",
       ),
-    dataset: z
-      .object({
-        name: z
-          .string()
-          .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
-          ),
-        row_count: z.number().describe('Rows materialized in the dataframe.'),
-        expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
-      })
+    dataset: datasetSchema
       .optional()
       .describe(
         'Dataframe of the full aligned series, every period, with cells[] columns. Absent when canvas is unavailable.',
@@ -573,14 +550,17 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       reason: 'not_found' | 'ambiguous' | 'no_company_facts';
       message: string;
     }> = [];
+    /** One note per input a reading resolved, merged inputs included (#235). */
+    const readings: string[] = [];
 
     for (const supplied of companyInputs) {
       const resolved = await api.resolveCik(supplied, scope);
       if (Array.isArray(resolved) && resolved.length === 0) {
+        const note = nonUsListingNote(supplied.trim());
         failed.push({
           input: supplied,
           reason: 'not_found',
-          message: `'${supplied}' did not resolve to a CIK. Use a ticker symbol or 10-digit CIK.`,
+          message: `'${supplied}' did not resolve to a CIK. Use a ticker symbol or 10-digit CIK.${note ? ` ${note}` : ''}`,
         });
         continue;
       }
@@ -596,6 +576,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       }
       const match = Array.isArray(resolved) ? resolved[0] : resolved;
       if (!match) continue;
+      if (match.reading) readings.push(match.reading);
       const earlier = resolvedCompanies.find((c) => c.cik === match.cik);
       if (!earlier) resolvedCompanies.push({ ...match, input: supplied, merged: [] });
       else if (supplied !== earlier.input && !earlier.merged.includes(supplied)) {
@@ -627,6 +608,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     const caveatSet = new Set<string>();
     /** Company-concept pairs an annual matrix left empty for holding only off-year-end snapshots. */
     const offYearEndPairs: string[] = [];
+    for (const reading of readings) caveatSet.add(reading);
     for (const { input: first, merged } of resolvedCompanies) {
       if (merged.length === 0) continue;
       const one = merged.length === 1;
@@ -642,8 +624,24 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       );
     }
 
-    for (const company of resolvedCompanies) {
-      const facts = await api.tryGetCompanyFacts(company.cik, scope);
+    /**
+     * Every company's facts read starts before any is awaited: the pacer spaces them, and a
+     * slow answer SEC still gives is never charged to the failure budget, so reads one after
+     * another could sum past the client's request timeout. They settle together, and a
+     * failure fails the call as the first in input order once none is left running.
+     */
+    const reads = await Promise.allSettled(
+      resolvedCompanies.map(async (company) => ({
+        company,
+        facts: await api.tryGetCompanyFacts(company.cik, scope),
+      })),
+    );
+    const companyFacts = reads.map((read) => {
+      if (read.status === 'rejected') throw read.reason;
+      return read.value;
+    });
+
+    for (const { company, facts } of companyFacts) {
       const name = company.name || company.input;
       if (!facts || Object.keys(facts.facts).length === 0) {
         failed.push({
@@ -984,21 +982,21 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
 
   format: (result) => {
     // SEC's names and the caller's inputs, failure messages, and caveats render through
-    // escapeInline here, so content[] reads back the structuredContent value (#221).
+    // escapeMarkdownInline here, so content[] reads back the structuredContent value (#221).
     const out = [
       `**Company comparison** — ${result.companies.length} companies x ${result.concepts.length} concepts (${result.taxonomy}, ${result.period_type})`,
       `Periods: ${result.periods.join(', ')}`,
-      `Companies: ${result.companies.map((c) => `${escapeInline(c.name)} [${escapeInline(c.input)} → CIK ${c.cik}${c.ticker ? `, ${c.ticker}` : ''}]`).join('; ')}`,
+      `Companies: ${result.companies.map((c) => `${escapeMarkdownInline(c.name)} [${escapeMarkdownInline(c.input)} → CIK ${c.cik}${c.ticker ? `, ${c.ticker}` : ''}]`).join('; ')}`,
     ];
 
     for (const failure of result.failed_companies) {
       out.push(
-        `Excluded: ${escapeInline(failure.input)} (${failure.reason}) — ${escapeInline(failure.message)}`,
+        `Excluded: ${escapeMarkdownInline(failure.input)} (${failure.reason}) — ${escapeMarkdownInline(failure.message)}`,
       );
     }
     if (result.deferred_companies) {
       out.push(
-        `Deferred companies (not read): ${quoted(result.deferred_companies.map(escapeInline))}`,
+        `Deferred companies (not read): ${quoted(result.deferred_companies.map(escapeMarkdownInline))}`,
       );
     }
 
@@ -1009,12 +1007,12 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     }
     for (const unknown of result.unknown_concepts) {
       out.push(
-        `Unknown concept: ${escapeInline(unknown.concept)} — not queried. ${unknownConceptHint(unknown)}`,
+        `Unknown concept: ${escapeMarkdownInline(unknown.concept)} — not queried. ${unknownConceptHint(unknown)}`,
       );
     }
     if (result.deferred_concepts) {
       out.push(
-        `Deferred concepts (not read): ${quoted(result.deferred_concepts.map(escapeInline))}`,
+        `Deferred concepts (not read): ${quoted(result.deferred_concepts.map(escapeMarkdownInline))}`,
       );
     }
 
@@ -1030,7 +1028,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
     out.push('', '### Values');
     for (const cell of ordered) {
       out.push(
-        `- ${cell.concept} | ${escapeInline(cell.company)} (CIK ${cell.cik}) | ${cell.period} = ${cell.value} ${cell.unit} | ${cell.taxonomy}:${cell.tag} | frame ${cell.frame} | ends ${cell.period_end} | ${cell.form} [${cell.accession_number}]`,
+        `- ${cell.concept} | ${escapeMarkdownInline(cell.company)} (CIK ${cell.cik}) | ${cell.period} = ${cell.value} ${cell.unit} | ${cell.taxonomy}:${cell.tag} | frame ${cell.frame} | ends ${cell.period_end} | ${cell.form} [${cell.accession_number}]`,
       );
     }
 
@@ -1038,7 +1036,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       out.push('', `### Not reported (${result.gaps.length})`);
       for (const gap of result.gaps) {
         out.push(
-          `- ${escapeInline(gap.company)} (CIK ${gap.cik}) reports no ${gap.concept} — tried: ${gap.tags_tried.join(', ')}`,
+          `- ${escapeMarkdownInline(gap.company)} (CIK ${gap.cik}) reports no ${gap.concept} — tried: ${gap.tags_tried.join(', ')}`,
         );
       }
     }
@@ -1050,7 +1048,7 @@ export const compareCompaniesTool = tool('secedgar_compare_companies', {
       );
     }
 
-    for (const caveat of result.caveats) out.push('', `Caveat: ${escapeInline(caveat)}`);
+    for (const caveat of result.caveats) out.push('', `Caveat: ${escapeMarkdownInline(caveat)}`);
 
     return [{ type: 'text', text: out.join('\n') }];
   },

@@ -5,7 +5,7 @@
 
 import { z } from '@cyanheads/mcp-ts-core';
 import { DUCKDB_ERROR_REASONS, SQL_GATE_REASONS } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -14,7 +14,8 @@ import {
 } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
 import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 
-vi.mock('@/services/canvas-bridge/canvas-bridge.js', () => ({
+vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/canvas-bridge/canvas-bridge.js')>()),
   getCanvasBridge: vi.fn(),
 }));
 
@@ -135,7 +136,7 @@ describe('dataframeQueryTool', () => {
     const entry = dataframeQueryTool.errors?.find((e) => e.reason === 'non_select_statement');
     expect(entry).toBeDefined();
     expect(entry!.code).toBe(JsonRpcErrorCode.ValidationError);
-    expect(entry!.recovery).toMatch(/secedgar_dataframe_describe/);
+    expect(entry!.recovery).toMatch(/read-only SELECT over the df_<id> tables/);
   });
 
   it('declares every framework canvas reason the query path reaches the client with', () => {
@@ -192,36 +193,26 @@ describe('dataframeQueryTool', () => {
     });
   });
 
-  it('non_select_statement from the bridge surfaces reason + recovery hint on the wire (#74)', async () => {
+  it('non_select_statement from the bridge reaches the wire with the gate’s hint, and no statementType (#74)', async () => {
     vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
-    // The bridge rewraps a genuine non-SELECT (e.g. DROP) with the declared recovery
-    // hint (#74); the handler passes it through untouched.
+    // What the bridge throws for mcp-ts-core 0.13.22's refusal of a DROP: the gate's
+    // message and hint, statementType dropped. The handler passes it through untouched.
+    const hint =
+      'Rewrite as a single SELECT — this surface is read-only and cannot create, alter, or drop tables.';
     mockBridge.query.mockRejectedValue(
-      Object.assign(
-        new Error(
-          'Canvas query must be SELECT; got DROP. Mutations must use registerTable, drop, or clear.',
-        ),
-        {
-          code: JsonRpcErrorCode.ValidationError,
-          data: {
-            reason: 'non_select_statement',
-            statementType: 'DROP',
-            recovery: {
-              hint: 'Query only SELECT statements against df_<id> tables. Use secedgar_dataframe_describe to inspect available dataframes.',
-            },
-          },
-        },
-      ),
-    );
-    const ctx = createMockContext({ errors: dataframeQueryTool.errors });
-    const input = dataframeQueryTool.input.parse({ sql: 'DROP TABLE df_ABCDE_12345' });
-
-    await expect(dataframeQueryTool.handler(input, ctx)).rejects.toMatchObject({
-      data: {
+      new McpError(JsonRpcErrorCode.ValidationError, 'Canvas query must be SELECT.', {
         reason: 'non_select_statement',
-        recovery: { hint: expect.stringContaining('secedgar_dataframe_describe') },
-      },
-    });
+        recovery: { hint },
+      }),
+    );
+
+    const result = await runToolContract(dataframeQueryTool, { sql: 'DROP TABLE df_ABCDE_12345' });
+
+    const error = wireError(result);
+    expect(error.data.reason).toBe('non_select_statement');
+    expect(error.data).not.toHaveProperty('statementType');
+    expect(bag(error.data.recovery).hint).toBe(hint);
+    expect(blockText(result.content)).toContain(hint);
   });
 
   it('register_as clash from the bridge surfaces reason + recovery hint on the wire (#60)', async () => {
@@ -858,8 +849,9 @@ describe('dataframeQueryTool', () => {
     );
   });
 
-  it('escapes each line of a cell through escapeInline, so a cut cell reads back as its value (mcp-ts-core#809)', async () => {
-    // The cut itself is tested at its own seam, tests/mcp-server/tools/escape-inline.test.ts.
+  it('reads back a cell holding a long whitespace run before a block marker as its value', async () => {
+    // A run mid-line stays literal, and a marker after it is mid-line text, never a block opener;
+    // the escaper's own read-back cases are in tests/mcp-server/tools/markdown-escaping.test.ts.
     const run = ' '.repeat(40);
     const text = await expectTableReadsBack(
       ['v', 'w'],
@@ -869,8 +861,8 @@ describe('dataframeQueryTool', () => {
       ],
     );
 
-    expect(text).toContain(`| a${'&#32;'.repeat(40)}\\# b | x |`);
-    expect(text).toContain(`| line<br>b${'&#32;'.repeat(40)}\\> c | y |`);
+    expect(text).toContain(`| a${run}# b | x |`);
+    expect(text).toContain(`| line<br>b${run}> c | y |`);
   });
 
   it('formats empty results with no-rows message', () => {

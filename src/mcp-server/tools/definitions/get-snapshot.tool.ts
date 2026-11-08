@@ -9,8 +9,10 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
-import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
+import { resolvedAsField } from '@/mcp-server/tools/resolved-as.js';
+import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import { listConcepts, resolveConceptTarget } from '@/services/edgar/concept-map.js';
 import {
@@ -21,6 +23,7 @@ import {
 } from '@/services/edgar/concept-series.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { missingQuarterCaveats } from '@/services/edgar/fiscal-periods.js';
+import { nonUsListingNote } from '@/services/edgar/listing-codes.js';
 
 /** Full-year duration frame — `CY2024`. */
 const ANNUAL = /^CY\d{4}$/;
@@ -32,13 +35,11 @@ const INSTANT = /^CY\d{4}Q[1-4]I$/;
 /** One reported value, trimmed to what a profile line needs. */
 const pointSchema = z
   .object({
-    period: z.string().describe('Calendar period label (e.g. "CY2024", "CY2025Q2", "CY2025Q2I").'),
+    period: z.string().describe('Calendar period label, in the form the parent field names.'),
     value: z.number().describe("Reported value, in the line's unit."),
     period_end: z.string().describe('Period end date (YYYY-MM-DD).'),
     form: z.string().describe('Source filing type (10-K, 10-Q, 20-F).'),
-    accession_number: z
-      .string()
-      .describe('Source filing accession number for secedgar_get_filing.'),
+    accession_number: z.string().describe('Accession number for secedgar_get_filing.'),
     tag: z.string().describe("XBRL tag behind this value; can differ from the line's tag."),
   })
   .describe('One reported value with its period, source filing, and source tag.');
@@ -63,6 +64,14 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
     'Build a company financial profile in one call: the latest value of every supported XBRL concept, grouped by statement. Reads the filer\'s complete companyfacts payload once rather than one request per concept, so it replaces a run of secedgar_get_financials calls when the question is "what do this company\'s financials look like right now". Values use the same frame dedup and tag priority as secedgar_get_financials, so the two agree for any concept they both cover. Duration concepts (income statement, cash flow, per-share) report their latest full year and latest single quarter; balance-sheet and entity-info concepts report their latest point-in-time value, since that is the only form they are filed in. A concept the filer does not report is listed under gaps with the XBRL tags that were tried — never zero-filled or interpolated. Use secedgar_get_financials for a full time series of one concept, and secedgar_compare_companies to put several companies side by side.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
+  enrichment: {
+    resolvedAs: resolvedAsField,
+  },
+
+  enrichmentTrailer: {
+    resolvedAs: { label: 'Resolved as' },
+  },
+
   errors: [
     {
       reason: 'company_not_found',
@@ -83,24 +92,7 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
       recovery:
         'Check the filer files XBRL financial statements, or read the filings directly with secedgar_search_filings.',
     },
-    {
-      reason: 'rate_limited',
-      code: JsonRpcErrorCode.RateLimited,
-      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
-      recovery:
-        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
-      retryable: true,
-      thrownBy: 'service',
-    },
-    {
-      reason: 'sec_unreachable',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
-      recovery:
-        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
-      retryable: true,
-      thrownBy: 'service',
-    },
+    ...SEC_UPSTREAM_ERRORS,
   ],
 
   input: z.object({
@@ -175,7 +167,7 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
     caveats: z
       .array(z.string())
       .describe(
-        "Completeness warnings, else empty: quarters missing from every recent year (SEC reports fiscal Q4 only within the 10-K), and, prefixed with the concept name, lines stopping 2+ years behind the filer's newest period.",
+        "Completeness warnings, else empty: quarters missing every recent year (fiscal Q4 appears only in the 10-K) and, prefixed with the concept name, lines stopping 2+ years behind the filer's newest period.",
       ),
   }),
 
@@ -184,8 +176,13 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
     const scope = new CallScope(ctx.signal);
 
     const resolved = await api.resolveCik(input.company, scope);
-    if (Array.isArray(resolved) && resolved.length === 0) {
-      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
+    const match = Array.isArray(resolved) ? resolved[0] : resolved;
+    if (!match) {
+      const note = nonUsListingNote(input.company.trim());
+      throw ctx.fail(
+        'company_not_found',
+        `Company '${input.company}' not found.${note ? ` ${note}` : ''}`,
+      );
     }
     if (Array.isArray(resolved) && resolved.length > 1) {
       const { list, showing, data } = ambiguousMatches(resolved);
@@ -195,10 +192,7 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
         data,
       );
     }
-    const match = Array.isArray(resolved) ? resolved[0] : resolved;
-    if (!match) {
-      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
-    }
+    if (match.reading) ctx.enrich({ resolvedAs: match.reading });
 
     const facts = await api.tryGetCompanyFacts(match.cik, scope);
     if (!facts || Object.keys(facts.facts).length === 0) {
@@ -334,11 +328,11 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
 
   format: (result) => {
     // SEC's entity name, each line's label (SEC's companyfacts label when it serves one),
-    // and each caveat with the SEC label it can quote render through escapeInline
+    // and each caveat with the SEC label it can quote render through escapeMarkdownInline
     // here rather than where the caveat is composed, so content[] reads back the
     // structuredContent value and structuredContent keeps the label as SEC serves it (#221).
     const out = [
-      `**Financial snapshot** — ${escapeInline(result.company)} (CIK ${result.cik}, ${result.taxonomy}, periods: ${result.period_type})`,
+      `**Financial snapshot** — ${escapeMarkdownInline(result.company)} (CIK ${result.cik}, ${result.taxonomy}, periods: ${result.period_type})`,
       `${result.concepts_resolved} of ${result.concepts_total} concepts resolved`,
     ];
 
@@ -355,7 +349,7 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
         out.push('', `### ${group}`);
       }
       out.push(
-        `- ${escapeInline(line.label)} [${line.concept} → ${line.taxonomy}:${line.tag}, ${line.unit}]`,
+        `- ${escapeMarkdownInline(line.label)} [${line.concept} → ${line.taxonomy}:${line.tag}, ${line.unit}]`,
       );
       if (line.annual) out.push(point('annual', line.annual, line.tag));
       if (line.quarterly) out.push(point('quarterly', line.quarterly, line.tag));
@@ -371,7 +365,7 @@ export const getSnapshotTool = tool('secedgar_get_snapshot', {
       }
     }
 
-    for (const caveat of result.caveats) out.push('', `Caveat: ${escapeInline(caveat)}`);
+    for (const caveat of result.caveats) out.push('', `Caveat: ${escapeMarkdownInline(caveat)}`);
 
     return [{ type: 'text', text: out.join('\n') }];
   },

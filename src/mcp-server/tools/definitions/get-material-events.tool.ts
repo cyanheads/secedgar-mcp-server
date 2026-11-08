@@ -7,13 +7,16 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
-import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
+import { datasetSchema } from '@/mcp-server/tools/dataset-schema.js';
 import {
   type LimitClampOptions,
   limitClamp,
   withLimitClamps,
 } from '@/mcp-server/tools/limit-clamp.js';
+import { resolvedAsField } from '@/mcp-server/tools/resolved-as.js';
+import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -28,6 +31,7 @@ import {
   EIGHT_K_RENUMBERING_DATE,
   parseEightKItems,
 } from '@/services/edgar/eight-k-items.js';
+import { nonUsListingNote } from '@/services/edgar/listing-codes.js';
 import { SubmissionsArchiveWalk } from '@/services/edgar/submissions-archive.js';
 import type { FilingsRecent } from '@/services/edgar/types.js';
 
@@ -102,24 +106,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       when: 'The company input resolves to multiple entities and the target is ambiguous',
       recovery: 'Use a ticker symbol or 10-digit CIK from the matches list for an exact match.',
     },
-    {
-      reason: 'rate_limited',
-      code: JsonRpcErrorCode.RateLimited,
-      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
-      recovery:
-        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
-      retryable: true,
-      thrownBy: 'service',
-    },
-    {
-      reason: 'sec_unreachable',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
-      recovery:
-        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
-      retryable: true,
-      thrownBy: 'service',
-    },
+    ...SEC_UPSTREAM_ERRORS,
   ],
 
   input: z.object({
@@ -198,7 +185,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       .string()
       .optional()
       .describe(
-        'Oldest filing date the scan reached (YYYY-MM-DD); nothing older was examined. The scan reads the recent window (last year or 1,000 filings), then up to 10 archive pages: those a date filter overlaps, or, undated, until limit filings pass the items filter. Absent when nothing was scanned.',
+        'Oldest filing date the scan examined (YYYY-MM-DD). It reads the recent window (last year or 1,000 filings), then up to 10 archive pages a date filter overlaps or, undated, until limit filings pass the items filter. Absent when nothing was scanned.',
       ),
     filings: z
       .array(
@@ -252,19 +239,12 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
           .describe('One 8-K filing.'),
       )
       .describe('Matching filings, newest first, capped at limit.'),
-    dataset: z
-      .object({
-        name: z
-          .string()
-          .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
-          ),
-        row_count: z.number().describe('Rows materialized in the dataframe.'),
-        expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
+    dataset: datasetSchema
+      .extend({
         truncated: z
           .boolean()
           .describe(
-            'True when archive pages in range went unread (the 10-page cap, or an undated call that stopped once limit was filled, possibly before any archive page), so older matches may exist. Pass filed_after / filed_before to reach them.',
+            'True when archive pages in range went unread (the page cap, or an undated scan stopping at limit), so older matches may exist; pass filed_after / filed_before to reach them.',
           ),
       })
       .optional()
@@ -278,11 +258,16 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       .string()
       .optional()
       .describe(
-        'Why nothing matched (an empty date window, or an items filter that excluded everything), and, when fewer than limit matched while the page cap left pages unread, how far the scan reached and the window that goes further.',
+        'Why nothing matched (an empty date window, or an items filter that excluded everything), and, when the page cap left pages unread short of limit, how far the scan reached and a window going further.',
       ),
     truncated: z.boolean().optional().describe('True when the inline filings list was capped.'),
     shown: z.number().optional().describe('Number of filings shown inline.'),
     cap: z.number().optional().describe('The limit cap applied.'),
+    resolvedAs: resolvedAsField,
+  },
+
+  enrichmentTrailer: {
+    resolvedAs: { label: 'Resolved as' },
   },
 
   async handler(input, ctx) {
@@ -297,9 +282,10 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
           suggestions.length > 0
             ? ` Near matches: ${suggestions.map((s) => `${s.name ?? s.cik}${s.ticker ? ` (${s.ticker})` : ''}`).join(', ')}.`
             : '';
+        const listingNote = nonUsListingNote(input.company.trim());
         throw ctx.fail(
           'no_match',
-          `No company found for '${input.company}'.${suggestionNote}`,
+          `No company found for '${input.company}'.${suggestionNote}${listingNote ? ` ${listingNote}` : ''}`,
           suggestions.length > 0 ? { suggestions } : {},
         );
       }
@@ -317,6 +303,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
     if (!match) {
       throw ctx.fail('no_match', `No company found for '${input.company}'.`);
     }
+    if (match.reading) ctx.enrich({ resolvedAs: match.reading });
 
     // A numeric query that missed the ticker cache resolves to a bare CIK; only
     // that shape converts a submissions 404 into a no-match. A cache-hit match
@@ -444,7 +431,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       // Cut short by the cap, the empty result covers only the span scanned, and a
       // wider range would reach nothing further — the depth sentence names the lever.
       // The notice is authored Markdown, so SEC's entity name inside it is escaped.
-      const name = escapeInline(submissions.name);
+      const name = escapeMarkdownInline(submissions.name);
       ctx.enrich.notice(
         depthNote
           ? `${name} filed no 8-K ${windowText}${hasDateFilter ? ' as far back as the scan reached' : ''}.${depthNote} List every form type with secedgar_company_search.`
@@ -492,16 +479,16 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
     const filterText = result.items_filter?.length
       ? ` | items [${result.items_filter.join(', ')}]`
       : '';
-    // SEC's entity name and filing descriptions render through escapeInline, so
+    // SEC's entity name and filing descriptions render through escapeMarkdownInline, so
     // content[] reads back the structuredContent value as text (#221).
     const lines = [
-      `**8-K material events** — ${escapeInline(result.company_name)} (CIK ${result.cik})${filterText}`,
+      `**8-K material events** — ${escapeMarkdownInline(result.company_name)} (CIK ${result.cik})${filterText}`,
       `${result.total_matched} matching of ${result.total_8k_scanned} 8-K filings scanned; showing ${result.filings.length}`,
     ];
 
     for (const f of result.filings) {
       const reported = f.report_date ? ` (event: ${f.report_date})` : '';
-      const desc = f.description ? ` — ${escapeInline(f.description)}` : '';
+      const desc = f.description ? ` — ${escapeMarkdownInline(f.description)}` : '';
       const doc = f.primary_document ? ` — ${f.primary_document}` : '';
       lines.push('');
       lines.push(`**${f.form} ${f.filing_date}**${reported}${desc}${doc} [${f.accession_number}]`);

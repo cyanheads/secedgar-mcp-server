@@ -6,9 +6,12 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
-import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
+import { datasetSchema } from '@/mcp-server/tools/dataset-schema.js';
 import { formatUsd, groupedDigits } from '@/mcp-server/tools/format-usd.js';
+import { resolvedAsField } from '@/mcp-server/tools/resolved-as.js';
+import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -35,6 +38,7 @@ import {
 } from '@/services/edgar/concept-series.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
 import { missingQuarterCaveats } from '@/services/edgar/fiscal-periods.js';
+import { nonUsListingNote } from '@/services/edgar/listing-codes.js';
 import type {
   CompanyConceptUnit,
   CompanyFactsConcept,
@@ -118,6 +122,11 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     truncated: z.boolean().optional().describe('True when the inline data[] was capped by limit.'),
     shown: z.number().optional().describe('Number of periods shown inline.'),
     cap: z.number().optional().describe('The limit cap applied.'),
+    resolvedAs: resolvedAsField,
+  },
+
+  enrichmentTrailer: {
+    resolvedAs: { label: 'Resolved as' },
   },
 
   errors: [
@@ -164,24 +173,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       when: 'The unit input names a unit the resolved concept is not reported in for this company',
       recovery: 'Pass one of the units the error lists, or omit unit to read the default series.',
     },
-    {
-      reason: 'rate_limited',
-      code: JsonRpcErrorCode.RateLimited,
-      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
-      recovery:
-        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
-      retryable: true,
-      thrownBy: 'service',
-    },
-    {
-      reason: 'sec_unreachable',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
-      recovery:
-        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
-      retryable: true,
-      thrownBy: 'service',
-    },
+    ...SEC_UPSTREAM_ERRORS,
   ],
 
   input: z.object({
@@ -193,7 +185,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       .string()
       .min(1)
       .describe(
-        'Financial concept — friendly name (e.g., "revenue", "net_income", "assets", "eps_diluted") or raw XBRL tag (e.g., "AccountsPayableCurrent"). Friendly names auto-resolve to the correct XBRL tags and handle historical tag changes.',
+        'Financial concept — friendly name (e.g., "revenue", "net_income", "assets", "eps_diluted") or raw XBRL tag (e.g., "AccountsPayableCurrent"). Friendly names auto-resolve to the correct XBRL tags and handle historical tag changes. A friendly name matches in any case or separator form, in lowerCamelCase ("operatingIncome"), or spelled from its label ("capital_expenditures" for capex); UpperCamelCase input is always a raw tag.',
       ),
     taxonomy: z
       .enum(TAXONOMIES)
@@ -241,7 +233,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     unit: z
       .string()
       .describe(
-        'Unit of every value in data (e.g., "USD", "USD/shares"): the unit input when given (an unreported one fails with no_unit_data), else the newest value\'s unit, then the unit with more periods. A series never mixes units.',
+        'Unit of every value in data (e.g., "USD", "USD/shares"): the unit input (an unreported one fails with no_unit_data), else the newest value\'s unit, then the one with more periods.',
       ),
     data: z
       .array(
@@ -286,16 +278,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       .array(z.string())
       .optional()
       .describe('XBRL tags attempted, when a friendly name maps to several.'),
-    dataset: z
-      .object({
-        name: z
-          .string()
-          .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
-          ),
-        row_count: z.number().describe('Rows materialized in the dataframe.'),
-        expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
-      })
+    dataset: datasetSchema
       .optional()
       .describe(
         'Dataframe of the same series; fiscal keys are source_filing_fy/source_filing_fp, so order by period_end. Absent when canvas is unavailable.',
@@ -304,7 +287,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       .array(z.string())
       .optional()
       .describe(
-        'Completeness warnings, absent when none apply: other units the concept is reported in, with period counts and spans (pass unit to read one); quarters missing from every recent year (SEC reports fiscal Q4 only within the 10-K); a series ending well short of today (a retired or dropped tag).',
+        'Completeness warnings, absent when none apply: other units reported, with period counts and spans (pass unit to read one); quarters missing every recent year (fiscal Q4 appears only in the 10-K); a series ending well before today (a retired or dropped tag).',
       ),
   }),
 
@@ -330,8 +313,13 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
 
     // Resolve company to CIK
     const resolved = await api.resolveCik(input.company, scope);
-    if (Array.isArray(resolved) && resolved.length === 0) {
-      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
+    const match = Array.isArray(resolved) ? resolved[0] : resolved;
+    if (!match) {
+      const note = nonUsListingNote(input.company.trim());
+      throw ctx.fail(
+        'company_not_found',
+        `Company '${input.company}' not found.${note ? ` ${note}` : ''}`,
+      );
     }
     if (Array.isArray(resolved) && resolved.length > 1) {
       const { list, showing, data } = ambiguousMatches(resolved);
@@ -341,10 +329,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
         data,
       );
     }
-    const match = Array.isArray(resolved) ? resolved[0] : resolved;
-    if (!match) {
-      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
-    }
+    if (match.reading) ctx.enrich({ resolvedAs: match.reading });
 
     // Resolve concept to taxonomy + XBRL tag(s). The mapping's own taxonomy wins
     // over the `us-gaap` default (e.g. `dei` for shares_outstanding); ifrs-full
@@ -357,8 +342,8 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     // Default to "annual" for unset period_type; post-fetch fallback handles instant concepts (#48).
     const effectivePeriodType = input.period_type ?? 'annual';
 
-    // Try each tag until we get data. `tryGetCompanyConcept` returns null for 404
-    // (tag not reported by this company); other errors propagate.
+    // Read every tag. `tryGetCompanyConcept` returns null for 404 (tag not reported
+    // by this company); other errors fail the call.
     /** Taxonomy metadata of every tag that carried values, keyed by tag. */
     const responses = new Map<string, { label: string; description: string | undefined }>();
     const tagsTried: string[] = [];
@@ -388,9 +373,23 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
      */
     const servedEmpty: Array<{ tag: string; tagIndex: number }> = [];
 
+    /**
+     * Every tag's companyconcept read starts before any is awaited: the pacer spaces them,
+     * and a slow answer SEC still gives is never charged to the failure budget, so reads
+     * one after another could sum past the client's request timeout. They settle together,
+     * and a failure fails the call as the first in tag order once none is left running.
+     */
+    const conceptReads = (
+      await Promise.allSettled(
+        tags.map((tag) => api.tryGetCompanyConcept(match.cik, taxonomy, tag, scope)),
+      )
+    ).map((read) => {
+      if (read.status === 'rejected') throw read.reason;
+      return read.value;
+    });
     for (const [tagIndex, tag] of tags.entries()) {
       tagsTried.push(tag);
-      const resp = await api.tryGetCompanyConcept(match.cik, taxonomy, tag, scope);
+      const resp = conceptReads[tagIndex];
       if (!resp) continue;
       if (Object.keys(resp.units).length === 0) {
         servedEmpty.push({ tag, tagIndex });
@@ -787,15 +786,15 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
   format: (result) => {
     /**
      * The SEC label and description, the company name, and the caveats — which quote the SEC
-     * label as served — render through escapeInline, so a CommonMark parse reads back
+     * label as served — render through escapeMarkdownInline, so a CommonMark parse reads back
      * the structuredContent value (#221). Escaping here, not where a caveat is composed, keeps
      * structuredContent free of escapes.
      */
     const lines = [
-      `**${escapeInline(result.label)}** — ${escapeInline(result.company)} (CIK ${result.cik}, ${result.unit})`,
+      `**${escapeMarkdownInline(result.label)}** — ${escapeMarkdownInline(result.company)} (CIK ${result.cik}, ${result.unit})`,
     ];
     lines.push(`XBRL tag: ${result.concept}`);
-    if (result.description) lines.push(escapeInline(result.description));
+    if (result.description) lines.push(escapeMarkdownInline(result.description));
     if (result.tags_tried?.length) {
       lines.push(`Tags tried: ${result.tags_tried.join(', ')}`);
     }
@@ -828,7 +827,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
       );
     }
     for (const caveat of result.caveats ?? []) {
-      lines.push(`\nCaveat: ${escapeInline(caveat)}`);
+      lines.push(`\nCaveat: ${escapeMarkdownInline(caveat)}`);
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

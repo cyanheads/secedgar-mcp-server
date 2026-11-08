@@ -162,7 +162,8 @@ export class EdgarMirror {
    * Stricter readiness for the cross-company frames AGGREGATION. `getFrames`
    * scans every row for a (taxonomy, tag), so a partial or mid-sync store yields
    * a plausible-but-incomplete frame with no detectable "miss" to trigger a live
-   * fallback — unlike a point lookup, where a missing key falls through cleanly.
+   * fallback — unlike a point lookup, which reads live for a filer the store does
+   * not hold (`holdsFiler`).
    * Keys off `status === 'complete'` (read fresh, never memoized): false while a
    * sync is in progress or after a failed one, so frames fall back to live until
    * the layer is fully synced again. Contrast `companyFactsReady()` — the durable
@@ -170,6 +171,27 @@ export class EdgarMirror {
    */
   async companyFactsComplete(): Promise<boolean> {
     return (await this.companyFacts.status()).status === 'complete';
+  }
+
+  /**
+   * The company-facts layer's checkpoint: the `Last-Modified` of the `companyfacts.zip`
+   * its last completed sync ingested, as ISO 8601 — when SEC compiled the facts the
+   * store holds. `undefined` before any sync completes. Read fresh, so a refresh that
+   * lands moves it (#234).
+   */
+  async companyFactsCheckpoint(): Promise<string | undefined> {
+    return (await this.companyFacts.status()).checkpoint;
+  }
+
+  /** True when the store holds any row for the filer — one lookup through the `cik` index (#234). */
+  async holdsFiler(cik: string): Promise<boolean> {
+    const handle = await this.companyFacts.raw();
+    const row = handle
+      .prepare<{ held: number }>(
+        `SELECT 1 AS held FROM ${COMPANY_CONCEPTS_TABLE} WHERE cik = ? LIMIT 1`,
+      )
+      .get(cik.padStart(10, '0'));
+    return row !== undefined;
   }
 
   /** All ticker rows, for rebuilding the in-memory CIK index. Assumes the layer is ready. */

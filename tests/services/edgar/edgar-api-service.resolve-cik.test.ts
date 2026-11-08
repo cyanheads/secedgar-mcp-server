@@ -5,8 +5,8 @@
  * #107), resolution within the best tier — a suffix-dropped exact match, and former names
  * that tie current ones but never outrank them (#155) — the comma, period, and apostrophe
  * fold (#210), whitespace runs and spaced initials (#219), word boundaries on the prefix and
- * substring tiers (#218), and the catch-all ticker fallback (including the dotted
- * share-class retry, #110). The registry fixture mirrors live
+ * substring tiers (#218), the listed-symbol lookup (including the dotted share-class
+ * retry, #110), and the ticker-spelling readings and non-US exchange codes (#235). The registry fixture mirrors live
  * `company_tickers.json` rows verbatim, and the former names are the committed asset —
  * the suffix and share-class shapes these behaviors turn on only exist in real titles.
  * @module tests/services/edgar/edgar-api-service.resolve-cik
@@ -115,6 +115,54 @@ const REGISTRY: Array<{ cik_str: number; ticker: string; title: string }> = [
   { cik_str: 1026655, ticker: 'CMT', title: 'CORE MOLDING TECHNOLOGIES INC' },
   { cik_str: 1853599, ticker: 'CCOOF', title: 'CORE SILVER CORP.' },
   { cik_str: 1649009, ticker: 'CHAI', title: 'Core AI Holdings, Inc.' },
+  // Ticker spellings vendors write that the file does not list (#235), from the 2026-11-08 file:
+  // symbols a venue code follows, the classes a run-together spelling names, roots listed only
+  // as hyphenated classes, the registrants the period fold reached instead, and the names an
+  // uppercase-only reading must leave to the name passes.
+  { cik_str: 1334933, ticker: 'UEC', title: 'URANIUM ENERGY CORP' },
+  { cik_str: 766011, ticker: 'CMCL', title: 'Caledonia Mining Corp Plc' },
+  { cik_str: 1406234, ticker: 'BIP', title: 'Brookfield Infrastructure Partners L.P.' },
+  { cik_str: 1406234, ticker: 'BIP-PA', title: 'Brookfield Infrastructure Partners L.P.' },
+  { cik_str: 886982, ticker: 'GS', title: 'GOLDMAN SACHS GROUP INC' },
+  { cik_str: 1131399, ticker: 'GSK', title: 'GSK plc' },
+  { cik_str: 311337, ticker: 'SU', title: 'SUNCOR ENERGY INC' },
+  { cik_str: 831001, ticker: 'C', title: 'CITIGROUP INC' },
+  { cik_str: 19617, ticker: 'JPM', title: 'JPMORGAN CHASE & CO' },
+  { cik_str: 19617, ticker: 'JPM-PK', title: 'JPMORGAN CHASE & CO' },
+  { cik_str: 895421, ticker: 'MS', title: 'MORGAN STANLEY' },
+  { cik_str: 895421, ticker: 'MS-PA', title: 'MORGAN STANLEY' },
+  { cik_str: 759944, ticker: 'CFG', title: 'CITIZENS FINANCIAL GROUP INC/RI' },
+  { cik_str: 759944, ticker: 'CFG-PH', title: 'CITIZENS FINANCIAL GROUP INC/RI' },
+  { cik_str: 1004980, ticker: 'PCG', title: 'PG&E Corp' },
+  { cik_str: 1004980, ticker: 'PCG-PE', title: 'PG&E Corp' },
+  { cik_str: 75488, ticker: 'PCG-PA', title: 'PACIFIC GAS & ELECTRIC Co' },
+  { cik_str: 1571776, ticker: 'CHMI', title: 'Cherry Hill Mortgage Investment Corp' },
+  { cik_str: 1571776, ticker: 'CHMI-PB', title: 'Cherry Hill Mortgage Investment Corp' },
+  { cik_str: 1281761, ticker: 'RF', title: 'REGIONS FINANCIAL CORP' },
+  { cik_str: 1281761, ticker: 'RF-PF', title: 'REGIONS FINANCIAL CORP' },
+  { cik_str: 9326, ticker: 'BCPC', title: 'BALCHEM CORP' },
+  { cik_str: 14930, ticker: 'BC', title: 'BRUNSWICK CORP' },
+  { cik_str: 14930, ticker: 'BC-PC', title: 'BRUNSWICK CORP' },
+  { cik_str: 1598655, ticker: 'GLOP-PA', title: 'GasLog Partners LP' },
+  { cik_str: 1598655, ticker: 'GLOP-PB', title: 'GasLog Partners LP' },
+  { cik_str: 1598655, ticker: 'GLOP-PC', title: 'GasLog Partners LP' },
+  { cik_str: 1660734, ticker: 'TRTN-PA', title: 'Triton International Ltd' },
+  { cik_str: 1660734, ticker: 'TRTN-PG', title: 'Triton International Ltd' },
+  { cik_str: 1660734, ticker: 'TRTN-PB', title: 'Triton International Ltd' },
+  { cik_str: 14693, ticker: 'BF-A', title: 'BROWN FORMAN CORP' },
+  { cik_str: 1039828, ticker: 'ANG-PD', title: 'American National Group Inc.' },
+  { cik_str: 1403528, ticker: 'OAK-PA', title: 'Brookfield Oaktree Holdings, LLC' },
+  { cik_str: 1403528, ticker: 'OAK-PB', title: 'Brookfield Oaktree Holdings, LLC' },
+  { cik_str: 1865200, ticker: 'ANGX', title: 'Angel Studios, Inc.' },
+  { cik_str: 1275187, ticker: 'ANGO', title: 'ANGIODYNAMICS INC' },
+  { cik_str: 1431567, ticker: 'OVLY', title: 'Oak Valley Bancorp' },
+  { cik_str: 1865429, ticker: 'OAKV', title: 'Oak View Bankshares, Inc.' },
+  { cik_str: 1167419, ticker: 'RIOT', title: 'Riot Platforms, Inc.' },
+  { cik_str: 1306965, ticker: 'SHEL', title: 'Shell plc' },
+  { cik_str: 756894, ticker: 'B', title: 'BARRICK MINING CORP' },
+  { cik_str: 313807, ticker: 'BP', title: 'BP PLC' },
+  { cik_str: 2031561, ticker: 'ALDF', title: 'Aldel Financial II Inc.' },
+  { cik_str: 2031561, ticker: 'ALDF.U', title: 'Aldel Financial II Inc.' },
 ];
 
 const jsonResponse = (body: unknown) =>
@@ -479,4 +527,144 @@ describe('EdgarApiService.resolveCik', () => {
       expect(await resolveCiks(query)).toEqual([cik]);
     },
   );
+
+  // --- What the #235 readings leave alone ---
+
+  it.each([
+    ['RIO', '0000863064', 'RIO'],
+    ['SHEL', '0001306965', 'SHEL'],
+    // Balchem's own symbol, though it spells Brunswick's BC-PC run together.
+    ['BCPC', '0000009326', 'BCPC'],
+    // The one dotted symbol the file lists, answered by the exact lookup.
+    ['ALDF.U', '0002031561', 'ALDF.U'],
+    // A trailing period carries no venue code, and lowercase input takes no reading.
+    ['B.P.', '0000313807', 'BP'],
+    ['b.p', '0000313807', 'BP'],
+  ])('resolves %s as it always has, with no reading (#235)', async (query, cik, ticker) => {
+    const match = await resolveOne(query);
+    expect(match.cik).toBe(cik);
+    expect(match.ticker).toBe(ticker);
+    expect(match).not.toHaveProperty('reading');
+  });
+
+  it.each([
+    ['BRK.A', 'BRK-A'],
+    ['JPM.PK', 'JPM-PK'],
+    // PA is also a venue code; the dotted-class lookup answers first.
+    ['MS.PA', 'MS-PA'],
+  ])(
+    'keeps the dotted-class answer for %s, with no reading (#110, #235)',
+    async (query, ticker) => {
+      const match = await resolveOne(query);
+      expect(match.ticker).toBe(ticker);
+      expect(match).not.toHaveProperty('reading');
+    },
+  );
+
+  it('keeps the name passes for a root typed in mixed or lower case (#235)', async () => {
+    // ANG and OAK are listed only as classes (ANG-PD, OAK-PA, OAK-PB); typed this way they are
+    // names: `Ang` starts a word of each title and former name listed, `oak` ends the first word
+    // of two titles.
+    expect(await resolveCiks('Ang')).toEqual([
+      '0001865200',
+      '0001275187',
+      '0001766478',
+      '0001705110',
+      '0001601485',
+      '0001973832',
+      '0001905688',
+    ]);
+    expect(await resolveCiks('oak')).toEqual(['0001431567', '0001865429']);
+  });
+
+  // --- Ticker spellings EDGAR does not list (#235) ---
+
+  it.each([
+    ['UEC.N', '0001334933', 'UEC', 'UEC.N read as UEC (URANIUM ENERGY CORP)'],
+    ['CMCL.N', '0000766011', 'CMCL', 'CMCL.N read as CMCL (Caledonia Mining Corp Plc)'],
+    // The rest is a dotted class, which the dotted-class lookup reads.
+    [
+      'BIP.PA.N',
+      '0001406234',
+      'BIP-PA',
+      'BIP.PA.N read as BIP-PA (Brookfield Infrastructure Partners L.P.)',
+    ],
+    ['BRK.B.N', '0001067983', 'BRK-B', 'BRK.B.N read as BRK-B (BERKSHIRE HATHAWAY INC)'],
+    // The period fold read these as GSK plc, Sunoco LP, and a list holding Citigroup.
+    ['GS.K', '0000886982', 'GS', 'GS.K read as GS (GOLDMAN SACHS GROUP INC)'],
+    ['SU.N', '0000311337', 'SU', 'SU.N read as SU (SUNCOR ENERGY INC)'],
+    ['C.N', '0000831001', 'C', 'C.N read as C (CITIGROUP INC)'],
+    // The accepted cost: P is a venue code, so B.P is Barrick's B, while B.P. and b.p stay BP.
+    ['B.P', '0000756894', 'B', 'B.P read as B (BARRICK MINING CORP)'],
+  ])(
+    'reads %s, a listed symbol and a US venue code, as the symbol (#235)',
+    async (query, cik, ticker, reading) => {
+      const match = await resolveOne(query);
+      expect(match).toMatchObject({ cik, ticker, reading });
+    },
+  );
+
+  it.each([
+    ['CFGPH', '0000759944', 'CFG-PH', 'CFGPH read as CFG-PH (CITIZENS FINANCIAL GROUP INC/RI)'],
+    ['PCGPRE', '0001004980', 'PCG-PE', 'PCGPRE read as PCG-PE (PG&E Corp)'],
+    [
+      'CHMIPRB',
+      '0001571776',
+      'CHMI-PB',
+      'CHMIPRB read as CHMI-PB (Cherry Hill Mortgage Investment Corp)',
+    ],
+    ['RFPF', '0001281761', 'RF-PF', 'RFPF read as RF-PF (REGIONS FINANCIAL CORP)'],
+  ])(
+    'reads %s, a preferred class run together, as the listed class (#235)',
+    async (query, cik, ticker, reading) => {
+      const match = await resolveOne(query);
+      expect(match).toMatchObject({ cik, ticker, reading });
+    },
+  );
+
+  it.each([
+    ['GLOP', '0001598655', 'GLOP read as GasLog Partners LP (GLOP-PA, GLOP-PB, GLOP-PC)'],
+    ['TRTN', '0001660734', 'TRTN read as Triton International Ltd (TRTN-PA, TRTN-PB, TRTN-PG)'],
+    ['BRK', '0001067983', 'BRK read as BERKSHIRE HATHAWAY INC (BRK-A, BRK-B)'],
+    // The substring tier read BF as the former name `bfi canada income fund`.
+    ['BF', '0000014693', 'BF read as BROWN FORMAN CORP (BF-A, BF-B)'],
+    // The substring tier listed seven companies for ANG.
+    ['ANG', '0001039828', 'ANG read as American National Group Inc. (ANG-PD)'],
+  ])(
+    'reads %s, a root listed only as classes, as their company (#235)',
+    async (query, cik, reading) => {
+      const match = await resolveOne(query);
+      expect(match).toMatchObject({ cik, reading });
+    },
+  );
+
+  it('answers a root with the company’s own preferred listing (#235)', async () => {
+    // Berkshire's rows list BRK-B first; the root reads as the company, not one class.
+    expect(await resolveOne('BRK')).toMatchObject({
+      ticker: 'BRK-B',
+      name: 'BERKSHIRE HATHAWAY INC',
+    });
+  });
+
+  it.each(['7203.T', 'VOD.L', 'ROSN.ME', 'RIO.T'])(
+    'answers %s, a non-US listing, with no match (#235)',
+    async (query) => {
+      // RIO.T reached Riot Platforms through the prefix tier; RIO itself still resolves.
+      expect(await getEdgarApiService().resolveCik(query, scope())).toEqual([]);
+    },
+  );
+
+  it.each(['uec.n', 'cfgph', 'glop'])(
+    'takes no reading for %s, which is not typed in uppercase (#235)',
+    async (query) => {
+      expect(await getEdgarApiService().resolveCik(query, scope())).toEqual([]);
+    },
+  );
+
+  it('leaves a venue spelling not typed in uppercase to the period fold (#235)', async () => {
+    // `gs.k` folds to `gsk`, GSK plc minus its suffix.
+    const match = await resolveOne('Gs.k');
+    expect(match.cik).toBe('0001131399');
+    expect(match).not.toHaveProperty('reading');
+  });
 });

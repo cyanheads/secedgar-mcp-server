@@ -6,15 +6,17 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { markdown } from '@cyanheads/mcp-ts-core/utils';
+import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
 import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
-import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
+import { datasetSchema } from '@/mcp-server/tools/dataset-schema.js';
 import { normalizeFormFilter } from '@/mcp-server/tools/form-filter.js';
 import {
   type LimitClampOptions,
   limitClamp,
   withLimitClamps,
 } from '@/mcp-server/tools/limit-clamp.js';
+import { resolvedAsField } from '@/mcp-server/tools/resolved-as.js';
+import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -22,6 +24,7 @@ import {
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, suggestCompanies } from '@/services/edgar/edgar-api-service.js';
+import { nonUsListingNote } from '@/services/edgar/listing-codes.js';
 import { SubmissionsArchiveWalk } from '@/services/edgar/submissions-archive.js';
 import type { FilingsRecent } from '@/services/edgar/types.js';
 
@@ -114,7 +117,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       .string()
       .optional()
       .describe(
-        'Guidance when no filings matched the forms filter, or when the inline list withheld some — naming the dataframe, a larger filing_limit, or a secedgar_search_filings call to page through the rest.',
+        'Guidance when no filings matched the forms filter, or when the inline list withheld some: the dataframe, a larger filing_limit, or a secedgar_search_filings call for the rest.',
       ),
     truncated: z
       .boolean()
@@ -122,6 +125,11 @@ export const companySearchTool = tool('secedgar_company_search', {
       .describe('True when more filings matched than the inline list holds.'),
     shown: z.number().optional().describe('Number of filings returned inline.'),
     cap: z.number().optional().describe('The inline limit applied: `filing_limit`, at most 50.'),
+    resolvedAs: resolvedAsField,
+  },
+
+  enrichmentTrailer: {
+    resolvedAs: { label: 'Resolved as' },
   },
 
   errors: [
@@ -138,24 +146,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       when: 'The company input resolves to multiple entities and the target is ambiguous',
       recovery: 'Use a ticker symbol or 10-digit CIK from the matches list for an exact match.',
     },
-    {
-      reason: 'rate_limited',
-      code: JsonRpcErrorCode.RateLimited,
-      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
-      recovery:
-        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
-      retryable: true,
-      thrownBy: 'service',
-    },
-    {
-      reason: 'sec_unreachable',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
-      recovery:
-        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
-      retryable: true,
-      thrownBy: 'service',
-    },
+    ...SEC_UPSTREAM_ERRORS,
   ],
 
   input: z.object({
@@ -164,7 +155,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       .trim()
       .min(1, 'Query cannot be blank')
       .describe(
-        'Company ticker symbol (e.g., "AAPL", "VOO"), name (e.g., "Apple"), or CIK number (e.g., "320193"). Ticker is the fastest lookup and works for equities, ETFs, and mutual funds; a multi-class share ticker resolves in either form ("BRK-B" or "BRK.B"). Name search matches current and former names, preferring a name the query matches exactly over one it only starts or appears in, and never matching from inside a word ("SY Bancorp" does not find "Embassy Bancorp"); an exact or starts-with match ignores commas, periods, apostrophes, extra spaces, and the spaces between single initials ("QXO Inc" finds "QXO, Inc."; "U.S. Bancorp" finds "US BANCORP"; "Macys" finds "Macy\'s, Inc."; "JM Smucker" finds "J M SMUCKER Co"). The corporate suffix (Inc, Corp, Co, Ltd, PLC, LLC, LP, N.V., S.A., AG, SE) can be left off ("Apple" finds "Apple Inc."; "Rio Tinto" lists both the Ltd and the PLC) or spelled out ("Beacon Financial Corporation" finds "Beacon Financial Corp"), but a suffix you include must match — Corp, Inc, Co, and Ltd stay distinct from each other, since separate registrants differ only by which one they use.',
+        'Company ticker symbol (e.g., "AAPL", "VOO"), name (e.g., "Apple"), or CIK number (e.g., "320193"). Ticker is the fastest lookup and works for equities, ETFs, and mutual funds; a multi-class share ticker resolves in either form ("BRK-B" or "BRK.B"), and an uppercase ticker also resolves as market-data feeds write it: venue-coded ("UEC.N"), a preferred class run together ("CFGPH"), or a class root ("GLOP"). Name search matches current and former names, preferring a name the query matches exactly over one it only starts or appears in, and never matching from inside a word ("SY Bancorp" does not find "Embassy Bancorp"); an exact or starts-with match ignores commas, periods, apostrophes, extra spaces, and the spaces between single initials ("QXO Inc" finds "QXO, Inc."; "U.S. Bancorp" finds "US BANCORP"; "Macys" finds "Macy\'s, Inc."; "JM Smucker" finds "J M SMUCKER Co"). The corporate suffix (Inc, Corp, Co, Ltd, PLC, LLC, LP, N.V., S.A., AG, SE) can be left off ("Apple" finds "Apple Inc."; "Rio Tinto" lists both the Ltd and the PLC) or spelled out ("Beacon Financial Corporation" finds "Beacon Financial Corp"), but a suffix you include must match — Corp, Inc, Co, and Ltd stay distinct from each other, since separate registrants differ only by which one they use.',
       ),
     include_filings: z
       .boolean()
@@ -287,17 +278,10 @@ export const companySearchTool = tool('secedgar_company_search', {
       .string()
       .optional()
       .describe(
-        'Oldest filing date the scan reached (YYYY-MM-DD); nothing older was examined. Archive pages past the recent window (last year or 1,000 filings) are read only for a date filter or an under-filled form filter. Absent when nothing was scanned.',
+        'Oldest filing date the scan examined (YYYY-MM-DD). Archive pages past the recent window (last year or 1,000 filings) are read only for a date filter or an under-filled forms filter. Absent when nothing was scanned.',
       ),
-    dataset: z
-      .object({
-        name: z
-          .string()
-          .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
-          ),
-        row_count: z.number().describe('Rows materialized in the dataframe.'),
-        expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
+    dataset: datasetSchema
+      .extend({
         truncated: z
           .boolean()
           .describe(
@@ -306,7 +290,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       })
       .optional()
       .describe(
-        'Dataframe of the full filtered history (recent window plus archive pages), staged only when the scan went past the recent window and the history exceeds the inline list (filing_limit, at most 50).',
+        'Dataframe of the full filtered history (recent window plus archive pages), staged only when the scan went past the recent window and the history outgrows the inline list.',
       ),
   }),
 
@@ -324,10 +308,11 @@ export const companySearchTool = tool('secedgar_company_search', {
           suggestions.length > 0
             ? ` Near matches: ${suggestions.map((s) => `${s.name ?? s.cik}${s.ticker ? ` (${s.ticker})` : ''}`).join(', ')}.`
             : '';
+        const listingNote = nonUsListingNote(input.query.trim());
         // Only this throw can attach suggestions, so only it points the caller at them (#153).
         throw ctx.fail(
           'no_match',
-          `No company found for '${input.query}'.${suggestionNote}`,
+          `No company found for '${input.query}'.${suggestionNote}${listingNote ? ` ${listingNote}` : ''}`,
           suggestions.length > 0
             ? {
                 suggestions,
@@ -352,6 +337,7 @@ export const companySearchTool = tool('secedgar_company_search', {
     if (!match) {
       throw ctx.fail('no_match', `No company found for '${input.query}'.`);
     }
+    if (match.reading) ctx.enrich({ resolvedAs: match.reading });
 
     // Bare-CIK fallback: resolveCik returns { cik } with no name/ticker when a numeric
     // query missed the ticker cache — getSubmissions 404s for non-existent CIKs (#55).
@@ -480,7 +466,7 @@ export const companySearchTool = tool('secedgar_company_search', {
     if (input.include_filings && formTypes && totalFilings === 0) {
       // The notice is authored Markdown, so the caller's form types are escaped.
       ctx.enrich.notice(
-        `No filings matched form types [${escapeInline(formTypes.join(', '))}] for this entity. Try different form types or remove the filter.`,
+        `No filings matched form types [${escapeMarkdownInline(formTypes.join(', '))}] for this entity. Try different form types or remove the filter.`,
       );
     } else if (
       filings !== undefined &&
@@ -536,14 +522,14 @@ export const companySearchTool = tool('secedgar_company_search', {
   },
 
   format: (result) => {
-    // SEC's name, SIC title, and filing descriptions render through escapeInline,
+    // SEC's name, SIC title, and filing descriptions render through escapeMarkdownInline,
     // so content[] reads back the structuredContent value as text (#221).
     const lines = [
-      `**${escapeInline(result.name)}** (${result.tickers.join(', ') || 'no ticker'})`,
+      `**${escapeMarkdownInline(result.name)}** (${result.tickers.join(', ') || 'no ticker'})`,
     ];
     const exchange = result.exchanges.length ? ` | Exchange: ${result.exchanges.join(', ')}` : '';
     lines.push(
-      `CIK: ${result.cik} | SIC: ${result.sic} (${escapeInline(result.sic_description)})${exchange}`,
+      `CIK: ${result.cik} | SIC: ${result.sic} (${escapeMarkdownInline(result.sic_description)})${exchange}`,
     );
     if (result.fiscal_year_end) {
       lines.push(`Fiscal year end: ${result.fiscal_year_end}`);
@@ -560,7 +546,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       lines.push(`\nFilings (${result.filings.length} of ${result.total_filings}):`);
       for (const f of result.filings) {
         const reportDate = f.report_date ? ` (period: ${f.report_date})` : '';
-        const desc = f.description ? ` — ${escapeInline(f.description)}` : '';
+        const desc = f.description ? ` — ${escapeMarkdownInline(f.description)}` : '';
         lines.push(
           `- ${f.form} ${f.filing_date}${reportDate}${desc} — ${f.primary_document} [${f.accession_number}]`,
         );

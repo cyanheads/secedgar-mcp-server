@@ -6,14 +6,17 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
-import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
+import { datasetSchema } from '@/mcp-server/tools/dataset-schema.js';
 import { fixedPoint } from '@/mcp-server/tools/fixed-point.js';
 import {
   type LimitClampOptions,
   limitClamp,
   withLimitClamps,
 } from '@/mcp-server/tools/limit-clamp.js';
+import { resolvedAsField } from '@/mcp-server/tools/resolved-as.js';
+import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -21,6 +24,7 @@ import {
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+import { nonUsListingNote } from '@/services/edgar/listing-codes.js';
 import {
   type InsiderTransaction,
   parseForm4Xml,
@@ -141,24 +145,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       recovery:
         'Pass filed_after / filed_before to read an older period, or use secedgar_search_filings with forms=["4"] to find the filings.',
     },
-    {
-      reason: 'rate_limited',
-      code: JsonRpcErrorCode.RateLimited,
-      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
-      recovery:
-        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
-      retryable: true,
-      thrownBy: 'service',
-    },
-    {
-      reason: 'sec_unreachable',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
-      recovery:
-        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
-      retryable: true,
-      thrownBy: 'service',
-    },
+    ...SEC_UPSTREAM_ERRORS,
   ],
 
   input: z.object({
@@ -298,7 +285,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     filings_other_issuer: z
       .number()
       .describe(
-        "Scanned Form 4 filings naming a different issuer, filed by this company as a reporting owner of another (e.g., a 10% holder of a fund). They are that issuer's activity, so they add no transactions here or in the dataframe.",
+        "Scanned Form 4 filings naming a different issuer, filed by this company as that issuer's reporting owner (e.g., a 10% holder of a fund); they add no transactions here or to the dataframe.",
       ),
     history_scanned_through: z
       .string()
@@ -306,15 +293,8 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       .describe(
         'Filing date of the oldest Form 4 parsed (YYYY-MM-DD). Present only with a date window that held a Form 4.',
       ),
-    dataset: z
-      .object({
-        name: z
-          .string()
-          .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
-          ),
-        row_count: z.number().describe('Rows materialized in the dataframe.'),
-        expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
+    dataset: datasetSchema
+      .extend({
         truncated: z
           .boolean()
           .describe(
@@ -340,6 +320,11 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
       .describe('True when the inline transactions[] was capped by limit.'),
     shown: z.number().optional().describe('Number of transactions shown inline.'),
     cap: z.number().optional().describe('The limit cap applied.'),
+    resolvedAs: resolvedAsField,
+  },
+
+  enrichmentTrailer: {
+    resolvedAs: { label: 'Resolved as' },
   },
 
   async handler(input, ctx) {
@@ -360,8 +345,13 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
     }
     const match = Array.isArray(resolved) ? resolved[0] : resolved;
     if (!match) {
-      throw ctx.fail('company_not_found', `Company '${input.company}' not found.`);
+      const note = nonUsListingNote(input.company.trim());
+      throw ctx.fail(
+        'company_not_found',
+        `Company '${input.company}' not found.${note ? ` ${note}` : ''}`,
+      );
     }
+    if (match.reading) ctx.enrich({ resolvedAs: match.reading });
 
     // Every read of the limit takes the applied value, so a call above the cap answers
     // exactly as the same call at the cap does, scan depth included (#197).
@@ -556,7 +546,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
 
     const windowText = dateWindow && describeWindow(filedAfter, filedBefore);
     // The notices are authored Markdown, so the caller's company text is escaped.
-    const companyText = escapeInline(input.company);
+    const companyText = escapeMarkdownInline(input.company);
     if (windowText && filingBatch.length === 0) {
       // The walk runs newest first, so only an earlier upper bound reaches older filings.
       const walkNote = walk?.truncated
@@ -692,7 +682,7 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
         : '';
     // Names and titles are SEC or filer text, escaped to read back as written.
     const lines: string[] = [
-      `**Insider Transactions** — ${escapeInline(result.issuer_name)} (CIK ${result.issuer_cik}${result.issuer_ticker ? `, ${result.issuer_ticker}` : ''})`,
+      `**Insider Transactions** — ${escapeMarkdownInline(result.issuer_name)} (CIK ${result.issuer_cik}${result.issuer_ticker ? `, ${result.issuer_ticker}` : ''})`,
       `${result.transactions.length} transaction(s) from ${result.filings_scanned} Form 4 filing(s) scanned${otherIssuerNote}`,
     ];
 
@@ -719,18 +709,18 @@ export const getInsiderTransactionsTool = tool('secedgar_get_insider_transaction
           : '';
       const derivStr = tx.is_derivative ? ' [derivative]' : '';
       const ownershipStr = tx.ownership_nature
-        ? ` (${tx.ownership_type ?? 'indirect'}: ${escapeInline(tx.ownership_nature)})`
+        ? ` (${tx.ownership_type ?? 'indirect'}: ${escapeMarkdownInline(tx.ownership_nature)})`
         : tx.ownership_type
           ? ` (${tx.ownership_type})`
           : '';
 
       lines.push(
-        `**${escapeInline(tx.reporting_person)}** (${escapeInline(tx.relationship)}) — ${tx.transaction_type}${derivStr}`,
+        `**${escapeMarkdownInline(tx.reporting_person)}** (${escapeMarkdownInline(tx.relationship)}) — ${tx.transaction_type}${derivStr}`,
       );
       const txDate = tx.transaction_date ?? tx.filing_date;
       const periodStr = tx.period_of_report ? ` | report period: ${tx.period_of_report}` : '';
       lines.push(
-        `${txDate} | ${escapeInline(tx.security_title)} | ${sharesStr} ${priceStr}${ownedStr}${ownershipStr}${periodStr}`,
+        `${txDate} | ${escapeMarkdownInline(tx.security_title)} | ${sharesStr} ${priceStr}${ownedStr}${ownershipStr}${periodStr}`,
       );
       lines.push(
         `Code: ${tx.transaction_code} | Filed: ${tx.filing_date} [${tx.accession_number}]`,

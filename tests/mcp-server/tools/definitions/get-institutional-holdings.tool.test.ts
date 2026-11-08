@@ -49,7 +49,9 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import {
+  allText,
   at,
+  bag,
   blockAt,
   blockText,
   caught,
@@ -1362,6 +1364,70 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
     expect(err.data.reason).toBe('no_filings_found');
     expect(err.data.suggestions).toBeUndefined(); // no operating-company routing
     expect(err.message).toContain('SOME FILING AGENT');
+  });
+});
+
+/**
+ * A ticker spelling EDGAR does not list, read as one it does (#235): the note reaches both
+ * surfaces as `resolvedAs`, and a non-US listing's miss says why, once entity search also finds
+ * nothing. Values are tabled at their own seams; these cases prove the wiring, one per side.
+ */
+describe('getInstitutionalHoldingsTool — ticker readings (#235)', () => {
+  const NON_US =
+    'The .ME suffix marks a non-US listing; EDGAR indexes SEC registrants by US ticker, name, or CIK.';
+  const call = (args: Record<string, unknown>) =>
+    runToolContract(getInstitutionalHoldingsTool, args as never);
+
+  it('carries the reading on both surfaces', async () => {
+    const reading = 'BRK read as BERKSHIRE HATHAWAY INC (BRK-A, BRK-B)';
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0001067983',
+      name: 'BERKSHIRE HATHAWAY INC',
+      ticker: 'BRK-B',
+      reading,
+    });
+
+    const result = await call({ company: 'BRK' });
+
+    expect(result.isError).toBeFalsy();
+    expect(bag(result.structuredContent).resolvedAs).toBe(reading);
+    expect(readCommonMark(allText(result))).toContain(
+      `⟨strong⟩Resolved as:⟨/strong⟩ ⟨code_inline:${reading}⟩`,
+    );
+  });
+
+  it('carries no note for a match no reading produced', async () => {
+    const result = await call({ company: '0000102909' });
+
+    expect(result.isError).toBeFalsy();
+    expect(bag(result.structuredContent)).not.toHaveProperty('resolvedAs');
+    expect(allText(result)).not.toContain('Resolved as');
+  });
+
+  it('adds the non-US listing sentence to company_not_found, before any submissions read', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+
+    const result = await call({ company: 'ROSN.ME' });
+
+    const error = wireError(result);
+    expect(error.message).toBe(`Entity 'ROSN.ME' not found. ${NON_US}`);
+    expect(error.data).toMatchObject({
+      reason: 'company_not_found',
+      recovery: {
+        hint: 'Use secedgar_company_search to find the correct CIK or full entity name.',
+      },
+    });
+    expect(readCommonMark(blockText(result.content))).toContain(NON_US);
+    expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+  });
+
+  it('keeps the message unchanged for any other miss', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+
+    const error = wireError(await call({ company: 'Nonexistent Fund Managers' }));
+
+    expect(error.message).toBe("Entity 'Nonexistent Fund Managers' not found.");
+    expect(error.data).toMatchObject({ reason: 'company_not_found' });
   });
 });
 
@@ -2841,6 +2907,44 @@ describe('getInstitutionalHoldingsTool — amendment composition (#198)', () => 
       ],
     });
     expect(tableReads()).toEqual(['orig']);
+  });
+
+  it('skips an amendment SEC fails with an HTTP 5xx, keeping the original (#233)', async () => {
+    submissionsOf([hra('failing', '2026-09-01'), hr('orig', '2026-08-14')]);
+    serve({ orig: { cover: cover(), table: table([A]) } });
+    const served = mockApi.tryGetFilingDocument.getMockImplementation();
+    mockApi.tryGetFilingDocument.mockImplementation(
+      async (cik: string, accession: string, doc: string, scope: CallScope) => {
+        if (accession !== 'failing') return served?.(cik, accession, doc, scope);
+        throw new McpError(
+          JsonRpcErrorCode.ServiceUnavailable,
+          'SEC EDGAR (www.sec.gov) answered HTTP 503 on the last of 3 attempts.',
+          { reason: 'sec_unavailable', retryable: true, status: 503 },
+        );
+      },
+    );
+
+    const result = await runToolContract(getInstitutionalHoldingsTool, { company: '0000102909' });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      composed_accessions: ['orig'],
+      amendments: [
+        {
+          accession_number: 'failing',
+          amendment_type: 'UNAVAILABLE',
+          unavailable_reason: 'lookup_failed',
+          applied_as: 'not_applied',
+        },
+      ],
+    });
+    expect(holdingsOf(result).map((h) => h.cusip)).toEqual(['AAAAAAAA1']);
+    expect(mockApi.tryGetFilingDocument).toHaveBeenCalledWith(
+      expect.any(String),
+      'failing',
+      'primary_doc.xml',
+      expect.any(CallScope),
+    );
   });
 
   it('adds only the additive fields to a quarter with no amendment', async () => {

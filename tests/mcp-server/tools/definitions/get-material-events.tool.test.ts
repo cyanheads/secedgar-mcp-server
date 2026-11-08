@@ -16,7 +16,7 @@ import {
 import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import type { FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
-import { blockText, records, wireError } from '../../../support/assertions.js';
+import { allText, bag, blockText, records, wireError } from '../../../support/assertions.js';
 import { readCommonMark } from '../../../support/commonmark.js';
 
 vi.mock('@/services/edgar/edgar-api-service.js', async (importOriginal) => {
@@ -574,6 +574,75 @@ describe('getMaterialEventsTool — a name matching several companies (#228)', (
     expect(errors('secedgar_get_material_events').map((e) => e.reason)).not.toContain(
       'multiple_matches',
     );
+  });
+});
+
+/**
+ * A ticker spelling EDGAR does not list, read as one it does (#235): the note reaches both
+ * surfaces as `resolvedAs`, and a non-US listing's miss says why, after any near matches. Values
+ * are tabled at their own seams; these cases prove the wiring, one per side.
+ */
+describe('getMaterialEventsTool — ticker readings (#235)', () => {
+  const NON_US =
+    'The .L suffix marks a non-US listing; EDGAR indexes SEC registrants by US ticker, name, or CIK.';
+  const call = (args: Record<string, unknown>) =>
+    runToolContract(getMaterialEventsTool, args as never);
+
+  it('carries the reading on both surfaces', async () => {
+    const reading = 'AAPL.O read as AAPL (Apple Inc.)';
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0000320193',
+      name: 'Apple Inc.',
+      ticker: 'AAPL',
+      reading,
+    });
+
+    const result = await call({ company: 'AAPL.O', limit: 1 });
+
+    expect(result.isError).toBeFalsy();
+    expect(bag(result.structuredContent).resolvedAs).toBe(reading);
+    expect(readCommonMark(allText(result))).toContain(
+      `⟨strong⟩Resolved as:⟨/strong⟩ ⟨code_inline:${reading}⟩`,
+    );
+  });
+
+  it('carries no note for a match no reading produced', async () => {
+    const result = await call({ company: 'AAPL', limit: 1 });
+
+    expect(result.isError).toBeFalsy();
+    expect(bag(result.structuredContent)).not.toHaveProperty('resolvedAs');
+    expect(allText(result)).not.toContain('Resolved as');
+  });
+
+  it('adds the non-US listing sentence to no_match after its near matches, reading no submissions', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+    mockApi.getAllEntries.mockResolvedValue([
+      { cik: '0001823945', name: 'BLUE OWL CAPITAL INC.', ticker: 'OWL' },
+    ]);
+
+    const result = await call({ company: 'OWL.L', limit: 1 });
+
+    const error = wireError(result);
+    expect(error.message).toBe(
+      `No company found for 'OWL.L'. Near matches: BLUE OWL CAPITAL INC. (OWL). ${NON_US}`,
+    );
+    expect(error.data).toMatchObject({
+      reason: 'no_match',
+      recovery: {
+        hint: 'Use a ticker symbol or 10-digit CIK for an exact match, or find the company with secedgar_company_search.',
+      },
+    });
+    expect(readCommonMark(blockText(result.content))).toContain(NON_US);
+    expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+  });
+
+  it('keeps the message unchanged for any other miss', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+
+    const error = wireError(await call({ company: 'XYZNOTREAL', limit: 1 }));
+
+    expect(error.message).toBe("No company found for 'XYZNOTREAL'.");
+    expect(error.data).toMatchObject({ reason: 'no_match' });
   });
 });
 

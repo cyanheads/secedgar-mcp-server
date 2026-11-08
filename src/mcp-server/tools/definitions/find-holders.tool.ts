@@ -8,15 +8,17 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { markdown } from '@cyanheads/mcp-ts-core/utils';
+import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
 import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
+import { datasetSchema } from '@/mcp-server/tools/dataset-schema.js';
 import { MAX_RELEVANCE_OFFSET } from '@/mcp-server/tools/definitions/search-filings.tool.js';
-import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
 import {
   type LimitClampOptions,
   limitClamp,
   withLimitClamps,
 } from '@/mcp-server/tools/limit-clamp.js';
+import { resolvedAsField } from '@/mcp-server/tools/resolved-as.js';
+import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -28,6 +30,7 @@ import {
   getEdgarApiService,
   pickPreferredTicker,
 } from '@/services/edgar/edgar-api-service.js';
+import { nonUsListingNote } from '@/services/edgar/listing-codes.js';
 import type { CikMatch, EftsHit } from '@/services/edgar/types.js';
 
 /**
@@ -191,24 +194,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
       recovery:
         'Retry with the ticker or the 10-digit CIK of the intended issuer from the matches list.',
     },
-    {
-      reason: 'rate_limited',
-      code: JsonRpcErrorCode.RateLimited,
-      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
-      recovery:
-        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
-      retryable: true,
-      thrownBy: 'service',
-    },
-    {
-      reason: 'sec_unreachable',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
-      recovery:
-        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
-      retryable: true,
-      thrownBy: 'service',
-    },
+    ...SEC_UPSTREAM_ERRORS,
     {
       reason: 'efts_degraded_response',
       code: JsonRpcErrorCode.ServiceUnavailable,
@@ -327,15 +313,8 @@ export const findHoldersTool = tool('secedgar_find_holders', {
           .describe('One institutional manager reporting a position in this issuer.'),
       )
       .describe('One page of filers, capped at limit; order says nothing about position size.'),
-    dataset: z
-      .object({
-        name: z
-          .string()
-          .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
-          ),
-        row_count: z.number().describe('Rows materialized in the dataframe.'),
-        expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
+    dataset: datasetSchema
+      .extend({
         truncated: z
           .boolean()
           .describe('True when the fetched sample may omit matching documents.'),
@@ -359,6 +338,11 @@ export const findHoldersTool = tool('secedgar_find_holders', {
     truncated: z.boolean().optional().describe('True when the inline holders list was capped.'),
     shown: z.number().optional().describe('Number of filers shown inline.'),
     cap: z.number().optional().describe('The limit cap applied.'),
+    resolvedAs: resolvedAsField,
+  },
+
+  enrichmentTrailer: {
+    resolvedAs: { label: 'Resolved as' },
   },
 
   async handler(input, ctx) {
@@ -388,11 +372,13 @@ export const findHoldersTool = tool('secedgar_find_holders', {
       // A bare numeric CIK absent from the ticker cache resolves without a name,
       // leaving nothing to phrase-match — that is a miss, not a silent broadening.
       if (!match?.name) {
+        const note = nonUsListingNote(input.issuer.trim());
         throw ctx.fail(
           'issuer_not_found',
-          `No EDGAR company name found for issuer '${input.issuer}', so there is nothing to match against 13F information tables.`,
+          `No EDGAR company name found for issuer '${input.issuer}', so there is nothing to match against 13F information tables.${note ? ` ${note}` : ''}`,
         );
       }
+      if (match.reading) ctx.enrich({ resolvedAs: match.reading });
       resolvedName = match.name;
       resolvedCik = match.cik;
       phrase = namePhrase(match.name);
@@ -512,7 +498,9 @@ export const findHoldersTool = tool('secedgar_find_holders', {
 
     // The notices are authored Markdown, so the issuer phrase inside them is escaped.
     const searchedTerm =
-      searchMode === 'cusip' ? `CUSIP ${searchKey}` : `the phrase ${escapeInline(searchKey)}`;
+      searchMode === 'cusip'
+        ? `CUSIP ${searchKey}`
+        : `the phrase ${escapeMarkdownInline(searchKey)}`;
     const notices: string[] = [];
     // A zero-hit search has no holders to mix, so only a search that matched reads the
     // in-memory registry for another registrant the phrase names (#224).
@@ -522,10 +510,10 @@ export const findHoldersTool = tool('secedgar_find_holders', {
         : [];
     if (others.length > 0) {
       const named = new Intl.ListFormat('en', { type: 'conjunction' }).format(
-        others.map((o) => `${escapeInline(o.name)} (CIK ${o.cik}, ${o.ticker})`),
+        others.map((o) => `${escapeMarkdownInline(o.name)} (CIK ${o.cik}, ${o.ticker})`),
       );
       notices.push(
-        `${escapeInline(searchKey)} is also the name of ${named}, so these holders can include ${others.length === 1 ? "that company's" : "those companies'"}. Pass cusip to match one issuer.`,
+        `${escapeMarkdownInline(searchKey)} is also the name of ${named}, so these holders can include ${others.length === 1 ? "that company's" : "those companies'"}. Pass cusip to match one issuer.`,
       );
     }
     if (total === 0) {
@@ -600,21 +588,21 @@ export const findHoldersTool = tool('secedgar_find_holders', {
   format: (result) => {
     // Names and the searched phrase are upstream or caller text, escaped to read back as written.
     const lines = [
-      `**13F holders of ${escapeInline(result.issuer)}** — ${result.quarter}, filed ${result.filed_from} to ${result.filed_to}`,
+      `**13F holders of ${escapeMarkdownInline(result.issuer)}** — ${result.quarter}, filed ${result.filed_from} to ${result.filed_to}`,
     ];
     if (result.resolved_issuer_name) {
       lines.push(
-        `Resolved issuer: ${escapeInline(result.resolved_issuer_name)} (CIK ${result.resolved_issuer_cik})`,
+        `Resolved issuer: ${escapeMarkdownInline(result.resolved_issuer_name)} (CIK ${result.resolved_issuer_cik})`,
       );
     }
     lines.push(
-      `Matched by ${result.search_mode}: ${escapeInline(result.search_key)}`,
+      `Matched by ${result.search_mode}: ${escapeMarkdownInline(result.search_key)}`,
       `${result.total_filings} filings in the window (${result.total_is_exact ? 'exact count' : 'lower bound'}); ${result.fetched} fetched, ${result.holders_in_quarter} managers reporting ${result.quarter}, ${result.holders.length} shown`,
     );
 
     for (const h of result.holders) {
       lines.push(
-        `- ${escapeInline(h.filer_name)} (CIK ${h.filer_cik}) — ${h.form ?? '13F-HR'} ${h.filing_date} [${h.accession_number}]`,
+        `- ${escapeMarkdownInline(h.filer_name)} (CIK ${h.filer_cik}) — ${h.form ?? '13F-HR'} ${h.filing_date} [${h.accession_number}]`,
       );
     }
 

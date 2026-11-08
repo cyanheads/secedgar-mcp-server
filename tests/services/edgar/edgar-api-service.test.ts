@@ -4,7 +4,7 @@
  * `foldNamePunctuation` (the comma, period, apostrophe, and whitespace-run fold),
  * `joinSpacedInitials` and `containsFromWordStart` (the name passes' initials join and
  * word-start substring test, with their linear-time bounds),
- * `trigramSimilarity`/`suggestCompanies` (near-match suggestions),
+ * `trigramScorer`/`suggestCompanies` (near-match suggestions),
  * `buildTickerCache` MF-ticker merge behaviour via the private indexing logic, and
  * `parseSeriesFilingFeed` (fund series → its own filings).
  * @module tests/services/edgar/edgar-api-service
@@ -20,7 +20,7 @@ import {
   pickPreferredTicker,
   suggestCompanies,
 } from '@/services/edgar/edgar-api-service.js';
-import { trigramSimilarity } from '@/services/edgar/trigram-similarity.js';
+import { trigramScorer } from '@/services/edgar/trigram-similarity.js';
 import type { CikMatch } from '@/services/edgar/types.js';
 
 const match = (ticker: string, cik = '0000000001', name?: string): CikMatch => ({
@@ -326,31 +326,31 @@ describe('name-matching helpers — linear in the text’s length (#218, #219)',
 });
 
 // ---------------------------------------------------------------------------
-// trigramSimilarity
+// trigramScorer
 // ---------------------------------------------------------------------------
 
-describe('trigramSimilarity', () => {
+describe('trigramScorer', () => {
   it('returns 1 for identical strings', () => {
-    expect(trigramSimilarity('microsoft corp', 'microsoft corp')).toBe(1);
+    expect(trigramScorer('microsoft corp')('microsoft corp')).toBe(1);
   });
 
   it('returns 0 for completely unrelated strings', () => {
     // Short random strings share no trigrams
-    expect(trigramSimilarity('xyz', 'abc')).toBe(0);
+    expect(trigramScorer('xyz')('abc')).toBe(0);
   });
 
   it('returns a high score for a one-character typo', () => {
-    const score = trigramSimilarity('microsfot corp', 'microsoft corp');
+    const score = trigramScorer('microsfot corp')('microsoft corp');
     expect(score).toBeGreaterThan(0.7);
   });
 
   it('returns a moderate score for word-order transposition', () => {
-    const score = trigramSimilarity('morgan jp', 'jp morgan');
+    const score = trigramScorer('morgan jp')('jp morgan');
     expect(score).toBeGreaterThan(0.4);
   });
 
   it('returns a low-to-zero score for very different names', () => {
-    const score = trigramSimilarity('apple', 'exxon mobil');
+    const score = trigramScorer('apple')('exxon mobil');
     expect(score).toBeLessThan(0.3);
   });
 });

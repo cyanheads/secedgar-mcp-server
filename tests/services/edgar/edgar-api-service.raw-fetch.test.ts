@@ -174,6 +174,20 @@ const unreachableData = (url = DOCUMENT_URL) => ({
   recovery: { hint: UNREACHABLE_HINT },
 });
 
+/** The hint a 5xx ladder ends with (#233). */
+const unavailableHint = (status: number) =>
+  `SEC EDGAR (www.sec.gov) answered the last attempt with HTTP ${status} — a failure on SEC's side, not a problem with the request. Retry the same call in a minute.`;
+
+/** The `data` fields a 5xx ladder's ending adds to the status mapping's (#233). */
+const unavailableData = (status: number) => ({
+  reason: 'sec_unavailable',
+  retryable: true,
+  url: DOCUMENT_URL,
+  status,
+  statusCode: status,
+  recovery: { hint: unavailableHint(status) },
+});
+
 /**
  * Answer each call from `answers` in order — a status becomes a fresh `Response`,
  * a factory's `Response` is returned as-is, and its `Error` is thrown as the
@@ -567,7 +581,7 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
   // --- 5xx: still retried (#112 regression) ---
 
   it.each([500, 502, 503, 504])(
-    'still retries a %i up to MAX_RETRIES before failing (#112)',
+    'retries a %i up to MAX_RETRIES, then fails as sec_unavailable (#112, #233)',
     async (status) => {
       const fetchMock = stubStatus(status);
 
@@ -577,8 +591,42 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
 
       expect(fetchMock).toHaveBeenCalledTimes(3);
       expect(error).toBeInstanceOf(McpError);
+      // One code for all four: a 504 is SEC's gateway failing, not this request timing out.
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.message).toBe(
+        `SEC EDGAR (www.sec.gov) answered HTTP ${status} on the last of 3 attempts.`,
+      );
+      expect(error.data).toEqual({
+        ...unavailableData(status),
+        body: 'upstream error',
+        responseBody: 'upstream error',
+      });
     },
   );
+
+  it('keeps the Retry-After a 5xx carries on the error it ends with', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('busy', { status: 503, headers: { 'retry-after': '120' } })),
+    );
+
+    const error = await rejectionWithTimers(getEdgarApiService().fetchText(DOCUMENT_URL, scope()));
+
+    expect(error.data).toMatchObject({ status: 503, retryAfter: '120' });
+  });
+
+  it('fails a 501 on its one request with its status mapping and no reason', async () => {
+    const fetchMock = stubStatus(501);
+
+    const error = await rejectionWithTimers(getEdgarApiService().fetchText(DOCUMENT_URL, scope()));
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+    expect(error.message).toBe('SEC EDGAR returned HTTP 501.');
+    expect(error.data).toMatchObject({ status: 501, retryable: false });
+    expect(error.data).not.toHaveProperty('reason');
+    expect(error.data).not.toHaveProperty('recovery');
+  });
 
   // --- 403: hint unchanged (#112 regression) ---
 
@@ -743,8 +791,11 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       );
       expect(endsOn503.fetchMock).toHaveBeenCalledTimes(3);
       expect(httpError.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-      expect(httpError.data).toMatchObject({ status: 503, url: DOCUMENT_URL });
-      expect((httpError.data as { reason?: unknown }).reason).toBeUndefined();
+      expect(httpError.data).toMatchObject(unavailableData(503));
+      // Two of the three attempts got no HTTP answer, so the message claims only the last.
+      expect(httpError.message).toBe(
+        'SEC EDGAR (www.sec.gov) answered HTTP 503 on the last of 3 attempts.',
+      );
 
       // Two of the three attempts got an HTTP answer, so the message claims only the last.
       const endsUnanswered = stubSequence(503, 502, bunReset);
@@ -995,8 +1046,10 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       );
       expect(endsOn503.fetchMock).toHaveBeenCalledTimes(3);
       expect(httpError.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-      expect(httpError.data).toMatchObject({ status: 503, url: DOCUMENT_URL });
-      expect((httpError.data as { reason?: unknown }).reason).toBeUndefined();
+      expect(httpError.data).toMatchObject(unavailableData(503));
+      expect(httpError.message).toBe(
+        'SEC EDGAR (www.sec.gov) answered HTTP 503 on the last of 3 attempts.',
+      );
 
       const endsOnBody = stubSequence(503, bunReset, () => brokenBody(nodeShortBody()));
       const bodyError = await rejectionWithTimers(
@@ -1119,8 +1172,7 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       );
       expect(fiveHundreds.fetchMock).toHaveBeenCalledTimes(3);
       expect(httpError.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-      expect(httpError.data).toMatchObject({ status: 503, url: DOCUMENT_URL });
-      expect((httpError.data as { reason?: unknown }).reason).toBeUndefined();
+      expect(httpError.data).toMatchObject(unavailableData(503));
 
       const forbidden = stubSequence(breakingStatus(403));
       const forbiddenError = await rejectionWithTimers(
@@ -1342,9 +1394,9 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       expect(busy.state).toEqual({ cancelled: true, pulled: 0 });
       expect(call.state.error?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
       expect(call.state.error?.message).toBe(
-        `SEC EDGAR returned HTTP 503 on attempt 1 of 3; ${BUDGET_STOP}.`,
+        `SEC EDGAR (www.sec.gov) answered HTTP 503 on attempt 1 of 3; ${BUDGET_STOP}.`,
       );
-      expect(call.state.error?.data).toMatchObject({ status: 503, url: DOCUMENT_URL });
+      expect(call.state.error?.data).toMatchObject(unavailableData(503));
       expect(call.state.error?.data).not.toHaveProperty('body');
       expect(call.state.error?.data).not.toHaveProperty('responseBody');
     });
@@ -1404,7 +1456,9 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
         getEdgarApiService().fetchText(DOCUMENT_URL, scope()),
       );
 
-      expect(error.message).toBe('SEC EDGAR returned HTTP 503.');
+      expect(error.message).toBe(
+        'SEC EDGAR (www.sec.gov) answered HTTP 503 on the last of 3 attempts.',
+      );
       expect(error.data).toMatchObject({ status: 503, body: 'Service Unavailable' });
     });
 
@@ -1447,8 +1501,13 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       expect(starts.map((at) => at - t0)).toEqual([0, 1_000, 3_000]);
       expect(last.state.cancelled).toBe(true);
       expect(call.state.error?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-      expect(call.state.error?.message).toBe('SEC EDGAR returned HTTP 503.');
-      expect(call.state.error?.data).toMatchObject({ status: 503, body: '<html>partial…' });
+      expect(call.state.error?.message).toBe(
+        'SEC EDGAR (www.sec.gov) answered HTTP 503 on the last of 3 attempts.',
+      );
+      expect(call.state.error?.data).toMatchObject({
+        ...unavailableData(503),
+        body: '<html>partial…',
+      });
     });
 
     it('cuts the capture to the call’s budget left', async () => {
@@ -2016,9 +2075,13 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       expect(fetchMock).toHaveBeenCalledTimes(5);
       expect(second.state.error?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
       expect(second.state.error?.message).toBe(
-        `SEC EDGAR returned HTTP 503 on attempt 2 of 3; ${BUDGET_STOP}.`,
+        `SEC EDGAR (www.sec.gov) answered HTTP 503 on attempt 2 of 3; ${BUDGET_STOP}.`,
       );
-      expect(second.state.error?.data).toMatchObject({ status: 503, url: `${DOCUMENT_URL}?n=2` });
+      expect(second.state.error?.data).toMatchObject({
+        ...unavailableData(503),
+        url: `${DOCUMENT_URL}?n=2`,
+        body: 'busy',
+      });
     });
 
     it('stops further requests in the call that spent it, and in no other call', async () => {

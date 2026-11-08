@@ -18,6 +18,7 @@ import { readCommonMark } from '../../../support/commonmark.js';
 
 const mockBridge = {
   describe: vi.fn(),
+  listingEnabled: true,
 };
 
 const sampleMeta = {
@@ -37,6 +38,70 @@ const sampleMeta = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockBridge.listingEnabled = true;
+});
+
+describe('listing every dataframe (#242)', () => {
+  describe('refused where callers share one canvas (HTTP with auth none)', () => {
+    beforeEach(() => {
+      mockBridge.listingEnabled = false;
+      vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+    });
+
+    it.each([{}, { name: '' }])(
+      'fails %j as listing_unavailable on both surfaces, reading nothing',
+      async (input) => {
+        const result = await runToolContract(dataframeDescribeTool, input);
+
+        const error = wireError(result);
+        expect(error.code).toBe(JsonRpcErrorCode.Forbidden);
+        expect(error.data.reason).toBe('listing_unavailable');
+        const hint = String(bag(error.data.recovery).hint);
+        expect(hint).toBe(
+          'Pass the exact df_XXXXX_XXXXX name the producing tool returned in its `dataset` field, or the register_as name you chose; this deployment does not list dataframes.',
+        );
+        const text = readCommonMark(blockText(result.content));
+        expect(text).toContain(
+          'Listing dataframes is refused over HTTP with auth none: every caller of this deployment shares one canvas.',
+        );
+        expect(text).toContain(`Recovery: ${hint}`);
+        expect(mockBridge.describe).not.toHaveBeenCalled();
+      },
+    );
+
+    it('describes a dataframe by name', async () => {
+      mockBridge.describe.mockResolvedValue([sampleMeta]);
+
+      const result = await runToolContract(dataframeDescribeTool, { name: 'df_ABCDE_FGHIJ' });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockBridge.describe).toHaveBeenCalledWith(expect.anything(), 'df_ABCDE_FGHIJ');
+      const output = dataframeDescribeTool.output.parse(result.structuredContent);
+      expect(output.dataframes.map((df) => df.name)).toEqual(['df_ABCDE_FGHIJ']);
+      expect(blockText(result.content)).toContain('### df_ABCDE_FGHIJ');
+    });
+
+    it('declares the refusal as a notice-level Forbidden', () => {
+      const entry = dataframeDescribeTool.errors?.find((e) => e.reason === 'listing_unavailable');
+      expect(entry).toMatchObject({ code: JsonRpcErrorCode.Forbidden, severity: 'notice' });
+    });
+  });
+
+  describe('allowed on stdio and authenticated HTTP', () => {
+    beforeEach(() => {
+      vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+      mockBridge.describe.mockResolvedValue([sampleMeta]);
+    });
+
+    it.each([{}, { name: '' }])('lists %j as every active dataframe', async (input) => {
+      const result = await runToolContract(dataframeDescribeTool, input);
+
+      expect(result.isError).toBeFalsy();
+      expect(mockBridge.describe).toHaveBeenCalledWith(expect.anything(), undefined);
+      const output = dataframeDescribeTool.output.parse(result.structuredContent);
+      expect(output.dataframes.map((df) => df.name)).toEqual(['df_ABCDE_FGHIJ']);
+    });
+  });
 });
 
 describe('dataframeDescribeTool', () => {

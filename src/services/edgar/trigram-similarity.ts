@@ -8,7 +8,8 @@
 
 /**
  * Build the set of trigrams for a string.
- * Pads with two spaces on each side so edge characters are covered.
+ * Pads with two spaces on each side so edge characters are covered; every
+ * string, the empty one included, therefore has at least one trigram.
  */
 function trigramSet(s: string): Set<string> {
   const padded = `  ${s}  `;
@@ -20,18 +21,20 @@ function trigramSet(s: string): Set<string> {
 }
 
 /**
- * Dice-coefficient trigram similarity between two strings.
- * Returns a value in [0, 1]; 1 means identical.
+ * A scorer of strings against `a`, whose trigram set is built once, here: each
+ * call builds only the set of the string it scores, so a pass ranking a list
+ * against one input uses one scorer. Each call returns the Dice coefficient in
+ * [0, 1]; 1 means identical.
  */
-export function trigramSimilarity(a: string, b: string): number {
-  if (a === b) return 1;
+export function trigramScorer(a: string): (b: string) => number {
   const ga = trigramSet(a);
-  const gb = trigramSet(b);
-  if (ga.size === 0 && gb.size === 0) return 1;
-  if (ga.size === 0 || gb.size === 0) return 0;
-  let intersection = 0;
-  for (const g of ga) {
-    if (gb.has(g)) intersection++;
-  }
-  return (2 * intersection) / (ga.size + gb.size);
+  return (b) => {
+    if (a === b) return 1;
+    const gb = trigramSet(b);
+    let intersection = 0;
+    for (const g of gb) {
+      if (ga.has(g)) intersection++;
+    }
+    return (2 * intersection) / (ga.size + gb.size);
+  };
 }

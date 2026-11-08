@@ -9,17 +9,24 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import {
   type LimitClampOptions,
   limitClamp,
   withLimitClamps,
 } from '@/mcp-server/tools/limit-clamp.js';
-import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import {
+  DATAFRAME_NAME_RE,
+  getCanvasBridge,
+  MISSING_TABLE_HINT,
+  REGISTER_AS_CLASH_HINT,
+  SQL_READ_ONLY_HINT,
+  SYSTEM_CATALOG_HINT,
+} from '@/services/canvas-bridge/canvas-bridge.js';
 
 /**
  * Encode text for one Markdown table cell so it reads back as itself (#221).
- * Each line is escaped (`escapeInline`), which escapes every `|` and any
+ * Each line is escaped (`escapeMarkdownInline`), which escapes every `|` and any
  * backslash before punctuation (#114), along with emphasis, code, links, raw
  * HTML, and entities. The lines join with `<br>`: `\n`, `\r\n`, and a lone
  * `\r` each end a CommonMark line, and so a table row, mid-cell (#121) —
@@ -28,7 +35,7 @@ import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 function escapeTableCell(text: string): string {
   return text
     .split(/\r\n|\r|\n/)
-    .map(escapeInline)
+    .map(escapeMarkdownInline)
     .join('<br>');
 }
 
@@ -59,7 +66,7 @@ const rowLimit = limitClamp({
 
 export const dataframeQueryTool = tool('secedgar_dataframe_query', {
   description:
-    'Run a single-statement SELECT against the canvas dataframes registered by the data-returning secedgar_* tools — any tool whose response carries a `dataset` handle. Inspect a dataframe with secedgar_dataframe_describe first; its column schema is what the SQL has to match. Read-only: writes, DDL, DROP, COPY, PRAGMA, ATTACH, and external-file table functions are rejected. System catalogs (information_schema, pg_catalog, sqlite_master, duckdb_*) are denied — list dataframes via secedgar_dataframe_describe. Optional register_as chains the result as a new dataframe with a fresh TTL.',
+    'Run a single-statement SELECT against the canvas dataframes registered by the data-returning secedgar_* tools — any tool whose response carries a `dataset` handle. Inspect a dataframe with secedgar_dataframe_describe first; its column schema is what the SQL has to match. Read-only: writes, DDL, DROP, COPY, PRAGMA, ATTACH, and external-file table functions are rejected. System catalogs (information_schema, pg_catalog, sqlite_master, duckdb_*) are denied — reference dataframes by the df_<id> name a data tool returned. Optional register_as chains the result as a new dataframe with a fresh TTL.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
 
   // Agent-facing context — empty-result and row-cap notices populated via ctx.enrich
@@ -93,17 +100,15 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
     {
       reason: 'system_catalog_access',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The SQL query references a denied DuckDB system catalog (information_schema, pg_catalog, sqlite_master, duckdb_*)',
-      recovery:
-        'Query only df_<id> tables. Use secedgar_dataframe_describe to list available dataframes.',
+      when: 'The SQL query references a denied DuckDB system catalog (information_schema, pg_catalog, sqlite_master, duckdb_*), or names a column alias, table alias, or CTE spelled like one',
+      recovery: SYSTEM_CATALOG_HINT,
       thrownBy: 'service',
     },
     {
       reason: 'missing_table',
       code: JsonRpcErrorCode.NotFound,
       when: 'The SQL query references a df_<id> table that does not exist or has expired',
-      recovery:
-        'Use secedgar_dataframe_describe to list available dataframes and verify the table name.',
+      recovery: MISSING_TABLE_HINT,
       thrownBy: 'service',
     },
     {
@@ -126,8 +131,7 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       reason: 'register_as_clash',
       code: JsonRpcErrorCode.ValidationError,
       when: 'The register_as target name already exists on the canvas',
-      recovery:
-        'Drop the existing dataframe with secedgar_dataframe_drop (when enabled), choose a different df_XXXXX_XXXXX name, or omit register_as.',
+      recovery: REGISTER_AS_CLASH_HINT,
       thrownBy: 'service',
     },
     {
@@ -135,7 +139,7 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'The SQL is not a SELECT (DROP, INSERT, UPDATE, DDL, PRAGMA, EXPLAIN, etc.) or does not parse — only read-only SELECTs run against dataframes',
       recovery:
-        'Query only SELECT statements against df_<id> tables. Use secedgar_dataframe_describe to inspect available dataframes.',
+        'Rewrite as one read-only SELECT over the df_<id> tables; writes, DDL, and other statements that are not a SELECT are refused.',
       thrownBy: 'service',
     },
     {
@@ -151,23 +155,22 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       code: JsonRpcErrorCode.ValidationError,
       when: 'The SQL calls a file-reading or external-data table function (read_csv, read_parquet, glob), a function that reads an engine setting (current_setting, current_schema — an unqualified current_schema is refused even where it names a column, which reads qualified as <table>.current_schema), or one that runs SQL or names a table from a string (query_table, or query() over anything but a single string literal)',
       recovery:
-        'Remove the function the message names, or qualify a column it names with its table, and query only the df_<id> tables secedgar_dataframe_describe lists.',
+        'Remove the function the message names, or qualify a column it names with its table, and query only the df_<id> tables the data tools returned.',
       thrownBy: 'service',
     },
     {
       reason: 'sql_read_only',
       code: JsonRpcErrorCode.ValidationError,
       when: "The SQL names a file as a table (FROM 'data.csv') — the dataframe engine reads no files",
-      recovery:
-        'Query only the df_<id> tables secedgar_dataframe_describe lists, referenced by bare name.',
+      recovery: SQL_READ_ONLY_HINT,
       thrownBy: 'service',
     },
     {
       reason: 'plan_operator_not_allowed',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The query plan uses an operator outside the read-only allowlist, such as the range() or generate_series() table functions',
+      when: 'The query plan uses an operator outside the read-only allowlist, such as range() or generate_series() given a column or subquery argument instead of constants',
       recovery:
-        'Rewrite with read-only SELECT constructs — joins, aggregates, window functions, CTEs, and unnest() are supported.',
+        'Rewrite with read-only SELECT constructs — joins, aggregates, window functions, CTEs, unnest(), and range() or generate_series() over constant arguments are supported.',
       thrownBy: 'service',
     },
   ],
@@ -177,12 +180,12 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       .string()
       .min(1)
       .describe(
-        'Single-statement SELECT against df_<id> tables on the shared canvas. Standard DuckDB SQL — joins, aggregates, window functions, CTEs all supported. Reference dataframes by the names returned in fetch/search responses or listed by secedgar_dataframe_describe. BIGINT columns (e.g., XBRL `value`, COUNT/SUM results) serialize as JSON strings to preserve precision past 2^53 — CAST(col AS DOUBLE) in projections for inline arithmetic.',
+        'Single-statement SELECT against df_<id> tables on the shared canvas. Standard DuckDB SQL — joins, aggregates, window functions, CTEs all supported. Reference dataframes by the df_<id> name a data tool returned in its `dataset` field, or a register_as name. BIGINT columns (e.g., XBRL `value`, COUNT/SUM results) serialize as JSON strings to preserve precision past 2^53 — CAST(col AS DOUBLE) in projections for inline arithmetic.',
       ),
     register_as: z
       .string()
       .regex(
-        /^df_[A-Z0-9]{5}_[A-Z0-9]{5}$/,
+        DATAFRAME_NAME_RE,
         'register_as must match df_XXXXX_XXXXX (uppercase letters and digits, exactly 5 characters each segment).',
       )
       .optional()
@@ -248,7 +251,7 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
 
     if (result.rowCount === 0) {
       ctx.enrich.notice(
-        'Query returned 0 rows. Verify dataframe names (use secedgar_dataframe_describe) and check your WHERE conditions.',
+        'Query returned 0 rows. Check the WHERE conditions against the column values; secedgar_dataframe_describe on the df_<id> name shows the columns.',
       );
     } else if (result.truncated === true) {
       /**

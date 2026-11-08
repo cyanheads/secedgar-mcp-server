@@ -11,7 +11,7 @@ metadata:
 
 Every filing on EDGAR from 1993, the XBRL facts filers tag in their financial statements, and the structured ownership disclosures: Form 4, 13F-HR, SCHEDULE 13D/13G, and NPORT-P. Keyless and read-only.
 
-Not here: market prices, quotes, or returns (the only prices are the per-share prices on Form 4 transactions), estimates, and companies that do not file with the SEC. A figure no filer tagged in XBRL, such as anything from before XBRL or a number that appears only in MD&A prose, is read from the filing text with secedgar_get_filing.
+Not here: market prices, quotes, or returns (the only prices are the per-share prices on Form 4 transactions), estimates, and companies that do not file with the SEC. A figure no filer tagged in XBRL, such as anything from before XBRL or a number that appears only in MD&A prose, is read from the filing text with secedgar_get_filing: its `find` opens the page at a phrase naming the figure (`net revenue retention`) and lists every place the phrase occurs, where `section` reaches only headings and lines that start with the value.
 
 ## Identifiers
 
@@ -65,4 +65,4 @@ Not here: market prices, quotes, or returns (the only prices are the per-share p
 
 ### Dataframes
 
-Data tools stage their full result as a `df_<id>` table, named by the response's `dataset` handle, on one canvas that every secedgar_* call shares. Call secedgar_dataframe_describe for the table's column names before writing SQL, then secedgar_dataframe_query with one read-only SELECT. Tables from different tools join where they share a key: 13F positions, NPORT-P positions, and blockholder rows on `cusip`; insider and blockholder rows on `issuer_cik`. Insider rows carry no `cusip` and 13F rows no `issuer_cik`. A table expires a fixed time after it is staged (a day by default), and queries do not extend it; `missing_table` means the source tool has to run again. A deployment without a canvas, such as the MCPB bundle, returns results inline only.
+Data tools stage their full result as a `df_<id>` table, named by the response's `dataset` handle, on one canvas that every secedgar_* call shares. Call secedgar_dataframe_describe with the `dataset` name the producing tool returned to get the table's column names before writing SQL, then secedgar_dataframe_query with one read-only SELECT. Describe without a name lists the active tables, except over HTTP with auth none, where every caller shares one canvas and that listing is refused. Tables from different tools join where they share a key: 13F positions, NPORT-P positions, and blockholder rows on `cusip`; insider and blockholder rows on `issuer_cik`. Insider rows carry no `cusip` and 13F rows no `issuer_cik`. A table expires a fixed time after it is staged (a day by default), and queries do not extend it; `missing_table` means the source tool has to run again. A deployment without a canvas, such as the MCPB bundle, returns results inline only.

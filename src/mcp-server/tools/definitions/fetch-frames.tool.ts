@@ -10,13 +10,15 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { escapeInline } from '@/mcp-server/tools/escape-inline.js';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { datasetSchema } from '@/mcp-server/tools/dataset-schema.js';
 import { formatUsd, groupedDigits } from '@/mcp-server/tools/format-usd.js';
 import {
   type LimitClampOptions,
   limitClamp,
   withLimitClamps,
 } from '@/mcp-server/tools/limit-clamp.js';
+import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -81,24 +83,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       recovery:
         'Check duration vs. instant period and the unit, then query each tag the error lists in unqueried_tags — a tag has frames only for the periods filers reported it in, so another tag the concept maps to can cover a period this one lacks.',
     },
-    {
-      reason: 'rate_limited',
-      code: JsonRpcErrorCode.RateLimited,
-      when: "SEC is rate-limiting this server's IP — SEC answered 429, or the call was refused without being sent while the cool-down after one runs",
-      recovery:
-        'Wait the retryAfter seconds the error carries, then retry — SEC lifts the block only once requests stop for ten minutes.',
-      retryable: true,
-      thrownBy: 'service',
-    },
-    {
-      reason: 'sec_unreachable',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: "SEC EDGAR gave no complete, readable response — on the last attempt made (the third, or an earlier one once this call's 40-second budget for SEC failures ran out) the connection failed, no response headers arrived within 15 seconds, or the body broke off or stalled for 15 seconds, each wait capped at what was left of that budget; a 200 body was not the JSON SEC serves; or earlier SEC failures had spent that budget, so the request was never sent",
-      recovery:
-        'Retry the same call in a minute — SEC EDGAR did not deliver a complete, readable response, and nothing in the request needs to change.',
-      retryable: true,
-      thrownBy: 'service',
-    },
+    ...SEC_UPSTREAM_ERRORS,
   ],
 
   input: z.object({
@@ -106,7 +91,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
       .string()
       .min(1)
       .describe(
-        'Financial concept — same friendly names as secedgar_get_financials (e.g., "revenue", "assets", "eps_basic") or raw XBRL tag.',
+        'Financial concept — same friendly names and spellings as secedgar_get_financials (e.g., "revenue", "assets", "eps_basic", "capital_expenditures") or raw XBRL tag.',
       ),
     taxonomy: z
       .enum(['us-gaap', 'dei'])
@@ -145,11 +130,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
   }),
 
   output: z.object({
-    concept: z
-      .string()
-      .describe(
-        'XBRL tag the data was actually fetched against (after resolving any friendly name).',
-      ),
+    concept: z.string().describe('XBRL tag queried, after resolving any friendly name.'),
     taxonomy: z
       .string()
       .describe(
@@ -183,16 +164,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
           .describe("One company's reported value for this metric and period."),
       )
       .describe('Ranked companies for this metric.'),
-    dataset: z
-      .object({
-        name: z
-          .string()
-          .describe(
-            'Dataframe handle (df_XXXXX_XXXXX) for secedgar_dataframe_describe, then secedgar_dataframe_query.',
-          ),
-        row_count: z.number().describe('Rows materialized in the dataframe.'),
-        expires_at: z.string().describe('ISO 8601 expiry timestamp.'),
-      })
+    dataset: datasetSchema
       .optional()
       .describe(
         'Dataframe of the full frame, every reporter. Absent when canvas is unavailable or staging failed.',
@@ -200,7 +172,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     unqueried_tags: z
       .array(z.string())
       .describe(
-        'Same-meaning mapped tags this call did not query (e.g., SalesRevenueNet for revenue); their filers are absent from data, so fetch each and UNION/COALESCE in SQL. Empty for raw tags and single-tag concepts.',
+        'Same-meaning mapped tags not queried (e.g., SalesRevenueNet for revenue), whose filers are absent from data: fetch each and UNION/COALESCE in SQL. Empty for raw tags and single-tag concepts.',
       ),
     related_tags: z
       .array(
@@ -212,7 +184,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
           .describe('One alternate-definition tag and the reason it differs.'),
       )
       .describe(
-        'Alternate-definition tags many filers use as their primary line (e.g., cash including restricted cash); those filers are absent from data. Fetch each separately; never blindly UNION, since definitions differ. Empty when none is known.',
+        'Alternate-definition tags many filers use as their primary line (e.g., cash including restricted cash), whose filers are absent from data: fetch each separately, never blindly UNION. Empty when none is known.',
       ),
     value_distribution: z
       .object({
@@ -222,7 +194,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
         max_to_p95_ratio: z
           .number()
           .describe(
-            'Max divided by p95. Heavy-tail frames sit near 10–50×; above ~200× usually means a filer-side scale-factor error, so check the top rows of data before trusting rankings.',
+            "Max ÷ p95. Heavy-tail frames sit near 10–50×; above ~200× usually means a filer-side scale-factor error, so check data's top rows before trusting rankings.",
           ),
       })
       .describe('Distribution across the full frame; max_to_p95_ratio is the outlier signal.'),
@@ -237,7 +209,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     caveats: z
       .array(z.string())
       .describe(
-        'Completeness warnings, else empty: quarterly frames (CY####Q#) omit fiscal-Q4 filers; annual NetIncomeLoss rows may be proxy pay-versus-performance figures; an annual frame still open or in its 10-K window may hold 10-Q trailing-twelve-month figures; top rows may be split or scale artifacts.',
+        'Completeness warnings, else empty: fiscal-Q4 filers missing from quarterly frames (CY####Q#), proxy pay-versus-performance NetIncomeLoss rows in annual frames, 10-Q trailing-twelve-month figures in an annual frame through April of the next year, split or scale artifacts in top rows.',
       ),
   }),
 
@@ -493,10 +465,10 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
   },
 
   format: (result) => {
-    // The SEC label, filer-typed entity name, and location render through escapeInline,
+    // The SEC label, filer-typed entity name, and location render through escapeMarkdownInline,
     // so a CommonMark parse reads back the structuredContent value (#221).
     const lines = [
-      `**${escapeInline(result.label)}** [XBRL: ${result.taxonomy}:${result.concept}] — ${result.period} (${result.unit}, ${result.total_companies} companies)`,
+      `**${escapeMarkdownInline(result.label)}** [XBRL: ${result.taxonomy}:${result.concept}] — ${result.period} (${result.unit}, ${result.total_companies} companies)`,
     ];
     lines.push(`Page offset: ${result.offset} (${result.data.length} shown)`);
     if (result.next_offset !== undefined) {
@@ -510,9 +482,9 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
           : result.unit === 'USD-per-shares'
             ? formatUsd(d.value, 'per-share')
             : groupedDigits(d.value);
-      const location = d.location ? ` | ${escapeInline(d.location)}` : '';
+      const location = d.location ? ` | ${escapeMarkdownInline(d.location)}` : '';
       lines.push(
-        `${d.rank}. ${escapeInline(d.company_name)}${ticker} — CIK ${d.cik}: ${formatted} (raw ${d.value}) | period end ${d.period_end}${location} [${d.accession_number}]`,
+        `${d.rank}. ${escapeMarkdownInline(d.company_name)}${ticker} — CIK ${d.cik}: ${formatted} (raw ${d.value}) | period end ${d.period_end}${location} [${d.accession_number}]`,
       );
     }
     if (result.dataset) {

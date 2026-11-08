@@ -1382,7 +1382,7 @@ describe('concept names that are neither a friendly name nor an XBRL tag (#128)'
     ['free_cash_flow', 'operating_cash_flow − capex'],
     ['ebitda', 'operating_income + depreciation_amortization'],
     ['total_debt', 'debt'],
-    ['capital_expenditures', 'capex'],
+    ['capital_spending', 'capex'],
   ])('fails %s as unknown_concept before the frames request', async (concept, needle) => {
     const result = await runToolContract(fetchFramesTool, { concept, period: 'CY2024' });
 
@@ -1396,15 +1396,19 @@ describe('concept names that are neither a friendly name nor an XBRL tag (#128)'
     expect(edgarCalls()).toBe(0);
   });
 
-  it.each(['../submissions/CIK0000320193', 'netincomeloss', 'fcf', '  '])(
-    'fails %j as unknown_concept without building a frames URL',
-    async (concept) => {
-      const result = await runToolContract(fetchFramesTool, { concept, period: 'CY2024' });
+  it.each([
+    '../submissions/CIK0000320193',
+    'netincomeloss',
+    'fcf',
+    '  ',
+    '__proto__',
+    'constructor',
+  ])('fails %j as unknown_concept without building a frames URL', async (concept) => {
+    const result = await runToolContract(fetchFramesTool, { concept, period: 'CY2024' });
 
-      expect(wireError(result).data.reason).toBe('unknown_concept');
-      expect(edgarCalls()).toBe(0);
-    },
-  );
+    expect(wireError(result).data.reason).toBe('unknown_concept');
+    expect(edgarCalls()).toBe(0);
+  });
 
   it('trims surrounding whitespace, so " revenue" queries the revenue tag', async () => {
     const result = await runToolContract(fetchFramesTool, {
@@ -1450,6 +1454,25 @@ describe('concept names that are neither a friendly name nor an XBRL tag (#128)'
 
     expect(wireError(result).data.reason).toBe('no_data');
     expect(mockApi.tryGetFrames).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['capital_expenditures', 'PaymentsToAcquirePropertyPlantAndEquipment'],
+    ['cash_and_cash_equivalents', 'CashAndCashEquivalentsAtCarryingValue'],
+    ['operatingIncome', 'OperatingIncomeLoss'],
+  ])('reads the spelling %s as its catalog concept, querying %s (#240)', async (concept, tag) => {
+    const result = await runToolContract(fetchFramesTool, { concept, period: 'CY2023' });
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.tryGetFrames).toHaveBeenCalledWith(
+      'us-gaap',
+      tag,
+      'USD',
+      'CY2023',
+      expect.any(CallScope),
+    );
+    expect(result.structuredContent).toMatchObject({ concept: tag });
+    expect(blockText(result.content)).toContain(tag);
   });
 });
 

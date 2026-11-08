@@ -50,6 +50,7 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
 import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import {
   allText,
+  bag,
   blockAt,
   blockText,
   caught,
@@ -1828,6 +1829,68 @@ describe('getInsiderTransactionsTool — a company input matching several compan
     expect(error.data).toMatchObject({ matches: companies.slice(0, 10), total_matches: 15 });
     expect(readCommonMark(allText(result))).toContain('Showing 10 of 15 matches;');
     expect(mockApi.getSubmissions).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A ticker spelling EDGAR does not list, read as one it does (#235): the note reaches both
+ * surfaces as `resolvedAs`, and a non-US listing's miss says why. Values are tabled at their own
+ * seams; these cases prove the wiring, one per side.
+ */
+describe('getInsiderTransactionsTool — ticker readings (#235)', () => {
+  const NON_US =
+    'The .HK suffix marks a non-US listing; EDGAR indexes SEC registrants by US ticker, name, or CIK.';
+  const call = (args: Record<string, unknown>) =>
+    runToolContract(getInsiderTransactionsTool, args as never);
+
+  it('carries the reading on both surfaces', async () => {
+    const reading = 'AAPL.O read as AAPL (Apple Inc.)';
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0000320193',
+      name: 'Apple Inc.',
+      ticker: 'AAPL',
+      reading,
+    });
+
+    const result = await call({ company: 'AAPL.O' });
+
+    expect(result.isError).toBeFalsy();
+    expect(bag(result.structuredContent).resolvedAs).toBe(reading);
+    expect(readCommonMark(allText(result))).toContain(
+      `⟨strong⟩Resolved as:⟨/strong⟩ ⟨code_inline:${reading}⟩`,
+    );
+  });
+
+  it('carries no note for a match no reading produced', async () => {
+    const result = await call({ company: 'AAPL' });
+
+    expect(result.isError).toBeFalsy();
+    expect(bag(result.structuredContent)).not.toHaveProperty('resolvedAs');
+    expect(allText(result)).not.toContain('Resolved as');
+  });
+
+  it('adds the non-US listing sentence to company_not_found, before any Form 4 read', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+
+    const result = await call({ company: '0700.HK' });
+
+    const error = wireError(result);
+    expect(error.message).toBe(`Company '0700.HK' not found. ${NON_US}`);
+    expect(error.data).toMatchObject({
+      reason: 'company_not_found',
+      recovery: { hint: 'Use secedgar_company_search to find the correct ticker or CIK.' },
+    });
+    expect(readCommonMark(blockText(result.content))).toContain(NON_US);
+    expect(mockApi.getRecentFilingsByForm).not.toHaveBeenCalled();
+  });
+
+  it('keeps the message unchanged for any other miss', async () => {
+    mockApi.resolveCik.mockResolvedValue([]);
+
+    const error = wireError(await call({ company: 'XYZNOTREAL' }));
+
+    expect(error.message).toBe("Company 'XYZNOTREAL' not found.");
+    expect(error.data).toMatchObject({ reason: 'company_not_found' });
   });
 });
 

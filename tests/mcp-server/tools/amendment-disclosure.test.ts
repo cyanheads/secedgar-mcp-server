@@ -57,7 +57,8 @@ function requests(overrides: Record<string, Route> = {}) {
   const routes = { ...DEFAULTS, ...overrides };
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
-    if (url.endsWith('/company_tickers.json')) return Response.json({});
+    if (url.endsWith('/company_tickers.json'))
+      return Response.json({ 0: { cik_str: 1, ticker: 'MGR', title: 'Manager' } });
     if (url.endsWith('/company_tickers_mf.json')) return Response.json({ data: [] });
     if (url.endsWith('/CIK0000000001.json'))
       return Response.json({

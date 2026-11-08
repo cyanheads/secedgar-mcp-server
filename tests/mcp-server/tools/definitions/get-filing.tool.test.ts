@@ -15,7 +15,7 @@ import {
 } from '@/mcp-server/tools/definitions/get-filing.tool.js';
 import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
-import type { CachedExtract } from '@/services/edgar/filing-to-text.js';
+import type { CachedExtract, InDocumentLink } from '@/services/edgar/filing-to-text.js';
 import type { FilingIndex, SubmissionsResponse } from '@/services/edgar/types.js';
 
 // The index-listing wiring case runs the real service's index.json read over a
@@ -40,9 +40,10 @@ vi.mock('@/services/edgar/edgar-api-service.js', async (importOriginal) => ({
 }));
 
 // `foldForHeadingMatch`, `headingKey`, `MARKER_TITLE_RE`, `withoutSubItemLabel`,
-// `isTocHeading`, `matchSectionLine`, and `spaceRunInMarker` are not mocked:
-// they are the comparisons the section matcher under test performs, so the real
-// ones have to run (#106, #166, #169, #174, #175, #180).
+// `isTocHeading`, `matchSectionLine`, `spaceRunInMarker`, `linkedSectionStart`,
+// and `findPhrase` are not mocked: they are the comparisons and scans the section
+// and phrase matchers under test perform, so the real ones have to run (#106,
+// #166, #169, #174, #175, #180, #238, #239).
 vi.mock('@/services/edgar/filing-to-text.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/edgar/filing-to-text.js')>();
   return {
@@ -62,6 +63,8 @@ vi.mock('@/services/edgar/filing-to-text.js', async (importOriginal) => {
     isTocHeading: actual.isTocHeading,
     matchSectionLine: actual.matchSectionLine,
     spaceRunInMarker: actual.spaceRunInMarker,
+    linkedSectionStart: actual.linkedSectionStart,
+    findPhrase: actual.findPhrase,
   };
 });
 
@@ -94,8 +97,13 @@ const CIK = '0000320193';
  * An extract-cache entry as get_filing writes it: past the `CachedExtract` fields,
  * the CIK whose archive served the text, which a hit reports.
  */
-function cachedExtract(text: string, document: string, cik: string): CachedExtract {
-  const entry = { text, document, cik };
+function cachedExtract(
+  text: string,
+  document: string,
+  cik: string,
+  links: InDocumentLink[] = [],
+): CachedExtract {
+  const entry = { text, document, cik, links };
   return entry;
 }
 
@@ -1131,6 +1139,7 @@ describe('cache short-circuit', () => {
     await getFilingTool.handler(input, ctx);
     expect(vi.mocked(setExtractCache)).toHaveBeenCalledWith(expect.stringContaining(ACCN), {
       text: 'full text',
+      links: [],
       document: 'aapl-20230930.htm',
       cik: CIK,
     });
@@ -1519,7 +1528,7 @@ describe('section targeting — whitespace and quote folding (#106)', () => {
       const outlineBlock = STYLED_HEADINGS.map((h) => `  [${h.offset}] ${h.heading}`).join('\n');
       const message = `Section is blank: ${described}, leaving nothing to match.\n\nOutline:\n${outlineBlock}`;
       const hint =
-        'Pick a heading from the outline above and pass it as section; a subheading the outline omits matches when passed exactly as the document prints it.';
+        'Pick a heading from the outline above and pass it as section; a subheading the outline omits matches when passed exactly as the document prints it. For a phrase that is not a heading, pass it as find instead.';
       expect(error.message).toBe(message);
       expect(error.data).toMatchObject({ reason: 'section_not_found', section });
       expect(error.data.outline).toEqual(STYLED_HEADINGS);
@@ -2031,7 +2040,7 @@ describe('section targeting — the line fallback (#166)', () => {
     expect(err.data.reason).toBe('section_not_found');
     expect(err.data.outline).toEqual(HEADINGS);
     expect(recoveryHint(err)).toBe(
-      'Pick a heading from the outline above and pass it as section; a subheading the outline omits matches when passed exactly as the document prints it.',
+      'Pick a heading from the outline above and pass it as section; a subheading the outline omits matches when passed exactly as the document prints it. For a phrase that is not a heading, pass it as find instead.',
     );
   });
 
@@ -3381,6 +3390,7 @@ describe('primary document the archive does not serve (#158)', () => {
     ]);
     expect(vi.mocked(setExtractCache)).toHaveBeenCalledWith(expect.stringContaining(LEGACY_ACCN), {
       text: 'Submission text',
+      links: [],
       document: SUBMISSION,
       cik: LEGACY_CIK,
     });
@@ -3641,6 +3651,7 @@ describe('a sequence-numbered document under its accession-prefixed name (#213)'
     expect(text).not.toContain('does not serve');
     expect(vi.mocked(setExtractCache)).toHaveBeenCalledWith(`${LEGACY_ACCN}:\x00primary`, {
       text: '10-Q text',
+      links: [],
       document: PREFIXED_10Q,
       cik: LEGACY_CIK,
     });
@@ -3716,12 +3727,15 @@ describe('a sequence-numbered document under its accession-prefixed name (#213)'
     new McpError(JsonRpcErrorCode.ServiceUnavailable, 'SEC EDGAR unreachable', {
       reason: 'sec_unreachable',
     });
-  const http503 = () =>
-    new McpError(JsonRpcErrorCode.ServiceUnavailable, 'SEC EDGAR returned HTTP 503', {
-      status: 503,
-    });
-  const http504 = () =>
-    new McpError(JsonRpcErrorCode.Timeout, 'SEC EDGAR returned HTTP 504', { status: 504 });
+  /** A 5xx that spent the retry ladder, as the service throws it (#233). */
+  const exhausted = (status: number) => () =>
+    new McpError(
+      JsonRpcErrorCode.ServiceUnavailable,
+      `SEC EDGAR (www.sec.gov) answered HTTP ${status} on the last of 3 attempts.`,
+      { reason: 'sec_unavailable', retryable: true, status },
+    );
+  const http503 = exhausted(503);
+  const http504 = exhausted(504);
   /** The archive 404s the listed name, fails the prefixed one with `failure`, and serves the rest. */
   const failingPrefixed =
     (failure: () => McpError) =>
@@ -3800,17 +3814,19 @@ describe('a sequence-numbered document under its accession-prefixed name (#213)'
   });
 
   it.each([
-    ['gets no response', noResponse, JsonRpcErrorCode.ServiceUnavailable],
-    ['answers 503', http503, JsonRpcErrorCode.ServiceUnavailable],
-    ['answers 504', http504, JsonRpcErrorCode.Timeout],
+    ['gets no response', noResponse, 'sec_unreachable'],
+    ['answers 503', http503, 'sec_unavailable'],
+    ['answers 504', http504, 'sec_unavailable'],
   ])(
     'fails a caller-named accession-prefixed document whose read %s',
-    async (_label, failure, code) => {
+    async (_label, failure, reason) => {
       mockApi.tryGetFilingDocument.mockImplementation(failingPrefixed(failure));
 
       const result = await call({ document: PREFIXED_10Q });
 
-      expect(wireError(result).code).toBe(code);
+      const error = wireError(result);
+      expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
+      expect(error.data.reason).toBe(reason);
       expect(names()).toEqual([PREFIXED_10Q]);
     },
   );
@@ -4429,28 +4445,42 @@ describe('the filers a filing’s index page names (#203)', () => {
     expect(archiveReads()).toEqual([`index ${AGENT_CIK}`, `parties ${AGENT_CIK}`]);
   });
 
-  it('keeps the outcome the candidates reached when SEC cannot serve the index page', async () => {
-    mockApi.tryGetFilingDocument.mockResolvedValue(null);
-    mockApi.tryGetFilingPartyCiks.mockRejectedValue(
-      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'SEC EDGAR returned HTTP 503', {
-        status: 503,
-      }),
+  /** A 5xx that spent the retry ladder, as the service throws it (#233). */
+  const exhausted = (status: number) =>
+    new McpError(
+      JsonRpcErrorCode.ServiceUnavailable,
+      `SEC EDGAR (www.sec.gov) answered HTTP ${status} on the last of 3 attempts.`,
+      { reason: 'sec_unavailable', retryable: true, status },
     );
 
-    const result = await call();
+  it.each([
+    ['a 503', exhausted(503)],
+    ['a 504', exhausted(504)],
+    // A 408 is not retried and maps to Timeout, the other code an optional read degrades on.
+    [
+      'a 408',
+      new McpError(JsonRpcErrorCode.Timeout, 'SEC EDGAR returned HTTP 408 Request Timeout.', {
+        status: 408,
+      }),
+    ],
+  ])(
+    'keeps the outcome the candidates reached when SEC answers the index page with %s',
+    async (_label, failure) => {
+      mockApi.tryGetFilingDocument.mockResolvedValue(null);
+      mockApi.tryGetFilingPartyCiks.mockRejectedValue(failure);
 
-    const error = wireError(result);
-    expect(error.data.reason).toBe('no_documents');
-    expect(String(bag(error.data.recovery).hint)).toMatch(/lookup .*unavailable/);
-  });
+      const result = await call();
+
+      const error = wireError(result);
+      expect(error.data.reason).toBe('no_documents');
+      expect(String(bag(error.data.recovery).hint)).toMatch(/lookup .*unavailable/);
+      expect(mockApi.tryGetFilingPartyCiks).toHaveBeenCalledOnce();
+    },
+  );
 
   it('says the lookup was unavailable when SEC cannot serve the index page and no directory holds the filing', async () => {
     mockApi.tryGetFilingIndex.mockResolvedValue(null);
-    mockApi.tryGetFilingPartyCiks.mockRejectedValue(
-      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'SEC EDGAR returned HTTP 503', {
-        status: 503,
-      }),
-    );
+    mockApi.tryGetFilingPartyCiks.mockRejectedValue(exhausted(503));
 
     const result = await call();
 
@@ -4493,9 +4523,7 @@ describe('the filers a filing’s index page names (#203)', () => {
     mockApi.tryGetFilingDocument.mockResolvedValue(null);
     mockApi.tryGetFilingPartyCiks.mockImplementation(async () => {
       caller.abort('client cancelled');
-      throw new McpError(JsonRpcErrorCode.ServiceUnavailable, 'SEC EDGAR returned HTTP 503', {
-        status: 503,
-      });
+      throw exhausted(503);
     });
 
     const result = await runToolContract(
@@ -4509,7 +4537,7 @@ describe('the filers a filing’s index page names (#203)', () => {
     expect(result.isError).toBe(true);
     expect(bag(result.structuredContent).error).toEqual({
       code: JsonRpcErrorCode.RequestCancelled,
-      message: 'SEC EDGAR returned HTTP 503',
+      message: 'SEC EDGAR (www.sec.gov) answered HTTP 503 on the last of 3 attempts.',
     });
     expect(mockApi.tryGetFilingIndex).toHaveBeenCalledOnce();
   });
@@ -4627,14 +4655,19 @@ describe('a failed full-text search filer lookup (#215)', () => {
       signal ? { context: { signal } } : undefined,
     );
 
+  /** A 5xx that spent the retry ladder, as the service throws it (#233). */
+  const exhausted = (status: number) =>
+    new McpError(
+      JsonRpcErrorCode.ServiceUnavailable,
+      `SEC EDGAR (efts.sec.gov) answered HTTP ${status} on the last of 3 attempts.`,
+      { reason: 'sec_unavailable', retryable: true, status },
+    );
+
   it.each([
     ['a degraded search response', unavailable({ reason: 'efts_degraded_response' })],
     ['no response', unavailable({ reason: 'sec_unreachable' })],
-    ['a 503', unavailable({ status: 503 })],
-    [
-      'a 504',
-      new McpError(JsonRpcErrorCode.Timeout, 'SEC EDGAR returned HTTP 504', { status: 504 }),
-    ],
+    ['a 503', exhausted(503)],
+    ['a 504', exhausted(504)],
   ])('reads the filing from the accession-prefix directory after %s', async (_label, error) => {
     mockApi.findFilingCiks.mockRejectedValue(error);
 
@@ -4871,6 +4904,7 @@ describe('a structured XML form reads as SEC renders it (#216)', () => {
     expect(text).toContain(`URL: ${DIR_URL}/${RENDERING}`);
     expect(vi.mocked(setExtractCache)).toHaveBeenCalledWith(`${ACCN_13D}:\x00primary`, {
       text: 'rendered text',
+      links: [],
       document: RENDERING,
       cik: MAPLEBEAR_CIK,
     });
@@ -4925,25 +4959,20 @@ describe('a structured XML form reads as SEC renders it (#216)', () => {
   const unavailable = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'SEC EDGAR unreachable', {
     reason: 'sec_unreachable',
   });
+  /** A 5xx that spent the retry ladder, as the service throws it (#233). */
+  const exhausted = (status: number) => async () =>
+    Promise.reject(
+      new McpError(
+        JsonRpcErrorCode.ServiceUnavailable,
+        `SEC EDGAR (www.sec.gov) answered HTTP ${status} on the last of 3 attempts.`,
+        { reason: 'sec_unavailable', retryable: true, status },
+      ),
+    );
   it.each([
     ['answers 404', async () => null],
     ['gets no response', async () => Promise.reject(unavailable)],
-    [
-      'answers 503',
-      async () =>
-        Promise.reject(
-          new McpError(JsonRpcErrorCode.ServiceUnavailable, 'SEC EDGAR returned HTTP 503', {
-            status: 503,
-          }),
-        ),
-    ],
-    [
-      'answers 504',
-      async () =>
-        Promise.reject(
-          new McpError(JsonRpcErrorCode.Timeout, 'SEC EDGAR returned HTTP 504', { status: 504 }),
-        ),
-    ],
+    ['answers 503', exhausted(503)],
+    ['answers 504', exhausted(504)],
   ])('falls back to the raw file when the rendering request %s', async (_label, rendering) => {
     mockApi.tryGetFilingDocument.mockImplementation(
       async (_cik: string, _accn: string, name: string) => (name === RAW ? RAW_XML : rendering()),

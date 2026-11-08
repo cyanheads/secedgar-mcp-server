@@ -110,13 +110,13 @@ const ServerConfigSchema = z.object({
     .string()
     .optional()
     .describe(
-      'Cron expression for the in-process nightly refresh (HTTP transport only). Omit to disable scheduled refresh and run `bun run mirror:refresh` out-of-band instead. Recommended "0 9 * * *" (≈04:00–05:00 ET, after SEC rebuilds the bulk files ~03:00 ET).',
+      'Cron expression for the in-process refresh of both mirror stores (HTTP transport only): each run re-downloads the ticker file and, whenever SEC has rebuilt it, the companyfacts.zip bulk archive. With EDGAR_MIRROR_FALLBACK_LIVE on, an older store sends more reads live rather than answering stale; in strict mode the schedule is how current answers are. Omit to disable scheduled refresh and run `bun run mirror:refresh` out-of-band instead. Recommended "0 9 * * *" (≈04:00–05:00 ET, after SEC rebuilds the bulk files ~03:00 ET).',
     ),
   mirrorFallbackLive: z
     .stringbool()
     .default(true)
     .describe(
-      'When the mirror is enabled but a lookup misses (company/concept not yet synced, or a filing newer than the last refresh), fall back to the live SEC API. Default true. Set "false" for strict mirror-only reads.',
+      'With the mirror enabled, read the live SEC API wherever SEC may hold something newer than the mirror: the ticker index every EDGAR_TICKER_CACHE_TTL, a filer\'s XBRL facts once it has filed XBRL since the store was compiled (per its submissions document, read once per filer per TTL), a frames period still open for filing then, and anything the mirror lacks or has not synced. The mirror answers when such a live read fails, unless the caller cancelled. Default true. Set "false" for strict mirror-only reads, which send nothing to SEC for ticker, XBRL-facts, or frames lookups.',
     ),
   clampOversizedLimits: z
     .stringbool()

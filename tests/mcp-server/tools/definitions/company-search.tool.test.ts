@@ -1526,3 +1526,63 @@ describe('companySearchTool — SEC strings in content[] (#221)', () => {
     );
   });
 });
+
+/**
+ * A ticker spelling resolveCik read (#235) names the reading in resolvedAs on both surfaces; a
+ * match no reading produced carries none, and a non-US listing's no_match says what the suffix
+ * is. The readings themselves are tabled in the resolve-cik and listing-codes tests.
+ */
+describe('companySearchTool — ticker spellings EDGAR does not list (#235)', () => {
+  const READING = 'UEC.N read as UEC (URANIUM ENERGY CORP)';
+
+  it('names the reading in resolvedAs, in structuredContent and content[]', async () => {
+    mockApi.resolveCik.mockResolvedValue({
+      cik: '0001334933',
+      name: 'URANIUM ENERGY CORP',
+      ticker: 'UEC',
+      reading: READING,
+    });
+
+    const result = await runToolContract(companySearchTool, {
+      query: 'UEC.N',
+      include_filings: false,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(bag(result.structuredContent).resolvedAs).toBe(READING);
+    // A code literal, so the parsed text reads back as the structuredContent value.
+    expect(readCommonMark(allText(result))).toContain(
+      `⟨strong⟩Resolved as:⟨/strong⟩ ⟨code_inline:${READING}⟩`,
+    );
+  });
+
+  it('carries no resolvedAs for a match no reading produced', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+
+    const result = await runToolContract(companySearchTool, {
+      query: 'AAPL',
+      include_filings: false,
+    });
+
+    expect(bag(result.structuredContent)).not.toHaveProperty('resolvedAs');
+    expect(allText(result)).not.toContain('Resolved as');
+  });
+
+  it.each([
+    [
+      '7203.T',
+      ' The .T suffix marks a non-US listing; EDGAR indexes SEC registrants by US ticker, name, or CIK.',
+    ],
+    ['Riot', ''],
+  ])(
+    'ends the no_match message for %s with the listing note when one applies',
+    async (query, note) => {
+      mockApi.resolveCik.mockResolvedValue([]);
+
+      const error = wireError(await runToolContract(companySearchTool, { query }));
+
+      expect(error.data.reason).toBe('no_match');
+      expect(error.message).toBe(`No company found for '${query}'.${note}`);
+    },
+  );
+});

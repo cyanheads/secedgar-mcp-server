@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-11-04 04:21:28
+Generated on: 2026-11-08 19:23:08
 
 ```text
 secedgar-mcp-server/
@@ -194,11 +194,13 @@ secedgar-mcp-server/
 │   │       │   ├── search-concepts.tool.ts
 │   │       │   └── search-filings.tool.ts
 │   │       ├── ambiguous-matches.ts
-│   │       ├── escape-inline.ts
+│   │       ├── dataset-schema.ts
 │   │       ├── fixed-point.ts
 │   │       ├── form-filter.ts
 │   │       ├── format-usd.ts
-│   │       └── limit-clamp.ts
+│   │       ├── limit-clamp.ts
+│   │       ├── resolved-as.ts
+│   │       └── sec-upstream-errors.ts
 │   ├── services/
 │   │   ├── canvas-bridge/
 │   │   │   ├── canvas-bridge.ts
@@ -221,6 +223,7 @@ secedgar-mcp-server/
 │   │       ├── filing-headers.ts
 │   │       ├── filing-to-text.ts
 │   │       ├── fiscal-periods.ts
+│   │       ├── listing-codes.ts
 │   │       ├── nport-parser.ts
 │   │       ├── ownership-parser.ts
 │   │       ├── same-cik.ts
@@ -252,6 +255,7 @@ secedgar-mcp-server/
 │   │   └── tools/
 │   │       ├── definitions/
 │   │       │   ├── company-search.tool.test.ts
+│   │       │   ├── compare-companies.fact-reads.test.ts
 │   │       │   ├── compare-companies.tool.test.ts
 │   │       │   ├── dataframe-describe.tool.test.ts
 │   │       │   ├── dataframe-drop.tool.test.ts
@@ -259,7 +263,10 @@ secedgar-mcp-server/
 │   │       │   ├── fetch-frames.tool.test.ts
 │   │       │   ├── find-holders.tool.test.ts
 │   │       │   ├── get-beneficial-owners.tool.test.ts
+│   │       │   ├── get-filing.find.test.ts
+│   │       │   ├── get-filing.links.test.ts
 │   │       │   ├── get-filing.tool.test.ts
+│   │       │   ├── get-financials.concept-reads.test.ts
 │   │       │   ├── get-financials.tool.test.ts
 │   │       │   ├── get-fund-holdings.tool.test.ts
 │   │       │   ├── get-insider-transactions.tool.test.ts
@@ -275,19 +282,20 @@ secedgar-mcp-server/
 │   │       ├── ambiguous-matches.test.ts
 │   │       ├── amendment-disclosure.test.ts
 │   │       ├── dataframe-pointers.test.ts
-│   │       ├── escape-inline.test.ts
 │   │       ├── fixed-point.test.ts
 │   │       ├── form-filter.test.ts
 │   │       ├── format-usd.test.ts
 │   │       ├── fund-ticker-resolution.test.ts
 │   │       ├── input-aliases.test.ts
 │   │       ├── limit-clamp.test.ts
+│   │       ├── markdown-escaping.test.ts
 │   │       ├── rate-limit-contract.test.ts
 │   │       └── strict-inputs.test.ts
 │   ├── scripts/
 │   │   └── bundle-entry-patterns.test.ts
 │   ├── services/
 │   │   ├── canvas-bridge/
+│   │   │   ├── canvas-bridge.duckdb.test.ts
 │   │   │   ├── canvas-bridge.test.ts
 │   │   │   └── sql-gate-extras.test.ts
 │   │   └── edgar/
@@ -300,6 +308,7 @@ secedgar-mcp-server/
 │   │       ├── concept-map.test.ts
 │   │       ├── concept-series.test.ts
 │   │       ├── edgar-api-service.archive-urls.test.ts
+│   │       ├── edgar-api-service.caches.test.ts
 │   │       ├── edgar-api-service.efts.test.ts
 │   │       ├── edgar-api-service.filing-headers.test.ts
 │   │       ├── edgar-api-service.full-index.test.ts
@@ -312,12 +321,16 @@ secedgar-mcp-server/
 │   │       ├── edgar-api-service.xbrl-units.test.ts
 │   │       ├── eight-k-items.test.ts
 │   │       ├── filing-headers.test.ts
+│   │       ├── filing-to-text.find.test.ts
+│   │       ├── filing-to-text.links.test.ts
 │   │       ├── filing-to-text.test.ts
 │   │       ├── fiscal-periods.test.ts
+│   │       ├── listing-codes.test.ts
 │   │       ├── nport-parser.test.ts
 │   │       ├── ownership-parser.test.ts
 │   │       ├── same-cik.test.ts
 │   │       ├── submissions-archive.test.ts
+│   │       ├── trigram-similarity.test.ts
 │   │       └── xml-nodes.test.ts
 │   ├── support/
 │   │   ├── assertions.ts
