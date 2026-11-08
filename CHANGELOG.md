@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.19.0](changelog/0.19.x/0.19.0.md) — 2026-11-08 · ⚠️ Breaking · 🛡️ Security
+
+With the mirror enabled, ticker, XBRL, and frames reads go live wherever SEC may hold newer data. secedgar_get_filing gains find and lands table-of-contents rows on their sections, venue-suffixed tickers resolve, and over HTTP with auth none secedgar_dataframe_describe no longer lists every caller's dataframes.
+
 ## [0.18.1](changelog/0.18.x/0.18.1.md) — 2026-11-03
 
 Ambiguity errors count every match behind the 10 they list, and secedgar_get_filing's body reads back from content[] exactly as structuredContent carries it.
