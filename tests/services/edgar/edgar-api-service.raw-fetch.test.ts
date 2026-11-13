@@ -11,7 +11,9 @@
  * the call's 40 s failure budget and ends at once on the caller's cancel (#179), the
  * error body's bounded diagnostic capture included (#202); a body the ladder has no
  * use for is cancelled unread (#188), and a submissions or archive-page body without
- * the shape its readers index fails like one that is not JSON (#186). A 200 whose
+ * the shape its readers index fails like one that is not JSON (#186). The captured
+ * body rides the error's `cause` to the log, never its `data`, which reaches the
+ * caller (#244). A 200 whose
  * JSON names a backend error is returned as read unless the request opts in to
  * retrying it, as only EDGAR full-text search's readers do (#206). A
  * User-Agent that `fetch` refuses before sending is a configuration error at
@@ -69,6 +71,19 @@ async function rejectionWithTimers(promise: Promise<unknown>): Promise<McpError>
   );
   await vi.advanceTimersByTimeAsync(30_000);
   return (await settled) as McpError;
+}
+
+/**
+ * Every `data.body` on `error`'s cause chain below the error itself: where SEC's
+ * error body rides to the call's failure log record, which writes each cause's
+ * `data` (#244). The error's own `data` reaches the caller and holds none.
+ */
+function causeBodies(error: unknown): unknown[] {
+  const bodies: unknown[] = [];
+  for (let node = (error as Error | undefined)?.cause; node instanceof Error; node = node.cause) {
+    if (node instanceof McpError && node.data && 'body' in node.data) bodies.push(node.data.body);
+  }
+  return bodies;
 }
 
 // --- Runtime rejections with no HTTP response (#173) ---
@@ -576,6 +591,8 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
     expect(wire).not.toContain('<title>');
     expect((error.data as { body?: unknown }).body).toBeUndefined();
     expect((error.data as { responseBody?: unknown }).responseBody).toBeUndefined();
+    // Nor in the log (#244).
+    expect(causeBodies(error)).toEqual([]);
   });
 
   // --- 5xx: still retried (#112 regression) ---
@@ -596,11 +613,9 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       expect(error.message).toBe(
         `SEC EDGAR (www.sec.gov) answered HTTP ${status} on the last of 3 attempts.`,
       );
-      expect(error.data).toEqual({
-        ...unavailableData(status),
-        body: 'upstream error',
-        responseBody: 'upstream error',
-      });
+      // SEC's body rides `cause` to the log, never `data` to the caller (#244).
+      expect(error.data).toEqual(unavailableData(status));
+      expect(causeBodies(error)).toEqual(['upstream error']);
     },
   );
 
@@ -623,9 +638,13 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
     expect(error.message).toBe('SEC EDGAR returned HTTP 501.');
-    expect(error.data).toMatchObject({ status: 501, retryable: false });
-    expect(error.data).not.toHaveProperty('reason');
-    expect(error.data).not.toHaveProperty('recovery');
+    expect(error.data).toEqual({
+      url: DOCUMENT_URL,
+      status: 501,
+      statusCode: 501,
+      retryable: false,
+    });
+    expect(causeBodies(error)).toEqual(['upstream error']);
   });
 
   // --- 403: hint unchanged (#112 regression) ---
@@ -1276,7 +1295,8 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
         { cancelled: false, pulled: 1 },
       ]);
       expect(call.state.error?.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
-      expect(call.state.error?.data).toMatchObject({ status: 503, body: 'still busy' });
+      expect(call.state.error?.data).toEqual(unavailableData(503));
+      expect(causeBodies(call.state.error)).toEqual(['still busy']);
     });
 
     it('returns a retry’s 200 after releasing the 5xx bodies before it', async () => {
@@ -1310,6 +1330,7 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       expect(error.data).toMatchObject({ reason: 'rate_limited', retryable: true, status: 429 });
       expect(error.data).not.toHaveProperty('body');
       expect(error.data).not.toHaveProperty('responseBody');
+      expect(causeBodies(error)).toEqual([]);
     });
 
     it('cancels an answer that lands as the caller cancels, and rethrows the caller’s reason', async () => {
@@ -1399,10 +1420,11 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       expect(call.state.error?.data).toMatchObject(unavailableData(503));
       expect(call.state.error?.data).not.toHaveProperty('body');
       expect(call.state.error?.data).not.toHaveProperty('responseBody');
+      expect(causeBodies(call.state.error)).toEqual([]);
     });
   });
 
-  // --- The error body's diagnostic capture (#202) ---
+  // --- The error body's diagnostic capture (#202), logged on the error's cause (#244) ---
 
   describe('the error body’s diagnostic capture (#202)', () => {
     const FORBIDDEN_HINT =
@@ -1438,14 +1460,13 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       );
 
       expect(error.code).toBe(JsonRpcErrorCode.Forbidden);
-      expect(error.data).toMatchObject({
+      expect(error.data).toEqual({
         status: 403,
         statusCode: 403,
         url: DOCUMENT_URL,
-        body: captured,
-        responseBody: captured,
         recovery: { hint: FORBIDDEN_HINT },
       });
+      expect(causeBodies(error)).toEqual([captured]);
       expect(body.state).toEqual(state);
     });
 
@@ -1459,7 +1480,8 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       expect(error.message).toBe(
         'SEC EDGAR (www.sec.gov) answered HTTP 503 on the last of 3 attempts.',
       );
-      expect(error.data).toMatchObject({ status: 503, body: 'Service Unavailable' });
+      expect(error.data).toEqual(unavailableData(503));
+      expect(causeBodies(error)).toEqual(['Service Unavailable']);
     });
 
     it('ends a 403 body that stalls after its headers at the 15 s idle limit, keeping what it read and charging the wait', async () => {
@@ -1477,12 +1499,13 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       expect(body.state.cancelled).toBe(true);
       expect(call.state.error?.code).toBe(JsonRpcErrorCode.Forbidden);
       expect(call.state.error?.message).toBe('SEC EDGAR returned HTTP 403.');
-      expect(call.state.error?.data).toMatchObject({
+      expect(call.state.error?.data).toEqual({
         status: 403,
+        statusCode: 403,
         url: DOCUMENT_URL,
-        body: '<html>partial…',
         recovery: { hint: FORBIDDEN_HINT },
       });
+      expect(causeBodies(call.state.error)).toEqual(['<html>partial…']);
       expect(callScope.spentMs).toBe(15_000);
     });
 
@@ -1504,10 +1527,8 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       expect(call.state.error?.message).toBe(
         'SEC EDGAR (www.sec.gov) answered HTTP 503 on the last of 3 attempts.',
       );
-      expect(call.state.error?.data).toMatchObject({
-        ...unavailableData(503),
-        body: '<html>partial…',
-      });
+      expect(call.state.error?.data).toEqual(unavailableData(503));
+      expect(causeBodies(call.state.error)).toEqual(['<html>partial…']);
     });
 
     it('cuts the capture to the call’s budget left', async () => {
@@ -1522,7 +1543,8 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       await call.done;
 
       expect(call.state.error?.code).toBe(JsonRpcErrorCode.Forbidden);
-      expect(call.state.error?.data).toMatchObject({ body: '<html>partial…' });
+      expect(call.state.error?.data).not.toHaveProperty('body');
+      expect(causeBodies(call.state.error)).toEqual(['<html>partial…']);
     });
 
     it('ends at once on the caller’s cancel, rethrowing its reason, and cancels the body', async () => {
@@ -2077,11 +2099,11 @@ describe('EdgarApiService.rawFetch — retry and error classification', () => {
       expect(second.state.error?.message).toBe(
         `SEC EDGAR (www.sec.gov) answered HTTP 503 on attempt 2 of 3; ${BUDGET_STOP}.`,
       );
-      expect(second.state.error?.data).toMatchObject({
+      expect(second.state.error?.data).toEqual({
         ...unavailableData(503),
         url: `${DOCUMENT_URL}?n=2`,
-        body: 'busy',
       });
+      expect(causeBodies(second.state.error)).toEqual(['busy']);
     });
 
     it('stops further requests in the call that spent it, and in no other call', async () => {

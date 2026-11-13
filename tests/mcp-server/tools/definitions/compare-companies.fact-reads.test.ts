@@ -22,6 +22,8 @@ vi.mock('@/config/server-config.js', () => ({
   }),
 }));
 vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => undefined }));
+// The synthetic tickers below are real former tickers (`CCC`); no earlier holder is in play here.
+vi.mock('@/services/edgar/data/former-tickers.json', () => ({ default: [] }));
 vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/canvas-bridge/canvas-bridge.js')>()),
   getCanvasBridge: () => undefined,

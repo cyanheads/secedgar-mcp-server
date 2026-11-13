@@ -24,15 +24,23 @@ import {
   searchFilingsTool,
 } from '@/mcp-server/tools/definitions/search-filings.tool.js';
 
-vi.mock('@/services/edgar/edgar-api-service.js', async (importOriginal) => ({
-  getEdgarApiService: vi.fn(),
-  initEdgarApiService: vi.fn(),
-  suggestCompanies: vi.fn(() => []),
-  pickPreferredTicker: vi.fn(),
-  // Pure URL builder get_filing's filing_url uses.
-  filingArchiveUrl: (await importOriginal<typeof import('@/services/edgar/edgar-api-service.js')>())
-    .filingArchiveUrl,
-}));
+vi.mock('@/services/edgar/edgar-api-service.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/edgar/edgar-api-service.js')>();
+  return {
+    getEdgarApiService: vi.fn(),
+    initEdgarApiService: vi.fn(),
+    suggestCompanies: vi.fn(() => []),
+    pickPreferredTicker: vi.fn(),
+    // Pure URL builder get_filing's filing_url uses.
+    filingArchiveUrl: actual.filingArchiveUrl,
+    // The pure name tiering and phrase company_search's miss path reads (#236).
+    LAST_EXACT_TIER: actual.LAST_EXACT_TIER,
+    NAME_WORD_CHAR: actual.NAME_WORD_CHAR,
+    nameQuery: actual.nameQuery,
+    nameTier: actual.nameTier,
+    subsidiaryPhrase: actual.subsidiaryPhrase,
+  };
+});
 
 // Partial mock: the canvas accessors are stubbed, but `dataframeGuidance` stays
 // real so the staged-dataframe pointer is asserted against the shipped wording.
@@ -89,6 +97,8 @@ const mockApi = {
   tryGetCompanyFacts: vi.fn(),
   tryGetFrames: vi.fn(),
   cikToTicker: vi.fn(),
+  resolveEntityByName: vi.fn(),
+  findSubsidiaryParents: vi.fn(),
 };
 
 const mockSubmissions = {
@@ -120,6 +130,9 @@ beforeEach(() => {
   mockApi.resolveCik.mockResolvedValue([]);
   mockApi.getSubmissions.mockResolvedValue(mockSubmissions);
   mockApi.findFilingCiks.mockResolvedValue([]);
+  // company_search's miss path: nothing in EDGAR's entity index or its 10-K exhibits (#236).
+  mockApi.resolveEntityByName.mockResolvedValue({ matches: [], total: undefined });
+  mockApi.findSubsidiaryParents.mockResolvedValue([]);
   vi.mocked(getExtractCache).mockReturnValue(undefined);
   vi.mocked(filingToExtract).mockReturnValue('');
   vi.mocked(detectHeadings).mockReturnValue([]);

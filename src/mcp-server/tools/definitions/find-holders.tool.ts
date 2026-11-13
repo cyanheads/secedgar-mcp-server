@@ -18,7 +18,10 @@ import {
   withLimitClamps,
 } from '@/mcp-server/tools/limit-clamp.js';
 import { resolvedAsField } from '@/mcp-server/tools/resolved-as.js';
-import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
+import {
+  EFTS_DEGRADED_ERROR,
+  SEC_UPSTREAM_ERRORS,
+} from '@/mcp-server/tools/sec-upstream-errors.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -195,15 +198,7 @@ export const findHoldersTool = tool('secedgar_find_holders', {
         'Retry with the ticker or the 10-digit CIK of the intended issuer from the matches list.',
     },
     ...SEC_UPSTREAM_ERRORS,
-    {
-      reason: 'efts_degraded_response',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'EDGAR full-text search answered without results — its search backend failed to run the search on every attempt made (a connection or timeout failure, retried like a request SEC never answered), refused the request (upstreamErrorType and upstreamErrorMessage carry its error, and the request is not retried), or sent a payload with no hit list',
-      recovery:
-        'Retry the same call in a minute unless the error is marked not retryable; then change the request as upstreamErrorMessage indicates.',
-      retryable: true,
-      thrownBy: 'service',
-    },
+    EFTS_DEGRADED_ERROR,
   ],
 
   input: z.object({

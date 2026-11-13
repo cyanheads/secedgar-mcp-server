@@ -28,6 +28,8 @@ const { config, mirrorRef } = vi.hoisted(() => ({
 
 vi.mock('@/config/server-config.js', () => ({ getServerConfig: () => config }));
 vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => mirrorRef.current }));
+// The fixture tickers are real former tickers (`CASK`); no earlier holder is in play here.
+vi.mock('@/services/edgar/data/former-tickers.json', () => ({ default: [] }));
 
 import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, initEdgarApiService } from '@/services/edgar/edgar-api-service.js';

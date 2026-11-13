@@ -1,0 +1,1227 @@
+{
+  "hits": {
+    "total": { "value": 135, "relation": "eq" },
+    "hits": [
+      {
+        "_id": "0000882835-25-000008:a202410-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-25-000008",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2025-02-24",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-26-000009:a202510-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-26-000009",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2026-02-24",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-24-000008:a202310-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-24-000008",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2024-02-22",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-23-000016:a202210-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-23-000016",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2023-02-27",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-22-000012:a202110-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-22-000012",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2022-02-22",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-21-000011:a202010-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-21-000011",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2021-02-22",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-21-000011:rop-20201231.htm",
+        "_source": {
+          "adsh": "0000882835-21-000011",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2021-02-22",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-23-000016:rop-20221231.htm",
+        "_source": {
+          "adsh": "0000882835-23-000016",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2023-02-27",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-22-000012:rop-20211231.htm",
+        "_source": {
+          "adsh": "0000882835-22-000012",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2022-02-22",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-24-000008:rop-20231231.htm",
+        "_source": {
+          "adsh": "0000882835-24-000008",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2024-02-22",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000873044-12-000024:exhibit991companiesexclude.htm",
+        "_source": {
+          "adsh": "0000873044-12-000024",
+          "ciks": ["0000873044"],
+          "display_names": ["RADISYS CORP  (CIK 0000873044)"],
+          "file_date": "2012-04-27",
+          "file_type": "EX-99.1",
+          "form": "10-K/A",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001520138-16-000803:grck-20151231_10k.htm",
+        "_source": {
+          "adsh": "0001520138-16-000803",
+          "ciks": ["0001630176"],
+          "display_names": ["GREY CLOAK TECH INC.  (HYEX)  (CIK 0001630176)"],
+          "file_date": "2016-03-30",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-25-000008:rop-20241231.htm",
+        "_source": {
+          "adsh": "0000882835-25-000008",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2025-02-24",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001520138-17-000143:grck-20161231_10k.htm",
+        "_source": {
+          "adsh": "0001520138-17-000143",
+          "ciks": ["0001630176"],
+          "display_names": ["GREY CLOAK TECH INC.  (HYEX)  (CIK 0001630176)"],
+          "file_date": "2017-04-17",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001520138-18-000125:grck-20171231_10k.htm",
+        "_source": {
+          "adsh": "0001520138-18-000125",
+          "ciks": ["0001630176"],
+          "display_names": ["GREY CLOAK TECH INC.  (HYEX)  (CIK 0001630176)"],
+          "file_date": "2018-06-08",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-26-000009:rop-20251231.htm",
+        "_source": {
+          "adsh": "0000882835-26-000009",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2026-02-24",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-10-060497:d10k.htm",
+        "_source": {
+          "adsh": "0001193125-10-060497",
+          "ciks": ["0000863650"],
+          "display_names": ["ADAM INC  (CIK 0000863650)"],
+          "file_date": "2010-03-18",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-09-061656:d10k.htm",
+        "_source": {
+          "adsh": "0001193125-09-061656",
+          "ciks": ["0000863650"],
+          "display_names": ["ADAM INC  (CIK 0000863650)"],
+          "file_date": "2009-03-24",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001354488-14-002120:blfs_10ka.htm",
+        "_source": {
+          "adsh": "0001354488-14-002120",
+          "ciks": ["0000834365"],
+          "display_names": ["BIOLIFE SOLUTIONS INC  (BLFS)  (CIK 0000834365)"],
+          "file_date": "2014-04-30",
+          "file_type": "10-K/A",
+          "form": "10-K/A",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-08-059107:d10k.htm",
+        "_source": {
+          "adsh": "0001193125-08-059107",
+          "ciks": ["0000863650"],
+          "display_names": ["ADAM INC  (CIK 0000863650)"],
+          "file_date": "2008-03-17",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001330421-17-000026:a10kafiscal2017.htm",
+        "_source": {
+          "adsh": "0001330421-17-000026",
+          "ciks": ["0001330421"],
+          "display_names": ["Bazaarvoice Inc  (CIK 0001330421)"],
+          "file_date": "2017-08-28",
+          "file_type": "10-K/A",
+          "form": "10-K/A",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001496099-17-000002:nmfc-12312016xexhibit991.htm",
+        "_source": {
+          "adsh": "0001496099-17-000002",
+          "ciks": ["0001496099"],
+          "display_names": ["New Mountain Finance Corp  (NMFC, NMFCZ)  (CIK 0001496099)"],
+          "file_date": "2017-02-28",
+          "file_type": "EX-99.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001564590-17-007803:apti-10ka_20161231.htm",
+        "_source": {
+          "adsh": "0001564590-17-007803",
+          "ciks": ["0001419625"],
+          "display_names": ["Apptio Inc  (CIK 0001419625)"],
+          "file_date": "2017-04-28",
+          "file_type": "10-K/A",
+          "form": "10-K/A",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001496099-16-000008:nmfc-12312015xexhibit991.htm",
+        "_source": {
+          "adsh": "0001496099-16-000008",
+          "ciks": ["0001496099"],
+          "display_names": ["New Mountain Finance Corp  (NMFC, NMFCZ)  (CIK 0001496099)"],
+          "file_date": "2016-02-29",
+          "file_type": "EX-99.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000950134-07-026030:d52480e10vk.htm",
+        "_source": {
+          "adsh": "0000950134-07-026030",
+          "ciks": ["0001059103"],
+          "display_names": ["ACTIVANT SOLUTIONS INC /DE/  (CIK 0001059103)"],
+          "file_date": "2007-12-21",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001047469-15-001516:a2223205zex-99_1.htm",
+        "_source": {
+          "adsh": "0001047469-15-001516",
+          "ciks": ["0001496099"],
+          "display_names": ["New Mountain Finance Corp  (NMFC, NMFCZ)  (CIK 0001496099)"],
+          "file_date": "2015-03-02",
+          "file_type": "EX-99.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001297704-19-000016:ohai10k12312018.htm",
+        "_source": {
+          "adsh": "0001297704-19-000016",
+          "ciks": ["0001297704"],
+          "display_names": ["OHA Investment Corp  (CIK 0001297704)"],
+          "file_date": "2019-03-21",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000950134-08-022491:d65442e10vk.htm",
+        "_source": {
+          "adsh": "0000950134-08-022491",
+          "ciks": ["0001059103"],
+          "display_names": ["ACTIVANT SOLUTIONS INC /DE/  (CIK 0001059103)"],
+          "file_date": "2008-12-19",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001564590-16-015080:pn-ex221_405.htm",
+        "_source": {
+          "adsh": "0001564590-16-015080",
+          "ciks": ["0001619917"],
+          "display_names": ["Patriot National, Inc.  (CIK 0001619917)"],
+          "file_date": "2016-03-21",
+          "file_type": "EX-2.21",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000950123-09-070560:d70368e10vk.htm",
+        "_source": {
+          "adsh": "0000950123-09-070560",
+          "ciks": ["0001059103"],
+          "display_names": ["ACTIVANT SOLUTIONS INC /DE/  (CIK 0001059103)"],
+          "file_date": "2009-12-14",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001278752-20-000050:ainv2020q410-k.htm",
+        "_source": {
+          "adsh": "0001278752-20-000050",
+          "ciks": ["0001278752"],
+          "display_names": ["APOLLO INVESTMENT CORP  (MFIC, MFICL)  (CIK 0001278752)"],
+          "file_date": "2020-05-21",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001144204-14-015252:v369332_10k.htm",
+        "_source": {
+          "adsh": "0001144204-14-015252",
+          "ciks": ["0001372807"],
+          "display_names": ["KCAP Financial, Inc.  (PTMN)  (CIK 0001372807)"],
+          "file_date": "2014-03-13",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001523526-20-000002:sic12-31x201910xk.htm",
+        "_source": {
+          "adsh": "0001523526-20-000002",
+          "ciks": ["0001523526"],
+          "display_names": ["Sierra Income Corp  (CIK 0001523526)"],
+          "file_date": "2020-03-20",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001523526-19-000001:sic12-31x201810xk.htm",
+        "_source": {
+          "adsh": "0001523526-19-000001",
+          "ciks": ["0001523526"],
+          "display_names": ["Sierra Income Corp  (CIK 0001523526)"],
+          "file_date": "2019-04-01",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001520138-22-000131:hyex-20211231_10k.htm",
+        "_source": {
+          "adsh": "0001520138-22-000131",
+          "ciks": ["0001630176"],
+          "display_names": ["HEALTHY EXTRACTS INC.  (HYEX)  (CIK 0001630176)"],
+          "file_date": "2022-04-01",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001520138-21-000388:grck-20201231_10k.htm",
+        "_source": {
+          "adsh": "0001520138-21-000388",
+          "ciks": ["0001630176"],
+          "display_names": ["HEALTHY EXTRACTS INC.  (HYEX)  (CIK 0001630176)"],
+          "file_date": "2021-08-03",
+          "file_type": "10-K/A",
+          "form": "10-K/A",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001520138-21-000113:grck-20201231_10k.htm",
+        "_source": {
+          "adsh": "0001520138-21-000113",
+          "ciks": ["0001630176"],
+          "display_names": ["GREY CLOAK TECH INC.  (HYEX)  (CIK 0001630176)"],
+          "file_date": "2021-02-19",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001520138-20-000365:grck-20191231_10k.htm",
+        "_source": {
+          "adsh": "0001520138-20-000365",
+          "ciks": ["0001630176"],
+          "display_names": ["GREY CLOAK TECH INC.  (HYEX)  (CIK 0001630176)"],
+          "file_date": "2020-08-10",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001172052-20-000006:saft-20191231x10k.htm",
+        "_source": {
+          "adsh": "0001172052-20-000006",
+          "ciks": ["0001172052"],
+          "display_names": ["SAFETY INSURANCE GROUP INC  (SAFT)  (CIK 0001172052)"],
+          "file_date": "2020-02-28",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-12-244331:d356449d10k.htm",
+        "_source": {
+          "adsh": "0001193125-12-244331",
+          "ciks": ["0001278752"],
+          "display_names": ["APOLLO INVESTMENT CORP  (MFIC, MFICL)  (CIK 0001278752)"],
+          "file_date": "2012-05-23",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-07-042737:d10k.htm",
+        "_source": {
+          "adsh": "0001193125-07-042737",
+          "ciks": ["0000798354"],
+          "display_names": ["FISERV INC  (FI)  (CIK 0000798354)"],
+          "file_date": "2007-02-28",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001144204-13-015677:v338139_10k.htm",
+        "_source": {
+          "adsh": "0001144204-13-015677",
+          "ciks": ["0001372807"],
+          "display_names": ["KCAP Financial, Inc.  (PTMN)  (CIK 0001372807)"],
+          "file_date": "2013-03-18",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-12-143873:d321128d10k.htm",
+        "_source": {
+          "adsh": "0001193125-12-143873",
+          "ciks": ["0001422183"],
+          "display_names": ["FS Investment CORP  (FSK)  (CIK 0001422183)"],
+          "file_date": "2012-03-30",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001520138-20-000130:grck-20181231_10k.htm",
+        "_source": {
+          "adsh": "0001520138-20-000130",
+          "ciks": ["0001630176"],
+          "display_names": ["GREY CLOAK TECH INC.  (HYEX)  (CIK 0001630176)"],
+          "file_date": "2020-04-01",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001172052-21-000010:saft-20201231x10k.htm",
+        "_source": {
+          "adsh": "0001172052-21-000010",
+          "ciks": ["0001172052"],
+          "display_names": ["SAFETY INSURANCE GROUP INC  (SAFT)  (CIK 0001172052)"],
+          "file_date": "2021-02-26",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001172052-23-000006:saft-20221231x10k.htm",
+        "_source": {
+          "adsh": "0001172052-23-000006",
+          "ciks": ["0001172052"],
+          "display_names": ["SAFETY INSURANCE GROUP INC  (SAFT)  (CIK 0001172052)"],
+          "file_date": "2023-02-28",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001172052-22-000011:saft-20211231x10k.htm",
+        "_source": {
+          "adsh": "0001172052-22-000011",
+          "ciks": ["0001172052"],
+          "display_names": ["SAFETY INSURANCE GROUP INC  (SAFT)  (CIK 0001172052)"],
+          "file_date": "2022-02-28",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001144204-15-019659:v405885_10k.htm",
+        "_source": {
+          "adsh": "0001144204-15-019659",
+          "ciks": ["0001372807"],
+          "display_names": ["KCAP Financial, Inc.  (PTMN)  (CIK 0001372807)"],
+          "file_date": "2015-03-31",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-13-232355:d529765d10k.htm",
+        "_source": {
+          "adsh": "0001193125-13-232355",
+          "ciks": ["0001278752"],
+          "display_names": ["APOLLO INVESTMENT CORP  (MFIC, MFICL)  (CIK 0001278752)"],
+          "file_date": "2013-05-23",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-11-076255:d10k.htm",
+        "_source": {
+          "adsh": "0001193125-11-076255",
+          "ciks": ["0001422183"],
+          "display_names": ["FS Investment CORP  (FSK)  (CIK 0001422183)"],
+          "file_date": "2011-03-24",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001104659-13-047796:a13-14513_110ka.htm",
+        "_source": {
+          "adsh": "0001104659-13-047796",
+          "ciks": ["0001377936"],
+          "display_names": [
+            "SARATOGA INVESTMENT CORP.  (SAJ, SAR, SAT, SAY, SAZ)  (CIK 0001377936)"
+          ],
+          "file_date": "2013-06-10",
+          "file_type": "10-K/A",
+          "form": "10-K/A",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001278752-14-000005:ainv-2014331x10k.htm",
+        "_source": {
+          "adsh": "0001278752-14-000005",
+          "ciks": ["0001278752"],
+          "display_names": ["APOLLO INVESTMENT CORP  (MFIC, MFICL)  (CIK 0001278752)"],
+          "file_date": "2014-05-20",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001278752-21-000017:ainv2021q410-k.htm",
+        "_source": {
+          "adsh": "0001278752-21-000017",
+          "ciks": ["0001278752"],
+          "display_names": ["APOLLO INVESTMENT CORP  (MFIC, MFICL)  (CIK 0001278752)"],
+          "file_date": "2021-05-20",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001494538-18-000002:cct-123117x10k.htm",
+        "_source": {
+          "adsh": "0001494538-18-000002",
+          "ciks": ["0001494538"],
+          "display_names": ["Corporate Capital Trust, Inc.  (CIK 0001494538)"],
+          "file_date": "2018-03-14",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001564590-18-004249:cctii-10k_20171231.htm",
+        "_source": {
+          "adsh": "0001564590-18-004249",
+          "ciks": ["0001617896"],
+          "display_names": ["Corporate Capital Trust II  (CIK 0001617896)"],
+          "file_date": "2018-03-02",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-08-041891:d10k.htm",
+        "_source": {
+          "adsh": "0001193125-08-041891",
+          "ciks": ["0000798354"],
+          "display_names": ["FISERV INC  (FI)  (CIK 0000798354)"],
+          "file_date": "2008-02-28",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001144204-12-016605:v306690_10ka.htm",
+        "_source": {
+          "adsh": "0001144204-12-016605",
+          "ciks": ["0001372807"],
+          "display_names": ["Kohlberg Capital CORP  (PTMN)  (CIK 0001372807)"],
+          "file_date": "2012-03-22",
+          "file_type": "10-K/A",
+          "form": "10-K/A",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001278752-15-000008:ainv-2015331x10k.htm",
+        "_source": {
+          "adsh": "0001278752-15-000008",
+          "ciks": ["0001278752"],
+          "display_names": ["APOLLO INVESTMENT CORP  (MFIC, MFICL)  (CIK 0001278752)"],
+          "file_date": "2015-05-19",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001354488-16-006364:blfs_10k.htm",
+        "_source": {
+          "adsh": "0001354488-16-006364",
+          "ciks": ["0000834365"],
+          "display_names": ["BIOLIFE SOLUTIONS INC  (BLFS)  (CIK 0000834365)"],
+          "file_date": "2016-02-25",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001564590-20-050056:dct-10k_20200831.htm",
+        "_source": {
+          "adsh": "0001564590-20-050056",
+          "ciks": ["0001160951"],
+          "display_names": ["DUCK CREEK TECHNOLOGIES, INC.  (CIK 0001160951)"],
+          "file_date": "2020-11-03",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001047469-12-002231:a2207764z10-k.htm",
+        "_source": {
+          "adsh": "0001047469-12-002231",
+          "ciks": ["0001491925", "0001496099", "0001515173"],
+          "display_names": [
+            "New Mountain Finance Holdings, L.L.C.  (CIK 0001491925)",
+            "New Mountain Finance Corp  (NMFC, NMFCZ)  (CIK 0001496099)",
+            "New Mountain Finance AIV Holdings Corp  (CIK 0001515173)"
+          ],
+          "file_date": "2012-03-07",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001144204-16-138770:v454683_10ka.htm",
+        "_source": {
+          "adsh": "0001144204-16-138770",
+          "ciks": ["0000834365"],
+          "display_names": ["BIOLIFE SOLUTIONS INC  (BLFS)  (CIK 0000834365)"],
+          "file_date": "2016-12-09",
+          "file_type": "10-K/A",
+          "form": "10-K/A",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001096906-23-000699:hyex-20221231.htm",
+        "_source": {
+          "adsh": "0001096906-23-000699",
+          "ciks": ["0001630176"],
+          "display_names": ["HEALTHY EXTRACTS INC.  (HYEX)  (CIK 0001630176)"],
+          "file_date": "2023-03-31",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001047469-13-002285:a2213275z10-k.htm",
+        "_source": {
+          "adsh": "0001047469-13-002285",
+          "ciks": ["0001491925", "0001496099", "0001515173"],
+          "display_names": [
+            "New Mountain Finance Holdings, L.L.C.  (CIK 0001491925)",
+            "New Mountain Finance Corp  (NMFC, NMFCZ)  (CIK 0001496099)",
+            "New Mountain Finance AIV Holdings Corp  (CIK 0001515173)"
+          ],
+          "file_date": "2013-03-06",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001047469-14-001831:a2218496z10-k.htm",
+        "_source": {
+          "adsh": "0001047469-14-001831",
+          "ciks": ["0001491925", "0001515173", "0001496099"],
+          "display_names": [
+            "New Mountain Finance Holdings, L.L.C.  (CIK 0001491925)",
+            "New Mountain Finance AIV Holdings Corp  (CIK 0001515173)",
+            "New Mountain Finance Corp  (NMFC, NMFCZ)  (CIK 0001496099)"
+          ],
+          "file_date": "2014-03-05",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001104659-14-041712:a14-12343_110k.htm",
+        "_source": {
+          "adsh": "0001104659-14-041712",
+          "ciks": ["0001377936"],
+          "display_names": [
+            "SARATOGA INVESTMENT CORP.  (SAJ, SAR, SAT, SAY, SAZ)  (CIK 0001377936)"
+          ],
+          "file_date": "2014-05-27",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001096906-24-000706:hyex-20231231.htm",
+        "_source": {
+          "adsh": "0001096906-24-000706",
+          "ciks": ["0001630176"],
+          "display_names": ["HEALTHY EXTRACTS INC.  (HYEX)  (CIK 0001630176)"],
+          "file_date": "2024-04-01",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001096906-25-000370:hyex-20241231.htm",
+        "_source": {
+          "adsh": "0001096906-25-000370",
+          "ciks": ["0001630176"],
+          "display_names": ["HEALTHY EXTRACTS INC.  (HYEX)  (CIK 0001630176)"],
+          "file_date": "2025-04-01",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001278752-19-000021:ainv2019q410-k.htm",
+        "_source": {
+          "adsh": "0001278752-19-000021",
+          "ciks": ["0001278752"],
+          "display_names": ["APOLLO INVESTMENT CORP  (MFIC, MFICL)  (CIK 0001278752)"],
+          "file_date": "2019-05-16",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001096906-25-000553:hyex-20241231.htm",
+        "_source": {
+          "adsh": "0001096906-25-000553",
+          "ciks": ["0001630176"],
+          "display_names": ["HEALTHY EXTRACTS INC.  (HYEX)  (CIK 0001630176)"],
+          "file_date": "2025-04-22",
+          "file_type": "10-K/A",
+          "form": "10-K/A",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001496099-16-000008:nmfc-12312015x10k.htm",
+        "_source": {
+          "adsh": "0001496099-16-000008",
+          "ciks": ["0001496099"],
+          "display_names": ["New Mountain Finance Corp  (NMFC, NMFCZ)  (CIK 0001496099)"],
+          "file_date": "2016-02-29",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001535778-19-000015:hms12311810-ka.htm",
+        "_source": {
+          "adsh": "0001535778-19-000015",
+          "ciks": ["0001535778"],
+          "display_names": ["HMS INCOME FUND, INC.  (MSCF)  (CIK 0001535778)"],
+          "file_date": "2019-03-08",
+          "file_type": "10-K/A",
+          "form": "10-K/A",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-14-113718:d696739d10k.htm",
+        "_source": {
+          "adsh": "0001193125-14-113718",
+          "ciks": ["0001525759"],
+          "display_names": ["FS Investment Corp II  (CIK 0001525759)"],
+          "file_date": "2014-03-25",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-16-593198:d168943d10k.htm",
+        "_source": {
+          "adsh": "0001193125-16-593198",
+          "ciks": ["0001377936"],
+          "display_names": [
+            "SARATOGA INVESTMENT CORP.  (SAJ, SAR, SAT, SAY, SAZ)  (CIK 0001377936)"
+          ],
+          "file_date": "2016-05-17",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001535778-19-000013:hms12311810-k.htm",
+        "_source": {
+          "adsh": "0001535778-19-000013",
+          "ciks": ["0001535778"],
+          "display_names": ["HMS INCOME FUND, INC.  (MSCF)  (CIK 0001535778)"],
+          "file_date": "2019-03-08",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001047469-15-001516:a2223205z10-k.htm",
+        "_source": {
+          "adsh": "0001047469-15-001516",
+          "ciks": ["0001496099"],
+          "display_names": ["New Mountain Finance Corp  (NMFC, NMFCZ)  (CIK 0001496099)"],
+          "file_date": "2015-03-02",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-17-087758:d298119d10k.htm",
+        "_source": {
+          "adsh": "0001193125-17-087758",
+          "ciks": ["0001494538"],
+          "display_names": ["Corporate Capital Trust, Inc.  (CIK 0001494538)"],
+          "file_date": "2017-03-20",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-14-077728:d682611d10k.htm",
+        "_source": {
+          "adsh": "0001193125-14-077728",
+          "ciks": ["0001422183"],
+          "display_names": ["FS Investment CORP  (FSK)  (CIK 0001422183)"],
+          "file_date": "2014-02-28",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-15-195078:d926275d10k.htm",
+        "_source": {
+          "adsh": "0001193125-15-195078",
+          "ciks": ["0001377936"],
+          "display_names": [
+            "SARATOGA INVESTMENT CORP.  (SAJ, SAR, SAT, SAY, SAZ)  (CIK 0001377936)"
+          ],
+          "file_date": "2015-05-20",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-17-060262:d350071d10k.htm",
+        "_source": {
+          "adsh": "0001193125-17-060262",
+          "ciks": ["0001286681"],
+          "display_names": ["DOMINOS PIZZA INC  (DPZ)  (CIK 0001286681)"],
+          "file_date": "2017-02-28",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001096906-26-000515:hyex-20251231_10k.htm",
+        "_source": {
+          "adsh": "0001096906-26-000515",
+          "ciks": ["0001630176"],
+          "display_names": ["HEALTHY EXTRACTS INC.  (HYEX)  (CIK 0001630176)"],
+          "file_date": "2026-04-09",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-16-476935:d128680d10k.htm",
+        "_source": {
+          "adsh": "0001193125-16-476935",
+          "ciks": ["0001286681"],
+          "display_names": ["DOMINOS PIZZA INC  (DPZ)  (CIK 0001286681)"],
+          "file_date": "2016-02-25",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001144204-16-086925:v433537_10k.htm",
+        "_source": {
+          "adsh": "0001144204-16-086925",
+          "ciks": ["0001372807"],
+          "display_names": ["KCAP Financial, Inc.  (PTMN)  (CIK 0001372807)"],
+          "file_date": "2016-03-09",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000950123-10-025217:c97759e10vk.htm",
+        "_source": {
+          "adsh": "0000950123-10-025217",
+          "ciks": ["0000814549"],
+          "display_names": ["EBIX INC  (EBIXQ)  (CIK 0000814549)"],
+          "file_date": "2010-03-16",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001654954-17-002100:kins_10k.htm",
+        "_source": {
+          "adsh": "0001654954-17-002100",
+          "ciks": ["0000033992"],
+          "display_names": ["KINGSTONE COMPANIES, INC.  (KINS)  (CIK 0000033992)"],
+          "file_date": "2017-03-16",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001535778-20-000014:hms12311910-k.htm",
+        "_source": {
+          "adsh": "0001535778-20-000014",
+          "ciks": ["0001535778"],
+          "display_names": ["HMS INCOME FUND, INC.  (MSCF)  (CIK 0001535778)"],
+          "file_date": "2020-03-19",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-11-154722:d10k.htm",
+        "_source": {
+          "adsh": "0001193125-11-154722",
+          "ciks": ["0001278752"],
+          "display_names": ["APOLLO INVESTMENT CORP  (MFIC, MFICL)  (CIK 0001278752)"],
+          "file_date": "2011-05-31",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000950123-11-025942:c14084e10vk.htm",
+        "_source": {
+          "adsh": "0000950123-11-025942",
+          "ciks": ["0000814549"],
+          "display_names": ["EBIX INC  (EBIXQ)  (CIK 0000814549)"],
+          "file_date": "2011-03-16",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-18-049576:d531906d10k.htm",
+        "_source": {
+          "adsh": "0001193125-18-049576",
+          "ciks": ["0001286681"],
+          "display_names": ["DOMINOS PIZZA INC  (DPZ)  (CIK 0001286681)"],
+          "file_date": "2018-02-20",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000814549-16-000040:ebix-2015x10k.htm",
+        "_source": {
+          "adsh": "0000814549-16-000040",
+          "ciks": ["0000814549"],
+          "display_names": ["EBIX INC  (EBIXQ)  (CIK 0000814549)"],
+          "file_date": "2016-02-29",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001354488-16-006655:kins_10k.htm",
+        "_source": {
+          "adsh": "0001354488-16-006655",
+          "ciks": ["0000033992"],
+          "display_names": ["KINGSTONE COMPANIES, INC.  (KINS)  (CIK 0000033992)"],
+          "file_date": "2016-03-24",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-15-096880:d880552d10k.htm",
+        "_source": {
+          "adsh": "0001193125-15-096880",
+          "ciks": ["0001525759"],
+          "display_names": ["FS Investment Corp II  (CIK 0001525759)"],
+          "file_date": "2015-03-18",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000814549-12-000006:ebix-2011x10k.htm",
+        "_source": {
+          "adsh": "0000814549-12-000006",
+          "ciks": ["0000814549"],
+          "display_names": ["EBIX INC  (EBIXQ)  (CIK 0000814549)"],
+          "file_date": "2012-03-15",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-19-046191:d696297d10k.htm",
+        "_source": {
+          "adsh": "0001193125-19-046191",
+          "ciks": ["0001286681"],
+          "display_names": ["DOMINOS PIZZA INC  (DPZ)  (CIK 0001286681)"],
+          "file_date": "2019-02-21",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-13-132691:d452193d10k.htm",
+        "_source": {
+          "adsh": "0001193125-13-132691",
+          "ciks": ["0001422183"],
+          "display_names": ["FS Investment CORP  (FSK)  (CIK 0001422183)"],
+          "file_date": "2013-03-28",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000814549-14-000007:ebix-2013x10k.htm",
+        "_source": {
+          "adsh": "0000814549-14-000007",
+          "ciks": ["0000814549"],
+          "display_names": ["EBIX INC  (EBIXQ)  (CIK 0000814549)"],
+          "file_date": "2014-03-17",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-21-055734:d326373d10k.htm",
+        "_source": {
+          "adsh": "0001193125-21-055734",
+          "ciks": ["0001286681"],
+          "display_names": ["DOMINOS PIZZA INC  (DPZ)  (CIK 0001286681)"],
+          "file_date": "2021-02-25",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-09-053772:d10k.htm",
+        "_source": {
+          "adsh": "0001193125-09-053772",
+          "ciks": ["0001314655"],
+          "display_names": ["Goodman Global Inc  (CIK 0001314655)"],
+          "file_date": "2009-03-13",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000814549-15-000012:ebix-2014x10k.htm",
+        "_source": {
+          "adsh": "0000814549-15-000012",
+          "ciks": ["0000814549"],
+          "display_names": ["EBIX INC  (EBIXQ)  (CIK 0000814549)"],
+          "file_date": "2015-03-16",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-20-042675:d796357d10k.htm",
+        "_source": {
+          "adsh": "0001193125-20-042675",
+          "ciks": ["0001286681"],
+          "display_names": ["DOMINOS PIZZA INC  (DPZ)  (CIK 0001286681)"],
+          "file_date": "2020-02-20",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      }
+    ]
+  }
+}

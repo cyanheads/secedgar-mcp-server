@@ -1,0 +1,331 @@
+{
+  "hits": {
+    "total": { "value": 27, "relation": "eq" },
+    "hits": [
+      {
+        "_id": "0000882835-24-000008:a202310-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-24-000008",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2024-02-22",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-23-000016:a202210-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-23-000016",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2023-02-27",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-26-000009:a202510-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-26-000009",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2026-02-24",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-25-000008:a202410-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-25-000008",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2025-02-24",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-22-000012:a202110-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-22-000012",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2022-02-22",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-17-000006:ex21-1.htm",
+        "_source": {
+          "adsh": "0000882835-17-000006",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2017-02-27",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-21-000011:a202010-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-21-000011",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2021-02-22",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-19-000010:a201810-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-19-000010",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2019-02-25",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-20-000006:a201910-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-20-000006",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2020-02-28",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-18-000011:a201710-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-18-000011",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2018-02-23",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-24-000008:rop-20231231.htm",
+        "_source": {
+          "adsh": "0000882835-24-000008",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2024-02-22",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-17-000006:cy2016_10-k.htm",
+        "_source": {
+          "adsh": "0000882835-17-000006",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2017-02-27",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-23-000016:rop-20221231.htm",
+        "_source": {
+          "adsh": "0000882835-23-000016",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2023-02-27",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-25-000008:rop-20241231.htm",
+        "_source": {
+          "adsh": "0000882835-25-000008",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2025-02-24",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-18-000011:a201710-kdoc.htm",
+        "_source": {
+          "adsh": "0000882835-18-000011",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2018-02-23",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-22-000012:rop-20211231.htm",
+        "_source": {
+          "adsh": "0000882835-22-000012",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2022-02-22",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-19-000010:a201810-kdoc.htm",
+        "_source": {
+          "adsh": "0000882835-19-000010",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2019-02-25",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-26-000009:rop-20251231.htm",
+        "_source": {
+          "adsh": "0000882835-26-000009",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2026-02-24",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-20-000006:a201910-kdoc.htm",
+        "_source": {
+          "adsh": "0000882835-20-000006",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2020-02-28",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-16-000035:cy2015_10-k.htm",
+        "_source": {
+          "adsh": "0000882835-16-000035",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2016-02-26",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-21-000011:rop-20201231.htm",
+        "_source": {
+          "adsh": "0000882835-21-000011",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2021-02-22",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001193125-23-017750:d451800d10ka.htm",
+        "_source": {
+          "adsh": "0001193125-23-017750",
+          "ciks": ["0001857951"],
+          "display_names": ["Weber Inc.  (CIK 0001857951)"],
+          "file_date": "2023-01-27",
+          "file_type": "10-K/A",
+          "form": "10-K/A",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001104659-21-009139:tm213472d1_10k.htm",
+        "_source": {
+          "adsh": "0001104659-21-009139",
+          "ciks": ["0001807707"],
+          "display_names": ["Novus Capital Corp  (CIK 0001807707)"],
+          "file_date": "2021-01-29",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001104659-21-075808:tm2114625d1_10ka.htm",
+        "_source": {
+          "adsh": "0001104659-21-075808",
+          "ciks": ["0001807707"],
+          "display_names": ["AppHarvest, Inc.  (CIK 0001807707)"],
+          "file_date": "2021-06-02",
+          "file_type": "10-K/A",
+          "form": "10-K/A",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001410578-24-000237:fhltu-20231231x10k.htm",
+        "_source": {
+          "adsh": "0001410578-24-000237",
+          "ciks": ["0001851182"],
+          "display_names": ["Future Health ESG Corp.  (CIK 0001851182)"],
+          "file_date": "2024-03-20",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001410578-22-000567:fhltu-20211231x10k.htm",
+        "_source": {
+          "adsh": "0001410578-22-000567",
+          "ciks": ["0001851182"],
+          "display_names": ["Future Health ESG Corp.  (CIK 0001851182)"],
+          "file_date": "2022-03-28",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001410578-23-000221:fhltu-20221231x10k.htm",
+        "_source": {
+          "adsh": "0001410578-23-000221",
+          "ciks": ["0001851182"],
+          "display_names": ["Future Health ESG Corp.  (CIK 0001851182)"],
+          "file_date": "2023-03-09",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      }
+    ]
+  }
+}

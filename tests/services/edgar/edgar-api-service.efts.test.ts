@@ -10,10 +10,13 @@
  * a transport one, and fails on its one request otherwise, with the backend's error
  * in typed fields (#206). Caller text is escaped before it reaches full-text search,
  * in `q` and `keysTyped` alike (#205). An entity lookup returns SEC's `hits.total` beside
- * its hits (#230).
+ * its hits (#230), each listed entity's name without SEC's ticker list and with its first
+ * ticker (#236). A subsidiary search names the filers of the 10-K subsidiaries exhibits
+ * (EX-21) holding a quoted name, and no other filer (#236).
  * @module tests/services/edgar/edgar-api-service.efts
  */
 
+import { readFileSync } from 'node:fs';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -789,5 +792,266 @@ describe('EdgarApiService — caller text is escaped before it reaches full-text
     expect(urls[0]?.searchParams.get('keysTyped')).toBe('US BANCORP \\\\DE\\\\\\u0009');
     expect(matches).toEqual([{ cik: '0000036104', name: 'US BANCORP \\DE\\' }]);
     expect(fetchMock).toHaveBeenCalledOnce();
+  });
+});
+
+// --- The entity index's ticker list, and 10-K subsidiaries exhibits (#236) ---
+
+/**
+ * SEC's entity-index answer for `Charles Schwab`, captured live 2026-11-13 (first three
+ * hits): a listed entity carries its tickers after its name and again in `tickers`.
+ */
+const SCHWAB_ENTITY_HITS = {
+  hits: {
+    total: { value: 16, relation: 'eq' },
+    hits: [
+      { _id: '923738', _source: { entity: 'Schwab Charles R.', rank: 1817323 } },
+      {
+        _id: '316709',
+        _source: {
+          entity: 'SCHWAB CHARLES CORP (SCHW, SCHW-PJ, SCHW-PD)',
+          tickers: 'SCHW, SCHW-PJ, SCHW-PD',
+          rank: 82073066,
+        },
+      },
+      { _id: '1549728', _source: { entity: 'Schwabe Charles E.', rank: 10330 } },
+    ],
+  },
+};
+
+describe('EdgarApiService.resolveEntityByName — SEC’s ticker list split from the name (#236)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    initEdgarApiService();
+  });
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('names a listed entity without its ticker list and carries the first ticker', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse(SCHWAB_ENTITY_HITS)),
+    );
+
+    const { matches } = await getEdgarApiService().resolveEntityByName('Charles Schwab', scope());
+
+    expect(matches).toEqual([
+      { cik: '0000923738', name: 'Schwab Charles R.' },
+      { cik: '0000316709', name: 'SCHWAB CHARLES CORP', ticker: 'SCHW' },
+      { cik: '0001549728', name: 'Schwabe Charles E.' },
+    ]);
+    expect(matches[0]).not.toHaveProperty('ticker');
+  });
+
+  it('leaves a parenthetical SEC lists no tickers for in the name, as no ticker', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          hits: { hits: [{ _id: '1234567', _source: { entity: 'DEERFIELD HOLDINGS INC (DE)' } }] },
+        }),
+      ),
+    );
+
+    const { matches } = await getEdgarApiService().resolveEntityByName('Deerfield', scope());
+
+    expect(matches).toEqual([{ cik: '0001234567', name: 'DEERFIELD HOLDINGS INC (DE)' }]);
+    expect(matches[0]).not.toHaveProperty('ticker');
+  });
+});
+
+/** The full-text page for a quoted name over 10-Ks, trimmed from a live capture (2026-11-13). */
+const fullTextFixture = (name: string): unknown =>
+  JSON.parse(
+    readFileSync(
+      new URL(`../../fixtures/company-search/fts10k-${name}.json`, import.meta.url),
+      'utf8',
+    ),
+  );
+
+/** SEC's ticker file as the subsidiary-exhibit cases need it: Roper, Duke, and Apollo listed. */
+const PARENT_TICKER_FILE = {
+  0: { cik_str: 882835, ticker: 'ROP', title: 'ROPER TECHNOLOGIES INC' },
+  1: { cik_str: 1326160, ticker: 'DUK', title: 'Duke Energy CORP' },
+  2: { cik_str: 1278752, ticker: 'MFIC', title: 'MidCap Financial Investment Corp' },
+};
+
+/**
+ * Stand in for SEC: the two ticker files, and every full-text search answered with `page`.
+ * Records each full-text request URL; any other request rejects and is recorded.
+ */
+function stubParentSearch(page: unknown) {
+  const searches: URL[] = [];
+  const unrouted: string[] = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: string) => {
+      const url = new URL(input);
+      if (url.pathname === '/files/company_tickers.json') return jsonResponse(PARENT_TICKER_FILE);
+      if (url.pathname === '/files/company_tickers_mf.json') {
+        return jsonResponse({ fields: ['cik', 'seriesId', 'classId', 'symbol'], data: [] });
+      }
+      if (url.hostname === 'efts.sec.gov' && url.searchParams.has('q')) {
+        searches.push(url);
+        return jsonResponse(page);
+      }
+      unrouted.push(input);
+      throw new Error(`unrouted fetch: ${input}`);
+    }),
+  );
+  return { searches, unrouted };
+}
+
+/** One full-text hit: a document of a 10-K filed by `filers` (`[cik, display name]`). */
+const tenKHit = (
+  adsh: string,
+  fileType: string,
+  fileDate: string,
+  filers: Array<readonly [string, string | undefined]>,
+) => ({
+  _id: `${adsh}:doc.htm`,
+  _source: {
+    adsh,
+    ciks: filers.map(([cik]) => cik),
+    display_names: filers.flatMap(([cik, name]) => (name ? [`${name}  (CIK ${cik})`] : [])),
+    file_date: fileDate,
+    file_type: fileType,
+    form: '10-K',
+    root_forms: ['10-K'],
+  },
+});
+
+describe('EdgarApiService.findSubsidiaryParents — 10-K subsidiaries exhibits naming a company (#236)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    initEdgarApiService();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  /** Run `call` with the pacer's spacing elapsed. */
+  async function settled<T>(call: Promise<T>): Promise<T> {
+    await vi.advanceTimersByTimeAsync(1_000);
+    return call;
+  }
+
+  it('sends one quoted-phrase search over 10-Ks, its first 100 documents', async () => {
+    const sec = stubParentSearch(fullTextFixture('vertafore'));
+
+    await settled(getEdgarApiService().findSubsidiaryParents('Vertafore', scope()));
+
+    expect(sec.searches).toHaveLength(1);
+    const params = sec.searches[0]?.searchParams;
+    expect(params?.get('q')).toBe('"Vertafore"');
+    expect(params?.get('forms')).toBe('10-K');
+    expect(params?.get('size')).toBe('100');
+    expect(params?.get('from')).toBe('0');
+    expect(sec.unrouted).toEqual([]);
+  });
+
+  it.each([
+    ['Vertafore', 'vertafore'],
+    ['Clinisys', 'clinisys'],
+    ['Strata Decision Technology', 'strata-decision-technology'],
+  ])(
+    'names only the filer of the EX-21 hits for %s, at its newest exhibit, never a filer of other documents',
+    async (name, fixture) => {
+      const sec = stubParentSearch(fullTextFixture(fixture));
+
+      const parents = await settled(getEdgarApiService().findSubsidiaryParents(name, scope()));
+
+      // The pages also hold Apollo Investment's, Health Catalyst's, Allscripts', and others'
+      // 10-K documents mentioning the name; only Roper's subsidiaries exhibits count.
+      expect(parents).toEqual([
+        {
+          cik: '0000882835',
+          name: 'ROPER TECHNOLOGIES INC',
+          ticker: 'ROP',
+          filingDate: '2026-02-24',
+          accessionNumber: '0000882835-26-000009',
+        },
+      ]);
+      expect(sec.unrouted).toEqual([]);
+    },
+  );
+
+  it('lists co-registrants the ticker file lists first, then by newest exhibit, then in search order', async () => {
+    stubParentSearch({
+      hits: {
+        total: { value: 4, relation: 'eq' },
+        hits: [
+          tenKHit('0001326160-16-000221', 'EX-21', '2016-02-25', [
+            ['0000017797', 'DUKE ENERGY PROGRESS, LLC.'],
+            ['0001094093', 'PROGRESS ENERGY INC'],
+            ['0001326160', 'Duke Energy CORP  (DUK, DUKB, DUKH, DUK-PA)'],
+          ]),
+          tenKHit('0001326160-23-000073', 'EX-21.1', '2023-02-27', [
+            ['0001326160', 'Duke Energy CORP  (DUK, DUKB, DUKH, DUK-PA)'],
+            ['0000030371', 'Duke Energy Carolinas, LLC'],
+            ['0000017797', 'DUKE ENERGY PROGRESS, LLC.'],
+            ['0000081020', undefined],
+          ]),
+          // Newer, but not a subsidiaries exhibit: it moves no filer's exhibit date.
+          tenKHit('0001326160-24-000011', 'EX-10.61', '2024-02-27', [
+            ['0001094093', 'PROGRESS ENERGY INC'],
+          ]),
+          // An exhibit number that merely starts with 21 is not exhibit 21.
+          tenKHit('0009999999-24-000001', 'EX-210', '2024-03-01', [
+            ['0009999999', 'NOT A PARENT INC'],
+          ]),
+        ],
+      },
+    });
+
+    const parents = await settled(
+      getEdgarApiService().findSubsidiaryParents('Duke Energy Renewables', scope()),
+    );
+
+    expect(parents).toEqual([
+      {
+        cik: '0001326160',
+        name: 'Duke Energy CORP',
+        ticker: 'DUK',
+        filingDate: '2023-02-27',
+        accessionNumber: '0001326160-23-000073',
+      },
+      {
+        cik: '0000017797',
+        name: 'DUKE ENERGY PROGRESS, LLC.',
+        filingDate: '2023-02-27',
+        accessionNumber: '0001326160-23-000073',
+      },
+      {
+        cik: '0000030371',
+        name: 'Duke Energy Carolinas, LLC',
+        filingDate: '2023-02-27',
+        accessionNumber: '0001326160-23-000073',
+      },
+      { cik: '0000081020', filingDate: '2023-02-27', accessionNumber: '0001326160-23-000073' },
+      {
+        cik: '0001094093',
+        name: 'PROGRESS ENERGY INC',
+        filingDate: '2016-02-25',
+        accessionNumber: '0001326160-16-000221',
+      },
+    ]);
+    // Absent fields are left out, never set to undefined.
+    expect(parents[1]).not.toHaveProperty('ticker');
+    expect(parents[3]).not.toHaveProperty('name');
+  });
+
+  it('drops a double quote from the name, which would end the phrase early', async () => {
+    const sec = stubParentSearch({ hits: { total: { value: 0, relation: 'eq' }, hits: [] } });
+
+    const parents = await settled(
+      getEdgarApiService().findSubsidiaryParents('"Acme "Widget" Works"', scope()),
+    );
+
+    expect(parents).toEqual([]);
+    expect(sec.searches[0]?.searchParams.get('q')).toBe('"Acme Widget Works"');
   });
 });

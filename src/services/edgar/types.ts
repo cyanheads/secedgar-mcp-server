@@ -11,9 +11,12 @@ export interface CikMatch {
   exchange?: string;
   name?: string;
   /**
-   * How a reading interpreted an input that neither the exact-symbol nor the dotted-class lookup
-   * answered, e.g. `UEC.N read as UEC (URANIUM ENERGY CORP)` or
-   * `GLOP read as GasLog Partners LP (GLOP-PA, GLOP-PB, GLOP-PC)`. Absent for every other match.
+   * How the input was read, for a match that is more than a current listing or name hit: a ticker
+   * spelling the file does not list (`UEC.N read as UEC (URANIUM ENERGY CORP)`, `GLOP read as
+   * GasLog Partners LP (GLOP-PA, GLOP-PB, GLOP-PC)`, #235); a former ticker (`AMRK read as a
+   * former ticker of Gold.com, Inc. (GOLD, CIK 0001591588) as late as 2025-12 in SEC's ticker
+   * file`) or a listed one's earlier holders (`XOM was earlier the ticker of EXXON MOBIL CORP (CIK
+   * 0000034088) …`, #237); or a match in EDGAR's entity index (#236). Absent for every other match.
    */
   reading?: string;
   /** SEC fund series ID (e.g. "S000002839"). Present only for ETF/mutual-fund tickers resolved via company_tickers_mf.json. */
@@ -142,10 +145,12 @@ export interface EftsEntityHit {
   /** Bare (non-zero-padded) CIK of the matched entity. */
   _id: string;
   _source: {
-    /** Entity display name (e.g. "VANGUARD GROUP INC"). */
+    /** Entity display name, with a listed entity's tickers appended (e.g. "SCHWAB CHARLES CORP (SCHW, SCHW-PJ, SCHW-PD)"). */
     entity: string;
     /** SEC prominence weight. Deliberately NOT used to auto-select a match — two entities can share a legal name under different CIKs. */
     rank?: number;
+    /** A listed entity's tickers, comma-separated (e.g. "SCHW, SCHW-PJ, SCHW-PD"); undocumented by SEC, absent for an entity with none. */
+    tickers?: string;
   };
 }
 

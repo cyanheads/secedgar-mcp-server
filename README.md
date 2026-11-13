@@ -82,6 +82,8 @@ The skill ships in `skills/secedgar-guide/SKILL.md`. Plugin hosts load it from t
 
 - `query` takes a ticker (equities, ETFs, mutual funds), a current or former company name, or a CIK; `include_filings` (default on) adds up to `filing_limit` filings (default 10; a value up to 1,000 is served at the 50 inline cap), filtered by `forms`, `filed_after`, and `filed_before`
 - An uppercase ticker also resolves as market-data feeds write it: venue-coded (`UEC.N`), a preferred class run together (`CFGPH`), or a root listed only as share classes (`GLOP`); `resolvedAs` says how it was read (`UEC.N read as UEC (URANIUM ENERGY CORP)`), and a non-US listing such as `7203.T` fails `no_match` with a note that EDGAR indexes SEC registrants by US ticker, name, or CIK
+- A ticker SEC's file no longer lists resolves to the company that held it last (`AMRK` → Gold.com, Inc.), and a listed ticker an earlier company held names that company in `resolvedAs` (`XOM`). A name whose words are in another order also matches when nothing else does (`Charles Schwab` → SCHWAB CHARLES CORP)
+- A name SEC's ticker file lacks is looked up in EDGAR's entity index of every filer, which holds filers with no ticker (`Exxon Mobil` → EXXON MOBIL CORP, `resolvedAs` saying so). A private company found only in a 10-K's subsidiaries exhibit (EX-21) fails `no_match` with the filers of that exhibit in `data.parents`
 - Returns SIC code, exchanges, fiscal year end, and state of incorporation, plus `series_id` / `class_id` for a fund ticker; fails as `no_match` (with near matches in `data.suggestions`) or, for a name matching several companies, `ambiguous_company`, listing up to 10 by CIK, name, and ticker to retry with, plus the full count in `total_matches`
 - A date or form filter can reach into the archive (up to 10 pages); `history_scanned_through` reports how far it got
 
@@ -247,7 +249,7 @@ Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): s
 EDGAR-specific:
 
 - Requests are paced under SEC's 10 req/s limit; after a 429, calls fail locally as `rate_limited` with a `retryAfter` countdown for `EDGAR_RATE_LIMIT_COOLDOWN_SECONDS`, then one probe goes out
-- CIK resolution from tickers (fund tickers included), current and former company names, or raw CIKs, with near-match suggestions on a miss
+- CIK resolution from tickers (fund and former tickers included), current and former company names (reordered words too), or raw CIKs, with near-match suggestions on a miss; `secedgar_company_search` also tries EDGAR's entity index and 10-K subsidiaries exhibits
 - Friendly XBRL concept names that handle historical tag changes; `secedgar_get_financials`, `secedgar_get_snapshot`, and `secedgar_compare_companies` share the same dedup and tag priority, so their numbers agree, and `caveats` flag gaps in the series
 - Filing documents converted from HTML to text, with heading detection and offset paging for oversized filings
 - Opt-in local SQLite mirror of company tickers and XBRL company-facts (`EDGAR_MIRROR_ENABLED`) that serves CIK resolution and financials from disk

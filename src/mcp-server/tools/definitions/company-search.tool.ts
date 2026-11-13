@@ -7,7 +7,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
-import { ambiguousMatches } from '@/mcp-server/tools/ambiguous-matches.js';
+import { ambiguousMatches, type MatchTotal } from '@/mcp-server/tools/ambiguous-matches.js';
 import { datasetSchema } from '@/mcp-server/tools/dataset-schema.js';
 import { normalizeFormFilter } from '@/mcp-server/tools/form-filter.js';
 import {
@@ -16,17 +16,32 @@ import {
   withLimitClamps,
 } from '@/mcp-server/tools/limit-clamp.js';
 import { resolvedAsField } from '@/mcp-server/tools/resolved-as.js';
-import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
+import {
+  EFTS_DEGRADED_ERROR,
+  SEC_UPSTREAM_ERRORS,
+} from '@/mcp-server/tools/sec-upstream-errors.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
   toDatasetField,
 } from '@/services/canvas-bridge/canvas-bridge.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
-import { getEdgarApiService, suggestCompanies } from '@/services/edgar/edgar-api-service.js';
+import {
+  type EntityNameMatch,
+  type EntityNameResolution,
+  getEdgarApiService,
+  LAST_EXACT_TIER,
+  NAME_WORD_CHAR,
+  type NameTier,
+  nameQuery,
+  nameTier,
+  type SubsidiaryParent,
+  subsidiaryPhrase,
+  suggestCompanies,
+} from '@/services/edgar/edgar-api-service.js';
 import { nonUsListingNote } from '@/services/edgar/listing-codes.js';
 import { SubmissionsArchiveWalk } from '@/services/edgar/submissions-archive.js';
-import type { FilingsRecent } from '@/services/edgar/types.js';
+import type { CikMatch, FilingsRecent } from '@/services/edgar/types.js';
 
 interface FilingEntry {
   accession_number: string;
@@ -44,9 +59,9 @@ const INLINE_FILING_CAP = 50;
  * Point a caller at the filings the inline list withheld when neither a dataframe nor a
  * larger `filing_limit` can reach them: a `secedgar_search_filings` call over the same
  * entity, forms, and dates, ending at the oldest filing shown (inclusive, so that day's
- * shown filings repeat and none is skipped). That tool requires both date bounds and has
- * no `company` key, so the call carries `cik:` scope and a lower bound even when the
- * caller gave none. One call serves one window of up to 100 filings, so the notice says
+ * shown filings repeat and none is skipped). That tool has no `company` key, so the call
+ * carries `cik:` scope, and it carries a lower bound even when the caller gave none. One
+ * call serves one window of up to 100 filings, so the notice says
  * how to page on (#168). The call is a code span: the notice is authored Markdown, and
  * a caller's form types ride into it as typed, so outside code a CommonMark client
  * would consume their backslashes and Markdown punctuation (#220).
@@ -92,6 +107,113 @@ function zipFilings(block: FilingsRecent): FilingEntry[] {
   return rows;
 }
 
+/** The `ambiguous_company` message, worded as every company-resolving tool words it (#228). */
+function ambiguityMessage(query: string, list: string, showing: string): string {
+  return `'${query}' matches multiple companies: ${list}. Retry with one of these tickers or 10-digit CIKs.${showing}`;
+}
+
+/**
+ * The entity-index hits at the best name tier any of them reaches, in SEC's order, or
+ * `undefined` when none reaches one (#236). The index matches a name's words in any order,
+ * so a hit can reach no tier at all (`Schwab Charles R.` for `Charles Schwab`).
+ */
+function bestTierHits(
+  query: string,
+  hits: readonly EntityNameMatch[],
+): { tier: NameTier; hits: EntityNameMatch[] } | undefined {
+  const forms = nameQuery(query);
+  let best: { tier: NameTier; hits: EntityNameMatch[] } | undefined;
+  for (const hit of hits) {
+    const tier = nameTier(hit.name, forms);
+    if (tier === undefined || (best !== undefined && tier > best.tier)) continue;
+    if (best?.tier === tier) best.hits.push(hit);
+    else best = { tier, hits: [hit] };
+  }
+  return best;
+}
+
+/**
+ * SEC's count of an entity-index answer that holds more hits than the 10 it returned —
+ * `relation: 'gte'` makes it a floor — or `undefined` for a complete page, whose ambiguity
+ * counts its own best-tier hits (#230).
+ */
+function partialIndexTotal({ matches, total }: EntityNameResolution): MatchTotal | undefined {
+  if (total === undefined) return;
+  const lowerBound = total.relation === 'gte';
+  return lowerBound || total.value > matches.length
+    ? { count: total.value, lowerBound }
+    : undefined;
+}
+
+/** `resolvedAs` for a match the entity index made (#236). */
+function entityIndexReading(query: string, hit: EntityNameMatch): string {
+  return hit.ticker === undefined
+    ? `'${query}' matched ${hit.name} (CIK ${hit.cik}) in EDGAR's entity index, with no listed ticker`
+    : `'${query}' matched ${hit.name} (${hit.ticker}, CIK ${hit.cik}) in EDGAR's entity index`;
+}
+
+/** What the subsidiaries-exhibit search returned, or why it did not run (#236). */
+type ParentSearch =
+  | { ran: true; parents: SubsidiaryParent[] }
+  | { ran: false; reason: string | undefined; retryAfter: number | undefined };
+
+/** Codes for SEC failing a request, or refusing it during a rate-limit block. */
+const SEC_UNAVAILABLE_CODES = new Set<number>([
+  JsonRpcErrorCode.ServiceUnavailable,
+  JsonRpcErrorCode.Timeout,
+  JsonRpcErrorCode.RateLimited,
+]);
+
+/**
+ * Search 10-K subsidiaries exhibits for `query`, the miss path's last step (#236). The answer
+ * is already `no_match`, and no request follows this one, so SEC failing it (no response, a
+ * 5xx once retried, a search-backend failure, a 408 or 425) or refusing it during a
+ * rate-limit block leaves that answer standing, saying the search did not run. The
+ * caller's cancel and every other failure end the call.
+ */
+async function searchParents(
+  api: ReturnType<typeof getEdgarApiService>,
+  query: string,
+  scope: CallScope,
+): Promise<ParentSearch> {
+  try {
+    return { ran: true, parents: await api.findSubsidiaryParents(query, scope) };
+  } catch (error) {
+    const unavailable = error instanceof McpError && SEC_UNAVAILABLE_CODES.has(error.code);
+    if (!unavailable || scope.signal.aborted) throw error;
+    const reason = error.data?.reason;
+    const retryAfter = error.data?.retryAfter;
+    return {
+      ran: false,
+      reason: typeof reason === 'string' ? reason : undefined,
+      retryAfter: typeof retryAfter === 'number' ? retryAfter : undefined,
+    };
+  }
+}
+
+/** The `no_match` sentence a subsidiaries-exhibit search adds, its leading space included. */
+function parentSearchNote(query: string, search: ParentSearch): string {
+  if (!search.ran) {
+    const reason = search.reason === undefined ? '' : ` (${search.reason})`;
+    const when =
+      search.retryAfter === undefined ? 'in a minute' : `after ${search.retryAfter} seconds`;
+    return ` The search for a 10-K subsidiaries exhibit (EX-21) naming it did not run${reason}; retry the call ${when} to run it.`;
+  }
+  const { parents } = search;
+  if (parents.length === 0) {
+    return ` No 10-K subsidiaries exhibit (EX-21) names it either; for filings that mention it, call secedgar_search_filings with ${JSON.stringify({ query: subsidiaryPhrase(query) })}.`;
+  }
+  const filers = parents
+    .map((p) => {
+      const id = `${p.ticker === undefined ? '' : `${p.ticker}, `}CIK ${p.cik}`;
+      const filer = p.name === undefined ? id : `${p.name} (${id})`;
+      return `${filer}, in its 10-K filed ${p.filingDate} (accession ${p.accessionNumber})`;
+    })
+    .join('; ');
+  const whose = parents.length === 1 ? 'that filer' : 'one of these filers';
+  return ` '${query}' appears in the subsidiaries exhibit (EX-21) of ${filers}, so it may be a subsidiary of ${whose}.`;
+}
+
 /** `filing_limit`: the inline list holds at most 50 filings (#168, #197). */
 const filingLimitClamp = limitClamp({
   tool: 'secedgar_company_search',
@@ -106,7 +228,7 @@ const filingLimitClamp = limitClamp({
 
 export const companySearchTool = tool('secedgar_company_search', {
   description:
-    'Find companies and retrieve entity info with optional recent filings. Entry point for most EDGAR workflows — resolves tickers, names, or CIKs to entity details, with accession numbers in the result feeding secedgar_get_filing for document content. When a date or form filter carries the scan past the recent submissions window, the full filtered filing history is also staged as df_<id> — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query.',
+    "Find companies and retrieve entity info with optional recent filings. Entry point for most EDGAR workflows — resolves tickers, names, or CIKs to entity details, with accession numbers in the result feeding secedgar_get_filing for document content. A name SEC's ticker file misses is looked up in EDGAR's entity index of every filer, then in 10-K subsidiaries exhibits, whose filers the not-found error names as possible parents. When a date or form filter carries the scan past the recent submissions window, the full filtered filing history is also staged as df_<id> — inspect it with secedgar_dataframe_describe, then analyze it with secedgar_dataframe_query.",
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
 
   // Agent-facing context — notice for empty filings (e.g. filtered form types with
@@ -136,7 +258,7 @@ export const companySearchTool = tool('secedgar_company_search', {
     {
       reason: 'no_match',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No company matches the query',
+      when: "No company matches the query in SEC's ticker file, the former names it records, or EDGAR's entity index of every filer",
       recovery:
         'SEC\'s ticker index reflects the filer\'s own submissions record, which can differ from the exchange-listed symbol. ETFs and mutual funds resolve only by ticker (e.g. "VOO"); operating companies also resolve by full legal name or 10-digit CIK.',
     },
@@ -147,6 +269,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       recovery: 'Use a ticker symbol or 10-digit CIK from the matches list for an exact match.',
     },
     ...SEC_UPSTREAM_ERRORS,
+    EFTS_DEGRADED_ERROR,
   ],
 
   input: z.object({
@@ -155,7 +278,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       .trim()
       .min(1, 'Query cannot be blank')
       .describe(
-        'Company ticker symbol (e.g., "AAPL", "VOO"), name (e.g., "Apple"), or CIK number (e.g., "320193"). Ticker is the fastest lookup and works for equities, ETFs, and mutual funds; a multi-class share ticker resolves in either form ("BRK-B" or "BRK.B"), and an uppercase ticker also resolves as market-data feeds write it: venue-coded ("UEC.N"), a preferred class run together ("CFGPH"), or a class root ("GLOP"). Name search matches current and former names, preferring a name the query matches exactly over one it only starts or appears in, and never matching from inside a word ("SY Bancorp" does not find "Embassy Bancorp"); an exact or starts-with match ignores commas, periods, apostrophes, extra spaces, and the spaces between single initials ("QXO Inc" finds "QXO, Inc."; "U.S. Bancorp" finds "US BANCORP"; "Macys" finds "Macy\'s, Inc."; "JM Smucker" finds "J M SMUCKER Co"). The corporate suffix (Inc, Corp, Co, Ltd, PLC, LLC, LP, N.V., S.A., AG, SE) can be left off ("Apple" finds "Apple Inc."; "Rio Tinto" lists both the Ltd and the PLC) or spelled out ("Beacon Financial Corporation" finds "Beacon Financial Corp"), but a suffix you include must match — Corp, Inc, Co, and Ltd stay distinct from each other, since separate registrants differ only by which one they use.',
+        'Company ticker symbol (e.g., "AAPL", "VOO"), name (e.g., "Apple"), or CIK number (e.g., "320193"). Ticker is the fastest lookup and works for equities, ETFs, and mutual funds; a multi-class share ticker resolves in either form ("BRK-B" or "BRK.B"), and an uppercase ticker also resolves as market-data feeds write it: venue-coded ("UEC.N"), a preferred class run together ("CFGPH"), or a class root ("GLOP"). Name search matches current and former names, preferring a name the query matches exactly over one it only starts or appears in, and never matching from inside a word ("SY Bancorp" does not find "Embassy Bancorp"); an exact or starts-with match ignores commas, periods, apostrophes, extra spaces, and the spaces between single initials ("QXO Inc" finds "QXO, Inc."; "U.S. Bancorp" finds "US BANCORP"; "Macys" finds "Macy\'s, Inc."; "JM Smucker" finds "J M SMUCKER Co"). The corporate suffix (Inc, Corp, Co, Ltd, PLC, LLC, LP, N.V., S.A., AG, SE) can be left off ("Apple" finds "Apple Inc."; "Rio Tinto" lists both the Ltd and the PLC) or spelled out ("Beacon Financial Corporation" finds "Beacon Financial Corp"), but a suffix you include must match — Corp, Inc, Co, and Ltd stay distinct from each other, since separate registrants differ only by which one they use. A name with its words in another order also matches when nothing else does ("Charles Schwab" finds "SCHWAB CHARLES CORP"). A former ticker resolves to the company that last held it ("AMRK" finds Gold.com). A name SEC\'s ticker file misses is looked up in EDGAR\'s entity index, which also holds filers with no ticker ("Exxon Mobil" finds EXXON MOBIL CORP); a private company found only in a 10-K\'s subsidiaries exhibit fails as not found, naming the filer of that exhibit as its possible parent.',
       ),
     include_filings: z
       .boolean()
@@ -299,43 +422,80 @@ export const companySearchTool = tool('secedgar_company_search', {
     const scope = new CallScope(ctx.signal);
     const resolved = await api.resolveCik(input.query, scope);
 
-    if (Array.isArray(resolved)) {
-      if (resolved.length === 0) {
-        // Run trigram suggestions on the zero-hit name-search path.
-        const allEntries = await api.getAllEntries(scope);
-        const suggestions = suggestCompanies(input.query, allEntries);
+    if (Array.isArray(resolved) && resolved.length > 1) {
+      const { list, showing, data } = ambiguousMatches(resolved);
+      throw ctx.fail('ambiguous_company', ambiguityMessage(input.query, list, showing), {
+        query: input.query,
+        ...data,
+      });
+    }
+
+    let match: CikMatch | undefined = Array.isArray(resolved) ? resolved[0] : resolved;
+    if (!match) {
+      // Every local pass missed: EDGAR's entity index, then 10-K subsidiaries exhibits (#236).
+      // Neither index holds a non-US listing code (`7203.T`), and a query with no letter or
+      // digit names nothing, so neither is sent.
+      const listingNote = nonUsListingNote(input.query);
+      const index =
+        listingNote || !NAME_WORD_CHAR.test(input.query)
+          ? undefined
+          : await api.resolveEntityByName(input.query, scope);
+      const best = index && bestTierHits(input.query, index.matches);
+      if (index && best && best.hits.length > 1) {
+        const { list, showing, data } = ambiguousMatches(best.hits, {
+          total: partialIndexTotal(index),
+        });
+        throw ctx.fail('ambiguous_company', ambiguityMessage(input.query, list, showing), {
+          query: input.query,
+          ...data,
+        });
+      }
+      const [hit] = best?.hits ?? [];
+      if (hit && best && best.tier <= LAST_EXACT_TIER) {
+        match = {
+          cik: hit.cik,
+          name: hit.name,
+          ...(hit.ticker !== undefined && { ticker: hit.ticker }),
+          reading: entityIndexReading(input.query, hit),
+        };
+      } else {
+        // A lone hit at the prefix or substring tier is a near match, never a resolution (#41);
+        // only a name the index has no tiered hit for reaches the exhibits.
+        const parentSearch =
+          index && !hit ? await searchParents(api, input.query, scope) : undefined;
+        const parents = parentSearch?.ran ? parentSearch.parents : [];
+        const trigram = suggestCompanies(input.query, await api.getAllEntries(scope));
+        const suggestions = hit ? [hit, ...trigram.filter((s) => s.cik !== hit.cik)] : trigram;
         const suggestionNote =
           suggestions.length > 0
             ? ` Near matches: ${suggestions.map((s) => `${s.name ?? s.cik}${s.ticker ? ` (${s.ticker})` : ''}`).join(', ')}.`
             : '';
-        const listingNote = nonUsListingNote(input.query.trim());
-        // Only this throw can attach suggestions, so only it points the caller at them (#153).
+        // The hint points only at the fields this throw attaches (#153).
+        const hint = [
+          ...(parents.length > 0
+            ? ['Check `data.parents` for the filers whose 10-K subsidiaries exhibit names it.']
+            : []),
+          ...(suggestions.length > 0 ? ['Check `data.suggestions` for near matches.'] : []),
+          ctx.recoveryFor('no_match').recovery.hint,
+        ].join(' ');
         throw ctx.fail(
           'no_match',
-          `No company found for '${input.query}'.${suggestionNote}${listingNote ? ` ${listingNote}` : ''}`,
-          suggestions.length > 0
-            ? {
-                suggestions,
-                recovery: {
-                  hint: `Check \`data.suggestions\` for near matches. ${ctx.recoveryFor('no_match').recovery.hint}`,
-                },
-              }
-            : ctx.recoveryFor('no_match'),
+          `No company found for '${input.query}'.${parentSearch ? parentSearchNote(input.query, parentSearch) : ''}${suggestionNote}${listingNote ? ` ${listingNote}` : ''}`,
+          {
+            ...(parents.length > 0 && {
+              parents: parents.map((p) => ({
+                cik: p.cik,
+                name: p.name,
+                ticker: p.ticker,
+                filing_date: p.filingDate,
+                accession_number: p.accessionNumber,
+              })),
+            }),
+            ...(suggestions.length > 0 && { suggestions }),
+            recovery: { hint },
+          },
         );
       }
-      if (resolved.length > 1) {
-        const { list, showing, data } = ambiguousMatches(resolved);
-        throw ctx.fail(
-          'ambiguous_company',
-          `'${input.query}' matches multiple companies: ${list}. Retry with one of these tickers or 10-digit CIKs.${showing}`,
-          { query: input.query, ...data },
-        );
-      }
-    }
-
-    const match = Array.isArray(resolved) ? resolved[0] : resolved;
-    if (!match) {
-      throw ctx.fail('no_match', `No company found for '${input.query}'.`);
     }
     if (match.reading) ctx.enrich({ resolvedAs: match.reading });
 
@@ -527,10 +687,13 @@ export const companySearchTool = tool('secedgar_company_search', {
     const lines = [
       `**${escapeMarkdownInline(result.name)}** (${result.tickers.join(', ') || 'no ticker'})`,
     ];
+    // A filer found only in EDGAR's entity index often has no SIC on record (#236).
+    const sicTitle = result.sic_description
+      ? ` (${escapeMarkdownInline(result.sic_description)})`
+      : '';
+    const sic = result.sic ? ` | SIC: ${result.sic}${sicTitle}` : '';
     const exchange = result.exchanges.length ? ` | Exchange: ${result.exchanges.join(', ')}` : '';
-    lines.push(
-      `CIK: ${result.cik} | SIC: ${result.sic} (${escapeMarkdownInline(result.sic_description)})${exchange}`,
-    );
+    lines.push(`CIK: ${result.cik}${sic}${exchange}`);
     if (result.fiscal_year_end) {
       lines.push(`Fiscal year end: ${result.fiscal_year_end}`);
     }

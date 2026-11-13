@@ -1246,6 +1246,32 @@ describe('getInstitutionalHoldingsTool — entity resolution & routing', () => {
     expect(mockApi.getSubmissions).not.toHaveBeenCalled();
   });
 
+  it('lists an entity-search candidate with the ticker split from its name (#236)', async () => {
+    // resolveEntityByName splits SEC's `SCHWAB CHARLES CORP (SCHW, SCHW-PJ, SCHW-PD)`.
+    mockApi.resolveCik.mockResolvedValue([]);
+    mockApi.resolveEntityByName.mockResolvedValue({
+      matches: [
+        { cik: '0000923738', name: 'Schwab Charles R.' },
+        { cik: '0000316709', name: 'SCHWAB CHARLES CORP', ticker: 'SCHW' },
+      ],
+      total: { value: 2, relation: 'eq' },
+    });
+
+    const result = await runToolContract(getInstitutionalHoldingsTool, {
+      company: 'Charles Schwab',
+    });
+
+    const error = wireError(result);
+    expect(error.data.reason).toBe('ambiguous_entity');
+    expect(error.data.matches).toEqual([
+      { cik: '0000923738', name: 'Schwab Charles R.' },
+      { cik: '0000316709', name: 'SCHWAB CHARLES CORP', ticker: 'SCHW' },
+    ]);
+    expect(error.message).toBe(
+      "'Charles Schwab' matches multiple EDGAR entities: 0000923738 (Schwab Charles R.), 0000316709 (SCHWAB CHARLES CORP). Retry with the exact 10-digit CIK.",
+    );
+  });
+
   it('returns ambiguous_entity when the ticker cache returns multiple matches (#73)', async () => {
     // The handler previously took resolved[0] silently — now the >1 branch fires.
     mockApi.resolveCik.mockResolvedValue([

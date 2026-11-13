@@ -1,0 +1,307 @@
+{
+  "hits": {
+    "total": { "value": 25, "relation": "eq" },
+    "hits": [
+      {
+        "_id": "0000882835-24-000008:a202310-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-24-000008",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2024-02-22",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-25-000008:a202410-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-25-000008",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2025-02-24",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-23-000016:a202210-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-23-000016",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2023-02-27",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-26-000009:a202510-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-26-000009",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2026-02-24",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-16-000035:ex21-1.htm",
+        "_source": {
+          "adsh": "0000882835-16-000035",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2016-02-26",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-19-000010:a201810-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-19-000010",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2019-02-25",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-20-000006:a201910-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-20-000006",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2020-02-28",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-17-000006:ex21-1.htm",
+        "_source": {
+          "adsh": "0000882835-17-000006",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2017-02-27",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-18-000011:a201710-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-18-000011",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2018-02-23",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-22-000012:a202110-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-22-000012",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2022-02-22",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-21-000011:a202010-kex211.htm",
+        "_source": {
+          "adsh": "0000882835-21-000011",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER TECHNOLOGIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2021-02-22",
+          "file_type": "EX-21.1",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000950170-22-006718:mdrx-20211231.htm",
+        "_source": {
+          "adsh": "0000950170-22-006718",
+          "ciks": ["0001124804"],
+          "display_names": ["ALLSCRIPTS HEALTHCARE SOLUTIONS, INC.  (MDRX)  (CIK 0001124804)"],
+          "file_date": "2022-04-29",
+          "file_type": "10-K/A",
+          "form": "10-K/A",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001564590-21-009410:mdrx-10k_20201231.htm",
+        "_source": {
+          "adsh": "0001564590-21-009410",
+          "ciks": ["0001124804"],
+          "display_names": ["ALLSCRIPTS HEALTHCARE SOLUTIONS, INC.  (MDRX)  (CIK 0001124804)"],
+          "file_date": "2021-02-26",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000882835-15-000009:cy2014_10-k.htm",
+        "_source": {
+          "adsh": "0000882835-15-000009",
+          "ciks": ["0000882835"],
+          "display_names": ["ROPER INDUSTRIES INC  (ROP)  (CIK 0000882835)"],
+          "file_date": "2015-02-20",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000950170-22-002112:mdrx-20211231.htm",
+        "_source": {
+          "adsh": "0000950170-22-002112",
+          "ciks": ["0001124804"],
+          "display_names": ["ALLSCRIPTS HEALTHCARE SOLUTIONS, INC.  (MDRX)  (CIK 0001124804)"],
+          "file_date": "2022-02-25",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0000950170-25-041181:mdrx-20221231.htm",
+        "_source": {
+          "adsh": "0000950170-25-041181",
+          "ciks": ["0001124804"],
+          "display_names": ["Veradigm Inc.  (MDRX)  (CIK 0001124804)"],
+          "file_date": "2025-03-18",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001636422-20-000016:hcat-20191231x10k.htm",
+        "_source": {
+          "adsh": "0001636422-20-000016",
+          "ciks": ["0001636422"],
+          "display_names": ["Health Catalyst, Inc.  (HCAT)  (CIK 0001636422)"],
+          "file_date": "2020-02-28",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001636422-21-000026:hcat-20201231.htm",
+        "_source": {
+          "adsh": "0001636422-21-000026",
+          "ciks": ["0001636422"],
+          "display_names": ["Health Catalyst, Inc.  (HCAT)  (CIK 0001636422)"],
+          "file_date": "2021-02-25",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001636422-22-000011:hcat-20211231.htm",
+        "_source": {
+          "adsh": "0001636422-22-000011",
+          "ciks": ["0001636422"],
+          "display_names": ["Health Catalyst, Inc.  (HCAT)  (CIK 0001636422)"],
+          "file_date": "2022-03-01",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001636422-24-000016:hcat-20231231.htm",
+        "_source": {
+          "adsh": "0001636422-24-000016",
+          "ciks": ["0001636422"],
+          "display_names": ["Health Catalyst, Inc.  (HCAT)  (CIK 0001636422)"],
+          "file_date": "2024-02-22",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001636422-23-000033:hcat-20221231.htm",
+        "_source": {
+          "adsh": "0001636422-23-000033",
+          "ciks": ["0001636422"],
+          "display_names": ["Health Catalyst, Inc.  (HCAT)  (CIK 0001636422)"],
+          "file_date": "2023-02-28",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001636422-25-000028:hcat-20241231.htm",
+        "_source": {
+          "adsh": "0001636422-25-000028",
+          "ciks": ["0001636422"],
+          "display_names": ["Health Catalyst, Inc.  (HCAT)  (CIK 0001636422)"],
+          "file_date": "2025-02-26",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001636422-26-000035:hcat-20251231.htm",
+        "_source": {
+          "adsh": "0001636422-26-000035",
+          "ciks": ["0001636422"],
+          "display_names": ["Health Catalyst, Inc.  (HCAT)  (CIK 0001636422)"],
+          "file_date": "2026-03-12",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001628280-26-018174:ardt-20251231.htm",
+        "_source": {
+          "adsh": "0001628280-26-018174",
+          "ciks": ["0001756655"],
+          "display_names": ["Ardent Health, Inc.  (ARDT)  (CIK 0001756655)"],
+          "file_date": "2026-03-16",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      },
+      {
+        "_id": "0001628280-25-008727:ardt-20241231.htm",
+        "_source": {
+          "adsh": "0001628280-25-008727",
+          "ciks": ["0001756655"],
+          "display_names": ["Ardent Health Partners, Inc.  (ARDT)  (CIK 0001756655)"],
+          "file_date": "2025-02-27",
+          "file_type": "10-K",
+          "form": "10-K",
+          "root_forms": ["10-K"]
+        }
+      }
+    ]
+  }
+}

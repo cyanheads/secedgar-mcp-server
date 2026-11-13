@@ -6,15 +6,18 @@
  * that tie current ones but never outrank them (#155) — the comma, period, and apostrophe
  * fold (#210), whitespace runs and spaced initials (#219), word boundaries on the prefix and
  * substring tiers (#218), the listed-symbol lookup (including the dotted share-class
- * retry, #110), and the ticker-spelling readings and non-US exchange codes (#235). The registry fixture mirrors live
- * `company_tickers.json` rows verbatim, and the former names are the committed asset —
- * the suffix and share-class shapes these behaviors turn on only exist in real titles.
+ * retry, #110), the ticker-spelling readings and non-US exchange codes (#235), former tickers
+ * and a listed symbol's earlier holders (#237), and the word-order tier (#236). The registry
+ * fixture mirrors live `company_tickers.json` rows verbatim, and the former names are the
+ * committed asset — the suffix and share-class shapes these behaviors turn on only exist in
+ * real titles. The former-ticker asset is replaced by rows copied from it, so each case pins
+ * exact holders and months.
  * @module tests/services/edgar/edgar-api-service.resolve-cik
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { config } = vi.hoisted(() => ({
+const { config, formerTickerRows } = vi.hoisted(() => ({
   config: {
     userAgent: 'test test@example.com',
     rateLimitRps: 1000,
@@ -22,10 +25,25 @@ const { config } = vi.hoisted(() => ({
     tickerCacheTtl: 3600,
     mirrorFallbackLive: true,
   },
+  /** Rows copied from `src/services/edgar/data/former-tickers.json` (#237). */
+  formerTickerRows: [
+    ['AAIC-PB', '0001209028', '2023-12', 'Arlington Asset Investment Corp.'],
+    ['AMRK', '0001591588', '2025-12', 'A-Mark Precious Metals, Inc.'],
+    ['BK', '0001390777', '2026-04', 'Bank of New York Mellon Corp'],
+    ['BLDE', '0001779128', '2025-08', 'Blade Air Mobility, Inc.'],
+    ['CHUBB', '0001665658', '2020-05', 'CommerceHub, Inc.'],
+    ['DINE', '0000078536', '2020-05', 'REWARDS NETWORK INC'],
+    ['STR', '0001949543', '2025-08', 'Sitio Royalties Corp.'],
+    ['STR', '0001703785', '2023-01', 'Sitio Royalties Corp.'],
+    ['STR', '0000751652', '2020-05', 'DOMINION QUESTAR CORP'],
+    ['VJET', '0001582581', '2024-04', 'voxeljet AG'],
+    ['XOM', '0000034088', '2026-04', 'EXXON MOBIL CORP'],
+  ],
 }));
 
 vi.mock('@/config/server-config.js', () => ({ getServerConfig: () => config }));
 vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => undefined }));
+vi.mock('@/services/edgar/data/former-tickers.json', () => ({ default: formerTickerRows }));
 
 import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, initEdgarApiService } from '@/services/edgar/edgar-api-service.js';
@@ -163,6 +181,24 @@ const REGISTRY: Array<{ cik_str: number; ticker: string; title: string }> = [
   { cik_str: 313807, ticker: 'BP', title: 'BP PLC' },
   { cik_str: 2031561, ticker: 'ALDF', title: 'Aldel Financial II Inc.' },
   { cik_str: 2031561, ticker: 'ALDF.U', title: 'Aldel Financial II Inc.' },
+  // Former tickers' holders as listed today, and today's holders of reused symbols (#237), from
+  // the 2026-11-13 file: AMRK is Gold.com's, BLDE Strata's, BK BNY's; BK Technologies is the
+  // registrant the name passes reach for `bk`, and Strata the one they reach for `str`.
+  { cik_str: 1591588, ticker: 'GOLD', title: 'Gold.com, Inc.' },
+  { cik_str: 1779128, ticker: 'SRTA', title: 'Strata Critical Medical, Inc.' },
+  { cik_str: 1390777, ticker: 'BNY', title: 'Bank of New York Mellon Corp' },
+  { cik_str: 1390777, ticker: 'BNY-PK', title: 'Bank of New York Mellon Corp' },
+  { cik_str: 2186, ticker: 'BKTI', title: 'BK Technologies Corp' },
+  { cik_str: 2115436, ticker: 'XOM', title: 'ExxonMobil Holdings Corp' },
+  { cik_str: 1716621, ticker: 'VJET', title: 'Flyte Aviation, Inc.' },
+  // Registrants a former ticker names exactly (`CHUBB`) or begins (`DINE`) whose holder is
+  // listed no more (#237).
+  { cik_str: 896159, ticker: 'CB', title: 'Chubb Ltd' },
+  { cik_str: 49754, ticker: 'DIN', title: 'Dine Brands Global, Inc.' },
+  // A conformed name that inverts the name callers write (#236).
+  { cik_str: 316709, ticker: 'SCHW', title: 'SCHWAB CHARLES CORP' },
+  { cik_str: 316709, ticker: 'SCHW-PD', title: 'SCHWAB CHARLES CORP' },
+  { cik_str: 316709, ticker: 'SCHW-PJ', title: 'SCHWAB CHARLES CORP' },
 ];
 
 const jsonResponse = (body: unknown) =>
@@ -666,5 +702,191 @@ describe('EdgarApiService.resolveCik', () => {
     const match = await resolveOne('Gs.k');
     expect(match.cik).toBe('0001131399');
     expect(match).not.toHaveProperty('reading');
+  });
+
+  // --- Former tickers (#237) ---
+
+  it.each([
+    [
+      'AMRK',
+      '0001591588',
+      'GOLD',
+      "AMRK read as a former ticker of Gold.com, Inc. (GOLD, CIK 0001591588) as late as 2025-12 in SEC's ticker file",
+    ],
+    [
+      'BLDE',
+      '0001779128',
+      'SRTA',
+      "BLDE read as a former ticker of Strata Critical Medical, Inc. (SRTA, CIK 0001779128) as late as 2025-08 in SEC's ticker file",
+    ],
+  ])(
+    'resolves %s, a symbol the file no longer lists, to its holder under its current listing (#237)',
+    async (query, cik, ticker, reading) => {
+      expect(await resolveOne(query)).toEqual({
+        cik,
+        ticker,
+        name: expect.any(String),
+        reading,
+      });
+    },
+  );
+
+  it('reads an uppercase former ticker ahead of the name passes, which named another company (#237)', async () => {
+    // The name passes read BK as BK Technologies Corp by prefix.
+    expect(await resolveOne('BK')).toMatchObject({
+      cik: '0001390777',
+      ticker: 'BNY',
+      reading:
+        "BK read as a former ticker of Bank of New York Mellon Corp (BNY, CIK 0001390777) as late as 2026-04 in SEC's ticker file",
+    });
+  });
+
+  it('keeps a current name the uppercase input matches exactly ahead of a former ticker (#237)', async () => {
+    // CHUBB is CommerceHub's former ticker, and Chubb Ltd's name with its suffix left off.
+    const match = await resolveOne('CHUBB');
+    expect(match.cik).toBe('0000896159');
+    expect(match).not.toHaveProperty('reading');
+  });
+
+  it('keeps the one company the name passes find ahead of a former ticker whose holder is unlisted (#237)', async () => {
+    // DINE was REWARDS NETWORK INC's ticker; the prefix tier finds only Dine Brands Global.
+    const match = await resolveOne('DINE');
+    expect(match.cik).toBe('0000049754');
+    expect(match).not.toHaveProperty('reading');
+  });
+
+  it('keeps the name passes ahead of a former ticker typed in lowercase (#237)', async () => {
+    const match = await resolveOne('bk');
+    expect(match.cik).toBe('0000002186');
+    expect(match).not.toHaveProperty('reading');
+  });
+
+  it('reads a former ticker not typed in uppercase once the name passes miss (#237)', async () => {
+    expect(await resolveOne('amrk')).toMatchObject({
+      cik: '0001591588',
+      reading:
+        "amrk read as a former ticker of Gold.com, Inc. (GOLD, CIK 0001591588) as late as 2025-12 in SEC's ticker file",
+    });
+  });
+
+  it('resolves a former ticker of several holders to the most recent, naming the rest (#237)', async () => {
+    // The name passes listed Strata Critical Medical beside former names starting with `str`.
+    const match = await resolveOne('STR');
+    expect(match).toEqual({
+      cik: '0001949543',
+      name: 'Sitio Royalties Corp.',
+      reading:
+        "STR read as a former ticker of Sitio Royalties Corp. (CIK 0001949543) as late as 2025-08 in SEC's ticker file; earlier the ticker of Sitio Royalties Corp. (CIK 0001703785) as late as 2023-01 and of DOMINION QUESTAR CORP (CIK 0000751652) as late as 2020-05",
+    });
+  });
+
+  it.each([
+    [
+      'XOM',
+      '0002115436',
+      "XOM was earlier the ticker of EXXON MOBIL CORP (CIK 0000034088) as late as 2026-04 in SEC's ticker file",
+    ],
+    [
+      'VJET',
+      '0001716621',
+      "VJET was earlier the ticker of voxeljet AG (CIK 0001582581) as late as 2024-04 in SEC's ticker file",
+    ],
+  ])(
+    'keeps the current holder of %s, a symbol with an earlier holder, and names that holder (#237)',
+    async (query, cik, reading) => {
+      expect(await resolveOne(query)).toMatchObject({ cik, ticker: query, reading });
+    },
+  );
+
+  it('names the earlier holder whatever the case the listed symbol is typed in (#237)', async () => {
+    expect((await resolveOne('xom')).reading).toBe(
+      "XOM was earlier the ticker of EXXON MOBIL CORP (CIK 0000034088) as late as 2026-04 in SEC's ticker file",
+    );
+  });
+
+  it('reads the dotted spelling of a hyphenated former class (#237)', async () => {
+    // PB is no US venue code, so no ticker-spelling reading applies.
+    expect(await resolveOne('AAIC.PB')).toMatchObject({
+      cik: '0001209028',
+      name: 'Arlington Asset Investment Corp.',
+      reading:
+        "AAIC.PB read as a former ticker of Arlington Asset Investment Corp. (CIK 0001209028) as late as 2023-12 in SEC's ticker file",
+    });
+  });
+
+  it.each([
+    ['MSFT', 'MSFT'],
+    ['BRK.B', 'BRK-B'],
+    ['BRK-B', 'BRK-B'],
+  ])(
+    'resolves %s, a listed symbol with no earlier holder, with no reading (#110, #237)',
+    async (query, ticker) => {
+      const match = await resolveOne(query);
+      expect(match.ticker).toBe(ticker);
+      expect(match).not.toHaveProperty('reading');
+    },
+  );
+
+  it('sends no request for a former ticker beyond the ticker files (#237)', async () => {
+    await resolveOne('AMRK');
+    await resolveOne('XOM');
+    const urls = vi.mocked(globalThis.fetch).mock.calls.map(([url]) => String(url));
+    expect(urls.length).toBe(2);
+    expect(urls.every((url) => url.includes('company_tickers'))).toBe(true);
+  });
+
+  // --- Word order (#236) ---
+
+  it.each([
+    ['Charles Schwab', '0000316709'],
+    ['Charles Schwab Corp', '0000316709'],
+    ['Charles Schwab Corporation', '0000316709'],
+    ['charles schwab', '0000316709'],
+    ['JB Hunt Transport Services', '0000728535'],
+    ['J.B. Hunt Transport Services, Inc.', '0000728535'],
+  ])(
+    'resolves %s, a registry name with its words reordered, once tiers 0–4 miss (#236)',
+    async (query, cik) => {
+      expect(await resolveCiks(query)).toEqual([cik]);
+    },
+  );
+
+  it('ties suffix variants of one reordered name, as the exact tiers do (#155, #236)', async () => {
+    expect(await resolveCiks('Capital Owl Blue')).toEqual(['0001823945', '0001655888']);
+    expect(await resolveCiks('Tinto Rio')).toEqual(['0000887028', '0000863064']);
+  });
+
+  it('keeps the query’s own suffix in the word-order tier (#107, #236)', async () => {
+    // SCHWAB CHARLES CORP sits in the corp bucket, never the inc one.
+    expect(await resolveCiks('Charles Schwab Inc')).toEqual([]);
+    expect(await resolveCiks('Tinto Rio plc')).toEqual(['0000863064']);
+  });
+
+  it('reaches a former name only when no current name reorders to the query (#155, #236)', async () => {
+    // `travelers group inc` is a former name of Citigroup.
+    const match = await resolveOne('Group Travelers');
+    expect(match.cik).toBe('0000831001');
+    expect(match.ticker).toBeUndefined();
+  });
+
+  it('leaves an answer tiers 0–4 give unchanged (#236)', async () => {
+    // The prefix tier answers `Schwab Charles`; the exact tier `Hunt J B Transport Services`.
+    expect(await resolveCiks('Schwab Charles')).toEqual(['0000316709']);
+    expect(await resolveCiks('Hunt J B Transport Services')).toEqual(['0000728535']);
+  });
+
+  // `Corp Charles Schwab` moves the suffix off the end, where only a terminal one normalizes.
+  it.each(['Schwabcharles', 'Schwab Charles Hunt', 'Corp Charles Schwab'])(
+    'finds nothing for %s, which no registry name’s words make up (#236)',
+    async (query) => {
+      expect(await getEdgarApiService().resolveCik(query, scope())).toEqual([]);
+    },
+  );
+
+  it('sends no request for a word-order match beyond the ticker files (#236)', async () => {
+    await resolveOne('Charles Schwab');
+    const urls = vi.mocked(globalThis.fetch).mock.calls.map(([url]) => String(url));
+    expect(urls.length).toBe(2);
+    expect(urls.every((url) => url.includes('company_tickers'))).toBe(true);
   });
 });

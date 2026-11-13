@@ -1,7 +1,9 @@
 /**
  * @fileoverview The three error-contract entries every tool that reaches SEC declares: the
  * rate-limit block, no complete answer (`sec_unreachable`), and a 5xx once retries are spent
- * (`sec_unavailable`). All are raised by `EdgarApiService`, hence `thrownBy: 'service'`.
+ * (`sec_unavailable`); and the entry every tool that fails on an EDGAR full-text search
+ * failure declares (`efts_degraded_response`). All are raised by `EdgarApiService`, hence
+ * `thrownBy: 'service'`.
  * @module mcp-server/tools/sec-upstream-errors
  */
 
@@ -36,3 +38,17 @@ export const SEC_UPSTREAM_ERRORS = [
     thrownBy: 'service',
   },
 ] as const;
+
+/**
+ * A failure of EDGAR full-text search's backend (#206), declared by every tool a full-text
+ * search or an entity-index lookup on the same endpoint can fail.
+ */
+export const EFTS_DEGRADED_ERROR = {
+  reason: 'efts_degraded_response',
+  code: JsonRpcErrorCode.ServiceUnavailable,
+  when: 'EDGAR full-text search answered without results — its search backend failed to run the search on every attempt made (a connection or timeout failure, retried like a request SEC never answered), refused the request (upstreamErrorType and upstreamErrorMessage carry its error, and the request is not retried), or sent a payload with no hit list',
+  recovery:
+    'Retry the same call in a minute unless the error is marked not retryable; then change the request as upstreamErrorMessage indicates.',
+  retryable: true,
+  thrownBy: 'service',
+} as const;

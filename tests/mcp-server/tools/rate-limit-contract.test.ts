@@ -9,13 +9,19 @@
  * `sec_unavailable`, the failure once the last attempt draws a 500, 502, 503, or 504
  * (#233). Every tool that
  * fails on EDGAR full-text search declares `efts_degraded_response`, the failure once its
- * search backend fails every attempt or refuses the request (#206). Driven through
+ * search backend fails every attempt or refuses the request (#206). SEC's error body
+ * reaches the call's failure log record and never the caller (#244). Driven through
  * `runToolContract` over the real `EdgarApiService` with `globalThis.fetch` stubbed.
  * @module tests/mcp-server/tools/rate-limit-contract
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createMockContext,
+  type MockContextLogger,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
+import { ErrorHandler, logger } from '@cyanheads/mcp-ts-core/utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { config } = vi.hoisted(() => ({
@@ -158,6 +164,7 @@ describe('a call SEC answers with a 5xx on every attempt (#233)', () => {
     const message = 'SEC EDGAR (www.sec.gov) answered HTTP 504 on the last of 3 attempts.';
     const hint =
       "SEC EDGAR (www.sec.gov) answered the last attempt with HTTP 504 — a failure on SEC's side, not a problem with the request. Retry the same call in a minute.";
+    // SEC's body stays in the log (#244).
     expect(envelope(result)).toEqual({
       code: JsonRpcErrorCode.ServiceUnavailable,
       message,
@@ -167,8 +174,6 @@ describe('a call SEC answers with a 5xx on every attempt (#233)', () => {
         url: 'https://www.sec.gov/files/company_tickers.json',
         status: 504,
         statusCode: 504,
-        body: 'Gateway Timeout',
-        responseBody: 'Gateway Timeout',
         recovery: { hint },
       },
     });
@@ -181,6 +186,114 @@ describe('a call SEC answers with a 5xx on every attempt (#233)', () => {
   });
 });
 
+describe('SEC’s error body: in the call’s failure log record, never on the envelope (#244)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('unmocked fetch')));
+    initEdgarApiService();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const TICKERS_URL = 'https://www.sec.gov/files/company_tickers.json';
+  /** An HTML error page past the 500-byte bound, as SEC serves its block and error pages. */
+  const SEC_PAGE = `<html><body>${'Your Request Originates from an Undeclared Automated Tool. '.repeat(10)}</body></html>`;
+  /** What the log keeps of it: the first 500 bytes, marked cut. */
+  const SEC_PAGE_HEAD = `${SEC_PAGE.slice(0, 500)}…`;
+  const FORBIDDEN_HINT =
+    'www.sec.gov may be blocking requests. Check EDGAR_USER_AGENT format ("AppName contact@email.com") or retry later.';
+
+  it.each([
+    [
+      403,
+      JsonRpcErrorCode.Forbidden,
+      { recovery: { hint: FORBIDDEN_HINT } },
+      `Error: SEC EDGAR returned HTTP 403.\n\nRecovery: ${FORBIDDEN_HINT}`,
+    ],
+    [410, JsonRpcErrorCode.InvalidRequest, {}, 'Error: SEC EDGAR returned HTTP 410.'],
+  ])(
+    'leaves a %i’s body off both surfaces, every other field unchanged',
+    async (status, code, extra, text) => {
+      const fetchMock = vi.fn(async () => new Response(SEC_PAGE, { status }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      const pending = runToolContract(companySearchTool, { query: 'AAPL' });
+      await vi.advanceTimersByTimeAsync(10_000);
+      const result = await pending;
+
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(result.isError).toBe(true);
+      expect(envelope(result)).toEqual({
+        code,
+        message: `SEC EDGAR returned HTTP ${status}.`,
+        data: { url: TICKERS_URL, status, statusCode: status, ...extra },
+      });
+      expect(readCommonMark(blockText(result.content))).toBe(text);
+      expect(JSON.stringify(result)).not.toContain('Undeclared Automated Tool');
+    },
+  );
+
+  /**
+   * The thrown error goes through `ErrorHandler.handleError` as the tool handler factory
+   * hands it every failed call, with the call's request context; `runToolContract`
+   * builds the envelope without writing that record.
+   */
+  it.each([
+    [403, 'SEC EDGAR returned HTTP 403.'],
+    [504, 'SEC EDGAR (www.sec.gov) answered HTTP 504 on the last of 3 attempts.'],
+  ])(
+    'writes a %i’s bounded body to the call’s failure record, under its request id, and to no ctx.log call',
+    async (status, message) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(SEC_PAGE, { status })),
+      );
+      const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+      const ctx = createMockContext({ errors: companySearchTool.errors });
+
+      const input = companySearchTool.input.parse({ query: 'AAPL' });
+      const pending = (async () => companySearchTool.handler(input, ctx))().then(
+        () => undefined,
+        (thrown: unknown) => thrown,
+      );
+      await vi.advanceTimersByTimeAsync(10_000);
+      const thrown = await pending;
+      ErrorHandler.handleError(thrown, {
+        operation: `tool:${companySearchTool.name}`,
+        context: { requestId: 'GKZ4P-244AA', timestamp: new Date().toISOString() },
+      });
+
+      const records = error.mock.calls.filter(([line]) => line.startsWith('Error in tool:'));
+      expect(records).toHaveLength(1);
+      const [line, record] = records[0] ?? [];
+      expect(line).toBe(`Error in tool:secedgar_company_search: ${message}`);
+      const { extra, requestId } = record as unknown as {
+        extra: { errorData: Record<string, unknown> & { causeChain?: unknown[] } };
+        requestId: string;
+      };
+      expect(requestId).toBe('GKZ4P-244AA');
+      const { errorData } = extra;
+      expect(errorData).toMatchObject({ url: TICKERS_URL, status });
+      expect(errorData).not.toHaveProperty('body');
+      expect(errorData).not.toHaveProperty('responseBody');
+      const logged = (errorData.causeChain ?? []).flatMap((node) => {
+        const data = (node as { data?: Record<string, unknown> }).data;
+        return data && 'body' in data ? [data.body] : [];
+      });
+      expect(logged).toEqual([SEC_PAGE_HEAD]);
+      expect(
+        (ctx.log as MockContextLogger).calls.some((call) =>
+          JSON.stringify(call).includes('Undeclared Automated Tool'),
+        ),
+      ).toBe(false);
+    },
+  );
+});
+
 describe('efts_degraded_response on the tool contracts (#206)', () => {
   it('is declared by exactly the tools that surface an EDGAR full-text search failure, in one string on every tool', () => {
     const entries = buildToolDefinitions({ dropEnabled: true, clampOversizedLimits: true }).flatMap(
@@ -190,11 +303,13 @@ describe('efts_degraded_response on the tool contracts (#206)', () => {
           .map((e) => ({ ...e, tool: def.name })) ?? [],
     );
 
-    // search_filings and find_holders search; get_institutional_holdings resolves a name
-    // outside the ticker file through EDGAR's entity search on the same endpoint.
-    // get_filing's filer lookup searches too, but a failed lookup falls back to the
-    // accession-prefix CIK rather than failing the call (#215).
+    // search_filings and find_holders search; get_institutional_holdings and company_search
+    // resolve a name outside the ticker file through EDGAR's entity search on the same
+    // endpoint (#236). get_filing's filer lookup searches too, but a failed lookup falls back
+    // to the accession-prefix CIK rather than failing the call (#215), as a failed
+    // company_search subsidiaries-exhibit search keeps its no_match.
     expect(entries.map((e) => e.tool).sort()).toEqual([
+      'secedgar_company_search',
       'secedgar_find_holders',
       'secedgar_get_institutional_holdings',
       'secedgar_search_filings',

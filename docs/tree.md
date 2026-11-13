@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-11-08 19:30:30
+Generated on: 2026-11-13 13:36:37
 
 ```text
 secedgar-mcp-server/
@@ -152,6 +152,7 @@ secedgar-mcp-server/
 │   ├── edgar-mirror-refresh.ts
 │   ├── edgar-mirror-verify.ts
 │   ├── gen-former-names.ts
+│   ├── gen-former-tickers.ts
 │   ├── install-otel.ts
 │   ├── lint-mcp.ts
 │   ├── lint-packaging.ts
@@ -208,7 +209,8 @@ secedgar-mcp-server/
 │   │   │   └── sql-gate-extras.ts
 │   │   └── edgar/
 │   │       ├── data/
-│   │       │   └── former-names.json
+│   │       │   ├── former-names.json
+│   │       │   └── former-tickers.json
 │   │       ├── mirror/
 │   │       │   ├── companyfacts-sync.ts
 │   │       │   ├── edgar-mirror.ts
@@ -224,6 +226,7 @@ secedgar-mcp-server/
 │   │       ├── filing-headers.ts
 │   │       ├── filing-to-text.ts
 │   │       ├── fiscal-periods.ts
+│   │       ├── former-tickers.ts
 │   │       ├── listing-codes.ts
 │   │       ├── nport-parser.ts
 │   │       ├── ownership-parser.ts
@@ -242,6 +245,10 @@ secedgar-mcp-server/
 │   │   │   ├── berkshire-2025q1-new-holdings-primary_doc.xml
 │   │   │   ├── berkshire-2025q1-original-infotable.xml
 │   │   │   └── berkshire-2025q1-original-primary_doc.xml
+│   │   ├── company-search/
+│   │   │   ├── fts10k-clinisys.json
+│   │   │   ├── fts10k-strata-decision-technology.json
+│   │   │   └── fts10k-vertafore.json
 │   │   └── get-filing/
 │   │       ├── maplebear-13da-primary_doc.xml
 │   │       └── maplebear-13da-rendering.html
@@ -286,6 +293,7 @@ secedgar-mcp-server/
 │   │       ├── fixed-point.test.ts
 │   │       ├── form-filter.test.ts
 │   │       ├── format-usd.test.ts
+│   │       ├── former-ticker-resolution.test.ts
 │   │       ├── fund-ticker-resolution.test.ts
 │   │       ├── input-aliases.test.ts
 │   │       ├── limit-clamp.test.ts
@@ -326,6 +334,7 @@ secedgar-mcp-server/
 │   │       ├── filing-to-text.links.test.ts
 │   │       ├── filing-to-text.test.ts
 │   │       ├── fiscal-periods.test.ts
+│   │       ├── former-tickers.test.ts
 │   │       ├── listing-codes.test.ts
 │   │       ├── nport-parser.test.ts
 │   │       ├── ownership-parser.test.ts

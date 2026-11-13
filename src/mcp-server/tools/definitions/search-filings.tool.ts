@@ -22,7 +22,10 @@ import {
   limitClamp,
   withLimitClamps,
 } from '@/mcp-server/tools/limit-clamp.js';
-import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
+import {
+  EFTS_DEGRADED_ERROR,
+  SEC_UPSTREAM_ERRORS,
+} from '@/mcp-server/tools/sec-upstream-errors.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -914,7 +917,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
     effectiveQuery: z
       .string()
       .describe(
-        'The query as executed: "(entity scope: CIK …)" for a ticker:/cik: token, with how an unlisted ticker spelling was read; "(browse: forms …)" for a forms browse; a pre-2001 range\'s archive route, dates, and quarters read if capped; "(filed <after> to <before>)" if given one bound.',
+        'The query as executed: "(entity scope: CIK …)" for a ticker:/cik: token, with any reading of the ticker; "(browse: forms …)" for a forms browse; a pre-2001 range\'s archive route, dates, and quarters read if capped; "(filed <after> to <before>)" if given one bound.',
       ),
     notice: z
       .string()
@@ -995,15 +998,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       retryable: false,
     },
     ...SEC_UPSTREAM_ERRORS,
-    {
-      reason: 'efts_degraded_response',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'EDGAR full-text search answered without results — its search backend failed to run the search on every attempt made (a connection or timeout failure, retried like a request SEC never answered), refused the request (upstreamErrorType and upstreamErrorMessage carry its error, and the request is not retried), or sent a payload with no hit list',
-      recovery:
-        'Retry the same call in a minute unless the error is marked not retryable; then change the request as upstreamErrorMessage indicates.',
-      retryable: true,
-      thrownBy: 'service',
-    },
+    EFTS_DEGRADED_ERROR,
   ],
 
   input: z.object({
@@ -1020,7 +1015,7 @@ export const searchFilingsTool = tool('secedgar_search_filings', {
       ])
       .optional()
       .describe(
-        'Full-text search query. Optional — omit (or pass "") to browse by form type and/or entity instead, e.g. every S-1 in a date window, or a company\'s filings via ticker:/cik:. A date range alone is not a valid search; pair it with forms or entity targeting. The EFTS index that serves free text starts at 2001-01-01; a date range reaching earlier needs ticker:/cik: entity scope, which lets the tool read that entity\'s filings and match the terms locally (bounded to 50 documents, a few seconds at SEC\'s request rate), or drop the text terms and browse by form type (forms) and date. When present, supports exact phrases ("material weakness"), boolean operators (revenue OR income), exclusion (-preliminary), wildcard suffix (account*), and entity targeting (ticker:AAPL or cik:320193 in the query); terms are AND\'d by default. Entity targeting takes one ticker: or cik: term, never led by - or NOT: it scopes the search to one company and cannot exclude one. A multi-class share ticker resolves in either form — ticker:BRK-B and ticker:BRK.B scope to the same issuer — and an uppercase ticker also resolves as market-data feeds write it: venue-coded (UEC.N), a preferred class run together (CFGPH), or a class root (GLOP). The pre-2001 local scan honors the same phrase / OR / exclusion / wildcard syntax.',
+        'Full-text search query. Optional — omit (or pass "") to browse by form type and/or entity instead, e.g. every S-1 in a date window, or a company\'s filings via ticker:/cik:. A date range alone is not a valid search; pair it with forms or entity targeting. The EFTS index that serves free text starts at 2001-01-01; a date range reaching earlier needs ticker:/cik: entity scope, which lets the tool read that entity\'s filings and match the terms locally (bounded to 50 documents, a few seconds at SEC\'s request rate), or drop the text terms and browse by form type (forms) and date. When present, supports exact phrases ("material weakness"), boolean operators (revenue OR income), exclusion (-preliminary), wildcard suffix (account*), and entity targeting (ticker:AAPL or cik:320193 in the query); terms are AND\'d by default. Entity targeting takes one ticker: or cik: term, never led by - or NOT: it scopes the search to one company and cannot exclude one. A multi-class share ticker resolves in either form — ticker:BRK-B and ticker:BRK.B scope to the same issuer — and an uppercase ticker also resolves as market-data feeds write it: venue-coded (UEC.N), a preferred class run together (CFGPH), or a class root (GLOP); a former ticker scopes to the company that last held it (ticker:AMRK, Gold.com). The pre-2001 local scan honors the same phrase / OR / exclusion / wildcard syntax.',
       ),
     forms: z
       .array(z.string())

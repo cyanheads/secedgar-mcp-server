@@ -28,6 +28,10 @@ const { config, mirrorRef } = vi.hoisted(() => ({
 
 vi.mock('@/config/server-config.js', () => ({ getServerConfig: () => config }));
 vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => mirrorRef.current }));
+// A row copied from the committed former-ticker asset (#237).
+vi.mock('@/services/edgar/data/former-tickers.json', () => ({
+  default: [['AMRK', '0001591588', '2025-12', 'A-Mark Precious Metals, Inc.']],
+}));
 
 import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, initEdgarApiService } from '@/services/edgar/edgar-api-service.js';
@@ -975,6 +979,25 @@ describe('EdgarApiService — mirror routing', () => {
       const error = await run(failure(getEdgarApiService().resolveCik('AAPL', scope())));
 
       expect(error.message).toMatch(/ticker layer is not synced/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('resolves a former ticker from the committed asset, sending nothing (#237)', async () => {
+      const mirror = useStore();
+      mirror.tickersReady.mockResolvedValue(true);
+      mirror.getTickerRows.mockResolvedValue([
+        { cik: '0001591588', name: 'Gold.com, Inc.', ticker: 'GOLD' },
+      ]);
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+
+      expect(await run(getEdgarApiService().resolveCik('AMRK', scope()))).toEqual({
+        cik: '0001591588',
+        name: 'Gold.com, Inc.',
+        ticker: 'GOLD',
+        reading:
+          "AMRK read as a former ticker of Gold.com, Inc. (GOLD, CIK 0001591588) as late as 2025-12 in SEC's ticker file",
+      });
       expect(fetchMock).not.toHaveBeenCalled();
     });
   });

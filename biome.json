@@ -1,5 +1,6 @@
 {
   "extends": ["@cyanheads/mcp-ts-core/biome"],
+  "files": { "maxSize": 2097152 },
   "overrides": [
     {
       "includes": ["tests/fixtures/**/*.html"],

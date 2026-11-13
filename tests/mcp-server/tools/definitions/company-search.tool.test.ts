@@ -1,14 +1,16 @@
 /**
  * @fileoverview Tests for company-search tool — entity lookup with optional filings,
  * fund ticker resolution (series_id/class_id), no-match trigram suggestions,
- * and former-name resolution.
+ * former-name resolution, and a name SEC's ticker file misses reaching EDGAR's entity
+ * index and 10-K subsidiaries exhibits (#236).
  * @module tests/mcp-server/tools/definitions/company-search.tool
  */
 
+import { readFileSync } from 'node:fs';
 import { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   companySearchTool,
   createCompanySearchTool,
@@ -16,6 +18,30 @@ import {
 import { buildToolDefinitions } from '@/mcp-server/tools/definitions/index.js';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import type { CikMatch, FilingsRecent, SubmissionsResponse } from '@/services/edgar/types.js';
+
+/**
+ * The entity-index cases run the real service over a stubbed `fetch` (#236): the config
+ * fields its constructor and requests read, and the mirror strict mode reads its tickers from.
+ */
+const { config, mirrorRef } = vi.hoisted(() => ({
+  config: {
+    userAgent: 'test test@example.com',
+    rateLimitRps: 10,
+    rateLimitCooldownSeconds: 600,
+    tickerCacheTtl: 3600,
+    mirrorFallbackLive: true,
+  },
+  mirrorRef: { current: undefined as object | undefined },
+}));
+
+vi.mock('@/config/server-config.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/config/server-config.js')>()),
+  getServerConfig: () => config,
+}));
+vi.mock('@/services/edgar/mirror/index.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/edgar/mirror/index.js')>()),
+  getEdgarMirror: () => mirrorRef.current,
+}));
 
 // Keep the real module and override only the service accessor + suggestions. The
 // archive-page walk lives in its own module and runs for real against the mocked
@@ -51,6 +77,7 @@ import {
   blockAt,
   blockText,
   caught,
+  records,
   recoveryHint,
   wireError,
 } from '../../../support/assertions.js';
@@ -175,6 +202,8 @@ const mockApi = {
   getSubmissions: vi.fn(),
   getAllEntries: vi.fn(),
   fetchArchivePage: vi.fn(),
+  resolveEntityByName: vi.fn(),
+  findSubsidiaryParents: vi.fn(),
 };
 
 beforeEach(() => {
@@ -185,6 +214,12 @@ beforeEach(() => {
   mockApi.getSubmissions.mockResolvedValue(mockSubmissions);
   mockApi.getAllEntries.mockResolvedValue([]);
   mockApi.fetchArchivePage.mockResolvedValue(mockArchivePage);
+  // A name every local pass missed finds nothing in EDGAR's entity index or its exhibits (#236).
+  mockApi.resolveEntityByName.mockResolvedValue({
+    matches: [],
+    total: { value: 0, relation: 'eq' },
+  });
+  mockApi.findSubsidiaryParents.mockResolvedValue([]);
 });
 
 describe('companySearchTool', () => {
@@ -1573,7 +1608,11 @@ describe('companySearchTool — ticker spellings EDGAR does not list (#235)', ()
       '7203.T',
       ' The .T suffix marks a non-US listing; EDGAR indexes SEC registrants by US ticker, name, or CIK.',
     ],
-    ['Riot', ''],
+    // A name gets no listing note; EDGAR's indexes found nothing for it either (#236).
+    [
+      'Riot',
+      ' No 10-K subsidiaries exhibit (EX-21) names it either; for filings that mention it, call secedgar_search_filings with {"query":"\\"Riot\\""}.',
+    ],
   ])(
     'ends the no_match message for %s with the listing note when one applies',
     async (query, note) => {
@@ -1585,4 +1624,588 @@ describe('companySearchTool — ticker spellings EDGAR does not list (#235)', ()
       expect(error.message).toBe(`No company found for '${query}'.${note}`);
     },
   );
+});
+
+// --- A name SEC's ticker file misses (#236) ---
+
+/** SEC's ticker file for the entity-index cases: Roper, Duke, and two 10-K filers that mention Vertafore. */
+const INDEX_TICKER_FILE = {
+  0: { cik_str: 882835, ticker: 'ROP', title: 'ROPER TECHNOLOGIES INC' },
+  1: { cik_str: 1326160, ticker: 'DUK', title: 'Duke Energy CORP' },
+  2: { cik_str: 1278752, ticker: 'MFIC', title: 'MidCap Financial Investment Corp' },
+  3: { cik_str: 1286681, ticker: 'DPZ', title: "DOMINO'S PIZZA, INC." },
+};
+
+/** An entity-index answer: `hits` as `[CIK, entity name, tickers?]`, and SEC's count. */
+const entityIndex = (
+  total: { value: number; relation: string },
+  hits: Array<readonly [string, string, string?]>,
+) => ({
+  hits: {
+    total,
+    hits: hits.map(([id, entity, tickers]) => ({
+      _id: id,
+      _source: { entity: tickers ? `${entity} (${tickers})` : entity, ...(tickers && { tickers }) },
+    })),
+  },
+});
+
+const NO_INDEX_HITS = entityIndex({ value: 0, relation: 'eq' }, []);
+const NO_DOCUMENTS = { hits: { total: { value: 0, relation: 'eq' }, hits: [] } };
+
+/** The full-text page for a quoted name over 10-Ks, trimmed from a live capture (2026-11-13). */
+const fullTextFixture = (name: string): object =>
+  JSON.parse(
+    readFileSync(
+      new URL(`../../../fixtures/company-search/fts10k-${name}.json`, import.meta.url),
+      'utf8',
+    ),
+  );
+
+/** A submissions document with no filings, for a match the entity index resolved. */
+const bareSubmissions = (cik: string, name: string): SubmissionsResponse => ({
+  cik,
+  entityType: 'other',
+  exchanges: [],
+  filings: {
+    recent: {
+      accessionNumber: [],
+      filingDate: [],
+      form: [],
+      primaryDocDescription: [],
+      primaryDocument: [],
+      reportDate: [],
+    },
+    files: [],
+  },
+  fiscalYearEnd: null,
+  name,
+  sic: '',
+  sicDescription: '',
+  tickers: [],
+});
+
+/**
+ * How SEC answers one of the stubbed requests: a JSON 200 body, an HTTP status, or a
+ * responder given the request's signal.
+ */
+type SecAnswer = object | number | ((signal: AbortSignal | undefined) => Promise<Response>);
+
+const respond = (answer: SecAnswer, signal: AbortSignal | undefined): Promise<Response> => {
+  if (typeof answer === 'function') return answer(signal);
+  if (typeof answer === 'number') {
+    return Promise.resolve(new Response(`status ${answer}`, { status: answer }));
+  }
+  return Promise.resolve(Response.json(answer));
+};
+
+/**
+ * Stand in for SEC: the two ticker files, the entity index (`keysTyped`) and full-text
+ * search (`q`) each answered with its `SecAnswer`, and the submissions documents given.
+ * Records every request; one it does not route rejects and is recorded in `unrouted`.
+ */
+function stubSec({
+  index,
+  fullText,
+  submissions = {},
+}: {
+  index?: SecAnswer;
+  fullText?: SecAnswer;
+  submissions?: Record<string, SubmissionsResponse>;
+}) {
+  const requested: URL[] = [];
+  const unrouted: string[] = [];
+  vi.stubGlobal('fetch', (input: string, init: RequestInit = {}) => {
+    const url = new URL(input);
+    requested.push(url);
+    if (url.pathname === '/files/company_tickers.json') {
+      return Promise.resolve(Response.json(INDEX_TICKER_FILE));
+    }
+    if (url.pathname === '/files/company_tickers_mf.json') {
+      return Promise.resolve(
+        Response.json({ fields: ['cik', 'seriesId', 'classId', 'symbol'], data: [] }),
+      );
+    }
+    const answer =
+      url.hostname !== 'efts.sec.gov'
+        ? undefined
+        : url.searchParams.has('keysTyped')
+          ? index
+          : fullText;
+    if (answer !== undefined) return respond(answer, init.signal ?? undefined);
+    const doc = url.hostname === 'data.sec.gov' ? submissions[url.pathname] : undefined;
+    if (doc) return Promise.resolve(Response.json(doc));
+    unrouted.push(input);
+    return Promise.reject(new Error(`unrouted fetch: ${input}`));
+  });
+  return {
+    unrouted,
+    /** The EDGAR full-text requests sent, in order: `index` (keysTyped) or `full-text` (q). */
+    efts: () =>
+      requested
+        .filter((url) => url.hostname === 'efts.sec.gov')
+        .map((url) => (url.searchParams.has('keysTyped') ? 'index' : 'full-text')),
+    requested,
+  };
+}
+
+/** The no_match pointer for a name no subsidiaries exhibit holds. */
+const searchFilingsPointer = (query: string) =>
+  ` No 10-K subsidiaries exhibit (EX-21) names it either; for filings that mention it, call secedgar_search_filings with ${JSON.stringify({ query: `"${query}"` })}.`;
+
+const NO_MATCH_HINT =
+  'SEC\'s ticker index reflects the filer\'s own submissions record, which can differ from the exchange-listed symbol. ETFs and mutual funds resolve only by ticker (e.g. "VOO"); operating companies also resolve by full legal name or 10-digit CIK.';
+
+/**
+ * A name every local pass misses goes to EDGAR's entity index, and, when no index hit
+ * reaches a name tier, to the 10-K subsidiaries exhibits holding it (#236). Driven through
+ * `runToolContract` over the real `EdgarApiService`, with fake timers and `fetch` stubbed;
+ * SEC's answers are live captures from 2026-11-13. The trigram scan stays mocked.
+ */
+describe('companySearchTool — a name SEC’s ticker file misses (#236)', () => {
+  let edgar: typeof import('@/services/edgar/edgar-api-service.js');
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    edgar = await vi.importActual<typeof import('@/services/edgar/edgar-api-service.js')>(
+      '@/services/edgar/edgar-api-service.js',
+    );
+    edgar.initEdgarApiService();
+    vi.mocked(getEdgarApiService).mockReturnValue(edgar.getEdgarApiService());
+  });
+
+  afterEach(() => {
+    edgar.disposeEdgarApiService();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    config.mirrorFallbackLive = true;
+    mirrorRef.current = undefined;
+  });
+
+  /** Run the tool with the clock advanced past every pacer gap and retry backoff. */
+  async function search(args: Record<string, unknown>, signal?: AbortSignal) {
+    const call = runToolContract(
+      companySearchTool,
+      { include_filings: false, ...args } as never,
+      signal ? { context: { signal } } : undefined,
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    return call;
+  }
+
+  describe('the entity index', () => {
+    it.each([
+      [
+        'GasEntec Holdings',
+        ['2152783', 'Gasentec Holdings, Inc.'],
+        "'GasEntec Holdings' matched Gasentec Holdings, Inc. (CIK 0002152783) in EDGAR's entity index, with no listed ticker",
+      ],
+      [
+        'Exxon Mobil',
+        ['34088', 'EXXON MOBIL CORP'],
+        "'Exxon Mobil' matched EXXON MOBIL CORP (CIK 0000034088) in EDGAR's entity index, with no listed ticker",
+      ],
+      [
+        'Acme Rockets',
+        ['1111111', 'ACME ROCKETS INC', 'ACRK, ACRK-PA'],
+        "'Acme Rockets' matched ACME ROCKETS INC (ACRK, CIK 0001111111) in EDGAR's entity index",
+      ],
+    ] as const)(
+      'resolves %s, its one exact-tier hit, naming the index in resolvedAs on both surfaces',
+      async (query, hit, reading) => {
+        const cik = hit[0].padStart(10, '0');
+        const sec = stubSec({
+          index: entityIndex({ value: 1, relation: 'eq' }, [hit]),
+          submissions: { [`/submissions/CIK${cik}.json`]: bareSubmissions(cik, hit[1]) },
+        });
+
+        const result = await search({ query });
+
+        expect(result.isError).toBeFalsy();
+        expect(result.structuredContent).toMatchObject({ cik, name: hit[1], resolvedAs: reading });
+        expect(readCommonMark(allText(result))).toContain(
+          `⟨strong⟩Resolved as:⟨/strong⟩ ⟨code_inline:${reading}⟩`,
+        );
+        expect(sec.efts()).toEqual(['index']);
+        expect(sec.unrouted).toEqual([]);
+      },
+    );
+
+    it('leaves the SIC out of content[] for a filer SEC records none for', async () => {
+      stubSec({
+        index: entityIndex({ value: 1, relation: 'eq' }, [['2152783', 'Gasentec Holdings, Inc.']]),
+        submissions: {
+          '/submissions/CIK0002152783.json': bareSubmissions(
+            '0002152783',
+            'Gasentec Holdings, Inc.',
+          ),
+        },
+      });
+
+      const result = await search({ query: 'GasEntec Holdings' });
+
+      expect(result.structuredContent).toMatchObject({ sic: '', sic_description: '' });
+      expect(allText(result)).toMatch(/^CIK: 0002152783$/m);
+      expect(allText(result)).not.toContain('SIC:');
+    });
+
+    it('resolves Krones to KRONES AG, its exact hit, past Krones AG / ADR at the prefix tier', async () => {
+      const sec = stubSec({
+        index: entityIndex({ value: 2, relation: 'eq' }, [
+          ['933414', 'KRONES AG'],
+          ['1457890', 'Krones AG / ADR'],
+        ]),
+        submissions: {
+          '/submissions/CIK0000933414.json': bareSubmissions('0000933414', 'KRONES AG'),
+        },
+      });
+
+      const result = await search({ query: 'Krones' });
+
+      expect(result.structuredContent).toMatchObject({
+        cik: '0000933414',
+        resolvedAs:
+          "'Krones' matched KRONES AG (CIK 0000933414) in EDGAR's entity index, with no listed ticker",
+      });
+      expect(sec.efts()).toEqual(['index']);
+    });
+
+    it('fails Novelis as ambiguous_company listing its 3 exact hits of SEC’s 21, with the Showing sentence', async () => {
+      const sec = stubSec({
+        index: entityIndex({ value: 21, relation: 'eq' }, [
+          ['1332463', 'Novelis AG'],
+          ['1304280', 'Novelis Inc.'],
+          ['1332419', 'Novelis CORP'],
+          ['1332462', 'Novelis UK Ltd.'],
+          ['1472102', 'Novelis P.A.E. SAS'],
+          ['1332421', 'Novelis PAE CORP'],
+          ['1382215', 'Novelis Brand LLC'],
+          ['1471998', 'Novelis Services Ltd'],
+          ['1332444', 'Novelis do Brasil Ltda.'],
+          ['1332465', 'Novelis Technology AG'],
+        ]),
+      });
+
+      const result = await search({ query: 'Novelis' });
+
+      const error = wireError(result);
+      const message =
+        "'Novelis' matches multiple companies: 0001332463 Novelis AG, 0001304280 Novelis Inc., 0001332419 Novelis CORP. Retry with one of these tickers or 10-digit CIKs. Showing 3 of 21 matches; for one not listed, retry with a fuller name, its ticker, or its CIK.";
+      expect(error).toMatchObject({ code: JsonRpcErrorCode.ValidationError, message });
+      expect(error.data).toMatchObject({
+        reason: 'ambiguous_company',
+        query: 'Novelis',
+        matches: [
+          { cik: '0001332463', name: 'Novelis AG' },
+          { cik: '0001304280', name: 'Novelis Inc.' },
+          { cik: '0001332419', name: 'Novelis CORP' },
+        ],
+        total_matches: 21,
+      });
+      expect(error.data).not.toHaveProperty('total_matches_is_lower_bound');
+      expect(readCommonMark(blockText(result.content))).toContain(message);
+      expect(sec.efts()).toEqual(['index']);
+    });
+
+    it('fails Google as ambiguous_company listing its 4 exact hits as the whole count, SEC’s page being complete', async () => {
+      stubSec({
+        index: entityIndex({ value: 7, relation: 'eq' }, [
+          ['1136101', 'GOOGLE INC'],
+          ['1288776', 'GOOGLE INC.'],
+          ['1302837', 'Google Inc'],
+          ['1824723', 'Google LLC'],
+          ['1231833', 'GOOGLE TECHNOLOGY INC'],
+          ['1586699', 'Google Ventures 2011, L.P.'],
+          ['1639805', 'Google Ventures 2011 GP, L.L.C.'],
+        ]),
+      });
+
+      const error = wireError(await search({ query: 'Google' }));
+
+      expect(error.message).toBe(
+        "'Google' matches multiple companies: 0001136101 GOOGLE INC, 0001288776 GOOGLE INC., 0001302837 Google Inc, 0001824723 Google LLC. Retry with one of these tickers or 10-digit CIKs.",
+      );
+      expect(error.data).toMatchObject({ reason: 'ambiguous_company', total_matches: 4 });
+      expect(error.data.matches).toHaveLength(4);
+    });
+
+    it('fails no_match with a lone prefix-tier hit first in data.suggestions, searching no exhibits', async () => {
+      vi.mocked(suggestCompanies).mockReturnValue([
+        { cik: '0002222222', name: 'ACME WIDGETRY CORP', ticker: 'AWC' },
+        { cik: '0003333333', name: 'ACME WIDGET HOLDINGS LLC' },
+      ]);
+      const sec = stubSec({
+        index: entityIndex({ value: 1, relation: 'eq' }, [['3333333', 'ACME WIDGET HOLDINGS LLC']]),
+      });
+
+      const result = await search({ query: 'Acme Widget' });
+
+      const error = wireError(result);
+      expect(error.data.reason).toBe('no_match');
+      // The index hit leads; the trigram list follows without repeating its CIK.
+      expect(error.data.suggestions).toEqual([
+        { cik: '0003333333', name: 'ACME WIDGET HOLDINGS LLC' },
+        { cik: '0002222222', name: 'ACME WIDGETRY CORP', ticker: 'AWC' },
+      ]);
+      expect(error.message).toBe(
+        "No company found for 'Acme Widget'. Near matches: ACME WIDGET HOLDINGS LLC, ACME WIDGETRY CORP (AWC).",
+      );
+      expect(bag(error.data.recovery).hint).toBe(
+        `Check \`data.suggestions\` for near matches. ${NO_MATCH_HINT}`,
+      );
+      expect(error.data).not.toHaveProperty('parents');
+      expect(sec.efts()).toEqual(['index']);
+    });
+  });
+
+  describe('10-K subsidiaries exhibits', () => {
+    it('names Roper, the filer of the EX-21 exhibits holding Vertafore, on both surfaces, and no filer of other documents', async () => {
+      const sec = stubSec({ index: NO_INDEX_HITS, fullText: fullTextFixture('vertafore') });
+
+      const result = await search({ query: 'Vertafore' });
+
+      const error = wireError(result);
+      const message =
+        "No company found for 'Vertafore'. 'Vertafore' appears in the subsidiaries exhibit (EX-21) of ROPER TECHNOLOGIES INC (ROP, CIK 0000882835), in its 10-K filed 2026-02-24 (accession 0000882835-26-000009), so it may be a subsidiary of that filer.";
+      expect(error).toMatchObject({ code: JsonRpcErrorCode.NotFound, message });
+      expect(error.data).toMatchObject({
+        reason: 'no_match',
+        parents: [
+          {
+            cik: '0000882835',
+            name: 'ROPER TECHNOLOGIES INC',
+            ticker: 'ROP',
+            filing_date: '2026-02-24',
+            accession_number: '0000882835-26-000009',
+          },
+        ],
+        recovery: {
+          hint: `Check \`data.parents\` for the filers whose 10-K subsidiaries exhibit names it. ${NO_MATCH_HINT}`,
+        },
+      });
+      expect(error.data.parents).toHaveLength(1);
+      expect(error.data).not.toHaveProperty('suggestions');
+      const text = readCommonMark(blockText(result.content));
+      expect(text).toContain(message);
+      // Apollo Investment (now MidCap Financial) and Domino's mention Vertafore in other
+      // 10-K documents, and the ticker file lists both: neither is named.
+      expect(allText(result)).not.toMatch(/MIDCAP|MFIC|APOLLO|DOMINO|DPZ/i);
+      expect(sec.efts()).toEqual(['index', 'full-text']);
+      expect(sec.unrouted).toEqual([]);
+    });
+
+    it('names several co-registrants, the one the ticker file lists first, with trigram suggestions after', async () => {
+      vi.mocked(suggestCompanies).mockReturnValue([
+        { cik: '0001326160', name: 'Duke Energy CORP', ticker: 'DUK' },
+      ]);
+      stubSec({
+        index: NO_INDEX_HITS,
+        fullText: {
+          hits: {
+            total: { value: 1, relation: 'eq' },
+            hits: [
+              {
+                _id: '0001326160-16-000221:duk-20151231x10kxexx21.htm',
+                _source: {
+                  adsh: '0001326160-16-000221',
+                  ciks: ['0000017797', '0001326160'],
+                  display_names: [
+                    'DUKE ENERGY PROGRESS, LLC.  (CIK 0000017797)',
+                    'Duke Energy CORP  (DUK, DUKB, DUKH, DUK-PA)  (CIK 0001326160)',
+                  ],
+                  file_date: '2016-02-25',
+                  file_type: 'EX-21',
+                  form: '10-K',
+                  root_forms: ['10-K'],
+                },
+              },
+            ],
+          },
+        },
+      });
+
+      const error = wireError(await search({ query: 'Duke Energy Renewables' }));
+
+      expect(error.message).toBe(
+        "No company found for 'Duke Energy Renewables'. 'Duke Energy Renewables' appears in the subsidiaries exhibit (EX-21) of Duke Energy CORP (DUK, CIK 0001326160), in its 10-K filed 2016-02-25 (accession 0001326160-16-000221); DUKE ENERGY PROGRESS, LLC. (CIK 0000017797), in its 10-K filed 2016-02-25 (accession 0001326160-16-000221), so it may be a subsidiary of one of these filers. Near matches: Duke Energy CORP (DUK).",
+      );
+      expect(records(error.data.parents).map((p) => p.cik)).toEqual(['0001326160', '0000017797']);
+      expect(bag(error.data.recovery).hint).toBe(
+        `Check \`data.parents\` for the filers whose 10-K subsidiaries exhibit names it. Check \`data.suggestions\` for near matches. ${NO_MATCH_HINT}`,
+      );
+    });
+
+    it.each([
+      ['no document', NO_DOCUMENTS],
+      [
+        'only documents other than a subsidiaries exhibit',
+        {
+          hits: {
+            total: { value: 1, relation: 'eq' },
+            hits: [
+              {
+                _id: '0001278752-20-000010:ex99.htm',
+                _source: {
+                  adsh: '0001278752-20-000010',
+                  ciks: ['0001278752'],
+                  display_names: ['APOLLO INVESTMENT CORP  (MFIC, MFICL)  (CIK 0001278752)'],
+                  file_date: '2020-05-20',
+                  file_type: '10-K',
+                  form: '10-K',
+                  root_forms: ['10-K'],
+                },
+              },
+            ],
+          },
+        },
+      ],
+    ])(
+      'fails Nonexistent Widget Makers of Ohio as no_match after one index and one full-text request, given %s',
+      async (_case, page) => {
+        const sec = stubSec({ index: NO_INDEX_HITS, fullText: page });
+
+        const result = await search({ query: 'Nonexistent Widget Makers of Ohio' });
+
+        const error = wireError(result);
+        const message = `No company found for 'Nonexistent Widget Makers of Ohio'.${searchFilingsPointer('Nonexistent Widget Makers of Ohio')}`;
+        expect(error).toMatchObject({ code: JsonRpcErrorCode.NotFound, message });
+        expect(error.data).not.toHaveProperty('parents');
+        expect(bag(error.data.recovery).hint).toBe(NO_MATCH_HINT);
+        expect(readCommonMark(blockText(result.content))).toContain(message);
+        expect(sec.efts()).toEqual(['index', 'full-text']);
+        const fullText = sec.requested.find((url) => url.searchParams.has('q'));
+        expect(fullText?.searchParams.get('q')).toBe('"Nonexistent Widget Makers of Ohio"');
+        expect(fullText?.searchParams.get('forms')).toBe('10-K');
+      },
+    );
+
+    it.each([
+      [
+        'its search backend refusing it',
+        {
+          errorType: 'ResponseError',
+          errorMessage: 'search_phase_execution_exception',
+          trace: [],
+        },
+        ' The search for a 10-K subsidiaries exhibit (EX-21) naming it did not run (efts_degraded_response); retry the call in a minute to run it.',
+      ],
+      [
+        'a 429',
+        429,
+        ' The search for a 10-K subsidiaries exhibit (EX-21) naming it did not run (rate_limited); retry the call after 600 seconds to run it.',
+      ],
+    ])(
+      'keeps no_match when full-text search fails, %s, and says that search did not run',
+      async (_case, answer, sentence) => {
+        const sec = stubSec({ index: NO_INDEX_HITS, fullText: answer });
+
+        const result = await search({ query: 'Vertafore' });
+
+        const error = wireError(result);
+        expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+        expect(error.data.reason).toBe('no_match');
+        expect(error.message).toBe(`No company found for 'Vertafore'.${sentence}`);
+        expect(error.data).not.toHaveProperty('parents');
+        expect(readCommonMark(blockText(result.content))).toContain(sentence.trim());
+        expect(sec.efts()).toEqual(['index', 'full-text']);
+      },
+    );
+
+    it('ends on the caller’s cancel during the full-text search, settling as RequestCancelled on both surfaces', async () => {
+      const caller = new AbortController();
+      const signals: Array<AbortSignal | undefined> = [];
+      stubSec({
+        index: NO_INDEX_HITS,
+        fullText: (signal) => {
+          signals.push(signal);
+          caller.abort('client cancelled');
+          return new Promise<Response>((_resolve, reject) => {
+            if (signal?.aborted) reject(signal.reason);
+            signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+          });
+        },
+      });
+
+      const result = await search({ query: 'Vertafore' }, caller.signal);
+
+      expect(signals).toHaveLength(1);
+      expect(signals[0]?.aborted).toBe(true);
+      expect(bag(result.structuredContent).error).toEqual({
+        code: JsonRpcErrorCode.RequestCancelled,
+        message: 'client cancelled',
+      });
+      expect(blockText(result.content)).toBe('Error: client cancelled');
+    });
+  });
+
+  it.each([
+    [
+      'its search backend refusing it',
+      { errorType: 'ResponseError', errorMessage: 'search_phase_execution_exception', trace: [] },
+      JsonRpcErrorCode.ServiceUnavailable,
+      'efts_degraded_response',
+    ],
+    ['a 503 on every attempt', 503, JsonRpcErrorCode.ServiceUnavailable, 'sec_unavailable'],
+    ['a 429', 429, JsonRpcErrorCode.RateLimited, 'rate_limited'],
+  ])(
+    'fails with the entity index’s own reason, never no_match, given %s (#206)',
+    async (_case, answer, code, reason) => {
+      const sec = stubSec({ index: answer, fullText: NO_DOCUMENTS });
+
+      const error = wireError(await search({ query: 'Vertafore' }));
+
+      expect(error.code).toBe(code);
+      expect(error.data.reason).toBe(reason);
+      expect(sec.efts().every((kind) => kind === 'index')).toBe(true);
+      expect(sec.efts().length).toBeGreaterThan(0);
+    },
+  );
+
+  it.each([
+    ['a symbol the ticker file lists', 'ROP'],
+    ['a name the ticker file lists', 'Roper Technologies'],
+  ])('sends no EDGAR full-text request for %s', async (_case, query) => {
+    const sec = stubSec({
+      submissions: {
+        '/submissions/CIK0000882835.json': bareSubmissions('0000882835', 'ROPER TECHNOLOGIES INC'),
+      },
+    });
+
+    const result = await search({ query });
+
+    expect(result.structuredContent).toMatchObject({ cik: '0000882835' });
+    expect(sec.efts()).toEqual([]);
+  });
+
+  it.each([
+    ['a non-US listing', '7203.T'],
+    ['a query with no letter or digit', '.'],
+  ])('fails %s as no_match without searching EDGAR’s indexes', async (_case, query) => {
+    const sec = stubSec({});
+
+    const error = wireError(await search({ query }));
+
+    expect(error.data.reason).toBe('no_match');
+    expect(sec.efts()).toEqual([]);
+    expect(sec.unrouted).toEqual([]);
+  });
+
+  it('searches the entity index and the exhibits live in strict mirror mode, which mirrors neither', async () => {
+    config.mirrorFallbackLive = false;
+    mirrorRef.current = {
+      tickersReady: async () => true,
+      getTickerRows: async () => [
+        { cik: '0000882835', name: 'ROPER TECHNOLOGIES INC', ticker: 'ROP' },
+      ],
+    };
+    const sec = stubSec({ index: NO_INDEX_HITS, fullText: fullTextFixture('vertafore') });
+
+    const error = wireError(await search({ query: 'Vertafore' }));
+
+    expect(error.data.reason).toBe('no_match');
+    expect(records(error.data.parents).map((p) => p.cik)).toEqual(['0000882835']);
+    expect(sec.efts()).toEqual(['index', 'full-text']);
+    // Strict mode read its tickers from the mirror: the ticker files were never requested.
+    expect(sec.requested.filter((url) => url.hostname === 'www.sec.gov')).toEqual([]);
+  });
 });

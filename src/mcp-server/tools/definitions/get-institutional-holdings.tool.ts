@@ -20,7 +20,10 @@ import {
   withLimitClamps,
 } from '@/mcp-server/tools/limit-clamp.js';
 import { resolvedAsField } from '@/mcp-server/tools/resolved-as.js';
-import { SEC_UPSTREAM_ERRORS } from '@/mcp-server/tools/sec-upstream-errors.js';
+import {
+  EFTS_DEGRADED_ERROR,
+  SEC_UPSTREAM_ERRORS,
+} from '@/mcp-server/tools/sec-upstream-errors.js';
 import {
   dataframeGuidance,
   getCanvasBridge,
@@ -432,15 +435,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
         'Use secedgar_get_filing with the accession number to inspect the filing documents directly.',
     },
     ...SEC_UPSTREAM_ERRORS,
-    {
-      reason: 'efts_degraded_response',
-      code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'EDGAR full-text search answered without results — its search backend failed to run the search on every attempt made (a connection or timeout failure, retried like a request SEC never answered), refused the request (upstreamErrorType and upstreamErrorMessage carry its error, and the request is not retried), or sent a payload with no hit list',
-      recovery:
-        'Retry the same call in a minute unless the error is marked not retryable; then change the request as upstreamErrorMessage indicates.',
-      retryable: true,
-      thrownBy: 'service',
-    },
+    EFTS_DEGRADED_ERROR,
   ],
 
   input: z.object({
@@ -597,7 +592,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       reading?: string | undefined;
       ticker: string | undefined;
     }> = entitySearch
-      ? entitySearch.matches.map((m) => ({ cik: m.cik, name: m.name, ticker: undefined }))
+      ? entitySearch.matches.map((m) => ({ cik: m.cik, name: m.name, ticker: m.ticker }))
       : (Array.isArray(resolved) ? resolved : [resolved]).map((m) => ({
           cik: m.cik,
           name: m.name,

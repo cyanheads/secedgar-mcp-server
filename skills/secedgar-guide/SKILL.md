@@ -17,7 +17,7 @@ Not here: market prices, quotes, or returns (the only prices are the per-share p
 
 | Identifier | Comes from | Goes to |
 |:-----------|:-----------|:--------|
-| CIK (up to 10 digits) | secedgar_company_search, from a ticker, name, or CIK | any company, issuer, filer, or fund input, and secedgar_get_filing's `cik` |
+| CIK (up to 10 digits) | secedgar_company_search, from a ticker (a former one too), name, or CIK; a name with no ticker-file entry is looked up in EDGAR's entity index, and a private company's possible parents come back in the not-found error's `data.parents`. A `resolvedAs` note says when the input was read as something else, such as a former ticker | any company, issuer, filer, or fund input, and secedgar_get_filing's `cik` |
 | Accession number (`0000320193-23-000106`) | filing rows of secedgar_company_search and secedgar_search_filings, and the `accession_number` on every data row | secedgar_get_filing. Its first ten digits name the submitter, often a filing agent, so never read the company's CIK off it |
 | Concept (`eps_diluted`) or raw tag (`NetIncomeLoss`) | secedgar_search_concepts, which also reverse-maps a raw tag to its friendly name | secedgar_get_financials, secedgar_compare_companies, secedgar_fetch_frames |
 | Frame period (`CY2024`, `CY2024Q2`, `CY2024Q4I`) | written directly; the `I` suffix marks a balance-sheet instant | secedgar_fetch_frames |

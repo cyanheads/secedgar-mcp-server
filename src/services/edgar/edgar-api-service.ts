@@ -5,10 +5,17 @@
  * @module services/edgar/edgar-api-service
  */
 
-import { McpError, notFound, rateLimited, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  McpError,
+  notFound,
+  rateLimited,
+  serviceUnavailable,
+} from '@cyanheads/mcp-ts-core/errors';
 import {
   createPacer,
   httpErrorFromResponse,
+  httpStatusToErrorCode,
   isRecord,
   logger,
   type Pacer,
@@ -20,12 +27,19 @@ import { getServerConfig } from '@/config/server-config.js';
 import { type EdgarMirror, getEdgarMirror } from '@/services/edgar/mirror/index.js';
 import { CALL_FAILURE_BUDGET_MS, CallScope } from './call-scope.js';
 import formerNamesData from './data/former-names.json' with { type: 'json' };
+import formerTickersData from './data/former-tickers.json' with { type: 'json' };
 import {
   type FilingHeaders,
   parseFilingHeaders,
   parseSubmissionHeader,
   type SubmissionHeader,
 } from './filing-headers.js';
+import {
+  buildFormerTickerIndex,
+  type FormerTickerIndex,
+  readFormerTicker,
+  withEarlierHolders,
+} from './former-tickers.js';
 import { listedSymbol, readTickerSpelling } from './listing-codes.js';
 import { MF_TICKERS_URL, TICKERS_URL } from './mirror/types.js';
 import { trigramScorer } from './trigram-similarity.js';
@@ -35,6 +49,7 @@ import type {
   CompanyConceptUnit,
   CompanyFactsResponse,
   EftsEntityAutocompleteResponse,
+  EftsEntityHit,
   EftsResponse,
   FilingIndex,
   FilingsRecent,
@@ -445,6 +460,8 @@ interface TickerCache {
   /** Fund series ID → registrant. Built from company_tickers_mf.json, so it covers only series with a listed share class. */
   bySeriesId: Map<string, CikMatch>;
   byTicker: Map<string, CikMatch>;
+  /** Symbols the ticker file listed in a past monthly capture for a holder it no longer lists them for, from the committed asset (#237). */
+  formerTickers: FormerTickerIndex;
   /** Set while the live fund slice is missing after a failed load: when a resolution may refetch it (#119). */
   fundRetryAt: number | undefined;
   /** When `baseRows` loaded. The index expires a TTL after it; a fund-slice retry leaves it alone. */
@@ -461,7 +478,10 @@ export interface CompanySuggestion {
 /** A resolved candidate from EFTS entity-autocomplete (`resolveEntityByName`). */
 export interface EntityNameMatch {
   cik: string;
+  /** The entity's name, without the ticker list SEC appends to a listed entity's (#236). */
   name: string;
+  /** The first ticker SEC lists for the entity; absent when it lists none. */
+  ticker?: string;
 }
 
 /** What EFTS entity-autocomplete answers for a name: its first page of hits and its count. */
@@ -474,6 +494,59 @@ export interface EntityNameResolution {
    * `value` (#230).
    */
   total: { value: number; relation: string } | undefined;
+}
+
+/**
+ * An entity-index hit's name and first ticker (#236). SEC writes a listed entity's tickers
+ * after its name (`SCHWAB CHARLES CORP (SCHW, SCHW-PJ, SCHW-PD)`) and again in a `tickers`
+ * field its schema does not document (`SCHW, SCHW-PJ, SCHW-PD`). That field is the
+ * authority: only the parenthetical repeating it is cut, so one SEC lists no tickers for
+ * (`DEERFIELD HOLDINGS INC (DE)`) stays in the name and never becomes a ticker.
+ */
+function splitEntityTickers(
+  source: EftsEntityHit['_source'],
+): Pick<EntityNameMatch, 'name' | 'ticker'> {
+  const tickers = typeof source.tickers === 'string' ? source.tickers : '';
+  const ticker = tickers.split(',')[0]?.trim();
+  if (!ticker) return { name: source.entity };
+  const listed = ` (${tickers})`;
+  return {
+    name: source.entity.endsWith(listed) ? source.entity.slice(0, -listed.length) : source.entity,
+    ticker,
+  };
+}
+
+/** A filer whose 10-K subsidiaries exhibit (EX-21) holds a name (`findSubsidiaryParents`). */
+export interface SubsidiaryParent {
+  /** Accession number of the newest such 10-K. */
+  accessionNumber: string;
+  cik: string;
+  /** Filing date of the newest such 10-K (YYYY-MM-DD). */
+  filingDate: string;
+  /** The filer's name as that 10-K records it; absent when it records none for this CIK. */
+  name?: string;
+  /** The filer's ticker in SEC's ticker file; absent when the file lists none. */
+  ticker?: string;
+}
+
+/** A subsidiaries exhibit's type: `EX-21`, `EX-21.1`, never `EX-210`. */
+const SUBSIDIARIES_EXHIBIT = /^EX-21(?!\d)/i;
+
+/**
+ * The name a full-text hit's `display_names` records for `cik` (`ROPER TECHNOLOGIES INC
+ * (ROP)  (CIK 0000882835)` → `ROPER TECHNOLOGIES INC`), or `undefined` when none names it.
+ */
+function filerNameIn(displayNames: readonly string[] | undefined, cik: string): string | undefined {
+  const entry = displayNames?.find((name) => name.includes(`(CIK ${cik})`));
+  return entry === undefined ? undefined : cleanDisplayName(entry);
+}
+
+/**
+ * `name` as the phrase `findSubsidiaryParents` searches for: in double quotes, with any
+ * double quote inside it dropped, since one would end the phrase early.
+ */
+export function subsidiaryPhrase(name: string): string {
+  return `"${name.replaceAll('"', '').trim()}"`;
 }
 
 /** One fund series of a registrant, as listed in company_tickers_mf.json. */
@@ -597,8 +670,11 @@ export function joinSpacedInitials(name: string): string {
   return name.replace(/(?<=(?:^| )\p{L}) (?=\p{L}(?: |$))/gu, '');
 }
 
-/** A letter or digit: the characters a name's word boundary falls between (#218). */
-const NAME_WORD_CHAR = /[\p{L}\p{N}]/u;
+/**
+ * A letter or digit: the characters a name's word boundary falls between (#218). A query
+ * with none names no company.
+ */
+export const NAME_WORD_CHAR = /[\p{L}\p{N}]/u;
 
 /**
  * Whether index `at` of `text` is a word boundary — a letter or digit on exactly one side,
@@ -629,8 +705,114 @@ export function containsFromWordStart(name: string, query: string): boolean {
  * forms, then the same two), prefix of the joined form ending at a word boundary of the
  * name, substring as written starting at a word boundary of the name (#210, #218, #219).
  */
-type NameTier = 0 | 1 | 2 | 3 | 4;
+export type NameTier = 0 | 1 | 2 | 3 | 4;
 const NAME_TIERS: readonly NameTier[] = [0, 1, 2, 3, 4];
+/** The loosest exact tier: 0–2 are exact, 3 is prefix, 4 is substring. */
+export const LAST_EXACT_TIER: NameTier = 2;
+
+/** A name query's comparison forms, computed once per search for {@link nameTier}. */
+export interface NameQuery {
+  readonly folded: string;
+  readonly foldedNormalized: string;
+  readonly joined: string;
+  readonly joinedNormalized: string;
+  readonly lower: string;
+  readonly lowerNormalized: string;
+}
+
+/** The comparison forms of `query` (trimmed) that {@link nameTier} reads. */
+export function nameQuery(query: string): NameQuery {
+  const lower = query.trim().toLowerCase();
+  const folded = foldNamePunctuation(lower);
+  const joined = joinSpacedInitials(folded);
+  return {
+    lower,
+    lowerNormalized: normalizeCompanySuffix(lower),
+    folded,
+    foldedNormalized: normalizeCompanySuffix(folded),
+    joined,
+    joinedNormalized: normalizeCompanySuffix(joined),
+  };
+}
+
+/**
+ * The {@link NameTier} at which `name` (any case) matches `query`, or `undefined` when no
+ * tier reaches it. The three exact tiers also accept a suffix-normalized equality (#107)
+ * and the name minus its terminal suffix, so `Apple` names `Apple Inc.` exactly (#155);
+ * the query's own suffix is never dropped, so `Toro Co` never meets `TORO CORP.`.
+ */
+export function nameTier(name: string, query: NameQuery): NameTier | undefined {
+  // A suffix-dropped name is a prefix of the full one, so the strip runs on prefix hits only.
+  const isExact = (candidate: string, form: string, formNormalized: string): boolean =>
+    candidate === form ||
+    normalizeCompanySuffix(candidate) === formNormalized ||
+    (candidate.startsWith(form) && stripCompanySuffix(candidate) === form);
+  const lowerName = name.toLowerCase();
+  if (isExact(lowerName, query.lower, query.lowerNormalized)) return 0;
+  const foldedName = foldNamePunctuation(lowerName);
+  if (isExact(foldedName, query.folded, query.foldedNormalized)) return 1;
+  const joinedName = joinSpacedInitials(foldedName);
+  // With no initials joined on either side, this repeats the folded tier's comparison.
+  if (
+    (joinedName !== foldedName || query.joined !== query.folded) &&
+    isExact(joinedName, query.joined, query.joinedNormalized)
+  ) {
+    return 2;
+  }
+  if (joinedName.startsWith(query.joined) && isWordBoundary(joinedName, query.joined.length)) {
+    return 3;
+  }
+  return containsFromWordStart(lowerName, query.lower) ? 4 : undefined;
+}
+
+/** A joined form's words, sorted: the word-order tier's comparison key (#236). */
+function sortedWords(joined: string): string {
+  return joined.split(' ').sort().join(' ');
+}
+
+/**
+ * The word-order tier's key for a query: its joined form with the terminal suffix normalized,
+ * words sorted — the query's own suffix is never dropped (#155). `undefined` for one word,
+ * which the exact tiers already compare.
+ */
+function wordOrderQueryKey(query: NameQuery): string | undefined {
+  return query.joined.includes(' ') ? sortedWords(query.joinedNormalized) : undefined;
+}
+
+/**
+ * The keys a registry or former name meets the word-order tier under (#236): its words once
+ * folded and its initials joined, sorted, with the terminal suffix normalized
+ * (`normalizeCompanySuffix`) and, when it has one, dropped (`stripCompanySuffix`) — the exact
+ * tiers' rules — so `SCHWAB CHARLES CORP` meets `Charles Schwab Corp` and `Charles Schwab`. A
+ * key of one word is left out, since a query of one word never reaches the tier.
+ */
+function wordOrderKeys(name: string): string[] {
+  const joined = joinSpacedInitials(foldNamePunctuation(name.toLowerCase()));
+  const stripped = stripCompanySuffix(joined);
+  return [normalizeCompanySuffix(joined), ...(stripped === undefined ? [] : [stripped])]
+    .filter((form) => form.includes(' '))
+    .map(sortedWords);
+}
+
+/** `entries` with each CIK's first entry only, in order: a company's current and former names can both match. */
+function matchesByCik(entries: readonly CikMatch[]): CikMatch[] {
+  const seen = new Set<string>();
+  return entries.filter((entry) => !seen.has(entry.cik) && seen.add(entry.cik));
+}
+
+/** Word-order key → the entries meeting it, in `entries` order (#236). */
+function buildWordOrderIndex(entries: readonly CikMatch[]): Map<string, CikMatch[]> {
+  const index = new Map<string, CikMatch[]>();
+  for (const entry of entries) {
+    if (!entry.name) continue;
+    for (const key of wordOrderKeys(entry.name)) {
+      const hits = index.get(key);
+      if (hits) hits.push(entry);
+      else index.set(key, [entry]);
+    }
+  }
+  return index;
+}
 
 // ---------------------------------------------------------------------------
 // Near-match company suggestions
@@ -695,6 +877,8 @@ class EdgarApiService {
   );
   /** The newest XBRL acceptance each cached submissions document records, worked out once per document (#234). */
   private readonly xbrlRecency = new WeakMap<SubmissionsResponse, number>();
+  /** Each ticker index's word-order keys, built on the first query that reaches the tier (#236). */
+  private readonly wordOrderIndexes = new WeakMap<readonly CikMatch[], Map<string, CikMatch[]>>();
   /**
    * Filers whose recency read or live point read SEC just failed, keyed by padded CIK, each
    * mapped to the instant the mirror stops answering for it unasked (#234), at most
@@ -784,7 +968,8 @@ class EdgarApiService {
    * Resolve a query (ticker, name, or CIK) to company match(es).
    * - Numeric input → direct CIK lookup
    * - 1-5 letters in any case, or anything typed in uppercase → the ticker lookup (O(1)):
-   *   the symbol as listed, else a dotted share class in its hyphenated form (#110)
+   *   the symbol as listed, else a dotted share class in its hyphenated form (#110), with a
+   *   `reading` naming any earlier, different holder of the symbol (#237)
    * - Typed in uppercase, unlisted → the ticker-spelling readings (`readTickerSpelling`,
    *   #235): a US venue code dropped (`UEC.N`), a preferred class run together (`CFGPH`), a
    *   root listed only as classes (`GLOP`), each match carrying `reading`; a non-US listing
@@ -793,8 +978,11 @@ class EdgarApiService {
    * - Otherwise → name search (exact as written; exact once commas, periods, and
    *   apostrophes are folded out and whitespace runs collapse; exact once spaced initials
    *   join; prefix of the joined form ending at a word boundary; substring as written
-   *   starting at one — resolved within the best tier a current name reaches), then, for
-   *   input not typed in uppercase, the ticker lookup
+   *   starting at one — resolved within the best tier a current name reaches). Typed in
+   *   uppercase, a former ticker (#237) answers ahead of it unless a current name is the
+   *   input exactly, or the former holder is listed no more and the names find one company
+   * - No name tier matching and two or more words → the word-order tier (#236)
+   * - Then, for input not typed in uppercase, the ticker lookup, then a former ticker
    * Returns a single match, an array of multiple matches, or an empty array (no match).
    * Multiple matches are every candidate of that tier, deduplicated by CIK, current names
    * first, never cut: a consumer shows the first ten through `ambiguousMatches` and counts
@@ -822,13 +1010,21 @@ class EdgarApiService {
     // write BRK.B where the file lists BRK-B, and no registrant has both forms on file (#110).
     const upper = trimmed.toUpperCase();
     const typedUpper = trimmed === upper;
+    // The listing always answers; a symbol an earlier, different company held carries a reading
+    // naming it (`XOM` stays ExxonMobil Holdings Corp and names EXXON MOBIL CORP, #237).
     const listed = listedSymbol(upper, cache.byTicker);
-    if (listed && (typedUpper || /^[A-Z]{1,5}$/.test(upper))) return listed;
+    if (listed && (typedUpper || /^[A-Z]{1,5}$/.test(upper))) {
+      return withEarlierHolders(listed, cache);
+    }
 
     // Uppercase spellings vendors write for listed symbols, ahead of the name passes, which
     // otherwise read `GS.K` as GSK plc through the period fold (#235).
     const reading = readTickerSpelling(trimmed, cache);
     if (reading !== undefined) return reading;
+
+    // An uppercase symbol the file no longer lists reads as the company that held it last
+    // (#237), weighed against the name passes below.
+    const formerTicker = typedUpper ? readFormerTicker(trimmed, cache) : undefined;
 
     // A query with no letter or digit names no company: `.` would fold to an empty string
     // that starts every name (#219).
@@ -849,32 +1045,7 @@ class EdgarApiService {
     // `helix acquisition corp iii` — and a substring, matched as written, starts at one, so
     // `SY Bancorp` never names Embassy Bancorp; a query ending mid-word (`Berkshire Hath`)
     // still matches there when the name as written contains it.
-    const lower = trimmed.toLowerCase();
-    const lowerNormalized = normalizeCompanySuffix(lower);
-    const folded = foldNamePunctuation(lower);
-    const foldedNormalized = normalizeCompanySuffix(folded);
-    const joined = joinSpacedInitials(folded);
-    const joinedNormalized = normalizeCompanySuffix(joined);
-    // A suffix-dropped name is a prefix of the full one, so the strip runs on prefix hits only.
-    const isExact = (name: string, form: string, formNormalized: string): boolean =>
-      name === form ||
-      normalizeCompanySuffix(name) === formNormalized ||
-      (name.startsWith(form) && stripCompanySuffix(name) === form);
-    const tierOf = (name: string): NameTier | undefined => {
-      if (isExact(name, lower, lowerNormalized)) return 0;
-      const foldedName = foldNamePunctuation(name);
-      if (isExact(foldedName, folded, foldedNormalized)) return 1;
-      const joinedName = joinSpacedInitials(foldedName);
-      // With no initials joined on either side, this repeats the folded tier's comparison.
-      if (
-        (joinedName !== foldedName || joined !== folded) &&
-        isExact(joinedName, joined, joinedNormalized)
-      ) {
-        return 2;
-      }
-      if (joinedName.startsWith(joined) && isWordBoundary(joinedName, joined.length)) return 3;
-      return containsFromWordStart(name, lower) ? 4 : undefined;
-    };
+    const forms = nameQuery(trimmed);
 
     // Current names are registry rows, which carry a ticker; former names (the committed
     // asset) carry none. Resolution runs within the best tier a current name reaches —
@@ -886,7 +1057,7 @@ class EdgarApiService {
     const former: Record<NameTier, CikMatch[]> = { 0: [], 1: [], 2: [], 3: [], 4: [] };
     for (const entry of cache.allEntries) {
       if (!entry.name) continue;
-      const tier = tierOf(entry.name.toLowerCase());
+      const tier = nameTier(entry.name, forms);
       if (tier === undefined) continue;
       (entry.ticker === undefined ? former : current)[tier].push(entry);
     }
@@ -900,23 +1071,50 @@ class EdgarApiService {
             ...NAME_TIERS.filter((tier) => tier <= bestCurrent).flatMap((tier) => former[tier]),
           ];
 
-    // Dedup by CIK (current + former names may match the same registrant).
-    const seen = new Set<string>();
-    const deduped: CikMatch[] = [];
-    for (const entry of candidates) {
-      if (!seen.has(entry.cik)) {
-        seen.add(entry.cik);
-        deduped.push(entry);
+    const named = matchesByCik(candidates);
+    // The former ticker answers ahead of the names (`BK` is BNY, not BK Technologies, whose
+    // name only starts with it; `STR` starts many names) unless a current name is the input
+    // exactly (`CHUBB` is Chubb Ltd, not CommerceHub), or its holder is listed no more and the
+    // names find one company (`DINE` stays Dine Brands, not Rewards Network) (#237).
+    const exactCurrent = bestCurrent !== undefined && bestCurrent <= LAST_EXACT_TIER;
+    if (
+      formerTicker &&
+      !exactCurrent &&
+      (formerTicker.ticker !== undefined || named.length !== 1)
+    ) {
+      return formerTicker;
+    }
+    if (named.length > 0) return named.length === 1 ? (named[0] as CikMatch) : named;
+
+    // When no tier reaches any name, a query of two or more words may reorder one: SEC writes
+    // `SCHWAB CHARLES CORP` for `Charles Schwab` (#236). Current names before former ones (#155).
+    const key = wordOrderQueryKey(forms);
+    if (key !== undefined) {
+      const hits = this.wordOrderIndex(cache.allEntries).get(key) ?? [];
+      const reordered = matchesByCik([
+        ...hits.filter((entry) => entry.ticker !== undefined),
+        ...hits.filter((entry) => entry.ticker === undefined),
+      ]);
+      if (reordered.length > 0) {
+        return reordered.length === 1 ? (reordered[0] as CikMatch) : reordered;
       }
     }
 
-    if (deduped.length > 0) {
-      return deduped.length === 1 ? (deduped[0] as CikMatch) : deduped;
-    }
-
     // A symbol typed in mixed or lower case, outside the short alphabetic shape, keeps the name
-    // passes ahead of its ticker lookup (`brk.b`, `Bf.b`).
-    return listed ?? [];
+    // passes ahead of its ticker lookup (`brk.b`, `Bf.b`), and so does a former ticker (`amrk`,
+    // while `bk` keeps the name passes' BK Technologies, #237).
+    if (listed) return withEarlierHolders(listed, cache);
+    return (typedUpper ? undefined : readFormerTicker(trimmed, cache)) ?? [];
+  }
+
+  /** The word-order keys of one ticker index's entries, built once per index (#236). */
+  private wordOrderIndex(entries: readonly CikMatch[]): Map<string, CikMatch[]> {
+    let index = this.wordOrderIndexes.get(entries);
+    if (!index) {
+      index = buildWordOrderIndex(entries);
+      this.wordOrderIndexes.set(entries, index);
+    }
+    return index;
   }
 
   /**
@@ -931,7 +1129,9 @@ class EdgarApiService {
    * Distinct from `searchFilings`: same URL path, different query param (`keysTyped`)
    * and response shape (`_source.entity`, not the filing-document `_source`). A
    * failure of the search backend throws `efts_degraded_response` like a search's,
-   * never reads as no match (#206). The name is escaped like a search's `q` (#205).
+   * never reads as no match (#206). The name is escaped like a search's `q` (#205). A
+   * listed entity's name comes back without the ticker list SEC appends to it, its first
+   * ticker beside it (#236).
    */
   async resolveEntityByName(name: string, scope: CallScope): Promise<EntityNameResolution> {
     const url = new URL('https://efts.sec.gov/LATEST/search-index');
@@ -949,15 +1149,62 @@ class EdgarApiService {
     const matches: EntityNameMatch[] = [];
     for (const hit of hits) {
       const cik = hit._id?.padStart(10, '0');
-      const entity = hit._source?.entity;
-      if (!cik || !entity || seen.has(cik)) continue;
+      const source = hit._source;
+      if (!cik || !source?.entity || seen.has(cik)) continue;
       seen.add(cik);
-      matches.push({ cik, name: entity });
+      matches.push({ cik, ...splitEntityTickers(source) });
     }
     // A total with no numeric value reads as none, as searchFilings' shape guard reads it (#61):
     // the ambiguity sentence formats `value`, so a malformed one would throw a raw TypeError.
     const total = response.hits.total;
     return { matches, total: typeof total?.value === 'number' ? total : undefined };
+  }
+
+  /**
+   * The filers whose 10-K subsidiaries exhibit (EX-21) holds `name` as a phrase (#236): one
+   * EDGAR full-text search for {@link subsidiaryPhrase} over 10-Ks, its first 100 documents.
+   * Only an exhibit whose type is EX-21 names a parent — the other 10-K documents that
+   * mention a private company are mostly a lender's schedule of investments or a
+   * competitor's or customer's narrative. Each filer of such an exhibit counts, since a
+   * combined report lists every co-registrant, and is reported at its newest one. Filers
+   * SEC's ticker file lists come first, then the newest exhibit, then search order. Fails
+   * as `searchFilings` fails.
+   */
+  async findSubsidiaryParents(name: string, scope: CallScope): Promise<SubsidiaryParent[]> {
+    const response = await this.searchFilings(
+      { query: subsidiaryPhrase(name), forms: ['10-K'], size: 100 },
+      scope,
+    );
+
+    // Insertion order is search order: a newer exhibit updates a filer in place.
+    const found = new Map<string, SubsidiaryParent>();
+    for (const { _source: source } of response.hits.hits) {
+      if (!SUBSIDIARIES_EXHIBIT.test(source.file_type ?? '')) continue;
+      for (const filer of source.ciks ?? []) {
+        const cik = filer.padStart(10, '0');
+        const known = found.get(cik);
+        if (known && known.filingDate >= source.file_date) continue;
+        const filerName = filerNameIn(source.display_names, cik);
+        found.set(cik, {
+          cik,
+          accessionNumber: source.adsh,
+          filingDate: source.file_date,
+          ...(filerName !== undefined && { name: filerName }),
+        });
+      }
+    }
+
+    const cache = await this.getTickerCache(scope);
+    const parents = [...found.values()].map((parent) => {
+      const ticker = cache.byCik.get(parent.cik)?.ticker;
+      return ticker === undefined ? parent : { ...parent, ticker };
+    });
+    // `sort` is stable, so search order settles what the listing and the date leave tied.
+    return parents.sort(
+      (a, b) =>
+        Number(b.ticker !== undefined) - Number(a.ticker !== undefined) ||
+        b.filingDate.localeCompare(a.filingDate),
+    );
   }
 
   /** Reverse lookup: CIK → ticker symbol. */
@@ -1608,15 +1855,16 @@ class EdgarApiService {
    * when `cutoff` is given — and `null` on 404. A body the ladder has no use for — a
    * 404's, a retried 5xx's, a 429's, one that lands as the caller cancels — is
    * cancelled unread (#188); an error the last attempt earns carries a bounded head
-   * of its body, read like any other (#202). The body is read inside the ladder
-   * (#181): a 5xx, an attempt that got no HTTP response, a 2xx whose body failed to
-   * read, and — for a request that opts in with `backendFailure` — a 2xx whose whole
-   * body relays a transient failure of the search backend (#206) all retry up to
-   * `MAX_RETRIES` attempts, and then the last attempt decides — a 5xx throws
-   * `sec_unavailable` (#233), a backend failure `efts_degraded_response`, the
-   * other two `sec_unreachable`. Other non-OK statuses throw at once, as does
-   * the local refusal while SEC's rate-limit block is active, and the pacer's
-   * `RequestCancelled` — those are `McpError`s from `send()`, never retried.
+   * of its body on its `cause`, for the log only, read like any other (#202, #244).
+   * The body is read inside the ladder (#181): a 5xx, an attempt that got no HTTP
+   * response, a 2xx whose body failed to read, and — for a request that opts in
+   * with `backendFailure` — a 2xx whose whole body relays a transient failure of
+   * the search backend (#206) all retry up to `MAX_RETRIES` attempts, and then
+   * the last attempt decides — a 5xx throws `sec_unavailable` (#233), a backend
+   * failure `efts_degraded_response`, the other two `sec_unreachable`. Other
+   * non-OK statuses throw at once, as does the local refusal while SEC's
+   * rate-limit block is active, and the pacer's `RequestCancelled` — those are
+   * `McpError`s from `send()`, never retried.
    *
    * Every failed attempt and every backoff is charged to the call's failure budget,
    * and the ladder ends early once the budget cannot cover another backoff and
@@ -1716,9 +1964,10 @@ class EdgarApiService {
    * mapping's `data`: `url`, `status`, and SEC's `Retry-After` when it sends one.
    *
    * An HTTP answer's body is read under `scope` for the error's diagnostic
-   * (`errorBodyHead`, #202) — except a 429's, and the one `scope` is `null` for: a
-   * retried 5xx whose body was released before its backoff. Either is built without
-   * a body, the 429's cancelled unread (#188).
+   * (`errorBodyHead`, #202), which rides the error's `cause` to the log and never its
+   * `data` (#244) — except a 429's, and the one `scope` is `null` for: a retried 5xx
+   * whose body was released before its backoff. Either is built without a body, the
+   * 429's cancelled unread (#188).
    */
   private async ladderFailure(
     url: string,
@@ -1752,18 +2001,18 @@ class EdgarApiService {
       };
     }
     // A 429's body is SEC's full HTML block page; the hint above carries everything
-    // actionable, so the markup is not forwarded (#112).
+    // actionable, so the markup is not read (#112).
+    let body: string | undefined;
     if (scope === null || status === 429) {
       await discardBody(response);
     } else {
-      const body = await errorBodyHead(response, scope);
-      // The two names `httpErrorFromResponse` gives a body it captures itself.
-      if (body !== undefined) Object.assign(data, { body, responseBody: body });
+      body = await errorBodyHead(response, scope);
     }
     const error = await httpErrorFromResponse(response, {
       service: 'SEC EDGAR',
       data,
       captureBody: false,
+      ...(body !== undefined && { cause: errorBodyCause(status, body) }),
     });
     if (!RETRYABLE_STATUSES.has(status)) return error;
     const { close, onAttempt } = ladderEndText(end);
@@ -2090,6 +2339,9 @@ class EdgarApiService {
       byCik,
       bySeriesId,
       byTicker,
+      formerTickers: buildFormerTickerIndex(
+        formerTickersData as Array<[string, string, string, string]>,
+      ),
       fundRetryAt: funds.retryAt,
       loadedAt,
     };
@@ -2641,6 +2893,22 @@ async function errorBodyHead(response: Response, scope: CallScope): Promise<stri
   if (cut !== undefined) return cut;
   if (read.kind === 'read') return read.text;
   return read.text === '' ? undefined : `${read.text}…`;
+}
+
+/**
+ * An error response's diagnostic body ({@link errorBodyHead}) as the `cause` of the
+ * error built from that response (#244). The call's failure log record writes every
+ * cause's `data` under the call's `requestId`, and no client envelope carries a cause.
+ * On the error's own `data` the body would reach the caller as given: the framework
+ * keeps off the wire only a body its own capture read, and that capture has no stall
+ * bound or signal (#202).
+ */
+function errorBodyCause(status: number, body: string): McpError {
+  return new McpError(
+    httpStatusToErrorCode(status) ?? JsonRpcErrorCode.InternalError,
+    `SEC EDGAR's HTTP ${status} response body.`,
+    { body },
+  );
 }
 
 /**
