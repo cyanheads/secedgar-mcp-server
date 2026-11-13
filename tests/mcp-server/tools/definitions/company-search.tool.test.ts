@@ -2071,7 +2071,12 @@ describe('companySearchTool — a name SEC’s ticker file misses (#236)', () =>
         expect(error).toMatchObject({ code: JsonRpcErrorCode.NotFound, message });
         expect(error.data).not.toHaveProperty('parents');
         expect(bag(error.data.recovery).hint).toBe(NO_MATCH_HINT);
-        expect(readCommonMark(blockText(result.content))).toContain(message);
+        // content[] prints the arguments as code, so a caller copies them with no escapes.
+        const args = '{"query":"\\"Nonexistent Widget Makers of Ohio\\""}';
+        expect(codeSpansIn(blockText(result.content))).toEqual([args]);
+        expect(readCommonMark(blockText(result.content))).toContain(
+          message.replace(args, `⟨code_inline:${args}⟩`),
+        );
         expect(sec.efts()).toEqual(['index', 'full-text']);
         const fullText = sec.requested.find((url) => url.searchParams.has('q'));
         expect(fullText?.searchParams.get('q')).toBe('"Nonexistent Widget Makers of Ohio"');

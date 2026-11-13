@@ -191,6 +191,11 @@ async function searchParents(
   }
 }
 
+/** The JSON arguments of the search call `no_match` names when no subsidiaries exhibit holds it. */
+function mentionsSearchArgs(query: string): string {
+  return JSON.stringify({ query: subsidiaryPhrase(query) });
+}
+
 /** The `no_match` sentence a subsidiaries-exhibit search adds, its leading space included. */
 function parentSearchNote(query: string, search: ParentSearch): string {
   if (!search.ran) {
@@ -201,7 +206,7 @@ function parentSearchNote(query: string, search: ParentSearch): string {
   }
   const { parents } = search;
   if (parents.length === 0) {
-    return ` No 10-K subsidiaries exhibit (EX-21) names it either; for filings that mention it, call secedgar_search_filings with ${JSON.stringify({ query: subsidiaryPhrase(query) })}.`;
+    return ` No 10-K subsidiaries exhibit (EX-21) names it either; for filings that mention it, call secedgar_search_filings with ${mentionsSearchArgs(query)}.`;
   }
   const filers = parents
     .map((p) => {
@@ -494,6 +499,8 @@ export const companySearchTool = tool('secedgar_company_search', {
             ...(suggestions.length > 0 && { suggestions }),
             recovery: { hint },
           },
+          // content[] prints the search arguments as code, unescaped, to be sent back as written.
+          { literals: [mentionsSearchArgs(input.query)] },
         );
       }
     }
