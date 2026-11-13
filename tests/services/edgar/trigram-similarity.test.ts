@@ -343,21 +343,32 @@ describe('both scoring passes — linear in the length of the caller’s string'
   }
 
   // Each bound sits at two to four times the slowest call measured at 320k on either runtime.
+  // The per-test timeout is 0: vitest cannot interrupt a synchronous body, so its wall-clock
+  // timeout guards no hang and only fails linear work on a loaded machine; the thread-CPU
+  // bounds are the check.
 
   // Each concept shape opens lowercase, so the camelCase split runs too, and survives the trim.
   it.each([
     ['a long digit run', (n: number) => `a${fill('1', n)}`],
     ['one long line ending in a break', (n: number) => `a${fill('§1 x', n)}\ny`],
     ['breaks throughout', (n: number) => `a${fill('  \r\n', n)}B`],
-  ])('findUnknownConcept: %s (5k → 320k)', (_label, build) => {
-    expectLinear(findUnknownConcept, build, 120);
-  });
+  ])(
+    'findUnknownConcept: %s (5k → 320k)',
+    (_label, build) => {
+      expectLinear(findUnknownConcept, build, 120);
+    },
+    0,
+  );
 
   it.each([
     ['a long digit run', (n: number) => fill('1', n)],
     ['one long line ending in a break', (n: number) => `${fill('§1 x', n)}\ny`],
     ['breaks throughout', (n: number) => fill('  \r\n', n)],
-  ])('suggestCompanies over the ticker index: %s (5k → 320k)', (_label, build) => {
-    expectLinear((text) => suggestCompanies(text, entries), build, 100);
-  });
+  ])(
+    'suggestCompanies over the ticker index: %s (5k → 320k)',
+    (_label, build) => {
+      expectLinear((text) => suggestCompanies(text, entries), build, 100);
+    },
+    0,
+  );
 });

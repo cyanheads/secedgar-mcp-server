@@ -334,11 +334,18 @@ describe('filingToExtract — the link pass stays linear (#239)', () => {
     ['one long line ending in a break', (n: number) => `${LINKED}${fill('§1 x', n)}\ny`],
     ['breaks throughout', (n: number) => `${LINKED}${fill('  \r\n', n)}x`],
     ['a long digit run', (n: number) => `${LINKED}${'1'.repeat(n)}`],
-  ])('%s (5k → 320k)', (_label, build) => {
-    // Measured at 1–29 ms for 320k on Bun, the parser's own conversion included.
-    expectLinear(marked, build, 320_000, 200);
-  });
+  ])(
+    '%s (5k → 320k)',
+    (_label, build) => {
+      // Measured at 1–29 ms for 320k on Bun, the parser's own conversion included.
+      expectLinear(marked, build, 320_000, 200);
+    },
+    0,
+  );
 
+  // These bodies run with a per-test timeout of 0: vitest cannot interrupt a synchronous body,
+  // so its wall-clock timeout guards no hang and only fails linear work on a loaded machine;
+  // the thread-CPU bounds are the check.
   it('marks 100,000 linked empty <a name> targets followed by a megabyte of markup with no text', () => {
     let links = '';
     let targets = '';
@@ -358,7 +365,7 @@ describe('filingToExtract — the link pass stays linear (#239)', () => {
     expect(recorded).toHaveLength(100_000);
     expect(new Set(recorded.map((link) => link.target)).size).toBe(1);
     expect(cpuMs).toBeLessThan(3_000);
-  });
+  }, 0);
 
   it('stops at the first < with no > after it in a megabyte holding no >', () => {
     const html = `${LINKED}${fill('<a ', 1_000_000)}`;
@@ -372,7 +379,7 @@ describe('filingToExtract — the link pass stays linear (#239)', () => {
     // The target's text never comes, so the link has nowhere to land.
     expect(recorded).toEqual([]);
     expect(cpuMs).toBeLessThan(500);
-  });
+  }, 0);
 });
 
 /** A link whose text starts at `link` and whose target's text starts at `target`, both found in `text`. */
