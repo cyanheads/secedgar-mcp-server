@@ -4,7 +4,7 @@ description: Route SEC EDGAR research across the secedgar_* tools — which owne
 license: Apache-2.0
 metadata:
   author: cyanheads
-  version: "1.0"
+  version: "1.0.1"
 ---
 
 ## Scope
@@ -40,7 +40,7 @@ Not here: market prices, quotes, or returns (the only prices are the per-share p
 
 ### Before stating a number
 
-- **Label each value by its period end, never by `fiscal_year`.** On secedgar_get_financials rows, `fiscal_year` and `fiscal_period` (`source_filing_fy` / `source_filing_fp` in the dataframe) belong to the filing that reported the value, and a restated comparative carries the later filing's year. Key time on `end` (`period_end` in the dataframe).
+- **Label each value by its period end, never by `fiscal_year`.** On secedgar_get_financials rows, `fiscal_year` and `fiscal_period` (`source_filing_fy` / `source_filing_fp` in the dataframe) belong to the filing that reported the value, and a restated comparative carries the later filing's year. Key time on `end` (`period_end` in the dataframe). That dataframe also names `company` as `entity_name` and `start` as `period_start`.
 - **A `CY` key is SEC's calendar frame, not a fiscal-year label.** One column of secedgar_compare_companies holds fiscal years that end on different dates. Name each company's fiscal year from the cell's `period_end`.
 - **Derived metrics are not concepts.** Free cash flow is `operating_cash_flow` − `capex`, EBITDA is `operating_income` + `depreciation_amortization`, and working capital is `current_assets` − `current_liabilities`. `debt` is long-term debt only, and no concept gives total debt.
 - **Search totals are lower bounds** unless `total_is_exact` is true. Full-text search stops at 10,000 hits, so count a large set by splitting the date range.
@@ -65,4 +65,4 @@ Not here: market prices, quotes, or returns (the only prices are the per-share p
 
 ### Dataframes
 
-Data tools stage their full result as a `df_<id>` table, named by the response's `dataset` handle, on one canvas that every secedgar_* call shares. Call secedgar_dataframe_describe with the `dataset` name the producing tool returned to get the table's column names before writing SQL, then secedgar_dataframe_query with one read-only SELECT. Describe without a name lists the active tables, except over HTTP with auth none, where every caller shares one canvas and that listing is refused. Tables from different tools join where they share a key: 13F positions, NPORT-P positions, and blockholder rows on `cusip`; insider and blockholder rows on `issuer_cik`. Insider rows carry no `cusip` and 13F rows no `issuer_cik`. A table expires a fixed time after it is staged (a day by default), and queries do not extend it; `missing_table` means the source tool has to run again. A deployment without a canvas, such as the MCPB bundle, returns results inline only.
+Data tools stage their full result as a `df_<id>` table, named by the response's `dataset` handle, on one canvas that every secedgar_* call shares. Call secedgar_dataframe_describe with the `dataset` name the producing tool returned to get the table's column names before writing SQL, then secedgar_dataframe_query with one read-only SELECT. Describe without a name lists the active tables, except over HTTP with auth none, where every caller shares one canvas and that listing is refused. Tables from different tools join where they share a key: 13F positions, NPORT-P positions, and blockholder rows on `cusip`; insider and blockholder rows on `issuer_cik`. Insider rows carry no `cusip` and 13F rows no `issuer_cik`. A table expires a fixed time after it is staged (a day by default), and queries do not extend it; `missing_table` means the name is wrong or the table expired: check it against the `dataset` name, and run the source tool again for an expired one. A deployment without a canvas, such as the MCPB bundle, returns results inline only.

@@ -85,7 +85,7 @@ The skill ships in `skills/secedgar-guide/SKILL.md`. Plugin hosts load it from t
 - A ticker SEC's file no longer lists resolves to the company that held it last (`AMRK` → Gold.com, Inc.), and a listed ticker an earlier company held names that company in `resolvedAs` (`XOM`). A name whose words are in another order also matches when nothing else does (`Charles Schwab` → SCHWAB CHARLES CORP)
 - A name SEC's ticker file lacks is looked up in EDGAR's entity index of every filer, which holds filers with no ticker (`Exxon Mobil` → EXXON MOBIL CORP, `resolvedAs` saying so). A private company found only in a 10-K's subsidiaries exhibit (EX-21) fails `no_match` with the filers of that exhibit in `data.parents`
 - Returns SIC code, exchanges, fiscal year end, and state of incorporation, plus `series_id` / `class_id` for a fund ticker; fails as `no_match` (with near matches in `data.suggestions`) or, for a name matching several companies, `ambiguous_company`, listing up to 10 by CIK, name, and ticker to retry with, plus the full count in `total_matches`
-- A date or form filter can reach into the archive (up to 10 pages); `history_scanned_through` reports how far it got
+- A date or form filter can reach into the archive (up to 10 pages); `history_scanned_through` reports how far it got, and `older_filings_unexamined` whether older filings exist that the scan did not read
 
 ---
 
@@ -128,7 +128,7 @@ The skill ships in `skills/secedgar-guide/SKILL.md`. Plugin hosts load it from t
 
 - `company` plus up to 20 `items` codes, dotted (`2.02`) since 2004-08-23 and single integers (`12`) before; the two regimes don't overlap, so pair them across the changeover; `filed_after` / `filed_before` work alone and reach into the archive; `limit` 1–1,000, served at 100 (default 20)
 - Each filing decodes its `items` to `code`, `label`, and `regime` (`current` / `legacy`); `item_distribution` counts every code in the window, and `total_8k_scanned` against `total_matched` shows what the filter removed
-- A date window reads up to 10 archive pages; `history_scanned_through` and `dataset.truncated` report what went unread
+- A date window reads up to 10 archive pages; `history_scanned_through` reports how far the scan reached, `older_filings_unexamined` whether older filings went unread, and `dataset.truncated` whether pages in the window did
 
 ---
 
@@ -143,7 +143,7 @@ The skill ships in `skills/secedgar-guide/SKILL.md`. Plugin hosts load it from t
 ### `secedgar_get_institutional_holdings` <sub>tool</sub>
 
 - `company` is the 13F filer (a CIK is most reliable), not a portfolio company, which is `secedgar_find_holders`' job; `quarter` as `YYYY-QN`, defaulting to the newest filing; `limit` 1–500 (default 20; up to 1,000 is served at 500) with `offset` / `next_offset`; `consolidate` (default true) merges sub-lines into positions sorted by value
-- Older quarters are found in the archive (up to 10 pages); a quarter covered only by a 13F-NT notice fails as `no_filings_found` naming the notice's accession number and period
+- Older quarters are found in the archive (up to 10 pages); a quarter covered only by a 13F-NT notice fails as `no_filings_found` naming the notice's accession number and period; any other quarter with no 13F-HR fails as `no_filings_found` naming the filer (`resolved_name`, `resolved_cik`) and the newest quarter an original 13F-HR among the filings read covers (`latest_quarter`, as `YYYY-QN`; absent when none was read)
 - Holdings, paging, consolidation, and the dataframe cover the quarter composed from the original 13F-HR and its same-period 13F-HR/A amendments, applied in `acceptanceDateTime` order: a `RESTATEMENT` replaces everything composed so far (earlier `NEW HOLDINGS` included); a `NEW HOLDINGS` amendment appends its rows, unless its table repeats every composed row (CUSIP, class, put/call, discretion, shares, share type), in which case it applies as a restatement. Values normalize by each accession's own filing date. Only tables from the last readable restatement on are read
 - `amendments` (newest filed first) discloses each accession, filing date, and cover-page type (`UNAVAILABLE` with a reason when unreadable), plus `applied_as`: `restatement`, `new_holdings`, `superseded`, or `not_applied` (type or table unreadable, named in the notice); inspect any with `secedgar_get_filing`. `composed_accessions` lists the filings the rows come from, in application order. `amendment_search_complete=false` warns that bounded or unavailable archive discovery may have missed amendments
 - Holdings carry issuer, CUSIP, `market_value_usd` in whole USD, shares or principal, `put_call`, and `source_accession_numbers` (a consolidated position lists each filing it came from; also a dataframe column); `total_holdings_in_filing` counts the original 13F-HR's raw rows, `total_holdings_composed` the composed raw rows, and `total_positions` distinct composed positions; `accession_number` and `filing_date` name the original 13F-HR; a shared legal name fails as `ambiguous_entity`, listing up to 10 by CIK and name plus the full count in `total_matches` (EDGAR's own count for a name found by entity search, a floor when `total_matches_is_lower_bound` is true)
@@ -210,7 +210,7 @@ The skill ships in `skills/secedgar-guide/SKILL.md`. Plugin hosts load it from t
 
 ### `secedgar_dataframe_query` <sub>tool</sub>
 
-- One DuckDB SELECT in `sql` (joins, aggregates, window functions, CTEs); `row_limit` 1–10,000 (default 1,000) and `preview` for fewer inline rows, each served at 10,000 up to 100,000, and `register_as` (`df_XXXXX_XXXXX`) to save the result as a new dataframe
+- One DuckDB SELECT in `sql` (joins, aggregates, window functions, CTEs); `row_limit` 1–10,000 (default 1,000) and `preview` for fewer inline rows (a `preview` above `row_limit` is read as `row_limit`), each served at 10,000 up to 100,000, and `register_as` (`df_XXXXX_XXXXX`) to save the result as a new dataframe
 - Returns `columns`, `rows`, `row_count`, and `row_count_capped`, which when true means `row_count` is the cap, not a total; BIGINT columns serialize as strings
 - Writes, DDL, file-reading functions, multiple statements, and system catalogs are rejected with typed reasons (`non_select_statement`, `denied_function`, `multi_statement`, `system_catalog_access`, and others); an unqualified `current_schema` is refused as `denied_function` even when it names a column, so read such a column as `<table>.current_schema`
 
@@ -258,7 +258,7 @@ Agent-friendly output:
 
 - In-conversation SQL: any tool whose response carries a `dataset` field has staged its full result as a DuckDB dataframe (`df_<id>`), while the inline list stays capped at `limit`; inspect it with `secedgar_dataframe_describe`, then query it with `secedgar_dataframe_query`
 - Discriminated outputs and explicit gaps: `source` on filing-search rows, `search_mode`, 8-K item `regime`, typed `failed_companies` reasons, and `gaps` with `tags_tried` in place of zero-filled values
-- Completeness disclosure: `history_scanned_through`, `total_is_exact`, `publication_lag_days`, and `dataset.truncated` tell agents how deep a scan went and what it left out
+- Completeness disclosure: `history_scanned_through`, `older_filings_unexamined`, `total_is_exact`, `publication_lag_days`, and `dataset.truncated` tell agents how deep a scan went and what it left out
 - One parameter name per concept: `company`, `filed_after` / `filed_before`, and `forms` mean the same thing on every tool, and common alternate spellings (`ticker`, `cik`, `start_date`, `end_date`, `form_types`, and others) are accepted as aliases, as is `filing_limit` for `limit` on `secedgar_search_filings`, `secedgar_get_material_events`, and `secedgar_get_beneficial_owners`, where `limit` counts filings
 
 ## Getting started
