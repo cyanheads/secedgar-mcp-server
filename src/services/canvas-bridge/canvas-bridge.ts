@@ -25,7 +25,6 @@ import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { McpError, notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
 import { idGenerator } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
-import { stripStringLiterals } from './sql-gate-extras.js';
 
 /** Per-table provenance + TTL metadata persisted in `ctx.state`. */
 export interface DataframeMeta {
@@ -163,6 +162,29 @@ export const SYSTEM_CATALOG_HINT =
 export const SQL_READ_ONLY_HINT =
   'Query only the df_<id> tables, by the name the producing tool returned in its `dataset` field, referenced by bare name; this surface reads no files and cannot create, alter, or drop anything.';
 
+/** How the framework's SQL gate refers to a describe tool in the hints it writes, in place of a server's own tool name. */
+const GATE_DESCRIBE_TOOL = "this server's dataframe-describe tool";
+
+/**
+ * The gate's `invalid_sql` hints that send the caller to list the staged tables,
+ * a listing refused over HTTP with auth none (#242), each with this server's
+ * replacement: the engine's Catalog class (a missing function, type, collation,
+ * or schema, a schema-qualified table name included) and its IO class, which
+ * reuses the engine's read-only hint. Keyed by the gate's whole text, so a hint
+ * the framework rewords misses here and takes the {@link GATE_DESCRIBE_TOOL}
+ * substitution rather than a replacement written for other words.
+ */
+const GATE_LISTING_HINTS = new Map([
+  [
+    "Correct the function, type, collation, or schema name the message reports missing — list the staged tables with this server's dataframe-describe tool.",
+    'Correct the function, type, collation, or schema name the message reports missing; reference each df_<id> table by its bare name.',
+  ],
+  [
+    "Send a read-only SELECT over the staged tables — list them with this server's dataframe-describe tool. This surface reads no files and cannot create, alter, or drop anything.",
+    SQL_READ_ONLY_HINT,
+  ],
+]);
+
 /** Token character set for `df_XXXXX_XXXXX` table names. */
 const TABLE_NAME_CHARSET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
 
@@ -266,17 +288,24 @@ export class CanvasBridge {
    * `denySystemCatalogs` set. Optional `registerAs` chains the result as a new
    * dataframe with a fresh per-table TTL (not inherited from parents).
    *
-   * A pre-check answers an unregistered or TTL-expired `df_<id>` as
-   * `missing_table` from the records alone, before the canvas is acquired. Any
-   * raw DuckDB execution error that escapes the gate is re-thrown as a structured
-   * `invalid_sql`. The framework's `missing_table`, `register_as_clash`, and
-   * `system_catalog_access` are rebuilt with this server's recovery hints (#47,
-   * #54, #60), as is `sql_read_only`, whose engine hint points at a listing
-   * (#242), and its `non_select_statement` without the `statementType` it
-   * carries; other structured McpErrors propagate as-is — the framework's
-   * `sql_execution_error` (a SELECT that prepared and then failed on the data),
-   * `invalid_sql`, `multi_statement`, `denied_function`, and
-   * `plan_operator_not_allowed`, each with its own recovery hint.
+   * The SQL reaches the gate as written and the bridge reads none of it, so the
+   * engine alone decides what names a table. An unregistered `df_<id>`, or a
+   * TTL-expired one, whose table the sweep run first has dropped, fails as the
+   * gate's `missing_table`; a query naming only such handles mints the canvas
+   * like any other (#251).
+   *
+   * Any raw DuckDB execution error that escapes the gate is re-thrown as a
+   * structured `invalid_sql`. The framework's `missing_table`,
+   * `register_as_clash`, and `system_catalog_access` are rebuilt with this
+   * server's recovery hints (#47, #54, #60), as is `sql_read_only`, whose engine
+   * hint points at a listing (#242), and its `non_select_statement` and
+   * `invalid_sql` without the `statementType` they carry and with
+   * secedgar_dataframe_describe named in their hint (#74, #251), or the hint
+   * replaced where it sends the caller to list the staged tables (#242); other
+   * structured McpErrors propagate as-is — the framework's `sql_execution_error`
+   * (a SELECT that prepared and then failed on the data), `multi_statement`,
+   * `denied_function`, and `plan_operator_not_allowed`, each with its own
+   * recovery hint.
    */
   async query(
     ctx: Context,
@@ -284,7 +313,6 @@ export class CanvasBridge {
     options: BridgeQueryOptions = {},
   ): Promise<{ result: QueryResult; meta?: DataframeMeta }> {
     await this.sweepExpired(ctx);
-    await this.assertReferencedDataframesExist(ctx, sql);
     const instance = await this.canvasFor(ctx, true);
 
     const registerAs = options.registerAs;
@@ -322,8 +350,8 @@ export class CanvasBridge {
       if (err instanceof McpError) {
         const data = err.data as Record<string, unknown> | undefined;
         // (#54) The framework's missing_table hint points at a generic describe tool.
-        // Rebuild it with this server's guidance, so a missing table reads the same
-        // whether the records or the canvas refused it.
+        // Rebuild it with this server's guidance, in one wording for every missing
+        // table, the engine's name for it kept as `tableName`.
         if (data?.reason === 'missing_table') {
           const tableName = data.tableName;
           const subject =
@@ -369,14 +397,29 @@ export class CanvasBridge {
         if (data?.reason === 'sql_read_only') {
           throw validationError(err.message, { ...data, recovery: { hint: SQL_READ_ONLY_HINT } });
         }
-        // (#74) The gate refuses every non-SELECT before it is prepared, as
-        // `statementType: 'UNKNOWN'` on every path but an EXPLAIN failure, where it is
-        // 'SELECT'; no caller reads it, so it stays off the wire. The gate's hint is
-        // kept: it is written per shape (a PIVOT without an IN list names the list),
-        // and the contract's recovery fills in when one is ever missing.
-        if (data?.reason === 'non_select_statement') {
+        // (#74, #251) The gate attaches a `statementType` to both: `'UNKNOWN'` on
+        // invalid_sql, and on non_select_statement on every path but an EXPLAIN
+        // failure, where it is 'SELECT'. No caller reads it, so it stays off the
+        // wire. The rest is the gate's: the message, invalid_sql's engine detail
+        // (`binderMessage`), and a hint written per shape (a parser error names the
+        // syntax fix, a PIVOT without an IN list names the list), with the gate's
+        // generic describe-tool reference naming secedgar_dataframe_describe; the
+        // contract's recovery fills in when one is ever missing. The gate's error
+        // rides `cause`, which reaches the log only.
+        if (data?.reason === 'non_select_statement' || data?.reason === 'invalid_sql') {
           const { statementType: _statementType, ...rest } = data;
-          throw validationError(err.message, rest);
+          const recovery = rest.recovery as { hint?: unknown } | undefined;
+          if (typeof recovery?.hint === 'string') {
+            // (#242) A hint sending the caller to list the staged tables is replaced
+            // whole; any other, a reworded one included, takes the substitution.
+            rest.recovery = {
+              ...recovery,
+              hint:
+                GATE_LISTING_HINTS.get(recovery.hint) ??
+                recovery.hint.replaceAll(GATE_DESCRIBE_TOOL, 'secedgar_dataframe_describe'),
+            };
+          }
+          throw validationError(err.message, rest, { cause: err });
         }
         // All other structured McpErrors propagate as-is.
         throw err;
@@ -420,28 +463,6 @@ export class CanvasBridge {
     }
 
     return meta ? { result, meta } : { result };
-  }
-
-  /**
-   * Answer a referenced `df_<id>` handle with no record — mistyped, or
-   * TTL-expired since it was minted — as `missing_table` from the records
-   * alone, before the canvas is acquired, so a mistyped handle mints no canvas.
-   * Only the minted-handle pattern `df_<5>_<5>` is checked; string literals and
-   * quoted identifiers are stripped so a quoted handle never false-triggers, and
-   * other identifiers fall through to the gate, which answers a table the canvas
-   * lacks as `missing_table` itself (#47).
-   */
-  private async assertReferencedDataframesExist(ctx: Context, sql: string): Promise<void> {
-    const referenced = stripStringLiterals(sql).match(/\bdf_[A-Z0-9]{5}_[A-Z0-9]{5}\b/g);
-    if (!referenced) return;
-    for (const name of new Set(referenced)) {
-      if ((await ctx.state.get(`${META_PREFIX}${name}`)) === null) {
-        throw notFound(`Dataframe '${name}' does not exist or has expired.`, {
-          reason: 'missing_table',
-          recovery: { hint: MISSING_TABLE_HINT },
-        });
-      }
-    }
   }
 
   /**

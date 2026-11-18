@@ -14,6 +14,7 @@ import {
   CanvasBridge,
   getCanvasBridge,
   initCanvasBridge,
+  SQL_READ_ONLY_HINT,
   SYSTEM_CATALOG_HINT,
 } from '@/services/canvas-bridge/canvas-bridge.js';
 
@@ -178,36 +179,71 @@ describe('CanvasBridge.drop', () => {
 });
 
 describe('CanvasBridge.query error classification (#47)', () => {
-  it('unregistered df_<id> reference → structured missing_table via pre-check (#47)', async () => {
-    // The bridge pre-check answers an unregistered handle from its records,
-    // before the canvas is even acquired, so a mistyped handle mints nothing.
-    const acquireShared = vi.fn();
+  /** The `missing_table` the framework's gate throws, the engine's message on its cause. */
+  async function engineMissingTable(tableName: string) {
+    const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
+    return new McpError(
+      JsonRpcErrorCode.NotFound,
+      `Canvas table "${tableName}" does not exist. The table may have expired, been dropped, or the name may be mistyped.`,
+      {
+        reason: 'missing_table',
+        tableName,
+        recovery: {
+          hint: "Re-run the tool that produced this table to stage it again, or list the currently staged tables with this server's dataframe-describe tool.",
+        },
+      },
+      {
+        cause: new Error(
+          `Catalog Error: Table with name ${tableName} does not exist!\nDid you mean "df_AAAAA_BBBBB"?`,
+        ),
+      },
+    );
+  }
+
+  it('hands a query naming only unregistered handles to the canvas acquireShared resolves (#251)', async () => {
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockRejectedValue(await engineMissingTable('df_QQQQQ_QQQQQ')),
+    };
+    const acquireShared = vi.fn().mockResolvedValue(instance);
     const canvas = { acquireShared } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas, { listingEnabled: true });
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
     await expect(bridge.query(ctx, 'SELECT * FROM df_QQQQQ_QQQQQ LIMIT 1')).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
-      data: { reason: 'missing_table' },
+      data: { reason: 'missing_table', tableName: 'df_QQQQQ_QQQQQ' },
     });
-    expect(acquireShared).not.toHaveBeenCalled();
+    expect(acquireShared).toHaveBeenCalledWith(ctx, {
+      create: true,
+      onReplace: expect.any(Function),
+    });
+    expect(instance.query).toHaveBeenCalledWith(
+      'SELECT * FROM df_QQQQQ_QQQQQ LIMIT 1',
+      expect.objectContaining({ denySystemCatalogs: true }),
+    );
   });
 
-  it('missing_table names the df and points to dataframe_describe, no catalog leak (#47)', async () => {
-    const acquireShared = vi.fn();
+  it('missing_table names the df and points to dataframe_describe, no catalog leak (#47, #251)', async () => {
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockRejectedValue(await engineMissingTable('df_QQQQQ_QQQQQ')),
+    };
+    const acquireShared = vi.fn().mockResolvedValue(instance);
     const canvas = { acquireShared } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas, { listingEnabled: true });
     const ctx = createMockContext({ tenantId: 'test-tenant' });
 
     const err = await bridge.query(ctx, 'SELECT * FROM df_QQQQQ_QQQQQ LIMIT 1').catch((e) => e);
-    expect(err.message).toContain('df_QQQQQ_QQQQQ');
-    expect(err.message).not.toMatch(/duckdb|catalog|did you mean/i);
+    expect(err.message).toBe(
+      'Canvas table "df_QQQQQ_QQQQQ" does not exist — it may have expired or was never registered.',
+    );
+    expect(JSON.stringify(err.data)).not.toMatch(/duckdb|catalog error|did you mean/i);
+    expect(err.data.tableName).toBe('df_QQQQQ_QQQQQ');
     expect(err.data.recovery.hint).toMatch(/dataframe_describe/);
   });
 
-  it('a quoted df_<id> in a string literal does not false-trigger missing_table (#47)', async () => {
-    // String literals are stripped before the handle scan, so a registered df in
-    // FROM still runs even when an unregistered handle appears inside a string.
+  it('hands the SQL to the canvas as written, unregistered handles in a comment and a literal included (#251)', async () => {
     const instance = {
       canvasId: 'cid_test',
       query: vi.fn().mockResolvedValue({ columns: ['note'], rows: [], rowCount: 0 }),
@@ -216,17 +252,15 @@ describe('CanvasBridge.query error classification (#47)', () => {
     const canvas = { acquireShared } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
     const bridge = new CanvasBridge(canvas, { listingEnabled: true });
     const ctx = createMockContext({ tenantId: 'test-tenant' });
-    await ctx.state.set('df-meta/df_AAAAA_BBBBB', {
-      tableName: 'df_AAAAA_BBBBB',
-      expiresAt: '2999-01-01T00:00:00.000Z',
-    });
+    const sql =
+      "SELECT note FROM df_AAAAA_BBBBB WHERE note = 'see df_OLDXX_OLDXX' -- superseded df_OLDYY_OLDYY";
 
-    const { result } = await bridge.query(
-      ctx,
-      "SELECT note FROM df_AAAAA_BBBBB WHERE note = 'see df_OLDXX_OLDXX'",
-    );
+    const { result } = await bridge.query(ctx, sql);
     expect(result.rowCount).toBe(0);
-    expect(instance.query).toHaveBeenCalled();
+    expect(instance.query).toHaveBeenCalledExactlyOnceWith(sql, {
+      denySystemCatalogs: true,
+      signal: ctx.signal,
+    });
   });
 
   // #60 — the framework's system_catalog_access error carries reason + catalog and a
@@ -424,6 +458,104 @@ describe('CanvasBridge.query error classification (#47)', () => {
     expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
     expect(err.message).toBe('Canvas query must be SELECT.');
     expect(err.data).toEqual({ reason: 'non_select_statement', recovery: { hint } });
+  });
+
+  /**
+   * The gate's invalid_sql carries statementType 'UNKNOWN' as non_select_statement
+   * does; the rewrap drops it the same way, the gate's error kept on cause for the log.
+   * Its hint is written per engine error class and kept, with the gate's generic
+   * reference to a describe tool naming this server's — except the two hints that
+   * send the caller to list the staged tables, a listing refused over HTTP with auth
+   * none (#242), which are replaced. A reworded one keeps the substitution.
+   */
+  it.each([
+    {
+      shape: 'an unknown column',
+      binderMessage:
+        'Binder Error: Referenced column "nope" not found in FROM clause!\nCandidate bindings: "label"',
+      gateHint:
+        "Correct the column or function the message names; list the staged columns with this server's dataframe-describe tool.",
+      hint: 'Correct the column or function the message names; list the staged columns with secedgar_dataframe_describe.',
+    },
+    {
+      shape: 'an unknown function',
+      binderMessage: 'Catalog Error: Scalar Function with name nope does not exist!',
+      gateHint:
+        "Correct the function, type, collation, or schema name the message reports missing — list the staged tables with this server's dataframe-describe tool.",
+      hint: 'Correct the function, type, collation, or schema name the message reports missing; reference each df_<id> table by its bare name.',
+    },
+    {
+      shape: 'a file the engine could not read',
+      binderMessage: 'IO Error: No files found that match the pattern "x"',
+      gateHint:
+        "Send a read-only SELECT over the staged tables — list them with this server's dataframe-describe tool. This surface reads no files and cannot create, alter, or drop anything.",
+      hint: SQL_READ_ONLY_HINT,
+    },
+    {
+      shape: 'an unknown function, the gate’s listing hint reworded',
+      binderMessage: 'Catalog Error: Scalar Function with name nope does not exist!',
+      gateHint:
+        "Correct the function or type the message reports missing — list the staged tables with this server's dataframe-describe tool.",
+      hint: 'Correct the function or type the message reports missing — list the staged tables with secedgar_dataframe_describe.',
+    },
+    {
+      shape: 'a syntax error, whose hint names no tool',
+      binderMessage: 'Parser Error: syntax error at or near "FORM"',
+      gateHint:
+        'Fix the SQL syntax the message names and send a single read-only SELECT. Put AS before an alias that is a SQL keyword, or double-quote it.',
+      hint: 'Fix the SQL syntax the message names and send a single read-only SELECT. Put AS before an alias that is a SQL keyword, or double-quote it.',
+    },
+  ])(
+    'invalid_sql for $shape → rewrapped without statementType, message, detail, and hint kept (#251)',
+    async ({ binderMessage, gateHint, hint }) => {
+      const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
+      const gateErr = new McpError(
+        JsonRpcErrorCode.ValidationError,
+        `Canvas query failed to prepare: ${binderMessage}`,
+        {
+          reason: 'invalid_sql',
+          statementType: 'UNKNOWN',
+          binderMessage,
+          recovery: { hint: gateHint },
+        },
+      );
+      const instance = {
+        canvasId: 'cid_test',
+        query: vi.fn().mockRejectedValue(gateErr),
+      };
+      const acquireShared = vi.fn().mockResolvedValue(instance);
+      const canvas = { acquireShared } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
+      const bridge = new CanvasBridge(canvas, { listingEnabled: true });
+      const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+      const err = await bridge.query(ctx, 'SELECT nope FROM df_AAAAA_BBBBB').catch((e) => e);
+      expect(err).not.toBe(gateErr);
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.message).toBe(`Canvas query failed to prepare: ${binderMessage}`);
+      expect(err.data).toEqual({ reason: 'invalid_sql', binderMessage, recovery: { hint } });
+      expect(err.cause).toBe(gateErr);
+    },
+  );
+
+  it('invalid_sql with no hint → rewrapped with none, for the contract recovery to fill (#251)', async () => {
+    const { McpError } = await import('@cyanheads/mcp-ts-core/errors');
+    const binderMessage = 'Binder Error: Referenced column "nope" not found in FROM clause!';
+    const gateErr = new McpError(
+      JsonRpcErrorCode.ValidationError,
+      `Canvas query failed to prepare: ${binderMessage}`,
+      { reason: 'invalid_sql', statementType: 'UNKNOWN', binderMessage },
+    );
+    const instance = {
+      canvasId: 'cid_test',
+      query: vi.fn().mockRejectedValue(gateErr),
+    };
+    const acquireShared = vi.fn().mockResolvedValue(instance);
+    const canvas = { acquireShared } as unknown as ConstructorParameters<typeof CanvasBridge>[0];
+    const bridge = new CanvasBridge(canvas, { listingEnabled: true });
+    const ctx = createMockContext({ tenantId: 'test-tenant' });
+
+    const err = await bridge.query(ctx, 'SELECT nope FROM df_AAAAA_BBBBB').catch((e) => e);
+    expect(err.data).toEqual({ reason: 'invalid_sql', binderMessage });
   });
 });
 

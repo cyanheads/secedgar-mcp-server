@@ -2,10 +2,10 @@
  * @fileoverview The canvas bridge against the framework's real `DataCanvas` and
  * DuckDB provider. One shared canvas per tenant under concurrent first stagings,
  * a replaced canvas's records purged and never listed, describe/drop/sweep that
- * never mint (#241), and the SQL gate's own rejections as the bridge passes or
- * rewraps them. Every call's context shares one `ctx.state`, as the tool calls of
- * one tenant do: `createMockContext` alone gives each context its own store,
- * which hides the race.
+ * never mint (#241), the SQL gate's own rejections as the bridge passes or
+ * rewraps them, and the engine's answer for a table it cannot bind (#251). Every
+ * call's context shares one `ctx.state`, as the tool calls of one tenant do:
+ * `createMockContext` alone gives each context its own store, which hides the race.
  * @module tests/services/canvas-bridge/canvas-bridge.duckdb
  */
 
@@ -23,6 +23,9 @@ import {
   SQL_READ_ONLY_HINT,
   SYSTEM_CATALOG_HINT,
 } from '@/services/canvas-bridge/canvas-bridge.js';
+
+/** A dataframe name nothing staged. */
+const Z = 'df_ZZZZZ_ZZZZZ';
 
 let exportRoot: string;
 let canvas: DataCanvas;
@@ -188,19 +191,35 @@ describe('one shared canvas per tenant (#241)', () => {
 
     expect(await bridge.describe(ctx())).toEqual([]);
     expect(await shared.state.get(key)).toBeNull();
-    // Quoted, the handle skips the bridge's record pre-check and reaches the canvas itself.
+    // The sweep dropped the table with its record, so the canvas itself answers the name.
     const err = await rejection(`SELECT * FROM "${name}"`);
     expect(err.data.reason).toBe('missing_table');
     expect(canvas.countForTenant(shared)).toBe(1);
   });
 
-  it('refuses a mistyped handle from its records, minting nothing', async () => {
-    const err = await rejection('SELECT * FROM df_ZZZZZ_ZZZZZ');
+  it('answers a TTL-expired handle as missing_table, its table swept before the query runs', async () => {
+    const name = await stage(2);
+    const key = `df-meta/${name}`;
+    const meta = await shared.state.get<Record<string, unknown>>(key);
+    await shared.state.set(key, { ...meta, expiresAt: '2000-01-01T00:00:00.000Z' });
+
+    // The canvas keeps the table for its own day-long TTL: only the bridge's sweep removes it here.
+    const err = await rejection(`SELECT COUNT(*) AS n FROM ${name}`);
+    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err.data.reason).toBe('missing_table');
+    expect(err.data.tableName).toBe(name);
+    expect(err.data.recovery).toEqual({ hint: MISSING_TABLE_HINT });
+    expect(await shared.state.get(key)).toBeNull();
+  });
+
+  it('answers a mistyped handle on a cold canvas from the engine, minting the canvas (#251)', async () => {
+    const err = await rejection(`SELECT * FROM ${Z}`);
 
     expect(err.code).toBe(JsonRpcErrorCode.NotFound);
     expect(err.data.reason).toBe('missing_table');
+    expect(err.data.tableName).toBe(Z);
     expect(err.data.recovery).toEqual({ hint: MISSING_TABLE_HINT });
-    expect(canvas.countForTenant(shared)).toBe(0);
+    expect(canvas.countForTenant(shared)).toBe(1);
   });
 });
 
@@ -231,7 +250,7 @@ describe('malformed dataframe names', () => {
 });
 
 describe('SQL gate rejections through the bridge', () => {
-  it('keeps a SELECT naming an unknown column invalid_sql, with the engine detail', async () => {
+  it('keeps a SELECT naming an unknown column invalid_sql, with the engine detail and a hint naming the describe tool', async () => {
     const name = await stage(1);
 
     for (const sql of [
@@ -242,6 +261,33 @@ describe('SQL gate rejections through the bridge', () => {
       expect(err.code, sql).toBe(JsonRpcErrorCode.ValidationError);
       expect(err.data.reason, sql).toBe('invalid_sql');
       expect(String(err.data.binderMessage), sql).toContain('"nope"');
+      const { hint } = err.data.recovery as { hint: string };
+      expect(hint, sql).toContain('secedgar_dataframe_describe');
+      expect(hint, sql).not.toContain("this server's dataframe-describe tool");
+    }
+  });
+
+  // The engine's Catalog class: a missing function, type, collation, or schema, a
+  // schema-qualified table name included. The gate's hint for it sends the caller to
+  // list the staged tables, which is refused over HTTP with auth none (#242).
+  it('answers an unknown function or schema invalid_sql, with a hint that sends the caller to no listing', async () => {
+    const name = await stage(1);
+
+    for (const [sql, missing] of [
+      [`SELECT nosuchfn(1) AS x FROM ${name}`, 'nosuchfn'],
+      [`SELECT * FROM nosuchschema.${name}`, 'nosuchschema'],
+    ] as const) {
+      const err = await rejection(sql);
+      expect(err.code, sql).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data.reason, sql).toBe('invalid_sql');
+      expect(String(err.data.binderMessage), sql).toMatch(/^Catalog Error: /);
+      expect(String(err.data.binderMessage), sql).toContain(missing);
+      const { hint } = err.data.recovery as { hint: string };
+      expect(hint, sql).not.toContain('list the staged tables');
+      expect(hint, sql).not.toContain("this server's");
+      expect(hint, sql).toBe(
+        'Correct the function, type, collation, or schema name the message reports missing; reference each df_<id> table by its bare name.',
+      );
     }
   });
 
@@ -320,10 +366,10 @@ describe('SQL gate rejections through the bridge', () => {
   it('answers a table the canvas lacks with the server’s missing_table hint', async () => {
     await stage(1);
 
-    const err = await rejection('SELECT * FROM "df_ZZZZZ_ZZZZZ"');
+    const err = await rejection(`SELECT * FROM "${Z}"`);
     expect(err.code).toBe(JsonRpcErrorCode.NotFound);
     expect(err.data.reason).toBe('missing_table');
-    expect(err.data.tableName).toBe('df_ZZZZZ_ZZZZZ');
+    expect(err.data.tableName).toBe(Z);
     expect(err.data.recovery).toEqual({ hint: MISSING_TABLE_HINT });
   });
 
@@ -346,5 +392,128 @@ describe('SQL gate rejections through the bridge', () => {
     expect((await bridge.describe(ctx(), 'df_CHAIN_00001')).map((m) => m.tableName)).toEqual([
       'df_CHAIN_00001',
     ]);
+  });
+});
+
+describe('the engine reads the SQL and answers a missing table (#251)', () => {
+  it.each<[string, (t: string) => string, Record<string, unknown>[]]>([
+    [
+      'a handle in a line comment',
+      (t) => `SELECT COUNT(*) FROM ${t} -- superseded ${Z}`,
+      [{ 'count_star()': '2' }],
+    ],
+    [
+      'a handle in a block comment',
+      (t) => `SELECT COUNT(*) FROM ${t} /* superseded ${Z} */`,
+      [{ 'count_star()': '2' }],
+    ],
+    [
+      'a handle in a nested block comment',
+      (t) => `SELECT COUNT(*) FROM ${t} /* a /* b */ ${Z} */`,
+      [{ 'count_star()': '2' }],
+    ],
+    [
+      'a handle in a literal after a literal ending in a backslash',
+      (t) => `SELECT 'a\\' AS x, '${Z}' AS y FROM ${t}`,
+      [
+        { x: 'a\\', y: Z },
+        { x: 'a\\', y: Z },
+      ],
+    ],
+    [
+      'a handle in a dollar-quoted literal',
+      (t) => `SELECT $$${Z}$$ AS x FROM ${t}`,
+      [{ x: Z }, { x: Z }],
+    ],
+    [
+      'a handle in a literal after a line comment holding an apostrophe',
+      (t) => `SELECT COUNT(*) AS n -- isn't\n, '${Z}' AS y FROM ${t}`,
+      [{ n: '2', y: Z }],
+    ],
+    [
+      'a handle named as a CTE',
+      () => `WITH ${Z} AS (SELECT 1 AS v) SELECT v FROM ${Z}`,
+      [{ v: 1 }],
+    ],
+    [
+      'a handle used as a column alias',
+      (t) => `SELECT 1 AS ${Z} FROM ${t}`,
+      [{ [Z]: 1 }, { [Z]: 1 }],
+    ],
+    ['its own handle in a comment', (t) => `SELECT COUNT(*) AS n FROM ${t} -- ${t}`, [{ n: '2' }]],
+    [
+      'a system catalog in a comment or a literal',
+      (t) => `SELECT 'information_schema.tables' AS s FROM ${t} -- information_schema.tables`,
+      [{ s: 'information_schema.tables' }, { s: 'information_schema.tables' }],
+    ],
+  ])('runs SQL holding %s', async (_shape, sql, rows) => {
+    const name = await stage(2);
+
+    const { result } = await bridge.query(ctx(), sql(name));
+    expect(result.rows).toEqual(rows);
+  });
+
+  it.each<[string, (t: string) => string]>([
+    ['bare', () => `SELECT * FROM ${Z}`],
+    ['double-quoted', () => `SELECT * FROM "${Z}"`],
+    ['in a JOIN', (t) => `SELECT * FROM ${t} a JOIN ${Z} b ON a.v = b.v`],
+    ['in a scalar subquery', (t) => `SELECT v, (SELECT COUNT(*) FROM ${Z}) AS n FROM ${t}`],
+  ])('answers a missing handle %s as missing_table, in one wording', async (_form, sql) => {
+    const name = await stage(2);
+
+    const err = await rejection(sql(name));
+    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(err.message).toBe(
+      `Canvas table "${Z}" does not exist — it may have expired or was never registered.`,
+    );
+    expect(err.data).toEqual({
+      reason: 'missing_table',
+      tableName: Z,
+      recovery: { hint: MISSING_TABLE_HINT },
+    });
+  });
+
+  it.each<[string, (t: string) => string, string]>([
+    [
+      'an unterminated literal',
+      (t) => `SELECT v FROM ${t} WHERE label = '${Z}`,
+      'Parser Error: unterminated string literal',
+    ],
+    [
+      'an unterminated block comment',
+      (t) => `SELECT v FROM ${t} /* ${Z}`,
+      'Parser Error: unterminated /* comment',
+    ],
+  ])(
+    'answers %s holding a handle as invalid_sql with the parser message',
+    async (_shape, sql, parserMessage) => {
+      const name = await stage(1);
+
+      const err = await rejection(sql(name));
+      expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(err.data.reason).toBe('invalid_sql');
+      expect(err.message).toContain(parserMessage);
+      expect(String(err.data.binderMessage)).toContain(parserMessage);
+    },
+  );
+
+  it('answers invalid_sql without the statementType the gate attaches', async () => {
+    const name = await stage(1);
+
+    for (const sql of [`SELECT nope FROM ${name}`, `SELECT v FROM ${name} WHERE label = '${Z}`]) {
+      const err = await rejection(sql);
+      expect(err.data.reason, sql).toBe('invalid_sql');
+      expect(Object.keys(err.data).sort(), sql).toEqual(['binderMessage', 'reason', 'recovery']);
+    }
+  });
+
+  it('refuses a system catalog named in code as system_catalog_access', async () => {
+    await stage(1);
+
+    const err = await rejection('SELECT * FROM information_schema.tables');
+    expect(err.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(err.data.reason).toBe('system_catalog_access');
+    expect(err.data.catalog).toBe('information_schema');
+    expect(err.data.recovery).toEqual({ hint: SYSTEM_CATALOG_HINT });
   });
 });
