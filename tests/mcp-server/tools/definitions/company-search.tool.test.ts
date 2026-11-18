@@ -1109,6 +1109,198 @@ describe('companySearchTool — one-day manifest drift (#137)', () => {
   });
 });
 
+/**
+ * older_filings_unexamined on both surfaces, in both states, for each way company_search's
+ * scan ends. The walk's own signal is tabled in tests/services/edgar/submissions-archive.test.ts
+ * (#248).
+ */
+describe('companySearchTool — older filings left unexamined (#248)', () => {
+  const withFiles = (files: SubmissionsResponse['filings']['files']): SubmissionsResponse => ({
+    ...mockPagedSubmissions,
+    filings: { ...mockPagedSubmissions.filings, files },
+  });
+  /** Three archive pages back to 1994, each serving the 2005–2010 page fixture. */
+  const threePages = withFiles([
+    { name: 'p1', filingCount: 4, filingFrom: '2005-01-03', filingTo: '2010-12-20' },
+    { name: 'p2', filingCount: 4, filingFrom: '1999-01-04', filingTo: '2004-12-30' },
+    { name: 'p3', filingCount: 4, filingFrom: '1994-01-26', filingTo: '1998-12-29' },
+  ]);
+  /** Fourteen yearly pages, 2014 back to 2001: a date filter selects more than the cap reads. */
+  const yearly = Array.from({ length: 14 }, (_, i) => `y${2014 - i}`);
+  const fourteenPages = withFiles(
+    yearly.map((name) => ({
+      name,
+      filingCount: 4,
+      filingFrom: `${name.slice(1)}-01-01`,
+      filingTo: `${name.slice(1)}-12-31`,
+    })),
+  );
+  const ONLY_PAGE = 'CIK0000320193-submissions-001.json';
+
+  beforeEach(() => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+  });
+
+  it.each([
+    [
+      'false with no archive pages, for a forms filter the recent window under-fills',
+      mockSubmissions,
+      { query: 'AAPL', forms: ['10-K'] },
+      false,
+      [],
+      '2023-08-04',
+      false,
+    ],
+    [
+      'false once the only archive page is read for an under-filled forms filter',
+      mockPagedSubmissions,
+      { query: 'AAPL', forms: ['10-K'], filing_limit: 50 },
+      false,
+      [ONLY_PAGE],
+      '2005-01-03',
+      false,
+    ],
+    [
+      'false once the only archive page is read for a form never filed',
+      mockPagedSubmissions,
+      { query: 'AAPL', forms: ['13F-HR'] },
+      false,
+      [ONLY_PAGE],
+      '2005-01-03',
+      false,
+    ],
+    [
+      'false when a canvas keeps the walk reading to the oldest page',
+      threePages,
+      { query: 'AAPL', forms: ['10-K'], filing_limit: 3 },
+      true,
+      ['p1', 'p2', 'p3'],
+      '1994-01-26',
+      false,
+    ],
+    [
+      'true when a lookup with no filter reads no archive page',
+      mockPagedSubmissions,
+      { query: 'AAPL' },
+      false,
+      [],
+      '2023-11-03',
+      true,
+    ],
+    [
+      'true when the walk stops once filing_limit fills, with no canvas',
+      threePages,
+      { query: 'AAPL', forms: ['10-K'], filing_limit: 3 },
+      false,
+      ['p1'],
+      '2005-01-03',
+      true,
+    ],
+    [
+      'true when filed_after leaves older pages unselected',
+      threePages,
+      { query: 'AAPL', filed_after: '2005-01-01' },
+      false,
+      ['p1'],
+      '2005-01-03',
+      true,
+    ],
+    [
+      'true when the 10-page cap leaves older pages unread',
+      fourteenPages,
+      { query: 'AAPL', filed_before: '2014-12-31' },
+      false,
+      yearly.slice(0, 10),
+      '2005-01-01',
+      true,
+    ],
+  ] as const)('%s', async (_case, submissions, args, canvas, pages, through, older) => {
+    mockApi.getSubmissions.mockResolvedValue(submissions);
+    if (canvas) {
+      const registerDataframe = vi.fn().mockResolvedValue({
+        tableName: 'df_OLDER_HIST1',
+        rowCount: 7,
+        expiresAt: '2026-12-31T00:00:00.000Z',
+        columnSchema: [],
+      });
+      vi.mocked(getCanvasBridge).mockReturnValue({ registerDataframe } as any);
+    }
+
+    const result = await runToolContract(companySearchTool, args as never);
+
+    expect(result.isError).toBeFalsy();
+    expect(mockApi.fetchArchivePage.mock.calls.map(([name]) => name)).toEqual(pages);
+    expect(result.structuredContent).toMatchObject({
+      history_scanned_through: through,
+      older_filings_unexamined: older,
+    });
+    expect(blockText(result.content)).toContain(
+      `\nHistory scanned through: ${through} (${older ? 'older filings not examined' : 'no older filings on EDGAR'}).`,
+    );
+  });
+
+  it('carries neither field, and no history line, without filings', async () => {
+    mockApi.getSubmissions.mockResolvedValue(mockPagedSubmissions);
+
+    const result = await runToolContract(companySearchTool, {
+      query: 'AAPL',
+      include_filings: false,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const structured = bag(result.structuredContent);
+    expect(structured.history_scanned_through).toBeUndefined();
+    expect(structured.older_filings_unexamined).toBeUndefined();
+    expect(blockText(result.content)).not.toContain('History scanned through');
+  });
+
+  it('carries neither field for a filer whose submissions list no filing', async () => {
+    mockApi.getSubmissions.mockResolvedValue({
+      ...mockSubmissions,
+      filings: {
+        recent: {
+          accessionNumber: [],
+          filingDate: [],
+          form: [],
+          primaryDocDescription: [],
+          primaryDocument: [],
+          reportDate: [],
+        },
+        files: [],
+      },
+    });
+
+    const result = await runToolContract(companySearchTool, {
+      query: 'AAPL',
+      include_filings: true,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const structured = bag(result.structuredContent);
+    expect(structured.total_filings).toBe(0);
+    expect(structured.history_scanned_through).toBeUndefined();
+    expect(structured.older_filings_unexamined).toBeUndefined();
+    expect(blockText(result.content)).not.toContain('History scanned through');
+  });
+
+  it('format() claims no older filings only for an explicit false', () => {
+    const text = blockText(
+      companySearchTool.format!({
+        cik: '0000320193',
+        name: 'Apple Inc.',
+        tickers: [],
+        exchanges: [],
+        sic: '',
+        sic_description: '',
+        history_scanned_through: '2001-01-02',
+      }),
+    );
+
+    expect(text).toContain('History scanned through: 2001-01-02 (older filings not examined).');
+    expect(text).not.toContain('no older filings');
+  });
+});
+
 // A filing_limit above the 50-filing inline list is served at 50, and the notice names a
 // route to the rest that the caller can actually follow (#168).
 describe('companySearchTool — filing_limit above the inline cap (#168)', () => {

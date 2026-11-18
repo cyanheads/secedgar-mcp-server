@@ -185,7 +185,13 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       .string()
       .optional()
       .describe(
-        'Oldest filing date the scan examined (YYYY-MM-DD). It reads the recent window (last year or 1,000 filings), then up to 10 archive pages a date filter overlaps or, undated, until limit filings pass the items filter. Absent when nothing was scanned.',
+        'Oldest filing date the scan examined (YYYY-MM-DD). Absent when nothing was scanned.',
+      ),
+    older_filings_unexamined: z
+      .boolean()
+      .optional()
+      .describe(
+        "Present with history_scanned_through: true when filings older than it went unexamined, so older 8-Ks may exist; false when the scan reached the company's first filing.",
       ),
     filings: z
       .array(
@@ -361,6 +367,10 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
     // Oldest date reached — the deepest archive page read, else the recent window's tail.
     const historyScannedThrough =
       walk.scannedThrough ?? submissions.filings.recent.filingDate.at(-1);
+    // Not `truncated`, which sees only selected pages: a date window, or an archive never
+    // walked, leaves older pages unselected (#248).
+    const olderFilingsUnexamined =
+      historyScannedThrough === undefined ? undefined : walk.olderPagesUnread;
     const archiveTruncated = walk.truncated;
 
     scanned.sort((a, b) => b.filing_date.localeCompare(a.filing_date));
@@ -470,6 +480,7 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       total_8k_scanned: scanned.length,
       item_distribution: itemDistribution,
       history_scanned_through: historyScannedThrough,
+      older_filings_unexamined: olderFilingsUnexamined,
       filings: matched.slice(0, limit),
       dataset,
     };
@@ -510,9 +521,12 @@ export const getMaterialEventsTool = tool('secedgar_get_material_events', {
       lines.push(`\nItem distribution across the scanned window: ${dist}`);
     }
     if (result.history_scanned_through) {
-      lines.push(
-        `History scanned through: ${result.history_scanned_through} (older filings not examined).`,
-      );
+      // Only a known false claims the history complete.
+      const older =
+        result.older_filings_unexamined === false
+          ? 'no older filings on EDGAR'
+          : 'older filings not examined';
+      lines.push(`History scanned through: ${result.history_scanned_through} (${older}).`);
     }
     if (result.dataset) {
       const truncatedNote = result.dataset.truncated

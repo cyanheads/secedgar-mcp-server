@@ -980,6 +980,144 @@ describe('getMaterialEventsTool — under-filled archive walk (#134)', () => {
       expect(notice(result)).not.toContain('archive scan stopped');
     });
   });
+
+  /**
+   * older_filings_unexamined on both surfaces, in both states, for each way the scan ends.
+   * The walk's own signal is tabled in tests/services/edgar/submissions-archive.test.ts (#248).
+   */
+  describe('older filings left unexamined (#248)', () => {
+    /** Apple-shaped: one archive page back to its first filing. */
+    const ONLY_PAGE = [
+      {
+        name: 'CIK0000320193-submissions-001.json',
+        filingCount: 1236,
+        filingFrom: '1994-01-26',
+        filingTo: '2015-05-27',
+      },
+    ];
+    const rowsPerPage = (n: number) => async (name: string) =>
+      block(
+        Array.from({ length: n }, (_, j) => ({
+          accession: `${name}-${j}`,
+          date: '2000-01-01',
+          items: '8.01',
+        })),
+      );
+
+    it.each([
+      [
+        'false with no archive pages, for a history short of limit',
+        [],
+        undefined,
+        { company: 'AAPL' },
+        0,
+        '2025-10-30',
+        false,
+      ],
+      [
+        'false once the only archive page is read for an items filter nothing matches',
+        ONLY_PAGE,
+        undefined,
+        { company: 'AAPL', items: ['4.02'] },
+        1,
+        '1994-01-26',
+        false,
+      ],
+      [
+        'false when an undated walk fills limit on the oldest page',
+        FILES.slice(0, 3),
+        rowsPerPage(2),
+        { company: 'AAPL', limit: 10 },
+        3,
+        '2012-01-01',
+        false,
+      ],
+      [
+        'true when the recent window fills limit and no page is read',
+        FILES,
+        undefined,
+        { company: 'AAPL', limit: 5 },
+        0,
+        '2025-10-30',
+        true,
+      ],
+      [
+        'true when an undated walk fills limit before the oldest page',
+        FILES,
+        undefined,
+        { company: 'AAPL', limit: 20 },
+        2,
+        '2013-01-01',
+        true,
+      ],
+      [
+        'true when the 10-page cap leaves older pages unread',
+        FILES,
+        rowsPerPage(1),
+        { company: 'AAPL', limit: 16 },
+        10,
+        '2005-01-01',
+        true,
+      ],
+      [
+        'true when filed_after leaves older pages unselected',
+        FILES,
+        undefined,
+        { company: 'AAPL', filed_after: '2010-01-01' },
+        6,
+        '2009-01-01',
+        true,
+      ],
+    ] as const)('%s', async (_case, files, page, args, pagesRead, through, older) => {
+      mockApi.getSubmissions.mockResolvedValue(
+        buildSubmissions({ filings: RECENT_FILINGS, files: [...files] }),
+      );
+      if (page) mockApi.fetchArchivePage.mockImplementation(page);
+
+      const result = await runToolContract(getMaterialEventsTool, args as never);
+
+      expect(result.isError).toBeFalsy();
+      expect(mockApi.fetchArchivePage).toHaveBeenCalledTimes(pagesRead);
+      expect(result.structuredContent).toMatchObject({
+        history_scanned_through: through,
+        older_filings_unexamined: older,
+      });
+      expect(blockText(result.content)).toContain(
+        `History scanned through: ${through} (${older ? 'older filings not examined' : 'no older filings on EDGAR'}).`,
+      );
+    });
+
+    it('carries neither field for a filer whose submissions list no filing', async () => {
+      mockApi.getSubmissions.mockResolvedValue(buildSubmissions({ filings: [] }));
+
+      const result = await runToolContract(getMaterialEventsTool, { company: 'AAPL' });
+
+      expect(result.isError).toBeFalsy();
+      expect(mockApi.fetchArchivePage).not.toHaveBeenCalled();
+      const structured = bag(result.structuredContent);
+      expect(structured.total_8k_scanned).toBe(0);
+      expect(structured.history_scanned_through).toBeUndefined();
+      expect(structured.older_filings_unexamined).toBeUndefined();
+      expect(blockText(result.content)).not.toContain('History scanned through');
+    });
+
+    it('format() claims no older filings only for an explicit false', () => {
+      const text = blockText(
+        getMaterialEventsTool.format!({
+          cik: '0000320193',
+          company_name: 'Apple Inc.',
+          total_matched: 0,
+          total_8k_scanned: 0,
+          item_distribution: {},
+          history_scanned_through: '2001-01-02',
+          filings: [],
+        }),
+      );
+
+      expect(text).toContain('History scanned through: 2001-01-02 (older filings not examined).');
+      expect(text).not.toContain('no older filings');
+    });
+  });
 });
 
 // Through the real argument-parsing path, where `inputAliases` is applied (#115).

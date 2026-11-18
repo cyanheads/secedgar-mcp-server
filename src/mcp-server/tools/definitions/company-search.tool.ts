@@ -406,7 +406,13 @@ export const companySearchTool = tool('secedgar_company_search', {
       .string()
       .optional()
       .describe(
-        'Oldest filing date the scan examined (YYYY-MM-DD). Archive pages past the recent window (last year or 1,000 filings) are read only for a date filter or an under-filled forms filter. Absent when nothing was scanned.',
+        'Oldest filing date the scan examined (YYYY-MM-DD), reaching past the recent window only for a date filter or an under-filled forms filter. Absent when nothing was scanned.',
+      ),
+    older_filings_unexamined: z
+      .boolean()
+      .optional()
+      .describe(
+        "Present with history_scanned_through: true when filings older than it went unexamined; false when the scan reached the company's first filing.",
       ),
     dataset: datasetSchema
       .extend({
@@ -418,7 +424,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       })
       .optional()
       .describe(
-        'Dataframe of the full filtered history (recent window plus archive pages), staged only when the scan went past the recent window and the history outgrows the inline list.',
+        'Dataframe of the full filtered history, staged only when the scan read archive pages and the history outgrows the inline list.',
       ),
   }),
 
@@ -536,6 +542,7 @@ export const companySearchTool = tool('secedgar_company_search', {
     let filings: FilingEntry[] | undefined;
     let totalFilings: number | undefined;
     let historyScannedThrough: string | undefined;
+    let olderFilingsUnexamined: boolean | undefined;
     let dataset:
       | { name: string; row_count: number; expires_at: string; truncated: boolean }
       | undefined;
@@ -593,6 +600,10 @@ export const companySearchTool = tool('secedgar_company_search', {
       const scannedBeyondRecent = walk.pagesRead > 0;
       // Oldest date reached — the deepest archive page read, else the recent window's tail.
       historyScannedThrough = walk.scannedThrough ?? recentRows.at(-1)?.filing_date;
+      // Not `truncated`, which sees only selected pages: a date filter, or an archive never
+      // walked, leaves older pages unselected (#248).
+      olderFilingsUnexamined =
+        historyScannedThrough === undefined ? undefined : walk.olderPagesUnread;
       const archiveTruncated = walk.truncated;
 
       const fullMatched = [...recentMatched, ...archiveMatched].sort((a, b) =>
@@ -684,6 +695,7 @@ export const companySearchTool = tool('secedgar_company_search', {
       filings,
       total_filings: totalFilings,
       history_scanned_through: historyScannedThrough,
+      older_filings_unexamined: olderFilingsUnexamined,
       dataset,
     };
   },
@@ -723,9 +735,12 @@ export const companySearchTool = tool('secedgar_company_search', {
       }
     }
     if (result.history_scanned_through) {
-      lines.push(
-        `\nHistory scanned through: ${result.history_scanned_through} (older filings not examined).`,
-      );
+      // Only a known false claims the history complete.
+      const older =
+        result.older_filings_unexamined === false
+          ? 'no older filings on EDGAR'
+          : 'older filings not examined';
+      lines.push(`\nHistory scanned through: ${result.history_scanned_through} (${older}).`);
     }
     if (result.dataset) {
       const truncatedNote = result.dataset.truncated

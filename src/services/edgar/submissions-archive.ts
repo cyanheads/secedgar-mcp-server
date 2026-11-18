@@ -4,7 +4,8 @@
  * window, which SEC sizes at one year or 1,000 filings, whichever holds more. Every
  * tool that reaches past `recent` walks through here, so they share one page cap, one
  * rule for when `recent` already covers the range, and one way of reporting how far
- * the scan reached and whether pages it selected went unread.
+ * the scan reached, whether pages it selected went unread, and whether the filer has
+ * older pages it never read.
  * @module services/edgar/submissions-archive
  */
 
@@ -88,10 +89,13 @@ export function selectArchivePages(
  * filing dated on or after that day.
  *
  * Iterate it with `for await`; breaking out after any page ends the walk there.
- * Afterwards `scannedThrough` and `truncated` describe what was read. Every page
- * is read under the calling tool's `scope`, so a cancel ends the walk (#179).
+ * Afterwards `scannedThrough`, `truncated`, and `olderPagesUnread` describe what was
+ * read. Every page is read under the calling tool's `scope`, so a cancel ends the
+ * walk (#179).
  */
 export class SubmissionsArchiveWalk implements AsyncIterable<ArchivePageRead> {
+  /** The whole manifest, selected or not — `olderPagesUnread` reads past the selection. */
+  private readonly files: readonly ArchivePageEntry[];
   private readonly pages: ArchivePageEntry[];
   private read = 0;
   private oldestRead: string | undefined;
@@ -102,11 +106,12 @@ export class SubmissionsArchiveWalk implements AsyncIterable<ArchivePageRead> {
     options: ArchiveWalkOptions,
     private readonly scope: CallScope,
   ) {
+    this.files = submissions.filings.files;
     const recentOldest = submissions.filings.recent.filingDate.at(-1);
     const coveredByRecent = Boolean(
       options.filedAfter && recentOldest && options.filedAfter >= recentOldest,
     );
-    this.pages = coveredByRecent ? [] : selectArchivePages(submissions.filings.files, options);
+    this.pages = coveredByRecent ? [] : selectArchivePages(this.files, options);
   }
 
   /** Pages read so far. */
@@ -122,6 +127,20 @@ export class SubmissionsArchiveWalk implements AsyncIterable<ArchivePageRead> {
   /** True while selected pages remain unread — the cap ended the walk, or the caller stopped it early. */
   get truncated(): boolean {
     return this.read < this.pages.length;
+  }
+
+  /**
+   * True when the manifest lists a page that starts before every page read (an earlier
+   * `filingFrom` than `scannedThrough`), or any page at all before the first read, since
+   * every archive page predates `recent`. Unlike `truncated` it counts pages the date
+   * bounds never selected, and ignores unread pages newer than the scan reached; false
+   * means the scan reached the filer's oldest filing (#248).
+   */
+  get olderPagesUnread(): boolean {
+    const through = this.oldestRead;
+    return through === undefined
+      ? this.files.length > 0
+      : this.files.some((page) => page.filingFrom < through);
   }
 
   async *[Symbol.asyncIterator](): AsyncGenerator<ArchivePageRead> {

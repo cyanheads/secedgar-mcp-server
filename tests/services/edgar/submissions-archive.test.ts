@@ -334,3 +334,100 @@ describe('SubmissionsArchiveWalk — one-day manifest drift (#137)', () => {
     expect(walk.truncated).toBe(false);
   });
 });
+
+/**
+ * Whether the manifest lists a page older than every page read — any page, when none was
+ * read (#248). It differs from `truncated` both ways: pages the bounds never selected count,
+ * and unread pages newer than the scan reached do not.
+ */
+describe('SubmissionsArchiveWalk.olderPagesUnread (#248)', () => {
+  /** Apple-shaped: one page back to its first filing. */
+  const APPLE_PAGE: ArchivePageEntry[] = [
+    { name: 'aapl-001', filingCount: 1249, filingFrom: '1994-01-26', filingTo: '2015-07-25' },
+  ];
+
+  const walkOver = (
+    options: Parameters<typeof selectArchivePages>[1],
+    files = FILES,
+    recent = RECENT,
+  ) => new SubmissionsArchiveWalk(recordingSource(), submissions(recent, files), options, scope());
+
+  it('is true before any page is read while the manifest lists one, as for a walk never started', () => {
+    const walk = walkOver({ order: 'newest-first' });
+
+    expect(walk.olderPagesUnread).toBe(true);
+    expect(walk.scannedThrough).toBeUndefined();
+  });
+
+  it('is false for a filer with no archive pages, walked or not', async () => {
+    const walk = walkOver({ order: 'newest-first' }, []);
+    expect(walk.olderPagesUnread).toBe(false);
+
+    expect(await drain(walk)).toEqual([]);
+    expect(walk.olderPagesUnread).toBe(false);
+  });
+
+  it('is false once every page is read, and turns false only on the oldest', async () => {
+    const walk = walkOver({ order: 'newest-first' }, FILES.slice(0, 3));
+    const seen: boolean[] = [];
+    for await (const _read of walk) seen.push(walk.olderPagesUnread);
+
+    expect(seen).toEqual([true, true, false]);
+    expect(walk.scannedThrough).toBe('2012-01-01');
+    expect(walk.truncated).toBe(false);
+  });
+
+  it('is false once the only page is read, Apple-shaped', async () => {
+    const walk = walkOver({ order: 'newest-first' }, APPLE_PAGE, ['2026-09-22', '2015-07-27']);
+
+    expect(await drain(walk)).toEqual(['aapl-001']);
+    expect(walk.olderPagesUnread).toBe(false);
+  });
+
+  it(`is true when the ${ARCHIVE_PAGE_SCAN_CAP}-page cap leaves older pages unread`, async () => {
+    const walk = walkOver({ order: 'newest-first' });
+
+    expect(await drain(walk)).toHaveLength(ARCHIVE_PAGE_SCAN_CAP);
+    expect(walk.olderPagesUnread).toBe(true);
+    expect(walk.truncated).toBe(true);
+  });
+
+  it('is true when the caller stops before the oldest page', async () => {
+    const walk = walkOver({ order: 'newest-first' }, FILES.slice(0, 3));
+
+    expect(await drain(walk, 2)).toEqual(['page-001', 'page-002']);
+    expect(walk.olderPagesUnread).toBe(true);
+  });
+
+  it('is true when filed_after leaves older pages unselected, every selected page read', async () => {
+    const walk = walkOver({ filedAfter: '2011-01-01', order: 'newest-first' });
+
+    expect(await drain(walk)).toHaveLength(5);
+    expect(walk.truncated).toBe(false);
+    expect(walk.olderPagesUnread).toBe(true);
+  });
+
+  it('is true when recent covers filed_after and no page is selected', async () => {
+    const walk = walkOver({ filedAfter: '2015-06-01', order: 'newest-first' });
+
+    expect(await drain(walk)).toEqual([]);
+    expect(walk.truncated).toBe(false);
+    expect(walk.olderPagesUnread).toBe(true);
+  });
+
+  it('ignores unread pages newer than the scan reached: filed_before read to the oldest page', async () => {
+    const walk = walkOver({ filedBefore: '2003-06-30', order: 'newest-first' });
+
+    // Pages 001–011 start after the bound's one-day slack and are never selected.
+    expect(await drain(walk)).toEqual(['page-012', 'page-013', 'page-014']);
+    expect(walk.olderPagesUnread).toBe(false);
+  });
+
+  it('is false for an oldest-first walk stopped on the oldest page, though later pages go unread', async () => {
+    const walk = walkOver({ filedAfter: '2001-01-01', order: 'oldest-first' });
+
+    expect(await drain(walk, 1)).toEqual(['page-014']);
+    expect(walk.truncated).toBe(true);
+    expect(walk.olderPagesUnread).toBe(false);
+  });
+});
