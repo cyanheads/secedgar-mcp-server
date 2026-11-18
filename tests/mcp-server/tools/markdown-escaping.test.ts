@@ -208,15 +208,20 @@ describe('escapeMarkdownInline CPU time', () => {
     ['a backtick run', (chars) => `a${'`'.repeat(chars)}b`],
   ];
 
-  it.each(shapes)('escapes %s in time linear in its length', (_shape, make) => {
-    let smallest = 0;
-    for (let chars = SMALLEST; chars <= LARGEST; chars *= 2) {
-      // Small inputs are timed per call over a batch, so each measurement covers about 40k characters.
-      const micros = escapeMicros(make(chars), Math.ceil(40_000 / chars));
-      expect(micros, `${chars} characters`).toBeLessThan((chars * BUDGET_NS_PER_CHAR) / 1000);
-      if (chars === SMALLEST) smallest = micros;
-      // Linear growth with 4x slack at every size, so 256x the smallest at the 64x span.
-      expect(micros / smallest, `${chars} characters`).toBeLessThan((4 * chars) / SMALLEST);
-    }
-  });
+  // Timeout 0: a sync body can't be interrupted; a wall-clock limit only fails it under load.
+  it.each(shapes)(
+    'escapes %s in time linear in its length',
+    (_shape, make) => {
+      let smallest = 0;
+      for (let chars = SMALLEST; chars <= LARGEST; chars *= 2) {
+        // Small inputs are timed per call over a batch, so each measurement covers about 40k characters.
+        const micros = escapeMicros(make(chars), Math.ceil(40_000 / chars));
+        expect(micros, `${chars} characters`).toBeLessThan((chars * BUDGET_NS_PER_CHAR) / 1000);
+        if (chars === SMALLEST) smallest = micros;
+        // Linear growth with 4x slack at every size, so 256x the smallest at the 64x span.
+        expect(micros / smallest, `${chars} characters`).toBeLessThan((4 * chars) / SMALLEST);
+      }
+    },
+    0,
+  );
 });

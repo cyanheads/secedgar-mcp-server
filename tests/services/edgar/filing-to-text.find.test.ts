@@ -230,6 +230,7 @@ describe('findPhrase — CPU time, linear in the text length', () => {
     ],
   ];
 
+  // Timeout 0: a sync body can't be interrupted; a wall-clock limit only fails it under load.
   it.each(shapes)(
     'scans a text of %s in time linear in its length',
     (_shape, make, phrase, first) => {
@@ -243,5 +244,6 @@ describe('findPhrase — CPU time, linear in the text length', () => {
         expect(micros / smallest, `${chars} characters`).toBeLessThan((4 * chars) / first);
       }
     },
+    0,
   );
 });

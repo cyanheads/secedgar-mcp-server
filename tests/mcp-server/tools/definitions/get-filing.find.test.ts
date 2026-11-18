@@ -537,14 +537,19 @@ describe('find — CPU time, linear in the text length', () => {
     ],
   ];
 
-  it.each(shapes)('finds %s in time linear in the text length', async (_shape, make) => {
-    let smallest = 0;
-    for (let chars = 5_000; chars <= 320_000; chars *= 2) {
-      const micros = await handlerMicros(make(chars), Math.ceil(64_000 / chars));
-      expect(micros, `${chars} characters`).toBeLessThan((chars * BUDGET_NS_PER_CHAR) / 1000);
-      if (chars === 5_000) smallest = micros;
-      // Linear growth with 4x slack: the full 64x span may cost at most 256x the smallest size.
-      expect(micros / smallest, `${chars} characters`).toBeLessThan((4 * chars) / 5_000);
-    }
-  });
+  // Timeout 0: these await only in-memory stubs; a wall-clock limit only fails them under load.
+  it.each(shapes)(
+    'finds %s in time linear in the text length',
+    async (_shape, make) => {
+      let smallest = 0;
+      for (let chars = 5_000; chars <= 320_000; chars *= 2) {
+        const micros = await handlerMicros(make(chars), Math.ceil(64_000 / chars));
+        expect(micros, `${chars} characters`).toBeLessThan((chars * BUDGET_NS_PER_CHAR) / 1000);
+        if (chars === 5_000) smallest = micros;
+        // Linear growth with 4x slack: the full 64x span may cost at most 256x the smallest size.
+        expect(micros / smallest, `${chars} characters`).toBeLessThan((4 * chars) / 5_000);
+      }
+    },
+    0,
+  );
 });

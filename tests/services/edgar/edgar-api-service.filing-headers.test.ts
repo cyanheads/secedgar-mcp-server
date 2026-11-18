@@ -346,6 +346,7 @@ describe('filingPartyCiks — linear in the page’s length (#203)', () => {
     expect(last / t5k).toBeLessThan(256);
   }
 
+  // Timeout 0: a sync body can't be interrupted; a wall-clock limit only fails it under load.
   it.each([
     ['link openers with no closer', (n: number) => fill('browse-edgar?', n)],
     ['one query with no closer', (n: number) => `browse-edgar?${fill('&amp;x=1', n)}`],
@@ -365,7 +366,11 @@ describe('filingPartyCiks — linear in the page’s length (#203)', () => {
       'a query of one long line ending in a break',
       (n: number) => `browse-edgar?${fill('§1 x', n)}\ny`,
     ],
-  ])('%s (5k → 320k)', (_label, build) => {
-    expectLinear(build);
-  });
+  ])(
+    '%s (5k → 320k)',
+    (_label, build) => {
+      expectLinear(build);
+    },
+    0,
+  );
 });

@@ -302,13 +302,22 @@ describe('name-matching helpers — linear in the text’s length (#218, #219)',
     ['breaks throughout', (n) => fill('  \r\n', n)],
   ];
 
-  it.each(shapes)('foldNamePunctuation: %s (5k → 320k)', (_label, build) => {
-    expectLinear(foldNamePunctuation, build);
-  });
+  // Timeout 0: a sync body can't be interrupted; a wall-clock limit only fails it under load.
+  it.each(shapes)(
+    'foldNamePunctuation: %s (5k → 320k)',
+    (_label, build) => {
+      expectLinear(foldNamePunctuation, build);
+    },
+    0,
+  );
 
-  it.each(shapes)('joinSpacedInitials: %s (5k → 320k)', (_label, build) => {
-    expectLinear(joinSpacedInitials, build);
-  });
+  it.each(shapes)(
+    'joinSpacedInitials: %s (5k → 320k)',
+    (_label, build) => {
+      expectLinear(joinSpacedInitials, build);
+    },
+    0,
+  );
 
   it.each([
     ...shapes,
@@ -318,11 +327,16 @@ describe('name-matching helpers — linear in the text’s length (#218, #219)',
     (_label, build) => {
       expectLinear((text) => containsFromWordStart(text, 'ab'), build);
     },
+    0,
   );
 
-  it.each(shapes)('containsFromWordStart, %s as the query (5k → 320k)', (_label, build) => {
-    expectLinear((text) => containsFromWordStart('helix acquisition corp. iii', text), build);
-  });
+  it.each(shapes)(
+    'containsFromWordStart, %s as the query (5k → 320k)',
+    (_label, build) => {
+      expectLinear((text) => containsFromWordStart('helix acquisition corp. iii', text), build);
+    },
+    0,
+  );
 });
 
 // ---------------------------------------------------------------------------

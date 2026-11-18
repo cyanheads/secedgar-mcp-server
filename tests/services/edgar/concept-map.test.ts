@@ -946,6 +946,8 @@ describe('the camelCase key — linear in the input’s length (#240)', () => {
     expect(last / t5k).toBeLessThan(256);
   }
 
+  // Timeout 0: a sync body can't be interrupted; a wall-clock limit only fails it under load.
+
   // Each shape opens lowercase, so the plain key misses and the split runs on all of it.
   it.each([
     ['a hump at every other character', (n: number) => fill('aB', n)],
@@ -953,7 +955,11 @@ describe('the camelCase key — linear in the input’s length (#240)', () => {
     ['one uppercase run', (n: number) => `a${fill('B', n)}`],
     ['one long line ending in a break', (n: number) => `a${fill('§1 x', n)}\ny`],
     ['breaks throughout', (n: number) => `a${fill('  \r\n', n)}B`],
-  ])('%s (5k → 320k)', (_label, build) => {
-    expectLinear(build);
-  });
+  ])(
+    '%s (5k → 320k)',
+    (_label, build) => {
+      expectLinear(build);
+    },
+    0,
+  );
 });

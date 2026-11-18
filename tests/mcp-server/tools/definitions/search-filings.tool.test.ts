@@ -4451,6 +4451,8 @@ describe('searchFilingsTool — entity tokens read in time linear in the query�
 
   const REJECTED = 'unsupported_entity_scope';
 
+  // Timeout 0: these await only in-memory stubs; a wall-clock limit only fails them under load.
+
   /**
    * Doubles n from 5,000 to 320,000, checking the CPU bound at each size before building the
    * next, so a quadratic shape fails fast instead of hanging, then holds the 64× span's ratio
@@ -4491,27 +4493,31 @@ describe('searchFilingsTool — entity tokens read in time linear in the query�
       (n: number) => `x${fill('  \r\n', n)}-ticker:A`,
       REJECTED,
     ],
-  ])('%s (5k → 320k)', async (_label, build, expected) => {
-    const small = build(5_000);
-    await perCallCpuMs(small); // warm the JIT
-    const first = await perCallCpuMs(small);
-    expect(first.path).toBe(expected);
-    const t5k = Math.max(first.ms, 0.001);
-    let last = first.ms;
-    for (let n = 10_000; n <= 320_000; n *= 2) {
-      const timed = await perCallCpuMs(build(n));
-      expect(timed.path, `${n} characters`).toBe(expected);
-      expect(timed.ms, `${n} characters`).toBeLessThan(100);
-      last = timed.ms;
-    }
-    expect(last / t5k).toBeLessThan(256);
-    if (expected === 'scoped') {
-      expect(mockApi.searchFilings).toHaveBeenLastCalledWith(
-        expect.objectContaining({ ciks: ['0000000001'] }),
-        expect.any(CallScope),
-      );
-    } else {
-      expect(mockApi.searchFilings).not.toHaveBeenCalled();
-    }
-  });
+  ])(
+    '%s (5k → 320k)',
+    async (_label, build, expected) => {
+      const small = build(5_000);
+      await perCallCpuMs(small); // warm the JIT
+      const first = await perCallCpuMs(small);
+      expect(first.path).toBe(expected);
+      const t5k = Math.max(first.ms, 0.001);
+      let last = first.ms;
+      for (let n = 10_000; n <= 320_000; n *= 2) {
+        const timed = await perCallCpuMs(build(n));
+        expect(timed.path, `${n} characters`).toBe(expected);
+        expect(timed.ms, `${n} characters`).toBeLessThan(100);
+        last = timed.ms;
+      }
+      expect(last / t5k).toBeLessThan(256);
+      if (expected === 'scoped') {
+        expect(mockApi.searchFilings).toHaveBeenLastCalledWith(
+          expect.objectContaining({ ciks: ['0000000001'] }),
+          expect.any(CallScope),
+        );
+      } else {
+        expect(mockApi.searchFilings).not.toHaveBeenCalled();
+      }
+    },
+    0,
+  );
 });

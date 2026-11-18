@@ -2445,13 +2445,14 @@ describe('section targeting — one heading, linear in the value’s length', ()
     expect(last / t5k).toBeLessThan((4 * maxChars) / 5_000);
   }
 
+  // Timeout 0: these await only in-memory stubs; a wall-clock limit only fails them under load.
   it('case A', async () => {
     await expectLinear(
       (n) => ({ heading: `ITEM 1 ${'1'.repeat(n)}`, section: '1'.repeat(n / 2) }),
       320_000,
       200,
     );
-  });
+  }, 0);
 
   it.each([
     [
@@ -2465,9 +2466,13 @@ describe('section targeting — one heading, linear in the value’s length', ()
       'case C',
       (n: number) => ({ heading: `ITEM 1 ${'1'.repeat(n)}`, section: `${fill('  \r\n', n)}1` }),
     ],
-  ])('%s', async (_label, build) => {
-    await expectLinear(build, 80_000, 200);
-  });
+  ])(
+    '%s',
+    async (_label, build) => {
+      await expectLinear(build, 80_000, 200);
+    },
+    0,
+  );
 });
 
 describe('section targeting — every resolution step stays linear in a caller-sized value', () => {
@@ -2600,29 +2605,28 @@ describe('section targeting — every resolution step stays linear in a caller-s
    */
   const ITEM_7 = DOC.indexOf('ITEM 7. MANAGEMENT');
   const FIRST_ANALYSIS_NOTE = DOC.indexOf('NOTE 3 — DEBT ANALYSIS OF ITEM 1\n');
-  // The CPU bound at each size is the guard; the wall-clock timeout only absorbs a loaded machine.
-  const SLACK = { timeout: 30_000 };
 
+  // Timeout 0: these await only in-memory stubs; a wall-clock limit only fails them under load.
   describe.each([
     ['a 10-K', '10-K', ITEM_7],
     ['a proxy statement', 'DEF 14A', FIRST_ANALYSIS_NOTE],
   ])('in %s', (_label, form, analysisLanding) => {
-    it('case A', SLACK, async () => {
+    it('case A', async () => {
       await expectLinear((n) => '1'.repeat(n), form, 320_000, 'miss');
-    });
+    }, 0);
 
-    it('case B', SLACK, async () => {
+    it('case B', async () => {
       await expectLinear((n) => `${fill('§1 x', n)}\ny`, form, 80_000, 'miss');
-    });
+    }, 0);
 
-    it('case C', SLACK, async () => {
+    it('case C', async () => {
       await expectLinear((n) => `item 1${'.'.repeat(n)}x`, form, 80_000, 'miss');
-    });
+    }, 0);
 
     // Folds to "analysis", which lands apart in the two forms, so each run takes its own order.
-    it('case D', SLACK, async () => {
+    it('case D', async () => {
       await expectLinear((n) => `${fill('  \r\n', n)}analysis`, form, 80_000, analysisLanding);
-    });
+    }, 0);
   });
 });
 
@@ -3115,17 +3119,22 @@ describe('the filing body reads back from its fenced block (#226)', () => {
       ['line breaks throughout', (chars) => '  \r\n'.repeat(chars / 4)],
     ];
 
-    it.each(shapes)('renders a body of %s in time linear in its length', (_shape, make) => {
-      let smallest = 0;
-      for (let chars = 5_000; chars <= 320_000; chars *= 2) {
-        // Small bodies are timed per render over a batch, so each measurement covers about 40k characters.
-        const micros = renderMicros(make(chars), Math.ceil(40_000 / chars));
-        expect(micros, `${chars} characters`).toBeLessThan((chars * BUDGET_NS_PER_CHAR) / 1000);
-        if (chars === 5_000) smallest = micros;
-        // Linear growth with 4x slack: the full 64x span may cost at most 256x the smallest size.
-        expect(micros / smallest, `${chars} characters`).toBeLessThan((4 * chars) / 5_000);
-      }
-    });
+    // Timeout 0: a sync body can't be interrupted; a wall-clock limit only fails it under load.
+    it.each(shapes)(
+      'renders a body of %s in time linear in its length',
+      (_shape, make) => {
+        let smallest = 0;
+        for (let chars = 5_000; chars <= 320_000; chars *= 2) {
+          // Small bodies are timed per render over a batch, so each measurement covers about 40k characters.
+          const micros = renderMicros(make(chars), Math.ceil(40_000 / chars));
+          expect(micros, `${chars} characters`).toBeLessThan((chars * BUDGET_NS_PER_CHAR) / 1000);
+          if (chars === 5_000) smallest = micros;
+          // Linear growth with 4x slack: the full 64x span may cost at most 256x the smallest size.
+          expect(micros / smallest, `${chars} characters`).toBeLessThan((4 * chars) / 5_000);
+        }
+      },
+      0,
+    );
   });
 });
 

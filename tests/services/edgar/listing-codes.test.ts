@@ -256,6 +256,7 @@ describe('readTickerSpelling — linear in the input’s length (#235)', () => {
     expect(last / t5k).toBeLessThan(256);
   }
 
+  // Timeout 0: a sync body can't be interrupted; a wall-clock limit only fails it under load.
   it.each([
     ['a long digit run', (n: number) => fill('7', n)],
     ['a long letter run, read as a root', (n: number) => fill('A', n)],
@@ -265,7 +266,11 @@ describe('readTickerSpelling — linear in the input’s length (#235)', () => {
     ['dotted segments before a non-US code', (n: number) => `${fill('A.', n)}T`],
     ['one long line ending in a break', (n: number) => `${fill('§1 x', n)}\ny`],
     ['breaks throughout', (n: number) => fill('  \r\n', n)],
-  ])('%s (5k → 320k)', (_label, build) => {
-    expectLinear(build);
-  });
+  ])(
+    '%s (5k → 320k)',
+    (_label, build) => {
+      expectLinear(build);
+    },
+    0,
+  );
 });

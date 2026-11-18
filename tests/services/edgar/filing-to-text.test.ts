@@ -761,6 +761,7 @@ function expectLinear(
 }
 
 describe('detectHeadings — heading scans stay linear on long lines (#136)', () => {
+  // Timeout 0: a sync body can't be interrupted; a wall-clock limit only fails it under load.
   it.each([
     ['wrapped Item lines under prose lines', (n: number) => fill('see\nItem 1 Business\n', n)],
     [
@@ -774,9 +775,13 @@ describe('detectHeadings — heading scans stay linear on long lines (#136)', ()
     ['one ITEM line holding a long digit run', (n: number) => `ITEM ${'1'.repeat(n)}\ny`],
     ['one long line ending in a break', (n: number) => `${fill('§1 x', n)}\ny`],
     ['breaks throughout', (n: number) => fill('  \r\n', n)],
-  ])('%s (5k → 320k)', (_label, build) => {
-    expectLinear(detectHeadings, build, 320_000, 200);
-  });
+  ])(
+    '%s (5k → 320k)',
+    (_label, build) => {
+      expectLinear(detectHeadings, build, 320_000, 200);
+    },
+    0,
+  );
 });
 
 /**
@@ -1880,10 +1885,12 @@ describe('detectHeadings — a same-line Item heading that opens on one NBSP (#1
 describe('detectHeadings — the NBSP-led Item scans stay linear (#176)', () => {
   const NBSP = ' ';
 
+  // Timeout 0: a sync body can't be interrupted; a wall-clock limit only fails it under load.
+
   // A long digit run never crosses Bun's slower regex mode, so it carries the full 64× span.
   it('one NBSP-led all-caps ITEM line holding a long digit run (5k → 320k)', () => {
     expectLinear(detectHeadings, (n) => `${NBSP}ITEM ${'1'.repeat(n)}\ny`, 320_000, 400);
-  });
+  }, 0);
 
   it.each([
     [
@@ -1898,12 +1905,17 @@ describe('detectHeadings — the NBSP-led Item scans stay linear (#176)', () => 
     ['NBSP lines throughout', (n: number) => fill(`${NBSP}\r\n`, n)],
     ['NBSP-led Item lines throughout', (n: number) => fill(`${NBSP}Item 1.01 X\r\n`, n)],
     ['NBSP-led Part lines throughout', (n: number) => fill(`${NBSP}Part II —  \r\n`, n)],
-  ])('%s (5k → 80k)', (_label, build) => {
-    expectLinear(detectHeadings, build, 80_000, 200);
-  });
+  ])(
+    '%s (5k → 80k)',
+    (_label, build) => {
+      expectLinear(detectHeadings, build, 80_000, 200);
+    },
+    0,
+  );
 });
 
 describe('detectHeadings — the widened heading scans stay linear (#165, #170)', () => {
+  // Timeout 0: a sync body can't be interrupted; a wall-clock limit only fails it under load.
   it.each([
     ['a dotted marker before a long whitespace run', (n: number) => `Item 5.02${' '.repeat(n)}1\n`],
     [
@@ -1981,9 +1993,13 @@ describe('detectHeadings — the widened heading scans stay linear (#165, #170)'
       (n: number) => fill('Item 1ARISK\nItem 2.0 x\nPart Ifoo\n', n),
     ],
     ['a long run of lettered codes', (n: number) => `Item 1${fill('A', n)}b\n`],
-  ])('%s', (_label, build) => {
-    expectLinear(detectHeadings, build, 320_000, 800);
-  });
+  ])(
+    '%s',
+    (_label, build) => {
+      expectLinear(detectHeadings, build, 320_000, 800);
+    },
+    0,
+  );
 
   // The all-caps arm alternated its class with `[^\S\n]` under one quantifier,
   // which fell off a cliff past about 100,000 characters (25 ms at 160,000
@@ -1998,9 +2014,13 @@ describe('detectHeadings — the widened heading scans stay linear (#165, #170)'
       'an all-caps start and a long whitespace run, then lowercase',
       (n: number) => `ABCDEFGHIJ${' '.repeat(n)}x\n`,
     ],
-  ])('%s stays flat past 100,000 characters', (_label, build) => {
-    expectLinear(detectHeadings, build, 320_000, 20);
-  });
+  ])(
+    '%s stays flat past 100,000 characters',
+    (_label, build) => {
+      expectLinear(detectHeadings, build, 320_000, 20);
+    },
+    0,
+  );
 });
 
 describe('foldForHeadingMatch (#106)', () => {
@@ -2805,6 +2825,7 @@ describe('findSectionLine — a line carrying a leading 20-F sub-item label (#17
 });
 
 describe('findSectionLine — the whole-document scan stays linear (#166)', () => {
+  // Timeout 0: a sync body can't be interrupted; a wall-clock limit only fails it under load.
   it.each([
     ['one line with no newline', (n: number) => fill('Competitor ', n)],
     ['many short lines, each a near miss', (n: number) => fill('Competitor\n', n)],
@@ -2878,18 +2899,23 @@ describe('findSectionLine — the whole-document scan stays linear (#166)', () =
       (n: number) => `Competition\n${fill('§1 x', n)}\ny`,
     ],
     ['an equal line over breaks throughout', (n: number) => `Competition\n${fill('  \r\n', n)}`],
-  ])('%s', (_label, build) => {
-    expectLinear((text) => findSectionLine(text, 'Competition'), build, 320_000, 200);
-  });
+  ])(
+    '%s',
+    (_label, build) => {
+      expectLinear((text) => findSectionLine(text, 'Competition'), build, 320_000, 200);
+    },
+    0,
+  );
 });
 
 describe('the heading key, the label strip, and the TOC-row test stay linear (#174, #175)', () => {
   const NBSP = ' ';
   const lineScan = (text: string) => findSectionLine(text, 'risk factors');
 
+  // Timeout 0: a sync body can't be interrupted; a wall-clock limit only fails it under load.
   it('a line scan over case A', () => {
     expectLinear(lineScan, (n) => `Item 1. ${'1'.repeat(n)}\ny`, 320_000, 200);
-  });
+  }, 0);
 
   it.each([
     ['case B', (n: number) => `${fill('§1 x', n)}\ny`],
@@ -2904,16 +2930,24 @@ describe('the heading key, the label strip, and the TOC-row test stay linear (#1
     // The key's abutting-marker read (#180).
     ['a Part marker before a long whitespace run', (n: number) => `Part${' '.repeat(n)}IVx\n`],
     ['abutting markers throughout', (n: number) => fill('Item 1Financial Statements\n', n)],
-  ])('a line scan over %s (5k → 80k)', (_label, build) => {
-    expectLinear(lineScan, build, 80_000, 200);
-  });
+  ])(
+    'a line scan over %s (5k → 80k)',
+    (_label, build) => {
+      expectLinear(lineScan, build, 80_000, 200);
+    },
+    0,
+  );
 
   it.each([
     ['repeated Item headings with separators', (n: number) => fill('Item 1A. – Risk Factors\n', n)],
     ['repeated labelled all-caps headings', (n: number) => fill('D. RISK FACTORS\n', n)],
-  ])('heading detection over %s (5k → 80k)', (_label, build) => {
-    expectLinear(detectHeadings, build, 80_000, 200);
-  });
+  ])(
+    'heading detection over %s (5k → 80k)',
+    (_label, build) => {
+      expectLinear(detectHeadings, build, 80_000, 200);
+    },
+    0,
+  );
 
   it.each([
     [
@@ -2958,9 +2992,13 @@ describe('the heading key, the label strip, and the TOC-row test stay linear (#1
       'ITEM 1. RISK',
       (n: number) => `ITEM 1. RISK\n${fill('  \r\n', n)}`,
     ],
-  ])('the TOC-row test over %s (5k → 80k)', (_label, heading, build) => {
-    expectLinear((text) => isTocHeading(text, { heading, offset: 0 }), build, 80_000, 200);
-  });
+  ])(
+    'the TOC-row test over %s (5k → 80k)',
+    (_label, heading, build) => {
+      expectLinear((text) => isTocHeading(text, { heading, offset: 0 }), build, 80_000, 200);
+    },
+    0,
+  );
 });
 
 /**
@@ -3939,6 +3977,7 @@ describe('filingToExtract — filer text in an SEC rendering keeps its breaks (#
 });
 
 describe('filingToExtract — <TEXT> body scan worst cases stay linear (#136, #159, #160)', () => {
+  // Timeout 0: a sync body can't be interrupted; a wall-clock limit only fails it under load.
   it.each([
     ['repeated opener, no closer', (n: number) => fill('<TEXT>', n)],
     ['nested openers', (n: number) => `${fill('<TEXT>', n / 2)}x${fill('</TEXT>', n / 2)}`],
@@ -3989,11 +4028,15 @@ describe('filingToExtract — <TEXT> body scan worst cases stay linear (#136, #1
       '<body prefixes in an HTML fragment after a <body>',
       (n: number) => `<body><TEXT><P>${fill('<bod', n)}</TEXT>`,
     ],
-  ])('%s (5k → 80k)', (_label, build) => {
-    // Measured at 1–17 ms for 80k. A lazy `<TEXT>([\s\S]*?)</TEXT>` regex scan
-    // takes ~470 ms on the no-closer shape alone, a 230× span ratio.
-    expectLinear(filingToExtract, build, 80_000, 200);
-  });
+  ])(
+    '%s (5k → 80k)',
+    (_label, build) => {
+      // Measured at 1–17 ms for 80k. A lazy `<TEXT>([\s\S]*?)</TEXT>` regex scan
+      // takes ~470 ms on the no-closer shape alone, a 230× span ratio.
+      expectLinear(filingToExtract, build, 80_000, 200);
+    },
+    0,
+  );
 
   // A long digit run carries the full 64× span; so do the line-break shapes.
   it.each([
@@ -4003,9 +4046,13 @@ describe('filingToExtract — <TEXT> body scan worst cases stay linear (#136, #1
       (n: number) => `<TEXT>${fill('§1 x', n)}\ny</TEXT>`,
     ],
     ['a plain body with breaks throughout', (n: number) => `<TEXT>${fill('  \r\n', n)}</TEXT>`],
-  ])('%s (5k → 320k)', (_label, build) => {
-    expectLinear(filingToExtract, build, 320_000, 200);
-  });
+  ])(
+    '%s (5k → 320k)',
+    (_label, build) => {
+      expectLinear(filingToExtract, build, 320_000, 200);
+    },
+    0,
+  );
 });
 
 /**
