@@ -281,7 +281,7 @@ export const getFinancialsTool = tool('secedgar_get_financials', {
     dataset: datasetSchema
       .optional()
       .describe(
-        'Dataframe of the same series; fiscal keys are source_filing_fy/source_filing_fp, so order by period_end. Absent when canvas is unavailable.',
+        'Dataframe of the series: company is entity_name, start/end are period_start/period_end, fiscal keys are source_filing_fy/source_filing_fp; order by period_end. Absent without canvas.',
       ),
     caveats: z
       .array(z.string())

@@ -3,10 +3,15 @@
  * @module tests/mcp-server/tools/definitions/fetch-frames.tool
  */
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { z } from '@cyanheads/mcp-ts-core';
+import { CanvasRegistry, DataCanvas, DuckdbProvider } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { dataframeQueryTool } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
 import {
   createFetchFramesTool,
   fetchFramesTool,
@@ -30,9 +35,9 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
   getCanvasBridge: vi.fn(),
 }));
 
-import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import { CanvasBridge, getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
 import { getEdgarApiService } from '@/services/edgar/edgar-api-service.js';
-import { at, bag, blockText, wireError } from '../../../support/assertions.js';
+import { at, bag, blockText, caught, wireError } from '../../../support/assertions.js';
 import { readCommonMark } from '../../../support/commonmark.js';
 
 const mockFramesResponse: FramesResponse = {
@@ -1663,5 +1668,136 @@ describe('fetchFramesTool — limit above the 100 cap (#197)', () => {
     const rejected = await runToolContract(off, { ...args, limit: 101 });
     expect(rejected.isError).toBe(true);
     expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
+  });
+});
+
+/**
+ * The staged frame names its columns as the inline rows do (#253): SQL written
+ * from `data[]` binds against the dataframe. The staged rows add `period_start`
+ * and leave out `rank`, a position in one sort order.
+ */
+describe('fetchFramesTool — staged column names (#253)', () => {
+  const stagedColumns = [
+    'cik',
+    'company_name',
+    'ticker',
+    'value',
+    'location',
+    'period_start',
+    'period_end',
+    'accession_number',
+  ];
+
+  it('hands the canvas rows keyed as the inline rows, company_name included', async () => {
+    const registerDataframe = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(getCanvasBridge).mockReturnValueOnce({ registerDataframe } as never);
+
+    const result = await runToolContract(fetchFramesTool, { concept: 'revenue', period: 'CY2023' });
+
+    const { rows } = at(registerDataframe.mock.calls, 0)[1];
+    expect(rows.map((row: Record<string, unknown>) => Object.keys(row))).toEqual([
+      stagedColumns,
+      stagedColumns,
+      stagedColumns,
+    ]);
+    expect(rows.map((row: Record<string, unknown>) => [row.cik, row.company_name])).toEqual([
+      ['0000320193', 'Apple Inc.'],
+      ['0001018724', 'AMAZON COM INC'],
+      ['0001652044', 'Alphabet Inc.'],
+    ]);
+    // The inline rows keep their keys, and name each CIK as the staged row does.
+    const data = (result.structuredContent as { data: Array<Record<string, unknown>> }).data;
+    expect(data.map((row) => Object.keys(row))).toEqual(
+      data.map(() => [
+        'rank',
+        'company_name',
+        'cik',
+        'ticker',
+        'value',
+        'location',
+        'period_end',
+        'accession_number',
+      ]),
+    );
+    expect(data.map((row) => [row.cik, row.company_name])).toEqual([
+      ['0001018724', 'AMAZON COM INC'],
+      ['0000320193', 'Apple Inc.'],
+      ['0001652044', 'Alphabet Inc.'],
+    ]);
+  });
+
+  describe('on the real DuckDB canvas', () => {
+    let exportRoot: string;
+    let canvas: DataCanvas;
+
+    beforeAll(() => {
+      process.env.EDGAR_USER_AGENT ??= 'test test@example.com';
+    });
+
+    beforeEach(() => {
+      exportRoot = mkdtempSync(join(tmpdir(), 'secedgar-frames-'));
+      const provider = new DuckdbProvider({
+        memoryLimitMb: 256,
+        exportRootPath: exportRoot,
+        defaultRowLimit: 10_000,
+        schemaSniffRows: 100,
+      });
+      canvas = new DataCanvas(
+        provider,
+        new CanvasRegistry(provider, {
+          ttlMs: 60_000,
+          absoluteCapMs: 600_000,
+          maxCanvasesPerTenant: 100,
+          sweeperIntervalMs: 0,
+        }),
+      );
+      vi.mocked(getCanvasBridge).mockReturnValue(
+        new CanvasBridge(canvas, { listingEnabled: true }),
+      );
+    });
+
+    afterEach(async () => {
+      await canvas.shutdown(createMockContext());
+      rmSync(exportRoot, { recursive: true, force: true });
+    });
+
+    it('binds company_name and not entity_name in secedgar_dataframe_query', async () => {
+      const staging = createMockContext({ errors: fetchFramesTool.errors });
+      const frames = await fetchFramesTool.handler(
+        fetchFramesTool.input.parse({ concept: 'revenue', period: 'CY2023' }),
+        staging,
+      );
+      const dataset = frames.dataset?.name;
+      expect(dataset).toMatch(/^df_[A-Z0-9]{5}_[A-Z0-9]{5}$/);
+      /** A later call of the same tenant: its own context over the same tenant store. */
+      const query = () => ({
+        ...createMockContext({ errors: dataframeQueryTool.errors }),
+        state: staging.state,
+      });
+
+      const described = await getCanvasBridge()?.describe(query(), dataset);
+      expect(described?.[0]?.columnSchema.map((column) => column.name)).toEqual(stagedColumns);
+
+      const bound = await dataframeQueryTool.handler(
+        dataframeQueryTool.input.parse({
+          sql: `SELECT company_name FROM ${dataset} ORDER BY cik`,
+        }),
+        query(),
+      );
+      expect(bound.rows).toEqual([
+        { company_name: 'Apple Inc.' },
+        { company_name: 'AMAZON COM INC' },
+        { company_name: 'Alphabet Inc.' },
+      ]);
+
+      const refused = await caught(
+        dataframeQueryTool.handler(
+          dataframeQueryTool.input.parse({ sql: `SELECT entity_name FROM ${dataset}` }),
+          query(),
+        ),
+      );
+      expect(refused.data.reason).toBe('invalid_sql');
+      expect(`${refused.message} ${JSON.stringify(refused.data)}`).toContain('"company_name"');
+    });
   });
 });

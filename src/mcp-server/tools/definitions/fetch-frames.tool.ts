@@ -326,7 +326,7 @@ export const fetchFramesTool = tool('secedgar_fetch_frames', {
     if (bridge) {
       const allRows = enriched.map(({ entry, cik, ticker, location }) => ({
         cik,
-        entity_name: entry.entityName,
+        company_name: entry.entityName,
         ticker: ticker ?? null,
         value: entry.val,
         location: location ?? null,
