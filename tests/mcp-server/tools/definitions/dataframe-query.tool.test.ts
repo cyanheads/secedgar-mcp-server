@@ -3,11 +3,20 @@
  * @module tests/mcp-server/tools/definitions/dataframe-query.tool
  */
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { z } from '@cyanheads/mcp-ts-core';
-import { DUCKDB_ERROR_REASONS, SQL_GATE_REASONS } from '@cyanheads/mcp-ts-core/canvas';
+import {
+  CanvasRegistry,
+  DataCanvas,
+  DUCKDB_ERROR_REASONS,
+  DuckdbProvider,
+  SQL_GATE_REASONS,
+} from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createDataframeQueryTool,
   dataframeQueryTool,
@@ -19,8 +28,8 @@ vi.mock('@/services/canvas-bridge/canvas-bridge.js', async (importOriginal) => (
   getCanvasBridge: vi.fn(),
 }));
 
-import { getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
-import { bag, blockText, wireError } from '../../../support/assertions.js';
+import { CanvasBridge, getCanvasBridge } from '@/services/canvas-bridge/canvas-bridge.js';
+import { allText, bag, blockText, wireError } from '../../../support/assertions.js';
 import { readCommonMark } from '../../../support/commonmark.js';
 
 const mockBridge = {
@@ -409,17 +418,19 @@ describe('dataframeQueryTool', () => {
 
   it('reports row_limit as the cap when preview does not bind below it', async () => {
     vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+    // Without register_as the canvas stops the query at row_limit, so 5000 matching
+    // rows come back as the cap with `truncated` set.
     mockBridge.query.mockResolvedValue({
       result: {
         columns: ['id'],
-        rowCount: 5000,
+        rowCount: 100,
         rows: Array.from({ length: 100 }, (_, i) => ({ id: String(i) })),
+        truncated: true,
       },
       meta: undefined,
     });
     const ctx = createMockContext({ errors: dataframeQueryTool.errors });
-    // preview === row_limit is the boundary the canvas provider allows; it
-    // rejects preview > rowLimit outright, so that combination never reaches here.
+    // preview === row_limit does not bind; a larger preview is read as row_limit.
     const input = dataframeQueryTool.input.parse({
       sql: 'SELECT id FROM df_BIG',
       preview: 100,
@@ -935,5 +946,357 @@ describe('preview and row_limit above the 10000 cap (#197)', () => {
       expect(wireError(rejected).code).toBe(JsonRpcErrorCode.InvalidParams);
     }
     expect(mockBridge.query).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The truncation notice in every case the handler reaches (#252), on both
+ * surfaces. The fake answers as the canvas provider does: `preview` defaults to
+ * `rowLimit`; without `registerAs` the query stops at `rowLimit` and reports
+ * `truncated` past it; with `registerAs` every row is materialized, `rowCount` is
+ * the table's COUNT(*), and `truncated` is never set.
+ */
+describe('truncation notice per case (#252)', () => {
+  const sql = 'SELECT id FROM df_ABCDE_FGHIJ';
+  const name = 'df_FRM25_ALLRW';
+
+  function canvasHolding(total: number) {
+    vi.mocked(getCanvasBridge).mockReturnValue(mockBridge as any);
+    mockBridge.query.mockImplementation(
+      async (
+        _ctx: unknown,
+        _sql: string,
+        options: { rowLimit: number; preview?: number; registerAs?: string },
+      ) => {
+        const all = Array.from({ length: total }, (_, i) => ({ id: String(i) }));
+        const preview = options.preview ?? options.rowLimit;
+        if (options.registerAs !== undefined) {
+          return {
+            result: {
+              columns: ['id'],
+              rowCount: total,
+              rows: all.slice(0, preview),
+              tableName: options.registerAs,
+            },
+            meta: { tableName: options.registerAs, expiresAt: '2026-11-19T00:00:00.000Z' },
+          };
+        }
+        const fetched = all.slice(0, options.rowLimit);
+        return {
+          result: {
+            columns: ['id'],
+            rowCount: fetched.length,
+            rows: fetched.slice(0, preview),
+            ...(total > options.rowLimit && { truncated: true }),
+          },
+          meta: undefined,
+        };
+      },
+    );
+  }
+
+  it.each([
+    {
+      case: 'B — preview below an exact count, no register_as',
+      total: 50,
+      input: { preview: 10 },
+      notice:
+        'Showing 10 of 50 rows. Use register_as to persist the full result, or raise preview.',
+      shown: 10,
+      cap: 10,
+    },
+    {
+      case: 'C — row_limit below its maximum capped the query (unchanged)',
+      total: 3578,
+      input: { row_limit: 100 },
+      notice:
+        'Showing 100 rows. The query matched more than row_limit (100), so row_count is that cap and the full size is not in this response. Use register_as to materialize the whole result — its row_count is then exact — or raise row_limit (max 10000).',
+      shown: 100,
+      cap: 100,
+    },
+    {
+      case: 'C′ — row_limit at its maximum capped the query',
+      total: 10_001,
+      input: { row_limit: 10_000 },
+      notice:
+        'Showing 10000 rows. The query matched more than row_limit (10000), so row_count is that cap and the full size is not in this response. Use register_as to materialize the whole result — its row_count is then exact.',
+      shown: 10_000,
+      cap: 10_000,
+    },
+    {
+      case: 'C′ — row_limit above its maximum, served at it',
+      total: 10_001,
+      input: { row_limit: 50_000 },
+      notice:
+        'Showing 10000 rows. The query matched more than row_limit (10000), so row_count is that cap and the full size is not in this response. Use register_as to materialize the whole result — its row_count is then exact.',
+      shown: 10_000,
+      cap: 10_000,
+    },
+    {
+      case: 'D — row_limit below its maximum capped, preview cut further (unchanged)',
+      total: 3578,
+      input: { row_limit: 100, preview: 10 },
+      notice:
+        'Showing 10 rows. The query matched more than row_limit (100), so row_count is that cap and the full size is not in this response. Use register_as to materialize the whole result — its row_count is then exact — or raise preview, and raise row_limit (max 10000) to fetch past the query cap.',
+      shown: 10,
+      cap: 10,
+    },
+    {
+      case: 'D′ — row_limit at its maximum capped, preview cut further',
+      total: 10_001,
+      input: { row_limit: 10_000, preview: 5 },
+      notice:
+        'Showing 5 rows. The query matched more than row_limit (10000), so row_count is that cap and the full size is not in this response. Use register_as to materialize the whole result — its row_count is then exact — or raise preview.',
+      shown: 5,
+      cap: 5,
+    },
+    {
+      case: 'E — register_as with preview 0',
+      total: 3578,
+      input: { register_as: name, preview: 0 },
+      notice:
+        'Showing 0 of 3578 rows. The full result is registered as df_FRM25_ALLRW — query it with secedgar_dataframe_query.',
+      shown: 0,
+      cap: 0,
+    },
+    {
+      case: 'F — register_as, preview omitted, row_limit standing in for it',
+      total: 3578,
+      input: { register_as: name, row_limit: 100 },
+      notice:
+        'Showing 100 of 3578 rows. The full result is registered as df_FRM25_ALLRW — query it with secedgar_dataframe_query.',
+      shown: 100,
+      cap: 100,
+    },
+    {
+      case: 'F — register_as, row_limit at its maximum',
+      total: 10_001,
+      input: { register_as: name, row_limit: 10_000 },
+      notice:
+        'Showing 10000 of 10001 rows. The full result is registered as df_FRM25_ALLRW — query it with secedgar_dataframe_query.',
+      shown: 10_000,
+      cap: 10_000,
+    },
+    {
+      case: 'F′ — register_as, preview below row_limit',
+      total: 3578,
+      input: { register_as: name, row_limit: 100, preview: 10 },
+      notice:
+        'Showing 10 of 3578 rows. The full result is registered as df_FRM25_ALLRW — query it with secedgar_dataframe_query.',
+      shown: 10,
+      cap: 10,
+    },
+    {
+      case: 'register_as, preview above row_limit, read as row_limit',
+      total: 3578,
+      input: { register_as: name, row_limit: 100, preview: 500 },
+      notice:
+        'Showing 100 of 3578 rows. The full result is registered as df_FRM25_ALLRW — query it with secedgar_dataframe_query.',
+      shown: 100,
+      cap: 100,
+    },
+    {
+      case: 'preview above the default row_limit, read as row_limit',
+      total: 3578,
+      input: { preview: 2000 },
+      notice:
+        'Showing 1000 rows. The query matched more than row_limit (1000), so row_count is that cap and the full size is not in this response. Use register_as to materialize the whole result — its row_count is then exact — or raise row_limit (max 10000).',
+      shown: 1000,
+      cap: 1000,
+    },
+  ])('$case', async ({ total, input, notice, shown, cap }) => {
+    canvasHolding(total);
+
+    const result = await runToolContract(dataframeQueryTool, { sql, ...input });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ notice, truncated: true, shown, cap });
+    expect(allText(result)).toContain(`> ${notice}`);
+  });
+
+  it.each([
+    { case: 'A — every row inline, no register_as', total: 5, input: {} },
+    { case: 'G — every row inline, register_as', total: 5, input: { register_as: name } },
+    { case: 'preview above row_limit with every row inline', total: 50, input: { preview: 2000 } },
+  ])('$case: no notice', async ({ total, input }) => {
+    canvasHolding(total);
+
+    const result = await runToolContract(dataframeQueryTool, { sql, ...input });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured.rows).toHaveLength(total);
+    expect(structured).not.toHaveProperty('notice');
+    expect(structured).not.toHaveProperty('truncated');
+    expect(allText(result)).not.toContain('> ');
+  });
+
+  it.each([
+    { case: 'without register_as', input: {} },
+    { case: 'with register_as', input: { register_as: name, preview: 0 } },
+  ])('keeps the zero-row notice $case', async ({ input }) => {
+    canvasHolding(0);
+    const notice =
+      'Query returned 0 rows. Check the WHERE conditions against the column values; secedgar_dataframe_describe on the df_<id> name shows the columns.';
+
+    const result = await runToolContract(dataframeQueryTool, { sql, ...input });
+
+    expect(result.structuredContent).toMatchObject({ notice });
+    expect(result.structuredContent).not.toHaveProperty('truncated');
+    expect(allText(result)).toContain(`> ${notice}`);
+  });
+
+  it('hands the canvas a preview no larger than row_limit', async () => {
+    canvasHolding(3578);
+
+    await runToolContract(dataframeQueryTool, { sql, preview: 2000 });
+    await runToolContract(dataframeQueryTool, { sql, preview: 500, row_limit: 100 });
+
+    expect(mockBridge.query.mock.calls.map((call) => call[2])).toMatchObject([
+      { preview: 1000, rowLimit: 1000 },
+      { preview: 100, rowLimit: 100 },
+    ]);
+  });
+});
+
+/**
+ * The cases above on the framework's real `DataCanvas` and DuckDB provider, with
+ * production's default row limit: the canvas refuses a `preview` above `rowLimit`
+ * (`invalid_query_bounds`), and a `registerAs` table holds the whole result
+ * whatever `row_limit` is, which the registered notice states as its size (#252).
+ */
+describe('on the real DuckDB canvas (#252)', () => {
+  let exportRoot: string;
+  let canvas: DataCanvas;
+  let bridge: CanvasBridge;
+
+  beforeAll(() => {
+    process.env.EDGAR_USER_AGENT ??= 'test test@example.com';
+  });
+
+  beforeEach(() => {
+    exportRoot = mkdtempSync(join(tmpdir(), 'secedgar-query-'));
+    const provider = new DuckdbProvider({
+      memoryLimitMb: 256,
+      exportRootPath: exportRoot,
+      defaultRowLimit: 10_000,
+      schemaSniffRows: 100,
+    });
+    canvas = new DataCanvas(
+      provider,
+      new CanvasRegistry(provider, {
+        ttlMs: 60_000,
+        absoluteCapMs: 600_000,
+        maxCanvasesPerTenant: 100,
+        sweeperIntervalMs: 0,
+      }),
+    );
+    bridge = new CanvasBridge(canvas, { listingEnabled: true });
+    vi.mocked(getCanvasBridge).mockReturnValue(bridge);
+  });
+
+  afterEach(async () => {
+    await canvas.shutdown(createMockContext());
+    rmSync(exportRoot, { recursive: true, force: true });
+  });
+
+  const rows3578 = 'SELECT range AS n FROM range(3578)';
+
+  it('serves a preview above row_limit at row_limit instead of failing', async () => {
+    const result = await runToolContract(dataframeQueryTool, { sql: rows3578, preview: 2000 });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured.rows).toHaveLength(1000);
+    expect(structured).toMatchObject({
+      row_count: 1000,
+      row_count_capped: true,
+      truncated: true,
+      shown: 1000,
+      cap: 1000,
+      notice:
+        'Showing 1000 rows. The query matched more than row_limit (1000), so row_count is that cap and the full size is not in this response. Use register_as to materialize the whole result — its row_count is then exact — or raise row_limit (max 10000).',
+    });
+  });
+
+  it('serves a preview above row_limit at row_limit when every row fits', async () => {
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT range AS n FROM range(50)',
+      preview: 2000,
+    });
+
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as Record<string, unknown>;
+    expect(structured.rows).toHaveLength(50);
+    expect(structured).toMatchObject({ row_count: 50, row_count_capped: false });
+    expect(structured).not.toHaveProperty('notice');
+  });
+
+  it.each([
+    {
+      input: { preview: 0 },
+      shown: 0,
+      notice:
+        'Showing 0 of 3578 rows. The full result is registered as df_REGIS_PRV00 — query it with secedgar_dataframe_query.',
+      table: 'df_REGIS_PRV00',
+    },
+    {
+      input: { row_limit: 100 },
+      shown: 100,
+      notice:
+        'Showing 100 of 3578 rows. The full result is registered as df_REGIS_LIM01 — query it with secedgar_dataframe_query.',
+      table: 'df_REGIS_LIM01',
+    },
+    {
+      input: { row_limit: 100, preview: 500 },
+      shown: 100,
+      notice:
+        'Showing 100 of 3578 rows. The full result is registered as df_REGIS_PRVHI — query it with secedgar_dataframe_query.',
+      table: 'df_REGIS_PRVHI',
+    },
+  ])(
+    'registers all 3578 rows under $input and states that size',
+    async ({ input, shown, notice, table }) => {
+      const ctx = createMockContext({ errors: dataframeQueryTool.errors });
+
+      const output = await dataframeQueryTool.handler(
+        dataframeQueryTool.input.parse({ sql: rows3578, register_as: table, ...input }),
+        ctx,
+      );
+
+      expect(output.rows).toHaveLength(shown);
+      expect(output.row_count).toBe(3578);
+      expect(output.row_count_capped).toBe(false);
+      expect(getEnrichment(ctx).notice).toBe(notice);
+      const { result } = await bridge.query(ctx, `SELECT COUNT(*) AS n FROM ${table}`);
+      expect(Number(result.rows[0]?.n)).toBe(3578);
+    },
+  );
+
+  it('advertises row_count as every row of a register_as table, the count the case above observes', () => {
+    const { properties } = z.toJSONSchema(dataframeQueryTool.output) as {
+      properties: Record<string, { description?: string }>;
+    };
+
+    const description = properties.row_count?.description;
+    expect(description).toContain('with `register_as`, every row of the registered table');
+    expect(description).toContain('when `preview` or `row_limit` returned fewer');
+  });
+
+  it('names no row_limit lever when row_limit 10000 capped the query', async () => {
+    const result = await runToolContract(dataframeQueryTool, {
+      sql: 'SELECT range AS n FROM range(10001)',
+      row_limit: 10_000,
+      preview: 5,
+    });
+
+    expect(result.structuredContent).toMatchObject({
+      row_count: 10_000,
+      row_count_capped: true,
+      shown: 5,
+      cap: 5,
+      notice:
+        'Showing 5 rows. The query matched more than row_limit (10000), so row_count is that cap and the full size is not in this response. Use register_as to materialize the whole result — its row_count is then exact — or raise preview.',
+    });
   });
 });

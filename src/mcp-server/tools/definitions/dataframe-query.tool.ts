@@ -50,7 +50,7 @@ const previewLimit = limitClamp({
   bound: 100000,
   shape: (n) => n.optional(),
   description:
-    'Rows to include in the immediate response. Defaults to the row limit. Set lower (e.g., 50) when chaining via register_as and only a sample is needed inline.',
+    'Rows to include in the immediate response. Defaults to `row_limit`, and a value above `row_limit` is read as `row_limit`. Set lower (e.g., 50) when chaining via register_as and only a sample is needed inline.',
 });
 
 const rowLimit = limitClamp({
@@ -75,11 +75,8 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance when the query returned no rows, or when the row cap withheld some.'),
-    truncated: z
-      .boolean()
-      .optional()
-      .describe('True when the result set held more rows than the row cap allowed through.'),
+      .describe('Guidance when the query returned no rows or the row cap withheld some.'),
+    truncated: z.boolean().optional().describe('True when the row cap withheld rows.'),
     shown: z.number().optional().describe('Number of rows returned inline.'),
     cap: z
       .number()
@@ -201,7 +198,7 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
     row_count: z
       .number()
       .describe(
-        'Rows the query produced, up to `row_limit`; exceeds `rows.length` when `preview` returned fewer. When `row_count_capped` is true this is the cap, not the full size.',
+        'Rows the query produced, up to `row_limit` — with `register_as`, every row of the registered table; exceeds `rows.length` when `preview` or `row_limit` returned fewer. When `row_count_capped` is true this is the cap, not the full size.',
       ),
     row_count_capped: z
       .boolean()
@@ -215,10 +212,7 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       .string()
       .optional()
       .describe('Set when `register_as` was supplied and the new dataframe was materialized.'),
-    expires_at: z
-      .string()
-      .optional()
-      .describe('ISO 8601 expiry timestamp for the newly registered dataframe, when applicable.'),
+    expires_at: z.string().optional().describe('ISO 8601 expiry timestamp of `registered_as`.'),
   }),
 
   async handler(input, ctx) {
@@ -227,8 +221,13 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
       throw ctx.fail('canvas_unavailable', 'DataCanvas is not configured on this server.');
     }
 
-    const preview = previewLimit.apply(input.preview, ctx);
     const rowCap = rowLimit.apply(input.row_limit, ctx);
+    /**
+     * Inline rows never exceed `row_limit`, and the canvas refuses a `preview`
+     * above it, so one is served at `row_limit` — what the call without it returns.
+     */
+    const requestedPreview = previewLimit.apply(input.preview, ctx);
+    const preview = requestedPreview === undefined ? undefined : Math.min(requestedPreview, rowCap);
     const { result, meta } = await bridge.query(ctx, input.sql, {
       ...(input.register_as !== undefined && { registerAs: input.register_as }),
       ...(preview !== undefined && { preview }),
@@ -244,10 +243,9 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
     });
 
     // `preview` and `row_limit` are independent ceilings; report the one that
-    // actually bound, so `cap` names a number the caller can act on and the
-    // guidance points at the lever that will widen the window.
+    // actually bound, so `cap` names a number the caller can act on.
     const previewBinds = preview !== undefined && preview < rowCap;
-    const lever = previewBinds ? 'raise preview' : `raise row_limit (max ${MAX_ROWS})`;
+    const cap = previewBinds ? preview : rowCap;
 
     if (result.rowCount === 0) {
       ctx.enrich.notice(
@@ -261,28 +259,43 @@ export const dataframeQueryTool = tool('secedgar_dataframe_query', {
        * row past the cap and reports `truncated`, which is the only signal
        * separating a capped result from a table holding exactly `row_limit`
        * rows (#109). `rowCount` is that cap here, never a total, so the
-       * guidance names the ceiling instead of claiming a size.
+       * guidance names the ceiling instead of claiming a size. The canvas
+       * never caps a `registerAs` query, so this is always a call without
+       * `register_as`, and `row_limit` already at its maximum is no lever.
        */
+      const raiseRowLimit = rowCap < MAX_ROWS ? `raise row_limit (max ${MAX_ROWS})` : undefined;
+      let levers = '';
+      if (previewBinds) {
+        levers = raiseRowLimit
+          ? ` — or raise preview, and ${raiseRowLimit} to fetch past the query cap`
+          : ' — or raise preview';
+      } else if (raiseRowLimit) {
+        levers = ` — or ${raiseRowLimit}`;
+      }
       ctx.enrich.truncated({
         shown: result.rows.length,
-        cap: previewBinds ? preview : rowCap,
+        cap,
         guidance:
           `Showing ${result.rows.length} rows. The query matched more than row_limit (${rowCap}), so row_count is that cap and the full size is not in this response. ` +
-          `Use register_as to materialize the whole result — its row_count is then exact — or ${lever}` +
-          (previewBinds
-            ? `, and raise row_limit (max ${MAX_ROWS}) to fetch past the query cap.`
-            : '.'),
+          `Use register_as to materialize the whole result — its row_count is then exact${levers}.`,
       });
     } else if (result.rowCount > result.rows.length) {
       /**
        * `preview` slices after the query runs, and the `registerAs` path counts
        * the materialized table with COUNT(*), so `rowCount` is exact on both —
-       * the "of M" wording is correct here and only here.
+       * the "of M" wording is correct here and only here. A registered table
+       * already holds every row, so its notice names the table: raising
+       * `preview` or `row_limit` would re-run the query, which its own
+       * `register_as` name then refuses. Without `register_as` only `preview`
+       * holds rows back here — the canvas defaults it to `row_limit` — so it is
+       * the lever.
        */
       ctx.enrich.truncated({
         shown: result.rows.length,
-        cap: previewBinds ? preview : rowCap,
-        guidance: `Showing ${result.rows.length} of ${result.rowCount} rows (capped). Use register_as to persist the full result, or ${lever}.`,
+        cap,
+        guidance: meta
+          ? `Showing ${result.rows.length} of ${result.rowCount} rows. The full result is registered as ${meta.tableName} — query it with secedgar_dataframe_query.`
+          : `Showing ${result.rows.length} of ${result.rowCount} rows. Use register_as to persist the full result, or raise preview.`,
       });
     }
 
