@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.20.0](changelog/0.20.x/0.20.0.md) — 2026-11-17 · ⚠️ Breaking · 🛡️ Security
+
+The mirror's ticker sync drops symbols that left SEC's ticker files, secedgar_dataframe_query leaves SQL parsing to DuckDB alone, and company_search and get_material_events report whether older filings went unread. Breaking: secedgar_fetch_frames stages its filer column as company_name.
+
 ## [0.19.1](changelog/0.19.x/0.19.1.md) — 2026-11-13
 
 Every company-resolving tool resolves former tickers (AMRK is Gold.com), and secedgar_company_search finds filers with no ticker through EDGAR's entity index and names a private company's parent from 10-K subsidiaries exhibits. SEC's HTTP error bodies go to the server log instead of the error's data.

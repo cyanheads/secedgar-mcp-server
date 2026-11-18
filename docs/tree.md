@@ -1,6 +1,6 @@
 # secedgar-mcp-server - Directory Structure
 
-Generated on: 2026-11-13 13:36:37
+Generated on: 2026-11-18 06:00:20
 
 ```text
 secedgar-mcp-server/
@@ -36,6 +36,7 @@ secedgar-mcp-server/
 │   ├── 0.18.x/
 │   ├── 0.19.x/
 │   ├── 0.2.x/
+│   ├── 0.20.x/
 │   ├── 0.3.x/
 │   ├── 0.4.x/
 │   ├── 0.5.x/
@@ -205,8 +206,7 @@ secedgar-mcp-server/
 │   │       └── sec-upstream-errors.ts
 │   ├── services/
 │   │   ├── canvas-bridge/
-│   │   │   ├── canvas-bridge.ts
-│   │   │   └── sql-gate-extras.ts
+│   │   │   └── canvas-bridge.ts
 │   │   └── edgar/
 │   │       ├── data/
 │   │       │   ├── former-names.json
@@ -305,8 +305,7 @@ secedgar-mcp-server/
 │   ├── services/
 │   │   ├── canvas-bridge/
 │   │   │   ├── canvas-bridge.duckdb.test.ts
-│   │   │   ├── canvas-bridge.test.ts
-│   │   │   └── sql-gate-extras.test.ts
+│   │   │   └── canvas-bridge.test.ts
 │   │   └── edgar/
 │   │       ├── mirror/
 │   │       │   ├── companyfacts-sync.test.ts
@@ -344,7 +343,8 @@ secedgar-mcp-server/
 │   │       └── xml-nodes.test.ts
 │   ├── support/
 │   │   ├── assertions.ts
-│   │   └── commonmark.ts
+│   │   ├── commonmark.ts
+│   │   └── ticker-files.ts
 │   └── index.test.ts
 ├── .dockerignore
 ├── .env.example
