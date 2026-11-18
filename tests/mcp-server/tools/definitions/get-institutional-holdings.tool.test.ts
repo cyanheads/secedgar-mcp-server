@@ -1091,7 +1091,7 @@ describe('getInstitutionalHoldingsTool — available_documents leaves out namele
     vi.unstubAllGlobals();
   });
 
-  it('names only the listed files when the filing has no information table', async () => {
+  it('says the filing carries no XML information table and names only the listed files', async () => {
     const result = await runToolContract(getInstitutionalHoldingsTool, { company: '0000102909' });
 
     const error = wireError(result);
@@ -1100,6 +1100,16 @@ describe('getInstitutionalHoldingsTool — available_documents leaves out namele
       '0000102909-24-000001-index.html',
       '0000102909-24-000001.txt',
     ]);
+    expect(error.data).toMatchObject({
+      accession_number: '0000102909-24-000001',
+      recovery: {
+        hint: 'Use secedgar_get_filing with the accession number to inspect the filing documents directly.',
+      },
+    });
+    const message =
+      'Filing 0000102909-24-000001 (filed 2024-02-15) has no XML information table among its documents, so its holdings cannot be parsed; the documents it does carry are listed in available_documents.';
+    expect(error.message).toBe(message);
+    expect(blockText(result.content)).toContain(message);
   });
 });
 
@@ -2274,6 +2284,439 @@ describe('getInstitutionalHoldingsTool — 13F-NT notice for the quarter (#133)'
 
     expect(err.message).toContain('operating company');
     expect(err.data.notice_accession_number).toBeUndefined();
+  });
+});
+
+/** Calls each service method received, by name; every one of them but `resolveCik` reaches SEC. */
+function serviceCalls(): Record<string, number> {
+  return Object.fromEntries(
+    Object.entries(mockApi)
+      .map(([method, fn]) => [method, fn.mock.calls.length] as const)
+      .filter(([, count]) => count > 0),
+  );
+}
+
+/** The `content[]` text a CommonMark parse reads, asserting it holds each `data` value named. */
+function expectDataInText(
+  result: Awaited<ReturnType<typeof runToolContract>>,
+  keys: readonly string[],
+): string {
+  const { data } = wireError(result);
+  const text = readCommonMark(blockText(result.content));
+  for (const key of keys) {
+    expect(typeof data[key]).toBe('string');
+    expect(text).toContain(String(data[key]));
+  }
+  return text;
+}
+
+/**
+ * A quarter the manager filed no 13F-HR for names the filer it resolved to and the newest
+ * original 13F-HR the call read, from rows already in hand (#254).
+ */
+describe('getInstitutionalHoldingsTool — the quarter miss names the filer and its newest 13F-HR (#254)', () => {
+  const call = (args: Record<string, unknown>) =>
+    runToolContract(getInstitutionalHoldingsTool, args as never);
+  const retryArgs = (cik: string, quarter: string) => JSON.stringify({ company: cik, quarter });
+  const listArgs = (cik: string, forms: string[]) => JSON.stringify({ query: cik, forms });
+  const retryHint = (cik: string, quarter: string) =>
+    `Call this tool with ${retryArgs(cik, quarter)} for the newest 13F-HR found, or list this filer's 13F-HR filings and their periods with secedgar_company_search ${listArgs(cik, ['13F-HR'])}.`;
+  const listHint = (cik: string) =>
+    `List this filer's 13F-HR and 13F-NT filings and their periods with secedgar_company_search ${listArgs(cik, ['13F-HR', '13F-NT'])}, then call this tool with a quarter one of its 13F-HR filings covers.`;
+
+  /** 13F-HRs for 2024-Q4 (filed 2025-02-14) and 2024-Q1, none for 2024-Q2. */
+  const REPORTS: FilingSpec[] = [
+    {
+      form: '13F-HR',
+      accessionNumber: '0000102909-25-000050',
+      filingDate: '2025-02-14',
+      reportDate: '2024-12-31',
+    },
+    {
+      form: '13F-HR',
+      accessionNumber: '0000102909-24-000700',
+      filingDate: '2024-05-10',
+      reportDate: '2024-03-31',
+    },
+  ];
+
+  it('names the filer, its CIK, and the newest 13F-HR quarter on both surfaces, sending no request for them', async () => {
+    mockApi.getSubmissions.mockResolvedValue(buildSubmissions({ filings: REPORTS }));
+
+    const result = await call({ company: '0000102909', quarter: '2024-Q2' });
+
+    const error = wireError(result);
+    expect(error.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(error.message).toBe(
+      `No 13F-HR filings found for '0000102909' (VANGUARD GROUP INC, CIK 0000102909) for quarter "2024-Q2". The newest 13F-HR found covers 2024-Q4, filed 2025-02-14.`,
+    );
+    expect(error.data).toEqual({
+      reason: 'no_filings_found',
+      recovery: { hint: retryHint('0000102909', '2024-Q4') },
+      resolved_cik: '0000102909',
+      resolved_name: 'VANGUARD GROUP INC',
+      latest_quarter: '2024-Q4',
+    });
+    const text = expectDataInText(result, ['resolved_cik', 'resolved_name', 'latest_quarter']);
+    expect(text).toContain('filed 2025-02-14');
+    // The hint's calls render as code, so a copied call carries no Markdown escapes.
+    expect(text).toContain(`⟨code_inline:${retryArgs('0000102909', '2024-Q4')}⟩`);
+    expect(text).toContain(`⟨code_inline:${listArgs('0000102909', ['13F-HR'])}⟩`);
+    expect(text).not.toContain('check that the entity is an institutional investment manager');
+    expect(serviceCalls()).toEqual({ resolveCik: 1, getSubmissions: 1 });
+  });
+
+  it.each([
+    {
+      path: 'a name EDGAR entity search resolves',
+      company: 'Coatue Management',
+      arrange: () => {
+        mockApi.resolveCik.mockResolvedValue([]);
+        mockApi.resolveEntityByName.mockResolvedValue({
+          matches: [{ cik: '0001135730', name: 'COATUE MANAGEMENT LLC' }],
+          total: { value: 1, relation: 'eq' },
+        });
+      },
+      cik: '0001135730',
+      name: 'COATUE MANAGEMENT LLC',
+      requests: { resolveCik: 1, resolveEntityByName: 1, getSubmissions: 1 },
+    },
+    {
+      path: 'a CIK absent from the ticker file',
+      company: '0001135730',
+      arrange: () => mockApi.resolveCik.mockResolvedValue({ cik: '0001135730' }),
+      cik: '0001135730',
+      name: 'COATUE MANAGEMENT LLC',
+      requests: { resolveCik: 1, getSubmissions: 1 },
+    },
+    {
+      path: 'a ticker',
+      company: 'BRK-B',
+      arrange: () =>
+        mockApi.resolveCik.mockResolvedValue({
+          cik: '0001067983',
+          name: 'BERKSHIRE HATHAWAY INC',
+          ticker: 'BRK-B',
+        }),
+      cik: '0001067983',
+      name: 'BERKSHIRE HATHAWAY INC',
+      requests: { resolveCik: 1, getSubmissions: 1 },
+    },
+  ])('carries the same fields for $path', async ({ company, arrange, cik, name, requests }) => {
+    arrange();
+    mockApi.getSubmissions.mockResolvedValue(buildSubmissions({ name, filings: REPORTS }));
+
+    const result = await call({ company, quarter: '2026-Q4' });
+
+    const error = wireError(result);
+    expect(error.message).toBe(
+      `No 13F-HR filings found for '${company}' (${name}, CIK ${cik}) for quarter "2026-Q4". The newest 13F-HR found covers 2024-Q4, filed 2025-02-14.`,
+    );
+    expect(error.data).toMatchObject({
+      reason: 'no_filings_found',
+      resolved_cik: cik,
+      resolved_name: name,
+      latest_quarter: '2024-Q4',
+      recovery: { hint: retryHint(cik, '2024-Q4') },
+    });
+    expectDataInText(result, ['resolved_cik', 'resolved_name', 'latest_quarter']);
+    expect(serviceCalls()).toEqual(requests);
+  });
+
+  it('never takes a later-period 13F-HR/A for the newest 13F-HR', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [
+          {
+            form: '13F-HR/A',
+            accessionNumber: '0000102909-25-000090',
+            filingDate: '2025-05-20',
+            reportDate: '2025-03-31',
+          },
+          ...REPORTS,
+        ],
+      }),
+    );
+
+    const error = wireError(await call({ company: '0000102909', quarter: '2024-Q2' }));
+
+    expect(error.data.latest_quarter).toBe('2024-Q4');
+    expect(error.message).toContain('The newest 13F-HR found covers 2024-Q4, filed 2025-02-14.');
+  });
+
+  it('never takes a later-period 13F-NT for the newest 13F-HR', async () => {
+    // VANGUARD_RECENT: a 13F-NT for 2026-06-30 above 13F-HRs for 2025-12-31 and 2025-09-30.
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({ filings: VANGUARD_RECENT, files: VANGUARD_FILES }),
+    );
+
+    const result = await call({ company: '0000102909', quarter: '2026-Q1' });
+
+    const error = wireError(result);
+    expect(error.data.latest_quarter).toBe('2025-Q4');
+    expect(error.message).toBe(
+      `No 13F-HR filings found for '0000102909' (VANGUARD GROUP INC, CIK 0000102909) for quarter "2026-Q1". The newest 13F-HR found covers 2025-Q4, filed 2026-01-29.`,
+    );
+    expect(serviceCalls()).toEqual({ resolveCik: 1, getSubmissions: 1 });
+  });
+
+  it('takes a calendar quarter end only, never a later 13F-HR period off one', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [
+          {
+            form: '13F-HR',
+            accessionNumber: '0000102909-25-000070',
+            filingDate: '2025-03-10',
+            reportDate: '2025-01-31',
+          },
+          ...REPORTS,
+        ],
+      }),
+    );
+
+    const error = wireError(await call({ company: '0000102909', quarter: '2024-Q2' }));
+
+    expect(error.data.latest_quarter).toBe('2024-Q4');
+  });
+
+  it('takes the latest period, never a 13F-HR for an older quarter filed after it', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [
+          // A late original for 2024-Q1, filed after the 2024-Q4 report.
+          {
+            form: '13F-HR',
+            accessionNumber: '0000102909-25-000120',
+            filingDate: '2025-03-20',
+            reportDate: '2024-03-31',
+          },
+          {
+            form: '13F-HR',
+            accessionNumber: '0000102909-25-000050',
+            filingDate: '2025-02-14',
+            reportDate: '2024-12-31',
+          },
+        ],
+      }),
+    );
+
+    const error = wireError(await call({ company: '0000102909', quarter: '2024-Q2' }));
+
+    expect(error.data.latest_quarter).toBe('2024-Q4');
+    expect(error.data.recovery).toEqual({ hint: retryHint('0000102909', '2024-Q4') });
+    expect(error.message).toBe(
+      `No 13F-HR filings found for '0000102909' (VANGUARD GROUP INC, CIK 0000102909) for quarter "2024-Q2". The newest 13F-HR found covers 2024-Q4, filed 2025-02-14.`,
+    );
+  });
+
+  it.each([
+    ['newest filed first', ['0000102909-25-000080', '0000102909-25-000050']],
+    ['oldest filed first', ['0000102909-25-000050', '0000102909-25-000080']],
+  ])('names the newest-filed 13F-HR for a period filed twice, listed %s', async (_, order) => {
+    const filed: Record<string, string> = {
+      '0000102909-25-000080': '2025-03-01',
+      '0000102909-25-000050': '2025-02-14',
+    };
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: order.map((accessionNumber) => ({
+          form: '13F-HR',
+          accessionNumber,
+          filingDate: filed[accessionNumber] ?? '',
+          reportDate: '2024-12-31',
+        })),
+      }),
+    );
+
+    const error = wireError(await call({ company: '0000102909', quarter: '2024-Q2' }));
+
+    expect(error.message).toContain('The newest 13F-HR found covers 2024-Q4, filed 2025-03-01.');
+  });
+
+  it("names a notice-only manager and carries no newest quarter, the notice's later period included", async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000900000' });
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        name: 'NOTICE ONLY ADVISORS LLC',
+        filings: [
+          {
+            form: '13F-NT',
+            accessionNumber: '0000900000-26-000020',
+            filingDate: '2026-08-10',
+            reportDate: '2026-06-30',
+          },
+          { form: 'SCHEDULE 13G', accessionNumber: 'x', filingDate: '2026-02-01' },
+        ],
+      }),
+    );
+
+    const result = await call({ company: '0000900000', quarter: '2025-Q4' });
+
+    const error = wireError(result);
+    expect(error.message).toBe(
+      `No 13F-HR filings found for '0000900000' (NOTICE ONLY ADVISORS LLC, CIK 0000900000) for quarter "2025-Q4".`,
+    );
+    expect(error.data).toEqual({
+      reason: 'no_filings_found',
+      recovery: { hint: listHint('0000900000') },
+      resolved_cik: '0000900000',
+      resolved_name: 'NOTICE ONLY ADVISORS LLC',
+    });
+    const text = expectDataInText(result, ['resolved_cik', 'resolved_name']);
+    expect(text).not.toContain('newest 13F-HR');
+    expect(text).toContain(`⟨code_inline:${listArgs('0000900000', ['13F-HR', '13F-NT'])}⟩`);
+  });
+
+  it('keeps the Searched sentence after a walk and counts 13F-HRs on the pages read', async () => {
+    // No 13F row in the recent window; the pages read hold 13F-HRs up to 2025-03-31.
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [{ form: 'SCHEDULE 13G/A', accessionNumber: 'x', filingDate: '2025-08-27' }],
+        files: VANGUARD_FILES,
+      }),
+    );
+    mockApi.fetchArchivePage.mockImplementation(async (name: string) => {
+      const page = VANGUARD_PAGES[name];
+      if (!page) throw new Error(`unexpected archive page ${name}`);
+      return page;
+    });
+
+    const result = await call({ company: '0000102909', quarter: '2023-Q4' });
+
+    const error = wireError(result);
+    expect(error.message).toBe(
+      `No 13F-HR filings found for '0000102909' (VANGUARD GROUP INC, CIK 0000102909) for quarter "2023-Q4". Searched the recent submissions window and 2 archive pages filed from 2023-06-01 forward. The newest 13F-HR found covers 2025-Q1, filed 2025-05-12.`,
+    );
+    expect(error.data.latest_quarter).toBe('2025-Q1');
+    expect(error.data.recovery).toEqual({ hint: retryHint('0000102909', '2025-Q1') });
+    expectDataInText(result, ['resolved_cik', 'resolved_name', 'latest_quarter']);
+    // The walk's two pages, and no read past them for the miss.
+    expect(serviceCalls()).toEqual({ resolveCik: 1, getSubmissions: 1, fetchArchivePage: 2 });
+  });
+
+  it('keeps the whole Searched sentence after a walk the recent window answers the newest 13F-HR for', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({ filings: VANGUARD_RECENT, files: VANGUARD_FILES }),
+    );
+    mockApi.fetchArchivePage.mockImplementation(async (name: string) => {
+      const page = VANGUARD_PAGES[name];
+      if (!page) throw new Error(`unexpected archive page ${name}`);
+      return page;
+    });
+
+    const error = wireError(await call({ company: '0000102909', quarter: '2023-Q4' }));
+
+    expect(error.message).toContain(
+      ' Searched the recent submissions window and 2 archive pages filed from 2023-06-01 forward.',
+    );
+    expect(serviceCalls()).toEqual({ resolveCik: 1, getSubmissions: 1, fetchArchivePage: 2 });
+  });
+
+  it('says "in its recent submissions window", not a quarter, for a call without one whose window holds only amendments', async () => {
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({
+        filings: [
+          {
+            form: '13F-HR/A',
+            accessionNumber: '0000102909-26-000300',
+            filingDate: '2026-03-01',
+            reportDate: '2025-12-31',
+          },
+        ],
+      }),
+    );
+
+    const result = await call({ company: '0000102909' });
+
+    const error = wireError(result);
+    expect(error.message).toBe(
+      `No 13F-HR filings found for '0000102909' (VANGUARD GROUP INC, CIK 0000102909) in its recent submissions window.`,
+    );
+    expect(error.data).toEqual({
+      reason: 'no_filings_found',
+      recovery: { hint: listHint('0000102909') },
+      resolved_cik: '0000102909',
+      resolved_name: 'VANGUARD GROUP INC',
+    });
+    expect(blockText(result.content)).not.toContain('undefined');
+    // The contract's `when` for the reason names this path.
+    const declared = getInstitutionalHoldingsTool.errors?.find(
+      (e) => e.reason === 'no_filings_found',
+    );
+    expect(declared?.when).toContain(
+      'with no quarter the recent window holds only 13F-HR/A amendments',
+    );
+  });
+});
+
+/**
+ * The #86 operating-company miss carries `resolved_cik` and its `suggestions` in `data`; its
+ * message names the CIK and every suggested tool, so `content[]` carries the same facts (#254).
+ */
+describe('getInstitutionalHoldingsTool — operating-company miss on both surfaces (#86, #254)', () => {
+  const OPERATING_FORMS: FilingSpec[] = [
+    { form: '10-K', accessionNumber: 'a', filingDate: '2025-10-31', reportDate: '2025-09-27' },
+    { form: '10-Q', accessionNumber: 'b', filingDate: '2026-05-01', reportDate: '2026-03-28' },
+    { form: '8-K', accessionNumber: 'c', filingDate: '2026-04-30' },
+    { form: '8-K/A', accessionNumber: 'd', filingDate: '2026-03-02' },
+  ];
+
+  beforeEach(() => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000320193', name: 'Apple Inc.', ticker: 'AAPL' });
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({ name: 'Apple Inc.', tickers: ['AAPL'], filings: OPERATING_FORMS }),
+    );
+  });
+
+  const call = (args: Record<string, unknown>) =>
+    runToolContract(getInstitutionalHoldingsTool, args as never);
+
+  it('keeps its reason, data keys, and suggestions', async () => {
+    const { code, data } = wireError(await call({ company: 'AAPL', quarter: '2026-Q2' }));
+
+    expect(code).toBe(JsonRpcErrorCode.NotFound);
+    expect(Object.keys(data).sort()).toEqual([
+      'reason',
+      'recovery',
+      'resolved_cik',
+      'resolved_name',
+      'suggestions',
+    ]);
+    expect(data).toMatchObject({
+      reason: 'no_filings_found',
+      resolved_cik: '0000320193',
+      resolved_name: 'Apple Inc.',
+    });
+    expect(records(data.suggestions).map((s) => s.tool)).toEqual([
+      'secedgar_find_holders',
+      'secedgar_get_financials',
+      'secedgar_search_filings',
+    ]);
+  });
+
+  it('names the CIK and every suggested tool in content[]', async () => {
+    const result = await call({ company: 'AAPL', quarter: '2026-Q2' });
+
+    const text = expectDataInText(result, ['resolved_cik', 'resolved_name']);
+    expect(text).toContain('resolves to Apple Inc. (AAPL, CIK 0000320193), an operating company');
+    for (const { tool } of records(wireError(result).data.suggestions)) {
+      expect(text).toContain(String(tool));
+    }
+  });
+
+  it('names the CIK alone for a filer with no ticker', async () => {
+    mockApi.resolveCik.mockResolvedValue({ cik: '0000999999' });
+    mockApi.getSubmissions.mockResolvedValue(
+      buildSubmissions({ name: 'PRIVATE OPERATOR INC', filings: OPERATING_FORMS }),
+    );
+
+    const result = await call({ company: '0000999999' });
+
+    const text = expectDataInText(result, ['resolved_cik', 'resolved_name']);
+    expect(text).toContain(
+      'resolves to PRIVATE OPERATOR INC (CIK 0000999999), an operating company',
+    );
   });
 });
 

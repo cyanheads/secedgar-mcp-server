@@ -43,6 +43,9 @@ import {
 } from '@/services/edgar/submissions-archive.js';
 import type { FilingsRecent } from '@/services/edgar/types.js';
 
+/** Calendar quarter ends (MM-DD), Q1 through Q4. */
+const QUARTER_ENDS: readonly string[] = ['03-31', '06-30', '09-30', '12-31'];
+
 /**
  * Map a quarter string like "2025-Q4" to its calendar quarter-end date (YYYY-MM-DD) — the
  * filing's reporting-period end (`reportDate`) in the SEC submissions API. Returns undefined
@@ -52,9 +55,15 @@ function quarterEndDate(quarter: string | undefined): string | undefined {
   if (!quarter) return;
   const m = quarter.match(/^(\d{4})-Q([1-4])$/i);
   if (!m) return;
-  // Q1→03-31, Q2→06-30, Q3→09-30, Q4→12-31.
-  const day = ['03-31', '06-30', '09-30', '12-31'][Number(m[2]) - 1];
-  return `${m[1]}-${day}`;
+  return `${m[1]}-${QUARTER_ENDS[Number(m[2]) - 1]}`;
+}
+
+/** The `YYYY-QN` quarter a calendar quarter-end date closes, `quarterEndDate`'s inverse; undefined for any other date. */
+function quarterOf(periodEnd: string): string | undefined {
+  const index = QUARTER_ENDS.indexOf(periodEnd.slice(5));
+  return /^\d{4}-\d{2}-\d{2}$/.test(periodEnd) && index >= 0
+    ? `${periodEnd.slice(0, 4)}-Q${index + 1}`
+    : undefined;
 }
 
 /** One holdings row as returned to the caller (post unit-normalization / consolidation). */
@@ -348,6 +357,26 @@ function forPeriod(rows: ThirteenFRow[], periodEnd: string) {
   };
 }
 
+/**
+ * The newest original 13F-HR among `rows` that closes a calendar quarter: the latest period,
+ * the latest filed on a tie, which is the filing this tool reads for that quarter. A 13F-HR/A
+ * or a 13F-NT never counts, since this tool answers no quarter from either (#133, #198).
+ */
+function newestReport(rows: ThirteenFRow[]): { quarter: string; row: ThirteenFRow } | undefined {
+  let newest: { quarter: string; row: ThirteenFRow } | undefined;
+  for (const row of rows) {
+    const quarter = row.form === HOLDINGS_REPORT_FORM ? quarterOf(row.reportDate) : undefined;
+    if (!quarter) continue;
+    if (
+      !newest ||
+      (row.reportDate.localeCompare(newest.row.reportDate) || compositionOrder(row, newest.row)) > 0
+    ) {
+      newest = { quarter, row };
+    }
+  }
+  return newest;
+}
+
 /** SEC lookup failures that can leave optional disclosure unavailable. */
 function optionalLookupFailure(err: unknown): err is McpError {
   return (
@@ -423,7 +452,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
     {
       reason: 'no_filings_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No 13F-HR matches — the entity files none, none exists for the requested quarter in the recent submissions window or the archive pages searched, or the manager filed a 13F-NT notice instead (for the requested quarter, or as its only recent 13F filing when no quarter is given)',
+      when: 'No 13F-HR matches — the entity files none, none exists for the requested quarter in the recent submissions window or the archive pages searched, with no quarter the recent window holds only 13F-HR/A amendments, or the manager filed a 13F-NT notice instead (for the requested quarter, or as its only recent 13F filing when no quarter is given)',
       recovery:
         'Use secedgar_search_filings with forms=["13F-HR"] for broader search, or check that the entity is an institutional investment manager.',
     },
@@ -729,10 +758,13 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
         const recentForms = new Set(submissions.filings.recent.form);
         const operatingForms = OPERATING_COMPANY_FORMS.filter((f) => recentForms.has(f));
         if (operatingForms.length > 0) {
-          const tickerSuffix = submissions.tickers[0] ? ` (${submissions.tickers[0]})` : '';
+          // The message names the CIK and every suggested tool, so content[] carries what
+          // `data` does (#254).
+          const ticker = submissions.tickers[0];
+          const ids = ticker ? `${ticker}, CIK ${match.cik}` : `CIK ${match.cik}`;
           throw ctx.fail(
             'no_filings_found',
-            `No 13F-HR filings found for '${input.company}' — resolves to ${submissions.name}${tickerSuffix}, an operating company (files ${operatingForms.join(', ')}), not an institutional investment manager. To find which managers hold it, use secedgar_find_holders; for financials use secedgar_get_financials.`,
+            `No 13F-HR filings found for '${input.company}' — resolves to ${submissions.name} (${ids}), an operating company (files ${operatingForms.join(', ')}), not an institutional investment manager. To find which managers hold it, use secedgar_find_holders; for financials use secedgar_get_financials; to search its filings use secedgar_search_filings.`,
             {
               recovery: {
                 hint: `${submissions.name} is an operating company, not a 13F filer. Use secedgar_find_holders with issuer "${input.company}" to list its institutional holders.`,
@@ -763,14 +795,40 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
           `No 13F-HR filings found for '${input.company}' (resolves to ${submissions.name}). This entity is not a 13F institutional filer.`,
         );
       }
-      // 13F filings exist, but none for the requested quarter (#31) — a real 13F filer.
+      // 13F filings exist, but no 13F-HR for the requested quarter (#31) — or, asked for no
+      // quarter, the recent window holds amendments only. A real 13F filer, so the miss names
+      // it and the newest 13F-HR among the rows already read; it sends no request (#254).
+      const scope = input.quarter
+        ? `for quarter "${input.quarter}"`
+        : 'in its recent submissions window';
       const searched =
         walk && walk.pagesRead > 0
           ? ` Searched the recent submissions window and ${walk.pagesRead} archive page${walk.pagesRead === 1 ? '' : 's'} filed from ${walk.scannedThrough} forward${walk.truncated ? `; the ${ARCHIVE_PAGE_SCAN_CAP}-page cap stopped the search before later pages` : ''}.`
           : '';
+      const newest = newestReport(discoveredRows);
+      const newestSentence = newest
+        ? ` The newest 13F-HR found covers ${newest.quarter}, filed ${newest.row.filingDate}.`
+        : '';
+      // Calls the caller can send back as written, rendered as code in content[].
+      const retryCall = newest && JSON.stringify({ company: match.cik, quarter: newest.quarter });
+      const listCall = JSON.stringify({
+        query: match.cik,
+        forms: newest ? ['13F-HR'] : ['13F-HR', '13F-NT'],
+      });
       throw ctx.fail(
         'no_filings_found',
-        `No 13F-HR filings found for '${input.company}' for quarter "${input.quarter}".${searched}`,
+        `No 13F-HR filings found for '${input.company}' (${submissions.name}, CIK ${match.cik}) ${scope}.${searched}${newestSentence}`,
+        {
+          recovery: {
+            hint: retryCall
+              ? `Call this tool with ${retryCall} for the newest 13F-HR found, or list this filer's 13F-HR filings and their periods with secedgar_company_search ${listCall}.`
+              : `List this filer's 13F-HR and 13F-NT filings and their periods with secedgar_company_search ${listCall}, then call this tool with a quarter one of its 13F-HR filings covers.`,
+          },
+          resolved_cik: match.cik,
+          resolved_name: submissions.name,
+          ...(newest && { latest_quarter: newest.quarter }),
+        },
+        { literals: retryCall ? [retryCall, listCall] : [listCall] },
       );
     }
 
@@ -792,7 +850,7 @@ export const getInstitutionalHoldingsTool = tool('secedgar_get_institutional_hol
       case 'no_document':
         throw ctx.fail(
           'no_info_table',
-          `No information table XML found in filing ${filingMeta.accessionNumber}.`,
+          `Filing ${filingMeta.accessionNumber} (filed ${filingMeta.filingDate}) has no XML information table among its documents, so its holdings cannot be parsed; the documents it does carry are listed in available_documents.`,
           {
             accession_number: filingMeta.accessionNumber,
             available_documents: originalTable.documents,
