@@ -1,9 +1,13 @@
 /**
  * @fileoverview Constants and row shapes for the EDGAR local mirror — the two
  * bounded SEC reference layers (ticker/CIK resolution and XBRL company-facts)
- * mirrored into embedded SQLite via the framework `MirrorService`.
+ * mirrored into embedded SQLite via the framework `MirrorService` — and the
+ * company_tickers.json parser the live ticker index and the mirror's ticker
+ * sync share.
  * @module services/edgar/mirror/types
  */
+
+import { isRecord } from '@cyanheads/mcp-ts-core/utils';
 
 /** SEC ticker→CIK directory (direct-download JSON, about 800 KB: 796,507 bytes on 2026-11-08). */
 export const TICKERS_URL = 'https://www.sec.gov/files/company_tickers.json';
@@ -49,6 +53,30 @@ export interface TickerRow {
   name: string;
   /** Uppercased ticker symbol — primary key (e.g. "AAPL", "BRK-A"). */
   ticker: string;
+}
+
+/**
+ * Parse company_tickers.json — `{ cik_str, ticker, title }` entries keyed by index — into
+ * rows with a zero-padded CIK, skipping any entry without that shape. The ticker stays as
+ * written: the live index keys it uppercased and the mirror stores it so. `undefined` when
+ * no entry has the shape: the live index fails such a 200 like any unreadable answer
+ * (#234), and the mirror's ticker sync refuses it rather than read it as every symbol
+ * dropped (#247).
+ */
+export function parseTickerFile(raw: unknown): TickerRow[] | undefined {
+  if (!isRecord(raw)) return;
+  const rows: TickerRow[] = [];
+  for (const entry of Object.values(raw)) {
+    if (!isRecord(entry) || typeof entry.title !== 'string') continue;
+    if (typeof entry.ticker !== 'string' || !entry.ticker) continue;
+    if (typeof entry.cik_str !== 'number' && typeof entry.cik_str !== 'string') continue;
+    rows.push({
+      cik: String(entry.cik_str).padStart(10, '0'),
+      name: entry.title,
+      ticker: entry.ticker,
+    });
+  }
+  return rows.length > 0 ? rows : undefined;
 }
 
 /**

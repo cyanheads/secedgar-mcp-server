@@ -41,7 +41,7 @@ import {
   withEarlierHolders,
 } from './former-tickers.js';
 import { listedSymbol, readTickerSpelling } from './listing-codes.js';
-import { MF_TICKERS_URL, TICKERS_URL } from './mirror/types.js';
+import { MF_TICKERS_URL, parseTickerFile, TICKERS_URL } from './mirror/types.js';
 import { trigramScorer } from './trigram-similarity.js';
 import type {
   CikMatch,
@@ -2236,7 +2236,7 @@ class EdgarApiService {
   private async fetchTickerFile(scope: CallScope): Promise<EquityRow[]> {
     const rows = parseTickerFile(await this.fetchJson<unknown>(TICKERS_URL, scope));
     if (!rows) throw unexpectedShape(TICKERS_URL, 'the ticker file');
-    return rows;
+    return rows.map((row) => ({ ...row, kind: 'equity' }));
   }
 
   /**
@@ -2442,29 +2442,6 @@ function companyFactsNotSynced(): McpError {
     'EDGAR mirror enabled but the company-facts layer is not synced; run `bun run mirror:init`',
     { layer: 'companyfacts' },
   );
-}
-
-/**
- * Parse company_tickers.json — `{ cik_str, ticker, title }` entries keyed by index — into
- * equity rows, skipping any entry without that shape. Returns `undefined` when no entry
- * has it, which the caller fails like any unreadable answer (#234).
- */
-function parseTickerFile(raw: unknown): EquityRow[] | undefined {
-  if (!isRecord(raw)) return;
-  const rows: EquityRow[] = [];
-  for (const entry of Object.values(raw)) {
-    if (!isRecord(entry) || typeof entry.ticker !== 'string' || typeof entry.title !== 'string') {
-      continue;
-    }
-    if (typeof entry.cik_str !== 'number' && typeof entry.cik_str !== 'string') continue;
-    rows.push({
-      cik: String(entry.cik_str).padStart(10, '0'),
-      kind: 'equity',
-      name: entry.title,
-      ticker: entry.ticker,
-    });
-  }
-  return rows.length > 0 ? rows : undefined;
 }
 
 /**

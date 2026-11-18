@@ -3,20 +3,25 @@
  * SEC fetch mocked) streams a small zip + ticker directory into temp SQLite
  * stores, then the read helpers are exercised — concept reconstruction, the
  * cross-company frame assembly, the dashed→slashed unit mapping, and the absent
- * `loc`. Runs against the real `better-sqlite3` store under vitest/Node.
+ * `loc`. Ticker syncs on their own stores pin what a refresh deletes and what a
+ * refused one leaves, and the layer runs pin that both layers sync whichever
+ * fails (#247). Runs against the real SQLite store: `better-sqlite3` under
+ * Node, `bun:sqlite` under Bun.
  * @module tests/services/edgar/mirror/edgar-mirror
  */
 
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { SyncMode } from '@cyanheads/mcp-ts-core/mirror';
 import { strToU8, zipSync } from 'fflate';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { seriesFromCompanyFacts } from '@/services/edgar/concept-series.js';
 import type { CompanyFactsFile } from '@/services/edgar/mirror/companyfacts-sync.js';
 import { FISCAL_YEAR_END_READ_BUDGET } from '@/services/edgar/mirror/edgar-mirror.js';
 import { EdgarMirror } from '@/services/edgar/mirror/index.js';
 import type { CompanyConceptUnit } from '@/services/edgar/types.js';
+import { FILE_A, FILE_B, type TickerEntry, tickerFile } from '../../../support/ticker-files.js';
 
 const LM = 'Sat, 31 May 2026 03:00:00 GMT';
 
@@ -599,5 +604,228 @@ describe('EdgarMirror — init + read helpers', () => {
   it('returns null when no company reports the requested frame', async () => {
     expect(await mirror.getFrames('us-gaap', 'Revenues', 'USD', 'CY1999')).toBeNull();
     expect(await mirror.getFrames('us-gaap', 'Nope', 'USD', 'CY2023')).toBeNull();
+  });
+});
+
+/** A Last-Modified after {@link LM}: a ticker sync that yielded its page would advance the checkpoint to it. */
+const NEWER_LM = 'Sun, 01 Nov 2026 03:00:00 GMT';
+
+/** Fund rows both files list throughout, so the deletions under test stay within a refresh's quarter. */
+const PAD_FUNDS = Array.from({ length: 3 }, (_, i) => [36405, `S90${i}`, `C90${i}`, `PADF${i}`]);
+
+const fundFile = (...symbols: string[]) => ({
+  fields: ['cik', 'seriesId', 'classId', 'symbol'],
+  data: [...PAD_FUNDS, ...symbols.map((symbol, i) => [36405, `S${i}`, `C${i}`, symbol])],
+});
+
+/** The first sync's fund file adds VOO and OLDFX (0000036405); the refresh's drops OLDFX. */
+const MF_A = fundFile('VOO', 'OLDFX');
+const MF_B = fundFile('VOO');
+
+/** Every symbol a pair of ticker files lists, sorted. */
+const listed = (tickers: Record<string, TickerEntry>, mf: { data: unknown[][] }) =>
+  [...Object.values(tickers).map((e) => e.ticker), ...mf.data.map((row) => String(row[3]))].sort();
+
+describe('EdgarMirror — a ticker sync against the stored rows (#247)', () => {
+  let dir: string;
+  let mirror: EdgarMirror;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'edgar-mirror-tickers-'));
+    mirror = new EdgarMirror({ dir, userAgent: 'test test@example.com' });
+  });
+
+  afterEach(async () => {
+    await mirror.close();
+    vi.unstubAllGlobals();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Serve the two ticker files under `lastModified` (a number answers with that status) and run one ticker sync. */
+  function syncTickers(mode: SyncMode, tickers: unknown, mf: unknown, lastModified = LM) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        const body = String(url).includes('company_tickers_mf.json') ? mf : tickers;
+        if (typeof body === 'number') return new Response(null, { status: body });
+        return new Response(JSON.stringify(body), { headers: { 'last-modified': lastModified } });
+      }),
+    );
+    return mirror.tickers.runSync({ mode, signal: new AbortController().signal });
+  }
+
+  const storedSymbols = async () => (await mirror.getTickerRows()).map((row) => row.ticker).sort();
+
+  /** What a failed sync leaves as it was: every stored row, the row total, the checkpoint, and readiness. */
+  async function layerState() {
+    const status = await mirror.tickers.status();
+    const rows = await mirror.getTickerRows();
+    return {
+      rows: rows.sort((a, b) => a.ticker.localeCompare(b.ticker)),
+      total: status.total,
+      checkpoint: status.checkpoint,
+      ready: status.ready,
+    };
+  }
+
+  it('leaves exactly the symbols the refresh’s two files list, counted in status.total', async () => {
+    await syncTickers('init', FILE_A, MF_A);
+    const result = await syncTickers('refresh', FILE_B, MF_B, NEWER_LM);
+
+    const expected = listed(FILE_B, MF_B);
+    expect(await storedSymbols()).toEqual(expected);
+    expect(result).toMatchObject({ tombstonesApplied: 3, total: expected.length });
+    expect((await mirror.tickers.status()).total).toBe(expected.length);
+    expect((await mirror.getTickerRows()).filter((row) => row.cik === '0001591588')).toEqual([
+      { ticker: 'GOLD', cik: '0001591588', name: 'Gold.com, Inc.' },
+    ]);
+  });
+
+  it('deletes no fund row when the refresh’s fund file fails, still deleting the dropped operating-company symbols', async () => {
+    await syncTickers('init', FILE_A, MF_A);
+    await syncTickers('refresh', FILE_B, 503, NEWER_LM);
+
+    expect(await storedSymbols()).toEqual(
+      [
+        ...Object.values(FILE_B).map((e) => e.ticker),
+        ...MF_A.data.map((row) => String(row[3])),
+      ].sort(),
+    );
+  });
+
+  it('fails a refresh whose company_tickers.json is a 200 holding no ticker entry, leaving every row, the total, the checkpoint, and readiness as they were', async () => {
+    await syncTickers('init', FILE_A, MF_A);
+    const before = await layerState();
+
+    await expect(syncTickers('refresh', {}, MF_B, NEWER_LM)).rejects.toThrow(
+      /company_tickers\.json listed no ticker/,
+    );
+
+    expect((await mirror.tickers.status()).status).toBe('error');
+    expect(await layerState()).toEqual(before);
+    expect(before).toMatchObject({ ready: true, total: listed(FILE_A, MF_A).length });
+  });
+
+  it.each([
+    ['company_tickers.json', tickerFile(), MF_A, '3 of the 9'],
+    ['company_tickers_mf.json', FILE_A, fundFile(), '2 of the 5'],
+  ])(
+    'fails a refresh deleting more than a quarter of the stored %s symbols, leaving the store as it was, and init applies the same files',
+    async (file, tickers, mf, share) => {
+      await syncTickers('init', FILE_A, MF_A);
+      const before = await layerState();
+
+      await expect(syncTickers('refresh', tickers, mf, NEWER_LM)).rejects.toThrow(
+        `would delete ${share} stored ${file} symbols`,
+      );
+      expect((await mirror.tickers.status()).status).toBe('error');
+      expect(await layerState()).toEqual(before);
+
+      await syncTickers('init', tickers, mf, NEWER_LM);
+      expect(await storedSymbols()).toEqual(listed(tickers, mf));
+      expect(await mirror.tickers.status()).toMatchObject({
+        status: 'complete',
+        total: listed(tickers, mf).length,
+      });
+    },
+  );
+});
+
+describe('EdgarMirror — both layers sync on every run (#247)', () => {
+  let dir: string;
+  let mirror: EdgarMirror;
+  let requested: string[];
+
+  /** company_tickers.json answers `tickersStatus`, or the file; companyfacts.zip answers `factsStatus` to its GET, or Apple's facts. */
+  function serveSec(answers: { factsStatus?: number; tickersStatus?: number }) {
+    const zip = zipSync({ 'CIK0000320193.json': strToU8(JSON.stringify(apple)) });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const u = String(url);
+        requested.push(init?.method === 'HEAD' ? `HEAD ${u}` : u);
+        if (u.includes('company_tickers.json')) {
+          return answers.tickersStatus
+            ? new Response('unavailable', { status: answers.tickersStatus })
+            : new Response(JSON.stringify(tickersJson), { headers: { 'last-modified': LM } });
+        }
+        if (u.includes('company_tickers_mf.json')) return new Response(null, { status: 404 });
+        if (u.includes('companyfacts.zip')) {
+          if (init?.method === 'HEAD') {
+            return new Response(null, { status: 200, headers: { 'last-modified': LM } });
+          }
+          return answers.factsStatus
+            ? new Response('unavailable', { status: answers.factsStatus })
+            : new Response(zip, { headers: { 'last-modified': LM } });
+        }
+        throw new Error(`unexpected fetch: ${u}`);
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'edgar-mirror-layers-'));
+    mirror = new EdgarMirror({ dir, userAgent: 'test test@example.com' });
+    requested = [];
+  });
+
+  afterEach(async () => {
+    await mirror.close();
+    vi.unstubAllGlobals();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it.each(['runInit', 'runRefresh'] as const)(
+    '%s syncs company facts when the ticker download fails, then rejects with the ticker failure',
+    async (run) => {
+      serveSec({ tickersStatus: 503 });
+
+      await expect(mirror[run]({ signal: new AbortController().signal })).rejects.toThrow(
+        'SEC company_tickers.json download failed (HTTP 503)',
+      );
+
+      const status = await mirror.status();
+      expect(status.tickers.status).toBe('error');
+      expect(status.companyFacts.status).toBe('complete');
+      expect(await mirror.getCompanyConcept('320193', 'us-gaap', 'Revenues')).not.toBeNull();
+    },
+  );
+
+  it('rejects with the company-facts failure when only that layer fails, the ticker layer synced', async () => {
+    serveSec({ factsStatus: 503 });
+
+    await expect(mirror.runRefresh({ signal: new AbortController().signal })).rejects.toThrow(
+      'SEC companyfacts.zip download failed (HTTP 503)',
+    );
+
+    const status = await mirror.status();
+    expect(status.tickers.status).toBe('complete');
+    expect(status.companyFacts.status).toBe('error');
+  });
+
+  it.each(['runInit', 'runRefresh'] as const)(
+    '%s rejects with the first failure, the ticker download’s, when both layers fail',
+    async (run) => {
+      serveSec({ tickersStatus: 503, factsStatus: 503 });
+
+      await expect(mirror[run]({ signal: new AbortController().signal })).rejects.toThrow(
+        'SEC company_tickers.json download failed (HTTP 503)',
+      );
+
+      const status = await mirror.status();
+      expect(status.tickers.status).toBe('error');
+      expect(status.companyFacts.status).toBe('error');
+    },
+  );
+
+  it('starts no company-facts sync once the caller has stopped the run', async () => {
+    serveSec({});
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(mirror.runRefresh({ signal: controller.signal })).rejects.toThrow();
+
+    expect(requested.some((url) => url.includes('companyfacts.zip'))).toBe(false);
+    expect((await mirror.status()).companyFacts.status).toBe('pending');
   });
 });

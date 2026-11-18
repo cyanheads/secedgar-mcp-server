@@ -8,12 +8,13 @@
  * (#234). A frame goes live while its period's filing window was still open at the
  * checkpoint. Any live failure but the caller's cancel answers from the mirror where
  * it holds the answer; strict mirror-only mode sends nothing; the no-mirror path
- * reads live.
+ * reads live. A real store, refreshed from ticker files that dropped symbols,
+ * resolves them as the live files do (#247).
  * @module tests/services/edgar/edgar-api-service.mirror
  */
 
 import type { McpError } from '@cyanheads/mcp-ts-core/errors';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { config, mirrorRef } = vi.hoisted(() => ({
   config: {
@@ -28,13 +29,21 @@ const { config, mirrorRef } = vi.hoisted(() => ({
 
 vi.mock('@/config/server-config.js', () => ({ getServerConfig: () => config }));
 vi.mock('@/services/edgar/mirror/index.js', () => ({ getEdgarMirror: () => mirrorRef.current }));
-// A row copied from the committed former-ticker asset (#237).
+// Rows copied from the committed former-ticker asset (#237).
 vi.mock('@/services/edgar/data/former-tickers.json', () => ({
-  default: [['AMRK', '0001591588', '2025-12', 'A-Mark Precious Metals, Inc.']],
+  default: [
+    ['AMRK', '0001591588', '2025-12', 'A-Mark Precious Metals, Inc.'],
+    ['MRO', '0000101778', '2024-12', 'MARATHON OIL CORP'],
+  ],
 }));
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CallScope } from '@/services/edgar/call-scope.js';
 import { getEdgarApiService, initEdgarApiService } from '@/services/edgar/edgar-api-service.js';
+import { EdgarMirror } from '@/services/edgar/mirror/edgar-mirror.js';
+import { FILE_A, FILE_B } from '../../support/ticker-files.js';
 
 const scope = () => new CallScope(new AbortController().signal);
 
@@ -999,6 +1008,91 @@ describe('EdgarApiService — mirror routing', () => {
           "AMRK read as a former ticker of Gold.com, Inc. (GOLD, CIK 0001591588) as late as 2025-12 in SEC's ticker file",
       });
       expect(fetchMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('a real store refreshed from ticker files that dropped symbols (#247)', () => {
+    const TICKERS_URL = 'https://www.sec.gov/files/company_tickers.json';
+    const MF_URL = 'https://www.sec.gov/files/company_tickers_mf.json';
+    const MF_FIELDS = ['cik', 'seriesId', 'classId', 'symbol'];
+    /** Fund rows both syncs list (VTI and three pad symbols), so the refresh's deletions stay within its quarter. */
+    const fundFile = (
+      ...rows: Array<[cik: number, seriesId: string, classId: string, symbol: string]>
+    ) => ({
+      fields: MF_FIELDS,
+      data: [
+        [36405, 'S000002848', 'C000007773', 'VTI'],
+        ...Array.from({ length: 3 }, (_, i) => [36405, `S90${i}`, `C90${i}`, `PADF${i}`]),
+        ...rows,
+      ],
+    });
+    const VOO_ROW: [number, string, string, string] = [36405, 'S000002839', 'C000092055', 'VOO'];
+    /** The first sync's fund file adds VOO and OLDFX (0000036405); the refresh's drops OLDFX. */
+    const MF_A = fundFile(VOO_ROW, [36405, 'S000099999', 'C000099999', 'OLDFX']);
+    const MF_B = fundFile(VOO_ROW);
+
+    let dir: string;
+    let store: EdgarMirror;
+
+    beforeAll(async () => {
+      dir = mkdtempSync(join(tmpdir(), 'edgar-mirror-resolution-'));
+      store = new EdgarMirror({ dir, userAgent: config.userAgent });
+      for (const [mode, tickers, mf] of [
+        ['init', FILE_A, MF_A],
+        ['refresh', FILE_B, MF_B],
+      ] as const) {
+        stubSec({ [TICKERS_URL]: [tickers], [MF_URL]: [mf] });
+        await store.tickers.runSync({ mode, signal: new AbortController().signal });
+      }
+      vi.unstubAllGlobals();
+    });
+
+    afterAll(async () => {
+      await store.close();
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    beforeEach(() => {
+      mirrorRef.current = store as unknown as typeof mirrorRef.current;
+    });
+
+    it('strict mode reads a dropped symbol as a former ticker and the renamed filer’s CIK as its current symbol, sending nothing', async () => {
+      config.mirrorFallbackLive = false;
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      const api = getEdgarApiService();
+
+      expect(await run(api.resolveCik('AMRK', scope()))).toEqual({
+        cik: '0001591588',
+        name: 'Gold.com, Inc.',
+        ticker: 'GOLD',
+        reading:
+          "AMRK read as a former ticker of Gold.com, Inc. (GOLD, CIK 0001591588) as late as 2025-12 in SEC's ticker file",
+      });
+      expect(await run(api.resolveCik('1591588', scope()))).toEqual({
+        cik: '0001591588',
+        name: 'Gold.com, Inc.',
+        ticker: 'GOLD',
+      });
+      expect(await run(api.resolveCik('MRO', scope()))).toEqual({
+        cik: '0000101778',
+        name: 'MARATHON OIL CORP',
+        reading:
+          "MRO read as a former ticker of MARATHON OIL CORP (CIK 0000101778) as late as 2024-12 in SEC's ticker file",
+      });
+      expect(await run(api.cikToTicker('1591588', scope()))).toBe('GOLD');
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('with live fallback on and both live files loading, a fund symbol the refresh dropped is no match', async () => {
+      stubSec({ [TICKERS_URL]: [FILE_B], [MF_URL]: [MF_B] });
+      const api = getEdgarApiService();
+
+      expect(await run(api.resolveCik('OLDFX', scope()))).toEqual([]);
+      expect(await run(api.resolveCik('VOO', scope()))).toMatchObject({
+        cik: '0000036405',
+        seriesId: 'S000002839',
+      });
     });
   });
 

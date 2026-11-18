@@ -115,7 +115,11 @@ export class EdgarMirror {
         columns: { ticker: 'TEXT', cik: 'TEXT', name: 'TEXT' },
         indexes: [{ columns: ['cik'] }],
       }),
-      sync: makeTickersSync({ userAgent: opts.userAgent }),
+      sync: makeTickersSync({
+        userAgent: opts.userAgent,
+        storedRows: () => this.getTickerRows(),
+        ...(opts.log ? { log: opts.log } : {}),
+      }),
       ...(opts.log ? { logger: opts.log } : {}),
     });
     this.companyFacts = defineMirror({
@@ -194,7 +198,10 @@ export class EdgarMirror {
     return row !== undefined;
   }
 
-  /** All ticker rows, for rebuilding the in-memory CIK index. Assumes the layer is ready. */
+  /**
+   * All ticker rows: the in-memory CIK index rebuilds from them once the layer is ready,
+   * and the ticker sync reads them to find the symbols its files no longer list (#247).
+   */
   async getTickerRows(): Promise<TickerRow[]> {
     const handle = await this.tickers.raw();
     return handle.prepare<TickerRow>(`SELECT ticker, cik, name FROM ${TICKERS_TABLE}`).all();
@@ -376,21 +383,31 @@ export class EdgarMirror {
     return this.runBothLayers('refresh', args);
   }
 
+  /**
+   * Sync the ticker layer, then the company-facts layer whatever the ticker sync's
+   * outcome, and reject with the first failure once both have run (#247): a failed ticker
+   * download no longer costs that run's company-facts refresh. A run the caller stopped
+   * starts no company-facts sync, which on an aborted signal would only record a stop over
+   * that layer's last completed state.
+   */
   private async runBothLayers(
     mode: SyncMode,
     args: MirrorRunArgs,
   ): Promise<{ tickers: SyncResult; companyFacts: SyncResult }> {
-    const tickers = await this.tickers.runSync({
-      mode,
-      signal: args.signal,
-      ...(args.onProgress ? { onProgress: (i) => args.onProgress?.('tickers', i) } : {}),
-    });
-    const companyFacts = await this.companyFacts.runSync({
-      mode,
-      signal: args.signal,
-      ...(args.onProgress ? { onProgress: (i) => args.onProgress?.('companyfacts', i) } : {}),
-    });
-    return { tickers, companyFacts };
+    const sync = (mirror: Mirror, layer: MirrorLayer) =>
+      mirror.runSync({
+        mode,
+        signal: args.signal,
+        ...(args.onProgress ? { onProgress: (i) => args.onProgress?.(layer, i) } : {}),
+      });
+    const [tickers] = await Promise.allSettled([sync(this.tickers, 'tickers')]);
+    if (args.signal.aborted) {
+      throw tickers.status === 'rejected' ? tickers.reason : args.signal.reason;
+    }
+    const [companyFacts] = await Promise.allSettled([sync(this.companyFacts, 'companyfacts')]);
+    if (tickers.status === 'rejected') throw tickers.reason;
+    if (companyFacts.status === 'rejected') throw companyFacts.reason;
+    return { tickers: tickers.value, companyFacts: companyFacts.value };
   }
 
   /** Combined status of both layers, for the verify script and operability checks. */
